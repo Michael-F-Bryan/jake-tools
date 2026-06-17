@@ -14,6 +14,10 @@ class DummyResult:
         return {
             "note_path": str(self.note_path),
             "updated": self.updated,
+            "chapter_summaries": [{"title": "Kickoff", "start_timestamp": "00:00"}],
+            "ai_stage_stats": [{"stage": "chaptering", "total_tokens": 42, "estimated_cost_usd": 0.01}],
+            "ai_totals": {"stage_count": 1, "total_tokens": 42, "estimated_cost_usd": 0.01},
+            "speaker_message_counts": [{"speaker": "Vet West", "messages": 3}],
         }
 
 
@@ -50,3 +54,5 @@ def test_obsidian_recording_cli_json_output(tmp_path) -> None:
 
     assert result.exit_code == 0
     assert '"note_path": "/tmp/Meeting.md"' in result.output
+    assert '"chapter_summaries"' in result.output
+    assert '"speaker_message_counts"' in result.output

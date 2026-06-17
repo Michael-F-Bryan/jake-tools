@@ -78,6 +78,56 @@ class HermesResult(BaseModel):
         return self.final_response
 
 
+def _sum_int(results: list[HermesResult], field_name: str) -> int:
+    return sum(getattr(result, field_name) for result in results)
+
+
+def _sum_float(results: list[HermesResult], field_name: str) -> float:
+    return sum(getattr(result, field_name) for result in results)
+
+
+def _combine_results(results: list[HermesResult]) -> HermesResult:
+    if not results:
+        raise ValueError("cannot combine zero Hermes results")
+
+    first = results[0]
+    last = results[-1]
+    return HermesResult(
+        final_response=last.final_response,
+        last_reasoning=last.last_reasoning,
+        messages=[message for result in results for message in result.messages],
+        api_calls=_sum_int(results, "api_calls"),
+        completed=last.completed,
+        turn_exit_reason=last.turn_exit_reason,
+        failed=any(result.failed for result in results),
+        partial=any(result.partial for result in results),
+        interrupted=any(result.interrupted for result in results),
+        response_transformed=any(result.response_transformed for result in results),
+        response_previewed=any(result.response_previewed for result in results),
+        model=last.model or first.model,
+        provider=last.provider or first.provider,
+        base_url=last.base_url or first.base_url,
+        input_tokens=_sum_int(results, "input_tokens"),
+        output_tokens=_sum_int(results, "output_tokens"),
+        cache_read_tokens=_sum_int(results, "cache_read_tokens"),
+        cache_write_tokens=_sum_int(results, "cache_write_tokens"),
+        reasoning_tokens=_sum_int(results, "reasoning_tokens"),
+        prompt_tokens=_sum_int(results, "prompt_tokens"),
+        completion_tokens=_sum_int(results, "completion_tokens"),
+        total_tokens=_sum_int(results, "total_tokens"),
+        last_prompt_tokens=last.last_prompt_tokens,
+        estimated_cost_usd=_sum_float(results, "estimated_cost_usd"),
+        cost_status=last.cost_status or first.cost_status,
+        cost_source=last.cost_source or first.cost_source,
+        session_id=last.session_id or first.session_id,
+        error=last.error or next((result.error for result in results if result.error), None),
+        failure_reason=last.failure_reason or next((result.failure_reason for result in results if result.failure_reason), None),
+        guardrail=last.guardrail or next((result.guardrail for result in results if result.guardrail), None),
+        pending_steer=last.pending_steer,
+        interrupt_message=last.interrupt_message,
+    )
+
+
 ONESHOT_STRUCTURED_PROMPT = Template(
     """
 You are a helpful assistant that returns a structured response.
@@ -125,6 +175,7 @@ class Hermes(BaseModel):
 
     default_model: str = "gpt-5.4-mini"
     agent_factory: AgentFactory = Field(default=_default_agent_factory)
+    last_result: HermesResult | None = None
 
     def new_agent(
         self, model: str | None = None, provider: str | None = None
@@ -134,7 +185,8 @@ class Hermes(BaseModel):
     def oneshot(self, prompt: str) -> HermesResult:
         agent = self.new_agent()
         result = agent.run_conversation(prompt)
-        return HermesResult.model_validate(result)
+        self.last_result = HermesResult.model_validate(result)
+        return self.last_result
 
     def _parse_structured_response(self, response: Any, model_type: type[T]) -> T:
         if response is None:
@@ -146,6 +198,10 @@ class Hermes(BaseModel):
         return model_type.model_validate(response)
 
     def oneshot_structured(self, prompt: str, model_type: type[T]) -> T:
+        payload, _ = self.oneshot_structured_with_result(prompt, model_type)
+        return payload
+
+    def oneshot_structured_with_result(self, prompt: str, model_type: type[T]) -> tuple[T, HermesResult]:
         """Run Hermes and parse the reply into ``model_type``.
 
         Retries once with an explicit repair prompt when the initial response does
@@ -159,7 +215,9 @@ class Hermes(BaseModel):
         result = HermesResult.model_validate(agent.run_conversation(prompt))
 
         try:
-            return self._parse_structured_response(result.response, model_type)
+            payload = self._parse_structured_response(result.response, model_type)
+            self.last_result = result
+            return payload, result
         except (ValidationError, ValueError) as exc:
             repair_prompt = ONESHOT_STRUCTURED_INVALID_JSON_PROMPT.render(
                 last_error=str(exc),
@@ -167,4 +225,7 @@ class Hermes(BaseModel):
             )
 
         repair_result = HermesResult.model_validate(agent.run_conversation(repair_prompt))
-        return self._parse_structured_response(repair_result.response, model_type)
+        payload = self._parse_structured_response(repair_result.response, model_type)
+        combined = _combine_results([result, repair_result])
+        self.last_result = combined
+        return payload, combined

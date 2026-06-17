@@ -78,3 +78,27 @@ def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
 
     assert result.updated is False
     assert note.read_text(encoding="utf-8") == "# Meeting\n\n![[meeting.m4a]]\n"
+    assert [summary.model_dump() for summary in result.chapter_summaries] == [
+        {
+            "title": "Kickoff",
+            "start": 0,
+            "end": 30,
+            "start_timestamp": "00:00",
+            "end_timestamp": "00:30",
+        }
+    ]
+    assert result.ai_stage_stats == []
+    assert result.ai_totals.model_dump() == {
+        "stage_count": 0,
+        "api_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "reasoning_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "estimated_cost_usd": 0.0,
+    }
+    assert [count.model_dump() for count in result.speaker_message_counts] == [{"speaker": "Michael", "messages": 1}]
