@@ -1,0 +1,30 @@
+[project]
+name = "jake-tools"
+version = "0.0.0"
+description = "Internal tools used by Jake"
+readme = "README.md"
+authors = [
+    { name = "Michael-F-Bryan", email = "michaelfbryan@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "click>=8.4.1",
+    "hermes-agent",
+    "jinja2>=3.1.6",
+    "pydantic>=2.13.4",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.21,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+hermes-agent = { path = "../../.hermes/hermes-agent", editable = true }
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.410",
+]
+
+[project.scripts]
+jake-tools = "jake_tools.__main__:main"
