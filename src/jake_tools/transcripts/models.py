@@ -134,7 +134,6 @@ class CoordinatorResult(BaseModel):
 
     def json_summary(self) -> dict[str, object]:
         return {
-            "updated": self.updated,
             "chapter_summaries": [summary.model_dump(mode="json") for summary in self.chapter_summaries],
             "ai_stage_stats": [stats.model_dump(mode="json") for stats in self.ai_stage_stats],
             "ai_totals": self.ai_totals.model_dump(mode="json"),
