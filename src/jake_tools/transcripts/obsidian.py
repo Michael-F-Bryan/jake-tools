@@ -19,6 +19,52 @@ def _normalise_link_target(target: str) -> str:
     return target.split("|", 1)[0].strip()
 
 
+def _frontmatter(body: str) -> str | None:
+    if not body.startswith("---\n"):
+        return None
+
+    _, _, rest = body.partition("---\n")
+    frontmatter, separator, _ = rest.partition("\n---\n")
+    if not separator:
+        return None
+    return frontmatter
+
+
+def _display_name(value: str) -> str:
+    candidate = value.strip().strip('"').strip("'")
+    if candidate.startswith("[[") and candidate.endswith("]]"):
+        inner = candidate[2:-2]
+        if "|" in inner:
+            _, alias = inner.split("|", 1)
+            return alias.strip()
+        return inner.strip()
+    return candidate
+
+
+def _parse_attendees(body: str) -> list[str]:
+    frontmatter = _frontmatter(body)
+    if frontmatter is None:
+        return []
+
+    attendees: list[str] = []
+    lines = frontmatter.splitlines()
+    capture = False
+    for line in lines:
+        if not capture and line.startswith("Attendees:"):
+            capture = True
+            continue
+
+        if not capture:
+            continue
+
+        if not line.startswith("  - "):
+            break
+
+        attendees.append(_display_name(line.removeprefix("  - ")))
+
+    return [attendee for attendee in attendees if attendee]
+
+
 def _created_at(path: Path) -> datetime:
     stat = path.stat()
     ts = stat.st_birthtime if hasattr(stat, "st_birthtime") else stat.st_mtime
@@ -75,4 +121,10 @@ def load_source_note(note_path: Path) -> SourceNote:
         for link in extract_recording_links(body)
     ]
     recordings.sort(key=lambda item: item.created_at)
-    return SourceNote(path=note_path, body=body, recordings=recordings)
+    return SourceNote(
+        path=note_path,
+        title=note_path.stem,
+        body=body,
+        attendees=_parse_attendees(body),
+        recordings=recordings,
+    )

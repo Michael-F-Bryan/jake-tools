@@ -10,13 +10,15 @@ from .merge import build_merge_report, merge_note, render_chaptered_transcript
 from .models import ChaptersPayload, ConcatPlan, CoordinatorResult, MeetingMinutes, SourceNote, SpeakerMapping, TranscriptTurn
 from .obsidian import load_source_note
 from .paths import Paths
-from .stages import run_chaptering_stage, run_minutes_stage, run_speaker_mapping_stage
+from .stages import run_chaptering_stage, run_minutes_stage, run_speaker_mapping_stage, run_transcript_polish_stage
+from .transforms import merge_consecutive_turns, normalise_turns
 from .verify import verify_note
 
 SourceLoader = Callable[[Path], SourceNote]
 ConcatenateRecordings = Callable[[ConcatPlan, Path], None]
 RunScribe = Callable[[Path, Path], object]
-MapSpeakers = Callable[[Hermes, list[TranscriptTurn]], SpeakerMapping]
+MapSpeakers = Callable[[Hermes, SourceNote, list[TranscriptTurn]], SpeakerMapping]
+PolishTranscript = Callable[[Hermes, SourceNote, list[TranscriptTurn], SpeakerMapping], list[TranscriptTurn]]
 RunChaptering = Callable[[Hermes, list[TranscriptTurn]], ChaptersPayload]
 RunMinutes = Callable[[Hermes, list[TranscriptTurn], ChaptersPayload | None], MeetingMinutes]
 
@@ -32,6 +34,7 @@ class ObsidianRecordingCoordinator:
         concatenate_audio: ConcatenateRecordings = concatenate_recordings,
         transcribe_audio: RunScribe = run_scribe,
         map_speakers: MapSpeakers = run_speaker_mapping_stage,
+        polish_transcript: PolishTranscript = run_transcript_polish_stage,
         build_chapters: RunChaptering = run_chaptering_stage,
         build_minutes: RunMinutes = run_minutes_stage,
     ) -> None:
@@ -42,6 +45,7 @@ class ObsidianRecordingCoordinator:
         self.concatenate_audio = concatenate_audio
         self.transcribe_audio = transcribe_audio
         self.map_speakers = map_speakers
+        self.polish_transcript = polish_transcript
         self.build_chapters = build_chapters
         self.build_minutes = build_minutes
 
@@ -55,24 +59,27 @@ class ObsidianRecordingCoordinator:
             self.concatenate_audio(concat_plan, paths.root / "inputs.txt")
             self.transcribe_audio(paths.merged, paths.transcript)
 
-            turns = self._load_turns(paths.transcript)
-            speaker_mapping = self.map_speakers(self.hermes, turns)
+            turns = merge_consecutive_turns(normalise_turns(self._load_turns(paths.transcript)))
+            speaker_mapping = self.map_speakers(self.hermes, source, turns)
             paths.speaker_mapping.write_text(
                 json.dumps(speaker_mapping.model_dump(mode="json"), indent=2),
                 encoding="utf-8",
             )
 
-            chapters_payload = self.build_chapters(self.hermes, turns)
+            polished_turns = merge_consecutive_turns(
+                normalise_turns(self.polish_transcript(self.hermes, source, turns, speaker_mapping))
+            )
+            chapters_payload = self.build_chapters(self.hermes, polished_turns)
             paths.chapters.write_text(
                 json.dumps(chapters_payload.model_dump(mode="json"), indent=2),
                 encoding="utf-8",
             )
             transcript_body = render_chaptered_transcript(
-                turns,
+                polished_turns,
                 chapters_payload.chapters,
                 speaker_mapping,
             )
-            minutes = self.build_minutes(self.hermes, turns, chapters_payload)
+            minutes = self.build_minutes(self.hermes, polished_turns, chapters_payload)
             paths.minutes.write_text(
                 json.dumps(minutes.model_dump(mode="json"), indent=2),
                 encoding="utf-8",

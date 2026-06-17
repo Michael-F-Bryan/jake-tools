@@ -9,7 +9,9 @@ from jake_tools.transcripts.models import Chapter, ChaptersPayload, MeetingMinut
 def build_source(note, tmp_path) -> SourceNote:
     return SourceNote(
         path=note,
+        title=note.stem,
         body=note.read_text(encoding="utf-8"),
+        attendees=["Michael Bryan", "Vet West"],
         recordings=[
             RecordingRef(
                 raw_link="meeting.m4a",
@@ -43,12 +45,15 @@ def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
         )
         return None
 
-    def map_speakers(hermes, turns):
+    def map_speakers(hermes, source, turns):
         return SpeakerMapping(
             mapping={
                 "SPEAKER_01": SpeakerIdentity(name="Michael", confidence=0.9, reason="test")
             }
         )
+
+    def polish_transcript(hermes, source, turns, speaker_mapping):
+        return turns
 
     def build_chapters(hermes, turns):
         return ChaptersPayload(chapters=[Chapter(title="Kickoff", start=0, end=30, summary="Start")])
@@ -64,6 +69,7 @@ def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
         concatenate_audio=concatenate_audio,
         transcribe_audio=fake_run_scribe,
         map_speakers=map_speakers,
+        polish_transcript=polish_transcript,
         build_chapters=build_chapters,
         build_minutes=build_minutes,
     )

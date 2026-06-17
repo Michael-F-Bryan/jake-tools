@@ -14,7 +14,9 @@ class RecordingRef(BaseModel):
 
 class SourceNote(BaseModel):
     path: Path
+    title: str
     body: str
+    attendees: list[str] = Field(default_factory=list)
     recordings: list[RecordingRef] = Field(default_factory=list)
 
 
@@ -38,6 +40,10 @@ class TranscriptTurn(BaseModel):
     end: float
     speaker: str
     text: str
+
+
+class TranscriptTurnsPayload(BaseModel):
+    turns: list[TranscriptTurn] = Field(default_factory=list)
 
 
 class SpeakerIdentity(BaseModel):

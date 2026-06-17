@@ -61,3 +61,19 @@ def test_render_chaptered_transcript_keeps_chapter_timestamps_only() -> None:
     assert "### 00:00 — Kickoff" in rendered
     assert "**Speaker 1** Hello there" in rendered
     assert "[00:12]" not in rendered
+
+
+def test_render_chaptered_transcript_assigns_boundary_turn_to_one_chapter() -> None:
+    rendered = render_chaptered_transcript(
+        [
+            TranscriptTurn(start=1, end=2, speaker="Speaker 1", text="Intro"),
+            TranscriptTurn(start=5, end=6, speaker="Speaker 1", text="Boundary turn"),
+            TranscriptTurn(start=8, end=9, speaker="Speaker 2", text="Wrap up"),
+        ],
+        [
+            Chapter(title="First", start=0, end=5, summary="Start"),
+            Chapter(title="Second", start=5, end=10, summary="End"),
+        ],
+    )
+
+    assert rendered.count("Boundary turn") == 1

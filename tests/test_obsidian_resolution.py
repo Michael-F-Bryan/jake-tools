@@ -53,7 +53,42 @@ def test_load_source_note_resolves_attachments_and_sorts_by_creation_time(tmp_pa
 
     source = load_source_note(note)
 
+    assert source.title == "Meeting"
+    assert source.attendees == []
     assert [recording.resolved_path.name for recording in source.recordings] == ["a.m4a", "b.m4a"]
+
+
+def test_load_source_note_parses_attendees_from_frontmatter(tmp_path) -> None:
+    vault = tmp_path / "Vault"
+    attachments = vault / "Attachments"
+    notes = vault / "Notes"
+    attachments.mkdir(parents=True)
+    notes.mkdir(parents=True)
+
+    recording = attachments / "meeting.m4a"
+    recording.write_text("audio", encoding="utf-8")
+
+    note = notes / "Call.md"
+    note.write_text(
+        "\n".join(
+            [
+                "---",
+                'Date: "[[June 17, 2026]]"',
+                "Attendees:",
+                '  - "[[Michael Bryan]]"',
+                '  - "[[Gabbey Parker|Gabbey]]"',
+                "---",
+                "",
+                "![[meeting.m4a]]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    source = load_source_note(note)
+
+    assert source.title == "Call"
+    assert source.attendees == ["Michael Bryan", "Gabbey"]
 
 
 def test_load_source_note_raises_clear_error_on_missing_recording(tmp_path) -> None:

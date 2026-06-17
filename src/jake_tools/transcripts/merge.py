@@ -47,9 +47,12 @@ def render_chaptered_transcript(
     mapping: SpeakerMapping | None = None,
 ) -> str:
     sections: list[str] = []
-    for chapter in chapters:
+    for index, chapter in enumerate(chapters):
+        next_start = chapters[index + 1].start if index + 1 < len(chapters) else None
         chapter_turns = [
-            turn for turn in turns if turn.start >= chapter.start and turn.start < chapter.end + 1e-9
+            turn
+            for turn in turns
+            if turn.start >= chapter.start and (next_start is None or turn.start < next_start)
         ]
         sections.append(
             "\n\n".join([
