@@ -20,9 +20,14 @@ def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, check=True, capture_output=True, text=True)
 
 
+def _concat_manifest_entry(path: Path) -> str:
+    escaped = str(path).replace("'", r"'\\''")
+    return f"file '{escaped}'"
+
+
 def concatenate_recordings(plan: ConcatPlan, concat_file: Path) -> None:
     concat_file.write_text(
-        "\n".join(f"file {json.dumps(str(path))}" for path in plan.inputs_in_creation_order),
+        "\n".join(_concat_manifest_entry(path) for path in plan.inputs_in_creation_order),
         encoding="utf-8",
     )
 

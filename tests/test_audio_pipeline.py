@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-from pathlib import Path
 import json
 import subprocess
 
@@ -53,7 +52,7 @@ def test_concatenate_recordings_writes_concat_manifest_and_invokes_ffmpeg(monkey
     concat_file = tmp_path / "inputs.txt"
     concatenate_recordings(plan, concat_file)
 
-    assert concat_file.read_text(encoding="utf-8") == f'file {json.dumps(str(tmp_path / "meeting.m4a"))}'
+    assert concat_file.read_text(encoding="utf-8") == f"file '{tmp_path / 'meeting.m4a'}'"
     assert commands == [[
         "ffmpeg",
         "-y",
