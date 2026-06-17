@@ -1,5 +1,5 @@
 from pathlib import Path
-import importlib
+
 from click.testing import CliRunner
 
 from jake_tools.cli.transcribe import transcribe
@@ -19,38 +19,36 @@ class DummyResult:
         }
 
 
-def test_obsidian_recording_cli_human_output(monkeypatch, tmp_path) -> None:
+def fake_process_obsidian_recording(hermes, obsidian_note, mode, dry_run):
+    return DummyResult()
+
+
+def test_obsidian_recording_cli_human_output(tmp_path) -> None:
     note = tmp_path / "Meeting.md"
     note.write_text("stub", encoding="utf-8")
 
-    cli_module = importlib.import_module("jake_tools.cli.transcribe")
-    monkeypatch.setattr(
-        cli_module,
-        "process_obsidian_recording",
-        lambda hermes, obsidian_note, mode, dry_run: DummyResult(),
-    )
-
     runner = CliRunner()
-    result = runner.invoke(transcribe, ["obsidian-recording", "--mode", "transcript", "--dry-run", str(note)])
+    result = runner.invoke(
+        transcribe,
+        ["obsidian-recording", "--mode", "transcript", "--dry-run", str(note)],
+        obj={"process_obsidian_recording": fake_process_obsidian_recording},
+    )
 
     assert result.exit_code == 0
     assert "mode: transcript" in result.output
     assert "updated: False" in result.output
 
 
-def test_obsidian_recording_cli_json_output(monkeypatch, tmp_path) -> None:
+def test_obsidian_recording_cli_json_output(tmp_path) -> None:
     note = tmp_path / "Meeting.md"
     note.write_text("stub", encoding="utf-8")
 
-    cli_module = importlib.import_module("jake_tools.cli.transcribe")
-    monkeypatch.setattr(
-        cli_module,
-        "process_obsidian_recording",
-        lambda hermes, obsidian_note, mode, dry_run: DummyResult(),
-    )
-
     runner = CliRunner()
-    result = runner.invoke(transcribe, ["obsidian-recording", "--json", str(note)])
+    result = runner.invoke(
+        transcribe,
+        ["obsidian-recording", "--json", str(note)],
+        obj={"process_obsidian_recording": fake_process_obsidian_recording},
+    )
 
     assert result.exit_code == 0
     assert '"mode": "transcript"' in result.output

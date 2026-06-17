@@ -2,19 +2,26 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
 from ..hermes import Hermes
 from .audio import build_concat_plan, concatenate_recordings, run_scribe
 from .merge import build_merge_report, merge_note, render_chaptered_transcript, render_transcript
-from .models import CoordinatorResult, MeetingMinutes, SpeakerMapping, TranscriptTurn
+from .models import ChaptersPayload, ConcatPlan, CoordinatorResult, MeetingMinutes, SourceNote, SpeakerMapping, TranscriptTurn
 from .obsidian import load_source_note
 from .paths import Paths
 from .stages import run_chaptering_stage, run_minutes_stage, run_speaker_mapping_stage
 from .verify import verify_note
 
 Mode = Literal["transcript", "chaptered-transcript", "minutes"]
+SourceLoader = Callable[[Path], SourceNote]
+ConcatenateRecordings = Callable[[ConcatPlan, Path], None]
+RunScribe = Callable[[Path, Path], object]
+MapSpeakers = Callable[[Hermes, list[TranscriptTurn]], SpeakerMapping]
+RunChaptering = Callable[[Hermes, list[TranscriptTurn]], ChaptersPayload]
+RunMinutes = Callable[[Hermes, list[TranscriptTurn], ChaptersPayload | None], MeetingMinutes]
 
 
 class ObsidianRecordingCoordinator:
@@ -25,24 +32,36 @@ class ObsidianRecordingCoordinator:
         source_note: Path,
         mode: Mode = "minutes",
         dry_run: bool = False,
+        source_loader: SourceLoader = load_source_note,
+        concatenate_audio: ConcatenateRecordings = concatenate_recordings,
+        transcribe_audio: RunScribe = run_scribe,
+        map_speakers: MapSpeakers = run_speaker_mapping_stage,
+        build_chapters: RunChaptering = run_chaptering_stage,
+        build_minutes: RunMinutes = run_minutes_stage,
     ) -> None:
         self.hermes = hermes
         self.source_note = source_note
         self.mode: Mode = mode
         self.dry_run = dry_run
+        self.source_loader = source_loader
+        self.concatenate_audio = concatenate_audio
+        self.transcribe_audio = transcribe_audio
+        self.map_speakers = map_speakers
+        self.build_chapters = build_chapters
+        self.build_minutes = build_minutes
 
     def run(self) -> CoordinatorResult:
-        source = load_source_note(self.source_note)
+        source = self.source_loader(self.source_note)
         if not source.recordings:
             raise ValueError(f"No recordings found in {self.source_note}")
 
         with Paths.temp() as paths:
             concat_plan = build_concat_plan(source.recordings, paths.merged)
-            concatenate_recordings(concat_plan, paths.root / "inputs.txt")
-            run_scribe(paths.merged, paths.transcript)
+            self.concatenate_audio(concat_plan, paths.root / "inputs.txt")
+            self.transcribe_audio(paths.merged, paths.transcript)
 
             turns = self._load_turns(paths.transcript)
-            speaker_mapping = run_speaker_mapping_stage(self.hermes, turns)
+            speaker_mapping = self.map_speakers(self.hermes, turns)
             paths.speaker_mapping.write_text(
                 json.dumps(speaker_mapping.model_dump(mode="json"), indent=2),
                 encoding="utf-8",
@@ -53,7 +72,7 @@ class ObsidianRecordingCoordinator:
             transcript_body = render_transcript(turns, speaker_mapping)
 
             if self.mode in {"chaptered-transcript", "minutes"}:
-                chapters_payload = run_chaptering_stage(self.hermes, turns)
+                chapters_payload = self.build_chapters(self.hermes, turns)
                 paths.chapters.write_text(
                     json.dumps(chapters_payload.model_dump(mode="json"), indent=2),
                     encoding="utf-8",
@@ -65,7 +84,7 @@ class ObsidianRecordingCoordinator:
                 )
 
             if self.mode == "minutes":
-                minutes = run_minutes_stage(self.hermes, turns, chapters_payload)
+                minutes = self.build_minutes(self.hermes, turns, chapters_payload)
                 paths.minutes.write_text(
                     json.dumps(minutes.model_dump(mode="json"), indent=2),
                     encoding="utf-8",

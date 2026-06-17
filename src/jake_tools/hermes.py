@@ -1,4 +1,5 @@
-from typing import Any, Literal, TypeVar
+from collections.abc import Callable
+from typing import Any, Literal, Protocol, TypeVar
 
 from jinja2 import Template
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -106,19 +107,29 @@ Return only corrected JSON that matches the schema. No markdown fences and no co
 T = TypeVar("T", bound=BaseModel)
 
 
+class AgentConversation(Protocol):
+    def run_conversation(self, user_message: str, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+
+AgentFactory = Callable[[str, str], AgentConversation]
+
+
+def _default_agent_factory(model: str, provider: str) -> AgentConversation:
+    return AIAgent(model=model, provider=provider, quiet_mode=True)
+
+
 class Hermes(BaseModel):
     """A high-level wrapper around the Hermes agent."""
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     default_model: str = "gpt-5.4-mini"
+    agent_factory: AgentFactory = Field(default=_default_agent_factory)
 
     def new_agent(
         self, model: str | None = None, provider: str | None = None
-    ) -> AIAgent:
-        return AIAgent(
-            model=model or self.default_model,
-            provider=provider or "",
-            quiet_mode=True,
-        )
+    ) -> AgentConversation:
+        return self.agent_factory(model or self.default_model, provider or "")
 
     def oneshot(self, prompt: str) -> HermesResult:
         agent = self.new_agent()

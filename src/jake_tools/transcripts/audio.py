@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 from .models import ConcatPlan, RecordingRef, ScribeRunReport
@@ -16,6 +17,9 @@ def build_concat_plan(recordings: list[RecordingRef], output_path: Path) -> Conc
     return ConcatPlan(inputs_in_creation_order=ordered, output_merged_audio=output_path)
 
 
+CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+
+
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, check=True, capture_output=True, text=True)
 
@@ -25,14 +29,19 @@ def _concat_manifest_entry(path: Path) -> str:
     return f"file '{escaped}'"
 
 
-def concatenate_recordings(plan: ConcatPlan, concat_file: Path) -> None:
+def concatenate_recordings(
+    plan: ConcatPlan,
+    concat_file: Path,
+    *,
+    run_command: CommandRunner = _run,
+) -> None:
     concat_file.write_text(
         "\n".join(_concat_manifest_entry(path) for path in plan.inputs_in_creation_order),
         encoding="utf-8",
     )
 
     try:
-        _run(
+        run_command(
             [
                 "ffmpeg",
                 "-y",
@@ -52,9 +61,14 @@ def concatenate_recordings(plan: ConcatPlan, concat_file: Path) -> None:
         raise AudioPipelineError(exc.stderr or exc.stdout or str(exc)) from exc
 
 
-def run_scribe(input_audio: Path, output_json: Path) -> ScribeRunReport:
+def run_scribe(
+    input_audio: Path,
+    output_json: Path,
+    *,
+    run_command: CommandRunner = _run,
+) -> ScribeRunReport:
     try:
-        result = _run(
+        result = run_command(
             [
                 "scribe",
                 "-o",

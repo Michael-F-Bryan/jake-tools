@@ -12,9 +12,13 @@ class FakeAgent:
         self._responses = list(responses)
         self.prompts: list[str] = []
 
-    def run_conversation(self, prompt: str) -> dict:
-        self.prompts.append(prompt)
+    def run_conversation(self, user_message: str) -> dict:
+        self.prompts.append(user_message)
         return self._responses.pop(0)
+
+
+def hermes_with(agent: FakeAgent) -> Hermes:
+    return Hermes(agent_factory=lambda model, provider: agent)
 
 
 def test_hermes_result_aliases_final_response() -> None:
@@ -22,12 +26,11 @@ def test_hermes_result_aliases_final_response() -> None:
     assert result.response == "ok"
 
 
-def test_oneshot_structured_parses_valid_json_without_repair(monkeypatch) -> None:
+def test_oneshot_structured_parses_valid_json_without_repair() -> None:
     agent = FakeAgent([
         {"final_response": '{"answer": 42}', "completed": True},
     ])
-    hermes = Hermes()
-    monkeypatch.setattr(Hermes, "new_agent", lambda self, model=None, provider=None: agent)
+    hermes = hermes_with(agent)
 
     result = hermes.oneshot_structured("Return the answer.", Payload)
 
@@ -35,13 +38,12 @@ def test_oneshot_structured_parses_valid_json_without_repair(monkeypatch) -> Non
     assert len(agent.prompts) == 1
 
 
-def test_oneshot_structured_repairs_invalid_json_once(monkeypatch) -> None:
+def test_oneshot_structured_repairs_invalid_json_once() -> None:
     agent = FakeAgent([
         {"final_response": 'nope', "completed": True},
         {"final_response": '{"answer": 7}', "completed": True},
     ])
-    hermes = Hermes()
-    monkeypatch.setattr(Hermes, "new_agent", lambda self, model=None, provider=None: agent)
+    hermes = hermes_with(agent)
 
     result = hermes.oneshot_structured("Return the answer.", Payload)
 
@@ -51,13 +53,12 @@ def test_oneshot_structured_repairs_invalid_json_once(monkeypatch) -> None:
     assert "Previous response:" in agent.prompts[1]
 
 
-def test_oneshot_structured_rejects_empty_response(monkeypatch) -> None:
+def test_oneshot_structured_rejects_empty_response() -> None:
     agent = FakeAgent([
         {"final_response": None, "completed": True},
         {"final_response": None, "completed": True},
     ])
-    hermes = Hermes()
-    monkeypatch.setattr(Hermes, "new_agent", lambda self, model=None, provider=None: agent)
+    hermes = hermes_with(agent)
 
     try:
         hermes.oneshot_structured("Return the answer.", Payload)
