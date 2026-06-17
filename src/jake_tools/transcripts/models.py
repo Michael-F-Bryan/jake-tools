@@ -65,6 +65,14 @@ class Chapter(BaseModel):
     summary: str
 
 
+class ChapterSummary(BaseModel):
+    title: str
+    start: float
+    end: float
+    start_timestamp: str
+    end_timestamp: str
+
+
 class ChaptersPayload(BaseModel):
     chapters: list[Chapter] = Field(default_factory=list)
 
@@ -82,6 +90,42 @@ class MergeReport(BaseModel):
     recording_embed_preserved: bool
 
 
+class SpeakerMessageCount(BaseModel):
+    speaker: str
+    messages: int
+
+
+class AIStageStats(BaseModel):
+    stage: str
+    model: str | None = None
+    provider: str | None = None
+    api_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    repair_attempted: bool = False
+
+
+class AITotals(BaseModel):
+    stage_count: int = 0
+    api_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
+
 class CoordinatorResult(BaseModel):
     note_path: Path
     updated: bool
@@ -90,3 +134,7 @@ class CoordinatorResult(BaseModel):
     chapters_json: Path | None = None
     speaker_mapping_json: Path | None = None
     merge_report: MergeReport | None = None
+    chapter_summaries: list[ChapterSummary] = Field(default_factory=list)
+    ai_stage_stats: list[AIStageStats] = Field(default_factory=list)
+    ai_totals: AITotals = Field(default_factory=AITotals)
+    speaker_message_counts: list[SpeakerMessageCount] = Field(default_factory=list)
