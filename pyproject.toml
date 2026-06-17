@@ -24,6 +24,7 @@ hermes-agent = { path = "../../.hermes/hermes-agent", editable = true }
 [dependency-groups]
 dev = [
     "pyright>=1.1.410",
+    "pytest>=8.4.0",
 ]
 
 [project.scripts]

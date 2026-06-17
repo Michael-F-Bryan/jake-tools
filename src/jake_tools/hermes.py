@@ -1,8 +1,8 @@
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
+from jinja2 import Template
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from run_agent import AIAgent
-from jinja2 import Template
 
 
 class HermesMessage(BaseModel):
@@ -37,13 +37,7 @@ class HermesGuardrail(BaseModel):
 
 
 class HermesResult(BaseModel):
-    """Result dict returned by ``AIAgent.run_conversation()``.
-
-    Hermes returns a plain dict whose keys vary slightly by exit path (success,
-    interrupt, API failure, truncation, guardrail halt, etc.). The full success
-    path in ``agent/conversation_loop.py`` always includes usage and session
-    fields; early returns may omit some of the optional metadata below.
-    """
+    """Result dict returned by ``AIAgent.run_conversation()``."""
 
     final_response: str | None = None
     last_reasoning: str | None = None
@@ -80,7 +74,6 @@ class HermesResult(BaseModel):
 
     @property
     def response(self) -> str | None:
-        """Alias for ``final_response``."""
         return self.final_response
 
 
@@ -93,22 +86,28 @@ Return a JSON object matching this schema:
 
 The input is:
 {{ input }}
-"""
+""".strip()
 )
+
 ONESHOT_STRUCTURED_INVALID_JSON_PROMPT = Template(
     """
-The response from Hermes was invalid JSON. The last error was:
+The previous response did not validate against the required schema.
+
+Validation error:
 {{ last_error }}
 
-Fix it. Returning just the corrected JSON, no other text, additional commentary, or any surrounding markdown code block.
-"""
+Previous response:
+{{ previous_response }}
+
+Return only corrected JSON that matches the schema. No markdown fences and no commentary.
+""".strip()
 )
+
+T = TypeVar("T", bound=BaseModel)
 
 
 class Hermes(BaseModel):
-    """
-    A high-level wrapper around the Hermes agent.
-    """
+    """A high-level wrapper around the Hermes agent."""
 
     default_model: str = "gpt-5.4-mini"
 
@@ -126,11 +125,20 @@ class Hermes(BaseModel):
         result = agent.run_conversation(prompt)
         return HermesResult.model_validate(result)
 
-    def oneshot_structured[T: BaseModel](self, prompt: str, model_type: type[T]) -> T:
-        """
-        Run a Hermes agent, getting a structured response out.
+    def _parse_structured_response(self, response: Any, model_type: type[T]) -> T:
+        if response is None:
+            raise ValueError("No response from Hermes")
 
-        This will automatically retry if the model returns invalid JSON.
+        if isinstance(response, str):
+            return model_type.model_validate_json(response)
+
+        return model_type.model_validate(response)
+
+    def oneshot_structured(self, prompt: str, model_type: type[T]) -> T:
+        """Run Hermes and parse the reply into ``model_type``.
+
+        Retries once with an explicit repair prompt when the initial response does
+        not validate as the requested structured payload.
         """
         prompt = ONESHOT_STRUCTURED_PROMPT.render(
             schema_json=model_type.model_json_schema(),
@@ -140,12 +148,12 @@ class Hermes(BaseModel):
         result = HermesResult.model_validate(agent.run_conversation(prompt))
 
         try:
-            return model_type.model_validate(result.response)
-        except ValidationError as e:
-            last_error = e
+            return self._parse_structured_response(result.response, model_type)
+        except (ValidationError, ValueError) as exc:
+            repair_prompt = ONESHOT_STRUCTURED_INVALID_JSON_PROMPT.render(
+                last_error=str(exc),
+                previous_response=result.response,
+            )
 
-        prompt = ONESHOT_STRUCTURED_INVALID_JSON_PROMPT.render(
-            last_error=last_error,
-        )
-        result = HermesResult.model_validate(agent.run_conversation(prompt))
-        return model_type.model_validate(result.response)
+        repair_result = HermesResult.model_validate(agent.run_conversation(repair_prompt))
+        return self._parse_structured_response(repair_result.response, model_type)

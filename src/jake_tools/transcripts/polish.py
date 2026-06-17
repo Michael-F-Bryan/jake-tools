@@ -22,5 +22,4 @@ def polish_transcript(hermes: Hermes, transcript: str) -> str:
     if not result.response:
         raise ValueError("No response from Hermes")
 
-    print(result.model_dump_json(indent=2))
     return result.response
