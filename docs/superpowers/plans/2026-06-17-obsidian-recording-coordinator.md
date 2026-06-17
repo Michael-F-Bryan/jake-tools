@@ -4,7 +4,7 @@
 
 **Goal:** Implement `jake-tools transcribe obsidian-recording` as a Python coordinator harness that runs Hermes under the hood to execute the `obsidian-recording-to-meeting-minutes` workflow against a local Obsidian note.
 
-**Architecture:** Keep the Click CLI thin, move orchestration into a dedicated coordinator module, and separate deterministic local work from Hermes-driven reasoning. Deterministic steps such as note parsing, recording discovery, concatenation, artifact-path management, and final verification should live in plain Python. Hermes should be used as the bounded reasoning engine for stage outputs that benefit from agentic judgement: provenance synthesis, speaker mapping, chaptering, polishing, fidelity audit, merge planning, and final signoff.
+**Architecture:** Keep the Click CLI thin, move orchestration into a dedicated coordinator module, and separate deterministic local work from Hermes-driven reasoning. Deterministic steps such as note parsing, recording discovery, concatenation, temporary artifact-path management, and final verification should live in plain Python. Hermes should be used as the bounded reasoning engine for stage outputs that benefit from agentic judgement: speaker mapping, chaptering, polishing, minutes extraction, and final signoff. Use the existing `Paths.temp()` context manager for the run scratch space and let the working directory disappear once the note is safely updated.
 
 **Tech Stack:** Python 3.14, Click, Pydantic, Hermes Agent (`run_agent.AIAgent`), Jinja2, local filesystem tools (`ffmpeg`/`ffprobe`, `scribe`, `obsidian` CLI), pytest.
 
@@ -15,8 +15,9 @@
 **Existing entrypoints and stubs**
 - `src/jake_tools/cli/transcribe.py:32-39` already exposes `jake-tools transcribe obsidian-recording OBSIDIAN_NOTE` and forwards to `process_obsidian_recording()`.
 - `src/jake_tools/transcripts/__init__.py:8-13` is a `NotImplementedError` stub.
-- `src/jake_tools/hermes.py:86-100` wraps `AIAgent.run_conversation()` into a small `Hermes.oneshot()` helper, but it only supports a single fire-and-forget prompt.
-- `src/jake_tools/transcripts/paths.py:8-18` is a broken temporary-path stub: `Paths.temp()` returns a path inside a `TemporaryDirectory()` context manager that is deleted immediately.
+- `src/jake_tools/hermes.py` now exposes `Hermes.oneshot_structured()`, which should be the default path for structured stage outputs.
+- `src/jake_tools/hermes.py` now creates `AIAgent(..., quiet_mode=True)`, so coordinator runs will stay quiet by default.
+- `src/jake_tools/transcripts/paths.py:10-21` is now a context-managed temporary artifact root. That matches the desired lifecycle for this command.
 - `src/jake_tools/transcripts/polish.py:5-26` is a useful precedent for Jinja-based prompts and Hermes invocation, but it is too thin for a multi-stage pipeline.
 
 **Gaps to fill**
@@ -24,7 +25,7 @@
 - no structured stage/artifact models;
 - no local note / recording ingestion;
 - no Hermes prompt library for specialist stages;
-- no verification layer for fidelity gates;
+- no verification layer for note preservation and stage handoffs;
 - no tests at all;
 - no documented tool prerequisites or failure modes.
 
@@ -38,9 +39,9 @@
 - `src/jake_tools/transcripts/__init__.py`
   - replace the stub with a thin public orchestration entrypoint.
 - `src/jake_tools/transcripts/paths.py`
-  - replace the unsafe temporary-dir stub with a durable artifact-path manager.
+  - extend the temporary artifact-root helper with the hard-coded paths the workflow needs.
 - `src/jake_tools/hermes.py`
-  - extend the wrapper so it can create configured agents for multi-stage runs, not just one-shot prompts.
+  - use `oneshot_structured()` for typed stage boundaries, and only extend the wrapper if implementation reveals a real gap.
 - `src/jake_tools/cli/transcribe.py`
   - add options for mode, output root, keep-working-dir, quiet/json output, and dry-run validation.
 
@@ -120,14 +121,16 @@ Use Pydantic models that map closely to the skill’s schemas:
 - `MergeReport`
 - `SignoffReport`
 
-Treat model output as untrusted until parsed and revalidated.
+Treat model output as untrusted until parsed and revalidated. Prefer `Hermes.oneshot_structured()` over hand-rolled JSON-repair loops unless a stage genuinely needs multi-turn agent behaviour.
 
-### 5. Working directory must be durable and user-visible
-Use a stable artifact root for each run, for example:
-- default: `$HERMES_HOME/_working/obsidian-recording/<slug>/`
-- overrideable with a CLI flag.
+### 5. Working directory should be temporary and implementation-local
+Use the existing `Paths.temp()` context manager and hard-coded artifact names such as:
+- `merged.mp3`
+- `merged.json`
+- `chapters.json`
+- `speaker-mapping.json`
 
-Do not use `TemporaryDirectory()` for the main workflow unless explicitly in ephemeral mode. The user needs the raw JSON, ledgers, and reports after the run.
+The command does not need to preserve artefacts after the note is written successfully, so avoid slug logic and durable working-directory policy unless a later requirement proves it necessary.
 
 ### 6. Start with the transcript + chaptered-transcript path, then add full minutes merge
 Implement in layers:
@@ -161,46 +164,16 @@ dev = [
 
 If later tasks need a helper like `python-slugify`, add it then; don’t pre-load libraries just in case.
 
-- [ ] **Step 2: Replace the one-shot-only Hermes wrapper with a reusable runtime surface**
+- [ ] **Step 2: Verify the existing structured Hermes helper is sufficient**
 
-Add a small configuration model and a method that returns an `AIAgent` configured for this workflow.
-
-Target shape in `src/jake_tools/hermes.py`:
-
-```python
-class HermesRunConfig(BaseModel):
-    model: str | None = None
-    provider: str | None = None
-    max_iterations: int = 24
-    enabled_toolsets: list[str] | None = None
-    skip_memory: bool = True
-    skip_context_files: bool = True
-    quiet_mode: bool = True
-    ephemeral_system_prompt: str | None = None
-
-class Hermes(BaseModel):
-    default_model: str = "gpt-5.4-mini"
-
-    def new_agent(self, config: HermesRunConfig | None = None) -> AIAgent:
-        cfg = config or HermesRunConfig()
-        return AIAgent(
-            model=cfg.model or self.default_model,
-            provider=cfg.provider or "",
-            max_iterations=cfg.max_iterations,
-            enabled_toolsets=cfg.enabled_toolsets,
-            skip_memory=cfg.skip_memory,
-            skip_context_files=cfg.skip_context_files,
-            quiet_mode=cfg.quiet_mode,
-            ephemeral_system_prompt=cfg.ephemeral_system_prompt,
-            platform="cli",
-        )
-```
-
-Keep `oneshot()` as a convenience wrapper, but build it on top of `new_agent()`.
+The repo now has `Hermes.oneshot_structured()`, so do not introduce a broader runtime wrapper unless a concrete stage requires it. The likely work here is small fixes only:
+- make sure `oneshot_structured()` really parses model output the way stage models expect;
+- make sure it fails clearly on empty responses;
+- remove any leftover debug `print()` calls elsewhere in the transcript pipeline.
 
 - [ ] **Step 3: Add a parsing test for `HermesResult` and wrapper behaviour**
 
-Write a small unit test that validates `HermesResult.model_validate()` still accepts the dict shape returned by Hermes, and that `new_agent()` passes through toolset/runtime config.
+Write a small unit test that validates `HermesResult.model_validate()` still accepts the dict shape returned by Hermes, and that `oneshot_structured()` can parse a structured payload without a follow-up repair turn when the response is already valid.
 
 ```python
 def test_hermes_result_aliases_final_response() -> None:
@@ -223,69 +196,49 @@ Expected: pass.
 
 ```bash
 git add pyproject.toml src/jake_tools/hermes.py tests/test_hermes_wrapper.py
-git commit -m "feat: add reusable Hermes runtime wrapper"
+git commit -m "test: cover Hermes structured helper"
 ```
 
-## Task 2: Replace the broken path stub with a durable artifact manager
+## Task 2: Extend the temporary path helper with workflow-specific artifact names
 
 **Files:**
 - Modify: `src/jake_tools/transcripts/paths.py`
 - Create: `tests/test_transcript_paths.py`
 
-- [ ] **Step 1: Replace `Paths.temp()` with an owned artifact-root model**
+- [ ] **Step 1: Add the hard-coded artifact paths the workflow needs**
 
-The current implementation returns a deleted temp path. Replace it with a model that can either create a stable root or adopt a user-provided one.
+Keep `Paths.temp()` as-is conceptually. The main work is to add explicit path properties for the files the coordinator writes during a run.
 
 Target shape:
 
 ```python
-class TranscriptPaths(BaseModel):
+class Paths(BaseModel):
     root: Path
-    source_note: Path
-
-    @classmethod
-    def create(cls, source_note: Path, root: Path) -> "TranscriptPaths":
-        root.mkdir(parents=True, exist_ok=True)
-        return cls(root=root, source_note=source_note)
 
     @property
-    def merged_audio(self) -> Path: ...
+    def merged(self) -> Path: ...
 
     @property
-    def merged_json(self) -> Path: ...
+    def transcript(self) -> Path: ...
 
     @property
-    def provenance_json(self) -> Path: ...
+    def chapters(self) -> Path: ...
 
     @property
-    def chapters_json(self) -> Path: ...
+    def speaker_mapping(self) -> Path: ...
 
     @property
-    def speaker_mapping_json(self) -> Path: ...
-
-    @property
-    def fidelity_report_json(self) -> Path: ...
+    def merge_report(self) -> Path: ...
 ```
 
-Include subdirectories such as `audio/`, `artifacts/`, `chapters/`, and `turn-artifacts/` if that makes write paths clearer.
+Keep names fixed and boring.
 
-- [ ] **Step 2: Add slug generation from the note name**
-
-Provide a helper that derives a stable run slug from the note stem, for example:
-
-```python
-def slug_for_note(note: Path) -> str:
-    return note.stem.lower().replace(" ", "-")
-```
-
-Start simple; refine only if tests show collisions or ugly names.
-
-- [ ] **Step 3: Test path creation and persistence semantics**
+- [ ] **Step 2: Test path creation and context-manager semantics**
 
 Write tests that assert:
 - the root exists after creation;
 - artifact paths live under the root;
-- no context manager deletes the directory behind your back.
+- the context manager cleans up after exit.
 
 - [ ] **Step 4: Run the focused tests**
 
@@ -300,7 +253,7 @@ Expected: pass.
 
 ```bash
 git add src/jake_tools/transcripts/paths.py tests/test_transcript_paths.py
-git commit -m "feat: add durable transcript artifact paths"
+git commit -m "feat: add transcript artifact temp paths"
 ```
 
 ## Task 3: Implement note parsing and recording resolution
