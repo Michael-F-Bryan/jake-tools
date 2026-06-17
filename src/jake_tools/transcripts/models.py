@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -33,6 +34,13 @@ class ScribeRunReport(BaseModel):
     stderr: str = ""
 
 
+class TranscriptTurn(BaseModel):
+    start: float
+    end: float
+    speaker: str
+    text: str
+
+
 class SpeakerIdentity(BaseModel):
     name: str
     confidence: float
@@ -52,6 +60,10 @@ class Chapter(BaseModel):
     summary: str
 
 
+class ChaptersPayload(BaseModel):
+    chapters: list[Chapter] = Field(default_factory=list)
+
+
 class MeetingMinutes(BaseModel):
     summary: str
     key_points: list[str] = Field(default_factory=list)
@@ -65,3 +77,14 @@ class MergeReport(BaseModel):
     chapter_count: int
     original_content_preserved: bool
     recording_embed_preserved: bool
+
+
+class CoordinatorResult(BaseModel):
+    mode: Literal["transcript", "chaptered-transcript", "minutes"]
+    note_path: Path
+    updated: bool
+    merged_audio: Path
+    transcript_json: Path
+    chapters_json: Path | None = None
+    speaker_mapping_json: Path | None = None
+    merge_report: MergeReport | None = None

@@ -2,12 +2,19 @@
 
 Internal tools used by Jake.
 
-## Guidance for later agents
-
-- [Internal tooling philosophy](docs/internal-tooling-philosophy.md)
-
 ## Installation
 
 ```bash
 uv tool add -e .
 ```
+
+## Transcribing Obsidian recordings
+
+```bash
+jake-tools transcribe obsidian-recording NOTE.md
+jake-tools transcribe obsidian-recording --mode transcript NOTE.md
+jake-tools transcribe obsidian-recording --mode chaptered-transcript NOTE.md
+jake-tools transcribe obsidian-recording --dry-run --json NOTE.md
+```
+
+This command expects local `ffmpeg` and `scribe` executables to be available.
