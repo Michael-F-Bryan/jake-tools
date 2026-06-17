@@ -1,5 +1,5 @@
-from jake_tools.transcripts.merge import merge_note
-from jake_tools.transcripts.models import Chapter, MeetingMinutes
+from jake_tools.transcripts.merge import merge_note, render_chaptered_transcript, render_transcript
+from jake_tools.transcripts.models import Chapter, MeetingMinutes, TranscriptTurn
 
 
 ORIGINAL = "# Meeting\n\nAgenda line\n\n![[meeting.m4a]]\n"
@@ -8,15 +8,14 @@ ORIGINAL = "# Meeting\n\nAgenda line\n\n![[meeting.m4a]]\n"
 def test_merge_note_preserves_original_content_and_embed() -> None:
     merged = merge_note(
         ORIGINAL,
-        mode="minutes",
-        transcript_body="**Speaker** [00:00] Hello",
+        transcript_body="**Speaker** Hello",
         chapters=[Chapter(title="Kickoff", start=0, end=30, summary="Start")],
-        minutes=MeetingMinutes(summary="Summary"),
+        minutes=MeetingMinutes(summary="Summary", key_points=["High-level note"]),
     )
 
     assert "Agenda line" in merged
     assert "![[meeting.m4a]]" in merged
-    assert "## Meeting Minutes" in merged
+    assert "## Meeting Notes" in merged
     assert "## Chapters" in merged
     assert "## Transcript" in merged
 
@@ -25,9 +24,40 @@ def test_merge_note_replaces_existing_generated_sections() -> None:
     original = ORIGINAL + "\n## Transcript\n\nold stuff\n"
     merged = merge_note(
         original,
-        mode="transcript",
-        transcript_body="**Speaker** [00:00] New text",
+        transcript_body="**Speaker** New text",
+        chapters=[Chapter(title="Kickoff", start=0, end=30, summary="Start")],
+        minutes=MeetingMinutes(summary="Summary", key_points=["High-level note"]),
     )
 
     assert "old stuff" not in merged
     assert merged.count("## Transcript") == 1
+
+
+def test_render_minutes_uses_dot_points() -> None:
+    merged = merge_note(
+        ORIGINAL,
+        transcript_body="**Speaker** Hello",
+        chapters=[Chapter(title="Kickoff", start=0, end=30, summary="Start")],
+        minutes=MeetingMinutes(summary="Summary", key_points=["First note", "Second note"]),
+    )
+
+    assert "## Meeting Notes\n\n- First note\n- Second note" in merged
+
+
+def test_render_transcript_omits_per_turn_timestamps() -> None:
+    rendered = render_transcript(
+        [TranscriptTurn(start=12, end=18, speaker="Speaker 1", text="Hello there")]
+    )
+
+    assert rendered == "**Speaker 1** Hello there"
+
+
+def test_render_chaptered_transcript_keeps_chapter_timestamps_only() -> None:
+    rendered = render_chaptered_transcript(
+        [TranscriptTurn(start=12, end=18, speaker="Speaker 1", text="Hello there")],
+        [Chapter(title="Kickoff", start=0, end=30, summary="Start")],
+    )
+
+    assert "### 00:00 — Kickoff" in rendered
+    assert "**Speaker 1** Hello there" in rendered
+    assert "[00:12]" not in rendered

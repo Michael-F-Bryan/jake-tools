@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 from jake_tools.hermes import Hermes
 from jake_tools.transcripts.coordinator import ObsidianRecordingCoordinator
-from jake_tools.transcripts.models import RecordingRef, SourceNote, SpeakerIdentity, SpeakerMapping
+from jake_tools.transcripts.models import Chapter, ChaptersPayload, MeetingMinutes, RecordingRef, SourceNote, SpeakerIdentity, SpeakerMapping
 
 
 def build_source(note, tmp_path) -> SourceNote:
@@ -20,7 +20,7 @@ def build_source(note, tmp_path) -> SourceNote:
     )
 
 
-def test_coordinator_transcript_mode_dry_run_preserves_note_file(tmp_path) -> None:
+def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
     note = tmp_path / "Meeting.md"
     note.write_text("# Meeting\n\n![[meeting.m4a]]\n", encoding="utf-8")
 
@@ -50,19 +50,25 @@ def test_coordinator_transcript_mode_dry_run_preserves_note_file(tmp_path) -> No
             }
         )
 
+    def build_chapters(hermes, turns):
+        return ChaptersPayload(chapters=[Chapter(title="Kickoff", start=0, end=30, summary="Start")])
+
+    def build_minutes(hermes, turns, chapters):
+        return MeetingMinutes(summary="Summary", key_points=["Opened the meeting"])
+
     coordinator = ObsidianRecordingCoordinator(
         hermes=Hermes(),
         source_note=note,
-        mode="transcript",
         dry_run=True,
         source_loader=load_source,
         concatenate_audio=concatenate_audio,
         transcribe_audio=fake_run_scribe,
         map_speakers=map_speakers,
+        build_chapters=build_chapters,
+        build_minutes=build_minutes,
     )
 
     result = coordinator.run()
 
-    assert result.mode == "transcript"
     assert result.updated is False
     assert note.read_text(encoding="utf-8") == "# Meeting\n\n![[meeting.m4a]]\n"

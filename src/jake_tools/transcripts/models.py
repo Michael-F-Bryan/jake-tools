@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -80,7 +79,6 @@ class MergeReport(BaseModel):
 
 
 class CoordinatorResult(BaseModel):
-    mode: Literal["transcript", "chaptered-transcript", "minutes"]
     note_path: Path
     updated: bool
     merged_audio: Path

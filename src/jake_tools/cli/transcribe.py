@@ -4,7 +4,7 @@ import json
 import click
 
 from ..hermes import Hermes
-from ..transcripts.coordinator import Mode, process_obsidian_recording
+from ..transcripts.coordinator import process_obsidian_recording
 from ..transcripts.models import CoordinatorResult
 from ..transcripts.polish import polish_transcript
 from .options import hermes
@@ -35,20 +35,12 @@ def _emit_obsidian_recording_result(result: CoordinatorResult, *, as_json: bool)
         click.echo(json.dumps(result.model_dump(mode="json"), indent=2))
         return
 
-    click.echo(f"mode: {result.mode}")
     click.echo(f"note: {result.note_path}")
     click.echo(f"updated: {result.updated}")
 
 
 @transcribe.command()
 @hermes
-@click.option(
-    "--mode",
-    type=click.Choice(["transcript", "chaptered-transcript", "minutes"], case_sensitive=False),
-    default="minutes",
-    show_default=True,
-    help="Output mode for the note update.",
-)
 @click.option(
     "--dry-run",
     is_flag=True,
@@ -68,7 +60,6 @@ def _emit_obsidian_recording_result(result: CoordinatorResult, *, as_json: bool)
 def obsidian_recording(
     ctx: click.Context,
     hermes: Hermes,
-    mode: str,
     dry_run: bool,
     as_json: bool,
     obsidian_note: Path,
@@ -80,7 +71,6 @@ def obsidian_recording(
     result = processor(
         hermes,
         obsidian_note,
-        mode=mode,  # type: ignore[arg-type]
         dry_run=dry_run,
     )
     _emit_obsidian_recording_result(result, as_json=as_json)

@@ -13,7 +13,6 @@ def verify_note(
     merged_body: str,
     *,
     original_body: str,
-    mode: str,
     chapters: list[Chapter],
 ) -> MergeReport:
     transcript_heading_count = merged_body.count("## Transcript")
@@ -25,14 +24,14 @@ def verify_note(
             if embed not in merged_body:
                 raise VerificationError("recording embed was not preserved")
 
-    if mode in {"chaptered-transcript", "minutes"}:
-        if "## Chapters" not in merged_body:
-            raise VerificationError("missing ## Chapters section")
-        if merged_body.count("### ") != len(chapters):
-            raise VerificationError("chapter heading count does not match chapter count")
+    if "## Meeting Notes" not in merged_body:
+        raise VerificationError("missing ## Meeting Notes section")
 
-    if mode == "minutes" and "## Meeting Minutes" not in merged_body:
-        raise VerificationError("missing ## Meeting Minutes section")
+    if "## Chapters" not in merged_body:
+        raise VerificationError("missing ## Chapters section")
+
+    if merged_body.count("### ") != len(chapters):
+        raise VerificationError("chapter heading count does not match chapter count")
 
     return MergeReport(
         status="pass",

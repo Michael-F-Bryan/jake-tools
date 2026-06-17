@@ -36,7 +36,7 @@ MEETING_MINUTES_PROMPT = Template(
     """
 You are the meeting-minutes specialist for an Obsidian meeting recording workflow.
 
-Write faithful meeting minutes from the transcript. Preserve uncertainty when the transcript is unclear. Do not invent decisions or action items.
+Write faithful high-level meeting notes from the transcript. Preserve uncertainty when the transcript is unclear. Do not invent decisions or action items.
 
 Transcript turns:
 {{ turns_json }}
@@ -47,10 +47,8 @@ Chapter plan:
 {% endif %}
 
 Return JSON with:
-- `summary`: short overall summary
-- `key_points`: list of key discussion points
-- `decisions`: list of decisions made
-- `action_items`: list of action items
+- `summary`: one-sentence overview of the meeting
+- `key_points`: concise high-level meeting notes written as dot-point-sized statements
 """.strip()
 )
 

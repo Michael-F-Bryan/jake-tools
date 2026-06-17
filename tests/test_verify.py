@@ -6,11 +6,10 @@ ORIGINAL = "# Meeting\n\n![[meeting.m4a]]\n"
 
 
 def test_verify_note_passes_for_valid_minutes_note() -> None:
-    merged = "# Meeting\n\n![[meeting.m4a]]\n\n## Meeting Minutes\n\nSummary\n\n## Chapters\n\n- 00:00 — Kickoff\n\n## Transcript\n\n### 00:00 — Kickoff\n\nBody\n"
+    merged = "# Meeting\n\n![[meeting.m4a]]\n\n## Meeting Notes\n\n- Summary\n\n## Chapters\n\n- 00:00 — Kickoff\n\n## Transcript\n\n### 00:00 — Kickoff\n\nBody\n"
     report = verify_note(
         merged,
         original_body=ORIGINAL,
-        mode="minutes",
         chapters=[Chapter(title="Kickoff", start=0, end=30, summary="Start")],
     )
 
@@ -22,7 +21,6 @@ def test_verify_note_requires_single_transcript_heading() -> None:
         verify_note(
             "## Transcript\n\nA\n\n## Transcript\n\nB\n",
             original_body=ORIGINAL,
-            mode="transcript",
             chapters=[],
         )
     except VerificationError as exc:
