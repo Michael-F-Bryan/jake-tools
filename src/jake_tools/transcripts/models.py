@@ -67,8 +67,6 @@ class Chapter(BaseModel):
 
 class ChapterSummary(BaseModel):
     title: str
-    start: float
-    end: float
     start_timestamp: str
     end_timestamp: str
 
@@ -129,12 +127,16 @@ class AITotals(BaseModel):
 class CoordinatorResult(BaseModel):
     note_path: Path
     updated: bool
-    merged_audio: Path
-    transcript_json: Path
-    chapters_json: Path | None = None
-    speaker_mapping_json: Path | None = None
-    merge_report: MergeReport | None = None
     chapter_summaries: list[ChapterSummary] = Field(default_factory=list)
     ai_stage_stats: list[AIStageStats] = Field(default_factory=list)
     ai_totals: AITotals = Field(default_factory=AITotals)
     speaker_message_counts: list[SpeakerMessageCount] = Field(default_factory=list)
+
+    def json_summary(self) -> dict[str, object]:
+        return {
+            "updated": self.updated,
+            "chapter_summaries": [summary.model_dump(mode="json") for summary in self.chapter_summaries],
+            "ai_stage_stats": [stats.model_dump(mode="json") for stats in self.ai_stage_stats],
+            "ai_totals": self.ai_totals.model_dump(mode="json"),
+            "speaker_message_counts": [count.model_dump(mode="json") for count in self.speaker_message_counts],
+        }

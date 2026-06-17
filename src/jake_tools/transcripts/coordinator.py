@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ..hermes import Hermes, HermesResult
 from .audio import build_concat_plan, concatenate_recordings, run_scribe
-from .merge import build_merge_report, format_timestamp, merge_note, render_chaptered_transcript, speaker_name
+from .merge import format_timestamp, merge_note, render_chaptered_transcript, speaker_name
 from .models import (
     AIStageStats,
     AITotals,
@@ -85,8 +85,6 @@ def _build_chapter_summaries(chapters: list[Chapter]) -> list[ChapterSummary]:
     return [
         ChapterSummary(
             title=chapter.title,
-            start=chapter.start,
-            end=chapter.end,
             start_timestamp=format_timestamp(chapter.start),
             end_timestamp=format_timestamp(chapter.end),
         )
@@ -196,19 +194,10 @@ class ObsidianRecordingCoordinator:
                 chapters=chapters_payload.chapters,
                 minutes=minutes,
             )
-            merge_report = build_merge_report(
-                source.body,
-                updated_note,
-                len(chapters_payload.chapters),
-            )
-            merge_report = verify_note(
+            verify_note(
                 updated_note,
                 original_body=source.body,
                 chapters=chapters_payload.chapters,
-            )
-            paths.merge_report.write_text(
-                json.dumps(merge_report.model_dump(mode="json"), indent=2),
-                encoding="utf-8",
             )
 
             if not self.dry_run:
@@ -217,11 +206,6 @@ class ObsidianRecordingCoordinator:
             return CoordinatorResult(
                 note_path=self.source_note,
                 updated=not self.dry_run,
-                merged_audio=paths.merged,
-                transcript_json=paths.transcript,
-                chapters_json=paths.chapters,
-                speaker_mapping_json=paths.speaker_mapping,
-                merge_report=merge_report,
                 chapter_summaries=_build_chapter_summaries(chapters_payload.chapters),
                 ai_stage_stats=ai_stage_stats,
                 ai_totals=_build_ai_totals(ai_stage_stats),

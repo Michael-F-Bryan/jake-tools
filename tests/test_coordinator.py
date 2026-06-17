@@ -81,8 +81,6 @@ def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
     assert [summary.model_dump() for summary in result.chapter_summaries] == [
         {
             "title": "Kickoff",
-            "start": 0,
-            "end": 30,
             "start_timestamp": "00:00",
             "end_timestamp": "00:30",
         }

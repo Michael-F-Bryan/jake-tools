@@ -32,7 +32,7 @@ def polish(hermes: Hermes, transcript):
 
 def _emit_obsidian_recording_result(result: CoordinatorResult, *, as_json: bool) -> None:
     if as_json:
-        click.echo(json.dumps(result.model_dump(mode="json"), indent=2))
+        click.echo(json.dumps(result.json_summary(), indent=2))
         return
 
     click.echo(f"note: {result.note_path}")
