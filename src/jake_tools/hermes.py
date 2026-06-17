@@ -1,7 +1,8 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from run_agent import AIAgent
+from jinja2 import Template
 
 
 class HermesMessage(BaseModel):
@@ -83,6 +84,27 @@ class HermesResult(BaseModel):
         return self.final_response
 
 
+ONESHOT_STRUCTURED_PROMPT = Template(
+    """
+You are a helpful assistant that returns a structured response.
+
+Return a JSON object matching this schema:
+{{ schema_json }}
+
+The input is:
+{{ input }}
+"""
+)
+ONESHOT_STRUCTURED_INVALID_JSON_PROMPT = Template(
+    """
+The response from Hermes was invalid JSON. The last error was:
+{{ last_error }}
+
+Fix it. Returning just the corrected JSON, no other text, additional commentary, or any surrounding markdown code block.
+"""
+)
+
+
 class Hermes(BaseModel):
     """
     A high-level wrapper around the Hermes agent.
@@ -96,9 +118,34 @@ class Hermes(BaseModel):
         return AIAgent(
             model=model or self.default_model,
             provider=provider or "",
+            quiet_mode=True,
         )
 
     def oneshot(self, prompt: str) -> HermesResult:
         agent = self.new_agent()
         result = agent.run_conversation(prompt)
         return HermesResult.model_validate(result)
+
+    def oneshot_structured[T: BaseModel](self, prompt: str, model_type: type[T]) -> T:
+        """
+        Run a Hermes agent, getting a structured response out.
+
+        This will automatically retry if the model returns invalid JSON.
+        """
+        prompt = ONESHOT_STRUCTURED_PROMPT.render(
+            schema_json=model_type.model_json_schema(),
+            input=prompt,
+        )
+        agent = self.new_agent()
+        result = HermesResult.model_validate(agent.run_conversation(prompt))
+
+        try:
+            return model_type.model_validate(result.response)
+        except ValidationError as e:
+            last_error = e
+
+        prompt = ONESHOT_STRUCTURED_INVALID_JSON_PROMPT.render(
+            last_error=last_error,
+        )
+        result = HermesResult.model_validate(agent.run_conversation(prompt))
+        return model_type.model_validate(result.response)
