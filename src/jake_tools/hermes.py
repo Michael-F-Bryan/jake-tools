@@ -1,9 +1,11 @@
 from collections.abc import Callable
-from typing import Any, Literal, Protocol, TypeVar
+from typing import Any, Literal, Protocol, TypeVar, cast
 
 from jinja2 import Template
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from run_agent import AIAgent
+
+from .prompting import StructuredPrompt
 
 
 class HermesMessage(BaseModel):
@@ -120,9 +122,14 @@ def _combine_results(results: list[HermesResult]) -> HermesResult:
         cost_status=last.cost_status or first.cost_status,
         cost_source=last.cost_source or first.cost_source,
         session_id=last.session_id or first.session_id,
-        error=last.error or next((result.error for result in results if result.error), None),
-        failure_reason=last.failure_reason or next((result.failure_reason for result in results if result.failure_reason), None),
-        guardrail=last.guardrail or next((result.guardrail for result in results if result.guardrail), None),
+        error=last.error
+        or next((result.error for result in results if result.error), None),
+        failure_reason=last.failure_reason
+        or next(
+            (result.failure_reason for result in results if result.failure_reason), None
+        ),
+        guardrail=last.guardrail
+        or next((result.guardrail for result in results if result.guardrail), None),
         pending_steer=last.pending_steer,
         interrupt_message=last.interrupt_message,
     )
@@ -158,7 +165,9 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class AgentConversation(Protocol):
-    def run_conversation(self, user_message: str, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
+    def run_conversation(
+        self, user_message: str, *args: Any, **kwargs: Any
+    ) -> dict[str, Any]: ...
 
 
 AgentFactory = Callable[[str, str], AgentConversation]
@@ -197,11 +206,17 @@ class Hermes(BaseModel):
 
         return model_type.model_validate(response)
 
-    def oneshot_structured(self, prompt: str, model_type: type[T]) -> T:
-        payload, _ = self.oneshot_structured_with_result(prompt, model_type)
+    def run_structured(self, prompt: StructuredPrompt[T]) -> T:
+        """Render a typed prompt and parse the reply into its response model."""
+        return cast(T, self._oneshot_structured(prompt.render(), prompt.response_model))
+
+    def _oneshot_structured(self, prompt: str, model_type: type[T]) -> T:
+        payload, _ = self._oneshot_structured_with_result(prompt, model_type)
         return payload
 
-    def oneshot_structured_with_result(self, prompt: str, model_type: type[T]) -> tuple[T, HermesResult]:
+    def _oneshot_structured_with_result(
+        self, prompt: str, model_type: type[T]
+    ) -> tuple[T, HermesResult]:
         """Run Hermes and parse the reply into ``model_type``.
 
         Retries once with an explicit repair prompt when the initial response does
@@ -224,7 +239,9 @@ class Hermes(BaseModel):
                 previous_response=result.response,
             )
 
-        repair_result = HermesResult.model_validate(agent.run_conversation(repair_prompt))
+        repair_result = HermesResult.model_validate(
+            agent.run_conversation(repair_prompt)
+        )
         payload = self._parse_structured_response(repair_result.response, model_type)
         combined = _combine_results([result, repair_result])
         self.last_result = combined
