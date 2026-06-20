@@ -1,5 +1,6 @@
 import click
 
+from .newsletter import newsletter
 from .transcribe import transcribe
 
 
@@ -8,4 +9,5 @@ def main():
     pass
 
 
+main.add_command(newsletter)
 main.add_command(transcribe)
