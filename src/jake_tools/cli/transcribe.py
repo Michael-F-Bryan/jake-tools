@@ -30,7 +30,9 @@ def polish(hermes: Hermes, transcript):
     click.echo(polished)
 
 
-def _emit_obsidian_recording_result(result: CoordinatorResult, *, as_json: bool) -> None:
+def _emit_obsidian_recording_result(
+    result: CoordinatorResult, *, as_json: bool
+) -> None:
     if as_json:
         click.echo(json.dumps(result.json_summary(), indent=2))
         return
@@ -64,6 +66,9 @@ def obsidian_recording(
     as_json: bool,
     obsidian_note: Path,
 ):
+    """
+    Process an Obsidian recording into a polished, chapterised note.
+    """
     processor = process_obsidian_recording
     if ctx.obj and "process_obsidian_recording" in ctx.obj:
         processor = ctx.obj["process_obsidian_recording"]
