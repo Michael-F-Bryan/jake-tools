@@ -138,6 +138,29 @@ def _combine_results(results: list[HermesResult]) -> HermesResult:
     )
 
 
+def _strip_markdown_json_fence(response: str) -> str:
+    """Return bare JSON when a model wraps structured output in a Markdown fence."""
+
+    stripped = response.strip()
+    if not stripped.startswith("```"):
+        return response
+
+    lines = stripped.splitlines()
+    if len(lines) < 2 or not lines[0].startswith("```"):
+        return response
+
+    closing_index = None
+    for index in range(len(lines) - 1, 0, -1):
+        if lines[index].strip() == "```":
+            closing_index = index
+            break
+
+    if closing_index is None:
+        return response
+
+    return "\n".join(lines[1:closing_index]).strip()
+
+
 ONESHOT_STRUCTURED_PROMPT = Template(
     """
 You are a helpful assistant that returns a structured response.
@@ -151,17 +174,17 @@ The input is:
 )
 
 ONESHOT_STRUCTURED_INVALID_JSON_PROMPT = Template(
-    """
+    '''
 The previous response did not validate against the required schema.
+
+Return only corrected JSON that matches the schema and includes all required fields. Populate all fields with relevant content based on the previous response and the schema. Preserve content from the previous response where possible. Do not include markdown fences or commentary.
 
 Validation error:
 {{ last_error }}
 
 Previous response:
 {{ previous_response }}
-
-Return only corrected JSON that matches the schema. No markdown fences and no commentary.
-""".strip()
+'''.strip()
 )
 
 
@@ -229,7 +252,7 @@ class Hermes(BaseModel):
             raise ValueError("No response from Hermes")
 
         if isinstance(response, str):
-            return model_type.model_validate_json(response)
+            return model_type.model_validate_json(_strip_markdown_json_fence(response))
 
         return model_type.model_validate(response)
 
@@ -239,12 +262,16 @@ class Hermes(BaseModel):
         return payload
 
     def run_structured_with_result[T: BaseModel](
-        self, prompt: StructuredPrompt[T]
+        self,
+        prompt: StructuredPrompt[T],
+        *,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> tuple[T, HermesResult]:
         """Render a typed prompt and return both parsed payload and Hermes usage."""
         response_model = cast(type[T], prompt.response_model)
         return self._oneshot_structured_with_result(
-            prompt.render(), response_model
+            prompt.render(), response_model, model=model, provider=provider
         )
 
     def run_agent_structured[T: BaseModel](
@@ -261,14 +288,20 @@ class Hermes(BaseModel):
         return payload
 
     def _oneshot_structured_with_result[T: BaseModel](
-        self, prompt: str, model_type: type[T]
+        self,
+        prompt: str,
+        model_type: type[T],
+        *,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> tuple[T, HermesResult]:
         """Run Hermes and parse the reply into ``model_type``.
 
         Retries once with an explicit repair prompt when the initial response does
         not validate as the requested structured payload.
         """
-        return self._structured_with_agent(self.new_agent(), prompt, model_type)
+        agent = self.new_agent(model=model, provider=provider)
+        return self._structured_with_agent(agent, prompt, model_type)
 
     def _structured_with_agent[T: BaseModel](
         self,
@@ -287,6 +320,7 @@ class Hermes(BaseModel):
             return payload, result
         except (ValidationError, ValueError) as exc:
             repair_prompt = ONESHOT_STRUCTURED_INVALID_JSON_PROMPT.render(
+                schema_json=model_type.model_json_schema(),
                 last_error=str(exc),
                 previous_response=result.response,
             )

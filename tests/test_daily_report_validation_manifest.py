@@ -177,6 +177,36 @@ def test_validation_catches_tool_unavailable_without_preflight(tmp_path: Path) -
     assert any("preflight" in error for error in result.errors)
 
 
+def test_validation_catches_placeholder_filler_but_allows_word_in_context(tmp_path: Path) -> None:
+    _, paths, specs = make_paths_and_specs(tmp_path)
+    spec = specs[0]
+    evidence = paths.evidence / "source.json"
+    evidence.write_text("{}", encoding="utf-8")
+
+    write_output(
+        spec,
+        LaneOutput(
+            markdown=markdown_for(spec),
+            caveats=["Placeholder response only; no evidence was actually reviewed."],
+            evidence_paths=[str(evidence)],
+        ),
+    )
+    filler = validate_lane_artifact(spec, paths)
+    assert filler.status == "fail"
+    assert any("banned placeholder phrase present: placeholder" in error for error in filler.errors)
+
+    write_output(
+        spec,
+        LaneOutput(
+            markdown=markdown_for(spec),
+            caveats=["This caveat explains why the output is not a placeholder."],
+            evidence_paths=[str(evidence)],
+        ),
+    )
+    contextual = validate_lane_artifact(spec, paths)
+    assert contextual.status == "ok"
+
+
 def test_validation_failure_can_be_represented_as_lane_status_fail_data(tmp_path: Path) -> None:
     _, paths, specs = make_paths_and_specs(tmp_path)
     spec = specs[0]

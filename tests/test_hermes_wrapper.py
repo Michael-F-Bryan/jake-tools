@@ -135,6 +135,72 @@ def test_run_structured_with_result_parses_valid_json_without_repair() -> None:
     )
 
 
+def test_run_structured_with_result_uses_requested_model_and_provider() -> None:
+    agent = FakeAgent(
+        [
+            {
+                "final_response": '{"answer": 42}',
+                "completed": True,
+            },
+        ]
+    )
+    factory = RecordingFactory(agent)
+    hermes = Hermes(default_model="default-model", agent_factory=factory)
+
+    payload, _ = hermes.run_structured_with_result(
+        PayloadPrompt(instruction="Return the answer."),
+        model="model-a",
+        provider="provider-a",
+    )
+
+    assert payload == Payload(answer=42)
+    assert factory.specs == [AgentSpec(model="model-a", provider="provider-a")]
+
+
+def test_run_structured_with_result_parses_fenced_json_without_repair() -> None:
+    agent = FakeAgent(
+        [
+            {
+                "final_response": '```json\n{"answer": 42}\n```',
+                "completed": True,
+                "api_calls": 1,
+            },
+        ]
+    )
+    hermes = hermes_with(agent)
+
+    payload, result = hermes.run_structured_with_result(
+        PayloadPrompt(instruction="Return the answer.")
+    )
+
+    assert payload == Payload(answer=42)
+    assert result.api_calls == 1
+    assert len(agent.prompts) == 1
+
+
+def test_run_agent_structured_parses_fenced_json_without_repair() -> None:
+    agent = FakeAgent(
+        [
+            {
+                "final_response": '```\n{"answer": 12}\n```',
+                "completed": True,
+                "api_calls": 1,
+            },
+        ]
+    )
+    factory = RecordingFactory(agent)
+    hermes = Hermes(agent_factory=factory)
+
+    payload, result = hermes.run_agent_structured(
+        AgentSpec(model="model-a", provider="provider-a", enabled_toolsets=["file"]),
+        PayloadPrompt(instruction="Return the answer."),
+    )
+
+    assert payload == Payload(answer=12)
+    assert result.api_calls == 1
+    assert len(agent.prompts) == 1
+
+
 def test_run_structured_with_result_repairs_invalid_json_once() -> None:
     agent = FakeAgent(
         [

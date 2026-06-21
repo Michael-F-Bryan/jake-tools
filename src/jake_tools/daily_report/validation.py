@@ -32,14 +32,14 @@ class LaneValidationResult:
         }
 
 
-_BANNED_PLACEHOLDER_PHRASES: tuple[str, ...] = (
-    "todo",
-    "tbd",
-    "lorem ipsum",
-    "placeholder",
-    "insert details",
-    "insert findings",
-    "coming soon",
+_BANNED_PLACEHOLDER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("todo", re.compile(r"\btodo\b", re.I)),
+    ("tbd", re.compile(r"\btbd\b", re.I)),
+    ("lorem ipsum", re.compile(r"\blorem\s+ipsum\b", re.I)),
+    ("placeholder", re.compile(r"\b(?:placeholder\s+(?:response|content|text|only)|as\s+a\s+placeholder)\b", re.I)),
+    ("insert details", re.compile(r"\binsert\s+details\b", re.I)),
+    ("insert findings", re.compile(r"\binsert\s+findings\b", re.I)),
+    ("coming soon", re.compile(r"\bcoming\s+soon\b", re.I)),
 )
 
 _NO_FINDINGS_RE = re.compile(r"\bno\s+(findings?|relevant findings?|items?|matches?|results?)\b", re.I)
@@ -171,8 +171,12 @@ def _missing_declared_evidence(evidence_paths: list[str], root: Path) -> list[st
 
 
 def _banned_placeholder_errors(output: LaneOutput) -> list[str]:
-    text = _combined_text(output).lower()
-    return [f"banned placeholder phrase present: {phrase}" for phrase in _BANNED_PLACEHOLDER_PHRASES if phrase in text]
+    text = _combined_text(output)
+    return [
+        f"banned placeholder phrase present: {phrase}"
+        for phrase, pattern in _BANNED_PLACEHOLDER_PATTERNS
+        if pattern.search(text)
+    ]
 
 
 def _unsupported_no_findings_errors(output: LaneOutput) -> list[str]:

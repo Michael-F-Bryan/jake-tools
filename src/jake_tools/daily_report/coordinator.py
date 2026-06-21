@@ -122,6 +122,7 @@ def run_daily_report_command(
     write_json(paths.evidence / "inbox-envelopes.json", _inbox_envelopes_json(inbox_preflight))
 
     specs = build_lane_specs(options, paths, preflight=inbox_preflight)
+    _write_lane_evidence_bundles(specs=specs, options=options, paths=paths, write_json=write_json)
     run_result = run_daily_report(
         options=options,
         stages=stages,
@@ -224,6 +225,57 @@ def _inbox_envelopes_json(preflight: Any) -> dict[str, Any]:
     }
 
 
+def _write_lane_evidence_bundles(
+    *,
+    specs: list[LaneSpec],
+    options: DailyReportLaneOptions,
+    paths: DailyReportPaths,
+    write_json: Callable[[Path, dict[str, Any]], None],
+) -> None:
+    for spec in specs:
+        source_paths = [paths.evidence / "session-manifest.json"]
+        if spec.name is LaneName.INBOX_TRIAGE:
+            source_paths.extend(
+                [paths.evidence / "inbox-preflight.json", paths.evidence / "inbox-envelopes.json"]
+            )
+
+        bundle: dict[str, Any] = {
+            "run_id": options.run_id,
+            "target_date": options.target_date,
+            "timezone": options.timezone_name,
+            "lane": spec.name.value,
+            "code_owned": True,
+            "sources": [str(path) for path in source_paths],
+            "notes": [
+                "Deterministic coordinator-created evidence bundle.",
+                "Lane workers may only use this bundle and explicitly enabled scoped tools.",
+            ],
+        }
+
+        # Inline source content for tool-less PRE_FED lanes so the model can
+        # see the data without needing filesystem tools.
+        for src_path in source_paths:
+            stem = src_path.stem
+            if not src_path.exists():
+                bundle[f"inlined_{stem}"] = None
+            else:
+                try:
+                    bundle[f"inlined_{stem}"] = json.loads(src_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    bundle[f"inlined_{stem}"] = None
+
+        write_json(spec.evidence_bundle_path, bundle)
+
+
+def _clear_lane_artefacts(specs: list[LaneSpec]) -> None:
+    """Remove stale lane artefacts so validation can't read prior-run output."""
+    for spec in specs:
+        try:
+            spec.artefact_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def run_daily_report(
     *,
     options: DailyReportLaneOptions,
@@ -238,6 +290,7 @@ def run_daily_report(
     paths.create()
     paths.lane_events.parent.mkdir(parents=True, exist_ok=True)
     paths.lane_events.write_text("", encoding="utf-8")
+    _clear_lane_artefacts(specs)
 
     results: dict[LaneName, LaneRunResult] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:

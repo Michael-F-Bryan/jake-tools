@@ -5,7 +5,12 @@ from datetime import date
 from pathlib import Path
 from typing import Any, cast
 
-from jake_tools.daily_report.coordinator import run_daily_report
+from jake_tools.daily_report.coordinator import (
+    DailyReportCommandOptions,
+    run_daily_report,
+    run_daily_report_command,
+)
+from jake_tools.daily_report.himalaya import CommandResult
 from jake_tools.daily_report.lanes import build_lane_specs
 from jake_tools.daily_report.models import DailyReportLaneOptions, LaneName, LaneOutput, LaneShape, LaneSpec
 from jake_tools.daily_report.paths import DailyReportPaths
@@ -104,17 +109,52 @@ def test_coordinator_records_lane_failure_and_still_returns_result(tmp_path: Pat
     assert all(spec.artefact_path.exists() for spec in successful)
 
 
+def test_coordinator_clears_stale_artefacts_before_dispatch(tmp_path: Path) -> None:
+    """Stale lane artefacts from a previous run must not survive dispatch."""
+    options, paths, specs = make_run(tmp_path)
+
+    # Write stale artefacts for every lane — as if a prior run left them.
+    stale_content = json.dumps(
+        {
+            "markdown": "## Stale\ndata.",
+            "findings": ["from prior run"],
+            "actions": [],
+            "caveats": [],
+            "evidence_paths": [],
+            "cited_session_ids": [],
+        }
+    )
+    for spec in specs:
+        spec.artefact_path.parent.mkdir(parents=True, exist_ok=True)
+        spec.artefact_path.write_text(stale_content, encoding="utf-8")
+        assert spec.artefact_path.exists()
+
+    stages = FakeStages()
+    result = run_daily_report(options=options, stages=stages, specs=specs, paths=paths)
+
+    # All succeeded lanes should have fresh artefacts written by the coordinator.
+    assert result.status == "ok"
+    for spec in specs:
+        artefact = json.loads(spec.artefact_path.read_text(encoding="utf-8"))
+        assert artefact["findings"] == [spec.name.value], (
+            f"{spec.name.value} artefact has stale data"
+        )
+
+
 class FakeHermes:
     def __init__(self) -> None:
-        self.structured_calls: list[StructuredPrompt[LaneOutput]] = []
+        self.structured_calls: list[tuple[StructuredPrompt[LaneOutput], str | None, str | None]] = []
         self.agent_calls: list[tuple[AgentSpec, StructuredPrompt[LaneOutput]]] = []
 
     def run_structured_with_result(
         self,
         prompt: StructuredPrompt[LaneOutput],
+        *,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> tuple[LaneOutput, HermesResult]:
-        self.structured_calls.append(prompt)
-        return LaneOutput(markdown="prefed"), HermesResult(completed=True)
+        self.structured_calls.append((prompt, model, provider))
+        return LaneOutput(markdown="prefed"), HermesResult(completed=True, model=model, provider=provider)
 
     def run_agent_structured(
         self,
@@ -123,6 +163,63 @@ class FakeHermes:
     ) -> tuple[LaneOutput, HermesResult]:
         self.agent_calls.append((spec, prompt))
         return LaneOutput(markdown="worker"), HermesResult(completed=True)
+
+
+class ValidatingFakeStages:
+    def run_lane(
+        self,
+        spec: LaneSpec,
+        options: DailyReportLaneOptions,
+    ) -> tuple[LaneOutput, HermesResult]:
+        del options
+        markdown = "\n".join(f"## {section}" for section in spec.required_sections)
+        return (
+            LaneOutput(
+                markdown=markdown,
+                evidence_paths=[str(spec.evidence_bundle_path)],
+            ),
+            HermesResult(completed=True, model=spec.model, provider=spec.provider, api_calls=1),
+        )
+
+
+def test_run_daily_report_command_creates_lane_evidence_bundles(tmp_path: Path) -> None:
+    def fake_himalaya_runner(command: tuple[str, ...]) -> CommandResult:
+        return CommandResult(args=command, returncode=1)
+
+    result = run_daily_report_command(
+        command_options=DailyReportCommandOptions(
+            target_date=date(2026, 6, 21),
+            base_dir=tmp_path,
+            state_db=tmp_path / "missing-state.db",
+            run_id_factory=lambda: "run-1",
+        ),
+        stages=cast(Any, ValidatingFakeStages()),
+        himalaya_runner=fake_himalaya_runner,
+    )
+
+    assert result.status == "ok"
+    evidence_dir = tmp_path / "daily-report-2026-06-21" / "evidence"
+    for lane in LaneName:
+        bundle_path = evidence_dir / f"{lane.value}.json"
+        assert bundle_path.exists()
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+        assert bundle["run_id"] == "run-1"
+        assert bundle["target_date"] == "2026-06-21"
+        assert bundle["lane"] == lane.value
+        assert bundle["code_owned"] is True
+
+
+def test_lane_prompt_renders_required_sections_as_exact_markdown_headings(tmp_path: Path) -> None:
+    options, paths, specs = make_run(tmp_path)
+    del options, paths
+    spec = next(spec for spec in specs if spec.name is LaneName.SESSION_HINDSIGHT)
+
+    rendered = spec.prompt.render()
+
+    assert "Required Markdown headings:\n## summary\n## decisions\n## risks\n## open threads" in rendered
+    assert "must include every required section above as an exact Markdown heading" in rendered
+    assert "Set evidence_paths only to existing filesystem evidence files" in rendered
+    assert "Evidence unavailable from declared bundle; no body content reviewed." in rendered
 
 
 def test_hermes_daily_report_stages_passes_worker_agent_spec(tmp_path: Path) -> None:
@@ -164,5 +261,5 @@ def test_hermes_daily_report_stages_uses_prefed_structured_path(tmp_path: Path) 
     output, _ = stages.run_lane(prefed, options)
 
     assert output.markdown == "prefed"
-    assert fake_hermes.structured_calls == [prefed.prompt]
+    assert fake_hermes.structured_calls == [(prefed.prompt, prefed.model, prefed.provider)]
     assert fake_hermes.agent_calls == []

@@ -24,7 +24,11 @@ class HermesDailyReportStages:
         options: DailyReportLaneOptions,
     ) -> tuple[LaneOutput, HermesResult]:
         if spec.shape is LaneShape.PRE_FED:
-            return self.hermes.run_structured_with_result(spec.prompt)
+            return self.hermes.run_structured_with_result(
+                spec.prompt,
+                model=spec.model,
+                provider=spec.provider,
+            )
 
         agent_spec = AgentSpec(
             model=spec.model,
