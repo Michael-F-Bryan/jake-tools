@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -72,4 +72,6 @@ class DailyReportLaneOptions:
     model_tier: ModelTier = "standard"
     timeout_seconds: int = 900
     parent_session_id: str | None = None
+    session_db: Any | None = None
+    max_iterations: int | None = None
     extra_context: dict[str, str] = field(default_factory=dict)
