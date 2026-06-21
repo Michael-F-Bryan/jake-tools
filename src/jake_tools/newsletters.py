@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import html
 import json
 import re
 import subprocess
+from typing import cast
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from pathlib import Path
+
+from pydantic import BaseModel, Field
 
 
 CSU_TENANT_ID = "0a3a5574-cfda-4314-952e-c0b3e1dcac6d"
@@ -22,6 +25,8 @@ GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
 SHAREPOINT_ROOT = f"https://{CSU_SITE_HOST}{CSU_SITE_PATH}/_api"
 GRAPH_RESOURCE = "https://graph.microsoft.com"
 SHAREPOINT_RESOURCE = f"https://{CSU_SITE_HOST}"
+
+JsonObject = dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -61,6 +66,38 @@ class NewsletterItem:
 
 class NewsletterError(RuntimeError):
     pass
+
+
+class GraphListItemFields(BaseModel):
+    id: str = ""
+    title: str = Field(default="", alias="Title")
+    body: str = Field(default="", alias="Body")
+    created: str = Field(default="", alias="Created")
+    modified: str = Field(default="", alias="Modified")
+
+
+class GraphListItem(BaseModel):
+    id: str = ""
+    web_url: str = Field(default="", alias="webUrl")
+    fields: GraphListItemFields = Field(default_factory=GraphListItemFields)
+
+    def to_newsletter_item(self) -> NewsletterItem:
+        return NewsletterItem(
+            id=self.id or self.fields.id,
+            title=self.fields.title,
+            body=body_from_html(self.fields.body),
+            created=self.fields.created,
+            modified=self.fields.modified,
+            url=self.web_url,
+        )
+
+
+class GraphListItemsResponse(BaseModel):
+    value: list[GraphListItem] = Field(default_factory=list)
+
+
+class GraphCreatedListItem(BaseModel):
+    id: str
 
 
 class AzureCliTokenProvider:
@@ -117,11 +154,12 @@ class NewsletterClient:
             safe="(),",
         )
         data = self._graph("GET", self._list_path(f"/items?{query}"))
-        return [self._parse_item(item) for item in data.get("value", [])]
+        response = GraphListItemsResponse.model_validate(data)
+        return [item.to_newsletter_item() for item in response.value]
 
     def get_item(self, item_id: str) -> NewsletterItem:
         data = self._graph("GET", self._list_path(f"/items/{item_id}?$expand=fields"))
-        return self._parse_item(data)
+        return GraphListItem.model_validate(data).to_newsletter_item()
 
     def create_item(
         self,
@@ -132,7 +170,7 @@ class NewsletterClient:
     ) -> NewsletterItem:
         payload = {"fields": {"Title": title, "Body": body_to_html(body)}}
         data = self._graph("POST", self._list_path("/items"), payload)
-        item_id = str(data["id"])
+        item_id = GraphCreatedListItem.model_validate(data).id
         for attachment in attachments:
             self.add_attachment(item_id, attachment)
         return self.get_item(item_id)
@@ -171,7 +209,7 @@ class NewsletterClient:
         site_id = urllib.parse.quote(self._site_id, safe="")
         return f"/sites/{site_id}/lists/{self._list_id}{suffix}"
 
-    def _graph(self, method: str, path: str, payload: dict | None = None) -> dict:
+    def _graph(self, method: str, path: str, payload: Mapping[str, object] | None = None) -> JsonObject:
         body = None if payload is None else json.dumps(payload).encode("utf-8")
         return self._request_json(
             method,
@@ -183,7 +221,7 @@ class NewsletterClient:
 
     def _sharepoint(
         self, method: str, path: str, body: bytes, *, content_type: str
-    ) -> dict:
+    ) -> JsonObject:
         return self._request_json(
             method,
             SHAREPOINT_RESOURCE,
@@ -200,7 +238,7 @@ class NewsletterClient:
         *,
         body: bytes | None,
         content_type: str,
-    ) -> dict:
+    ) -> JsonObject:
         request = urllib.request.Request(
             url,
             data=body,
@@ -220,25 +258,12 @@ class NewsletterClient:
                 if not raw:
                     return {}
 
-                return json.loads(raw)
+                return cast(JsonObject, json.loads(raw))
         except urllib.error.HTTPError as exc:
             details = exc.read().decode(errors="replace")
             raise NewsletterError(f"newsletter request failed: {exc.code} {exc.reason}\n{details}") from exc
         except urllib.error.URLError as exc:
             raise NewsletterError(f"newsletter request failed: {exc.reason}") from exc
-
-    @staticmethod
-    def _parse_item(data: dict) -> NewsletterItem:
-        fields = data.get("fields", {})
-        return NewsletterItem(
-            id=str(data.get("id", fields.get("id", ""))),
-            title=fields.get("Title", ""),
-            body=body_from_html(fields.get("Body", "")),
-            created=fields.get("Created", ""),
-            modified=fields.get("Modified", ""),
-            url=data.get("webUrl", ""),
-        )
-
 
 def body_to_html(body: str) -> str:
     paragraphs = [paragraph.strip() for paragraph in body.strip().split("\n\n") if paragraph.strip()]
