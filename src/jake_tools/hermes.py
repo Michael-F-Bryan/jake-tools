@@ -182,7 +182,6 @@ class Hermes(BaseModel):
 
     default_model: str = "gpt-5.4-mini"
     agent_factory: AgentFactory = Field(default=_default_agent_factory)
-    last_result: HermesResult | None = None
 
     def new_agent(
         self, model: str | None = None, provider: str | None = None
@@ -192,8 +191,7 @@ class Hermes(BaseModel):
     def oneshot(self, prompt: str) -> HermesResult:
         agent = self.new_agent()
         result = agent.run_conversation(prompt)
-        self.last_result = HermesResult.model_validate(result)
-        return self.last_result
+        return HermesResult.model_validate(result)
 
     def _parse_structured_response[T: BaseModel](self, response: Any, model_type: type[T]) -> T:
         if response is None:
@@ -206,7 +204,16 @@ class Hermes(BaseModel):
 
     def run_structured[T: BaseModel](self, prompt: StructuredPrompt[T]) -> T:
         """Render a typed prompt and parse the reply into its response model."""
-        return self._oneshot_structured(prompt.render(), prompt.response_model)
+        payload, _ = self.run_structured_with_result(prompt)
+        return payload
+
+    def run_structured_with_result[T: BaseModel](
+        self, prompt: StructuredPrompt[T]
+    ) -> tuple[T, HermesResult]:
+        """Render a typed prompt and return both parsed payload and Hermes usage."""
+        return self._oneshot_structured_with_result(
+            prompt.render(), prompt.response_model
+        )
 
     def _oneshot_structured[T: BaseModel](self, prompt: str, model_type: type[T]) -> T:
         payload, _ = self._oneshot_structured_with_result(prompt, model_type)
@@ -229,7 +236,6 @@ class Hermes(BaseModel):
 
         try:
             payload = self._parse_structured_response(result.response, model_type)
-            self.last_result = result
             return payload, result
         except (ValidationError, ValueError) as exc:
             repair_prompt = ONESHOT_STRUCTURED_INVALID_JSON_PROMPT.render(
@@ -242,5 +248,4 @@ class Hermes(BaseModel):
         )
         payload = self._parse_structured_response(repair_result.response, model_type)
         combined = _combine_results([result, repair_result])
-        self.last_result = combined
         return payload, combined

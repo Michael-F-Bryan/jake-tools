@@ -24,23 +24,34 @@ from .models import (
 )
 from .obsidian import load_source_note
 from .paths import Paths
-from .stages import run_chaptering_stage, run_minutes_stage, run_speaker_mapping_stage, run_transcript_polish_stage
+from .stages import (
+    run_chaptering_stage,
+    run_minutes_stage,
+    run_speaker_mapping_stage,
+    run_transcript_polish_stage,
+)
 from .transforms import merge_consecutive_turns, normalise_turns
 from .verify import verify_note
 
 SourceLoader = Callable[[Path], SourceNote]
 ConcatenateRecordings = Callable[[ConcatPlan, Path], None]
 RunScribe = Callable[[Path, Path], object]
-MapSpeakers = Callable[[Hermes, SourceNote, list[TranscriptTurn]], SpeakerMapping]
-PolishTranscript = Callable[[Hermes, SourceNote, list[TranscriptTurn], SpeakerMapping], list[TranscriptTurn]]
-RunChaptering = Callable[[Hermes, list[TranscriptTurn]], ChaptersPayload]
-RunMinutes = Callable[[Hermes, list[TranscriptTurn], ChaptersPayload | None], MeetingMinutes]
-
-
-def _copy_last_result(hermes: Hermes) -> HermesResult | None:
-    if hermes.last_result is None:
-        return None
-    return hermes.last_result.model_copy(deep=True)
+MapSpeakers = Callable[
+    [Hermes, SourceNote, list[TranscriptTurn]],
+    tuple[SpeakerMapping, HermesResult | None],
+]
+PolishTranscript = Callable[
+    [Hermes, SourceNote, list[TranscriptTurn], SpeakerMapping],
+    tuple[list[TranscriptTurn], HermesResult | None],
+]
+RunChaptering = Callable[
+    [Hermes, list[TranscriptTurn]],
+    tuple[ChaptersPayload, HermesResult | None],
+]
+RunMinutes = Callable[
+    [Hermes, list[TranscriptTurn], ChaptersPayload | None],
+    tuple[MeetingMinutes, HermesResult | None],
+]
 
 
 def _build_ai_stage_stats(stage: str, result: HermesResult | None) -> AIStageStats | None:
@@ -145,29 +156,39 @@ class ObsidianRecordingCoordinator:
             self.concatenate_audio(concat_plan, paths.root / "inputs.txt")
             self.transcribe_audio(paths.merged, paths.transcript)
 
-            turns = merge_consecutive_turns(normalise_turns(self._load_turns(paths.transcript)))
+            turns = merge_consecutive_turns(
+                normalise_turns(self._load_turns(paths.transcript))
+            )
 
             ai_stage_stats: list[AIStageStats] = []
 
-            self.hermes.last_result = None
-            speaker_mapping = self.map_speakers(self.hermes, source, turns)
-            if stage_stats := _build_ai_stage_stats("speaker_mapping", _copy_last_result(self.hermes)):
+            speaker_mapping, speaker_mapping_result = self.map_speakers(
+                self.hermes, source, turns
+            )
+            if stage_stats := _build_ai_stage_stats(
+                "speaker_mapping", speaker_mapping_result
+            ):
                 ai_stage_stats.append(stage_stats)
             paths.speaker_mapping.write_text(
                 json.dumps(speaker_mapping.model_dump(mode="json"), indent=2),
                 encoding="utf-8",
             )
 
-            self.hermes.last_result = None
-            polished_turns = merge_consecutive_turns(
-                normalise_turns(self.polish_transcript(self.hermes, source, turns, speaker_mapping))
+            polished_payload, transcript_polish_result = self.polish_transcript(
+                self.hermes, source, turns, speaker_mapping
             )
-            if stage_stats := _build_ai_stage_stats("transcript_polish", _copy_last_result(self.hermes)):
+            polished_turns = merge_consecutive_turns(
+                normalise_turns(polished_payload)
+            )
+            if stage_stats := _build_ai_stage_stats(
+                "transcript_polish", transcript_polish_result
+            ):
                 ai_stage_stats.append(stage_stats)
 
-            self.hermes.last_result = None
-            chapters_payload = self.build_chapters(self.hermes, polished_turns)
-            if stage_stats := _build_ai_stage_stats("chaptering", _copy_last_result(self.hermes)):
+            chapters_payload, chaptering_result = self.build_chapters(
+                self.hermes, polished_turns
+            )
+            if stage_stats := _build_ai_stage_stats("chaptering", chaptering_result):
                 ai_stage_stats.append(stage_stats)
             paths.chapters.write_text(
                 json.dumps(chapters_payload.model_dump(mode="json"), indent=2),
@@ -179,9 +200,12 @@ class ObsidianRecordingCoordinator:
                 chapters_payload.chapters,
                 speaker_mapping,
             )
-            self.hermes.last_result = None
-            minutes = self.build_minutes(self.hermes, polished_turns, chapters_payload)
-            if stage_stats := _build_ai_stage_stats("meeting_minutes", _copy_last_result(self.hermes)):
+            minutes, meeting_minutes_result = self.build_minutes(
+                self.hermes, polished_turns, chapters_payload
+            )
+            if stage_stats := _build_ai_stage_stats(
+                "meeting_minutes", meeting_minutes_result
+            ):
                 ai_stage_stats.append(stage_stats)
             paths.minutes.write_text(
                 json.dumps(minutes.model_dump(mode="json"), indent=2),

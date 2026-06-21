@@ -1,9 +1,17 @@
 import json
 from datetime import datetime, timezone
 
-from jake_tools.hermes import Hermes
+from jake_tools.hermes import Hermes, HermesResult
 from jake_tools.transcripts.coordinator import ObsidianRecordingCoordinator
-from jake_tools.transcripts.models import Chapter, ChaptersPayload, MeetingMinutes, RecordingRef, SourceNote, SpeakerIdentity, SpeakerMapping
+from jake_tools.transcripts.models import (
+    Chapter,
+    ChaptersPayload,
+    MeetingMinutes,
+    RecordingRef,
+    SourceNote,
+    SpeakerIdentity,
+    SpeakerMapping,
+)
 
 
 def build_source(note, tmp_path) -> SourceNote:
@@ -37,7 +45,12 @@ def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
             json.dumps(
                 {
                     "segments": [
-                        {"start": 0, "end": 2, "speaker": "SPEAKER_01", "text": "Hello team"},
+                        {
+                            "start": 0,
+                            "end": 2,
+                            "speaker": "SPEAKER_01",
+                            "text": "Hello team",
+                        },
                     ]
                 }
             ),
@@ -46,20 +59,30 @@ def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
         return None
 
     def map_speakers(hermes, source, turns):
-        return SpeakerMapping(
-            mapping={
-                "SPEAKER_01": SpeakerIdentity(name="Michael", confidence=0.9, reason="test")
-            }
+        return (
+            SpeakerMapping(
+                mapping={
+                    "SPEAKER_01": SpeakerIdentity(
+                        name="Michael", confidence=0.9, reason="test"
+                    )
+                }
+            ),
+            None,
         )
 
     def polish_transcript(hermes, source, turns, speaker_mapping):
-        return turns
+        return turns, None
 
     def build_chapters(hermes, turns):
-        return ChaptersPayload(chapters=[Chapter(title="Kickoff", start=0, end=30, summary="Start")])
+        return (
+            ChaptersPayload(
+                chapters=[Chapter(title="Kickoff", start=0, end=30, summary="Start")]
+            ),
+            None,
+        )
 
     def build_minutes(hermes, turns, chapters):
-        return MeetingMinutes(summary="Summary", key_points=["Opened the meeting"])
+        return MeetingMinutes(summary="Summary", key_points=["Opened the meeting"]), None
 
     coordinator = ObsidianRecordingCoordinator(
         hermes=Hermes(),
@@ -99,4 +122,103 @@ def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
         "total_tokens": 0,
         "estimated_cost_usd": 0.0,
     }
-    assert [count.model_dump() for count in result.speaker_message_counts] == [{"speaker": "Michael", "messages": 1}]
+    assert [count.model_dump() for count in result.speaker_message_counts] == [
+        {"speaker": "Michael", "messages": 1}
+    ]
+
+
+def test_coordinator_builds_ai_stats_from_returned_stage_results(tmp_path) -> None:
+    note = tmp_path / "Meeting.md"
+    note.write_text("# Meeting\n\n![[meeting.m4a]]\n", encoding="utf-8")
+
+    def load_source(path):
+        return build_source(note, tmp_path)
+
+    def concatenate_audio(plan, concat_file):
+        return None
+
+    def fake_run_scribe(input_audio, output_json):
+        output_json.write_text(
+            json.dumps(
+                {
+                    "segments": [
+                        {
+                            "start": 0,
+                            "end": 2,
+                            "speaker": "SPEAKER_01",
+                            "text": "Hello team",
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return None
+
+    def map_speakers(hermes, source, turns):
+        return (
+            SpeakerMapping(
+                mapping={
+                    "SPEAKER_01": SpeakerIdentity(
+                        name="Michael", confidence=0.9, reason="test"
+                    )
+                }
+            ),
+            HermesResult(
+                api_calls=1,
+                input_tokens=10,
+                output_tokens=5,
+                total_tokens=15,
+                estimated_cost_usd=0.02,
+            ),
+        )
+
+    def polish_transcript(hermes, source, turns, speaker_mapping):
+        return turns, None
+
+    def build_chapters(hermes, turns):
+        return (
+            ChaptersPayload(
+                chapters=[Chapter(title="Kickoff", start=0, end=30, summary="Start")]
+            ),
+            None,
+        )
+
+    def build_minutes(hermes, turns, chapters):
+        return MeetingMinutes(summary="Summary", key_points=["Opened the meeting"]), None
+
+    coordinator = ObsidianRecordingCoordinator(
+        hermes=Hermes(),
+        source_note=note,
+        dry_run=True,
+        source_loader=load_source,
+        concatenate_audio=concatenate_audio,
+        transcribe_audio=fake_run_scribe,
+        map_speakers=map_speakers,
+        polish_transcript=polish_transcript,
+        build_chapters=build_chapters,
+        build_minutes=build_minutes,
+    )
+
+    result = coordinator.run()
+
+    assert [stats.model_dump() for stats in result.ai_stage_stats] == [
+        {
+            "stage": "speaker_mapping",
+            "model": None,
+            "provider": None,
+            "api_calls": 1,
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 15,
+            "estimated_cost_usd": 0.02,
+            "repair_attempted": False,
+        }
+    ]
+    assert result.ai_totals.total_tokens == 15
+    assert result.ai_totals.estimated_cost_usd == 0.02

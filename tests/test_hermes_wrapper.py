@@ -1,10 +1,19 @@
+from typing import ClassVar
+
 from pydantic import BaseModel
 
 from jake_tools.hermes import Hermes, HermesResult
+from jake_tools.prompting import StructuredPrompt
 
 
 class Payload(BaseModel):
     answer: int
+
+
+class PayloadPrompt(StructuredPrompt[Payload]):
+    template: ClassVar[str] = "{{ instruction }}"
+
+    instruction: str
 
 
 class FakeAgent:
@@ -26,7 +35,7 @@ def test_hermes_result_aliases_final_response() -> None:
     assert result.response == "ok"
 
 
-def test_oneshot_structured_parses_valid_json_without_repair() -> None:
+def test_run_structured_with_result_parses_valid_json_without_repair() -> None:
     agent = FakeAgent(
         [
             {
@@ -40,11 +49,13 @@ def test_oneshot_structured_parses_valid_json_without_repair() -> None:
     )
     hermes = hermes_with(agent)
 
-    result = hermes._oneshot_structured("Return the answer.", Payload)
+    payload, result = hermes.run_structured_with_result(
+        PayloadPrompt(instruction="Return the answer.")
+    )
 
-    assert result == Payload(answer=42)
+    assert payload == Payload(answer=42)
     assert len(agent.prompts) == 1
-    assert hermes.last_result == HermesResult(
+    assert result == HermesResult(
         final_response='{"answer": 42}',
         completed=True,
         api_calls=1,
@@ -53,7 +64,7 @@ def test_oneshot_structured_parses_valid_json_without_repair() -> None:
     )
 
 
-def test_oneshot_structured_repairs_invalid_json_once() -> None:
+def test_run_structured_with_result_repairs_invalid_json_once() -> None:
     agent = FakeAgent(
         [
             {
@@ -78,21 +89,22 @@ def test_oneshot_structured_repairs_invalid_json_once() -> None:
     )
     hermes = hermes_with(agent)
 
-    result = hermes._oneshot_structured("Return the answer.", Payload)
+    payload, result = hermes.run_structured_with_result(
+        PayloadPrompt(instruction="Return the answer.")
+    )
 
-    assert result == Payload(answer=7)
+    assert payload == Payload(answer=7)
     assert len(agent.prompts) == 2
     assert "Validation error:" in agent.prompts[1]
     assert "Previous response:" in agent.prompts[1]
-    assert hermes.last_result is not None
-    assert hermes.last_result.api_calls == 2
-    assert hermes.last_result.input_tokens == 18
-    assert hermes.last_result.output_tokens == 5
-    assert hermes.last_result.total_tokens == 23
-    assert hermes.last_result.estimated_cost_usd == 0.03
+    assert result.api_calls == 2
+    assert result.input_tokens == 18
+    assert result.output_tokens == 5
+    assert result.total_tokens == 23
+    assert result.estimated_cost_usd == 0.03
 
 
-def test_oneshot_structured_with_result_returns_payload_and_usage() -> None:
+def test_run_structured_with_result_returns_payload_and_usage() -> None:
     agent = FakeAgent(
         [
             {
@@ -105,13 +117,12 @@ def test_oneshot_structured_with_result_returns_payload_and_usage() -> None:
     )
     hermes = hermes_with(agent)
 
-    payload, result = hermes._oneshot_structured_with_result(
-        "Return the answer.", Payload
+    payload, result = hermes.run_structured_with_result(
+        PayloadPrompt(instruction="Return the answer.")
     )
 
     assert payload == Payload(answer=42)
     assert result.total_tokens == 9
-    assert hermes.last_result == result
 
 
 def test_oneshot_structured_rejects_empty_response() -> None:
