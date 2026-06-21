@@ -5,12 +5,12 @@ from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 
+from jake_tools.ai_usage import build_ai_stage_stats, build_ai_totals
+
 from ..hermes import Hermes, HermesResult
 from .audio import build_concat_plan, concatenate_recordings, run_scribe
 from .merge import format_timestamp, merge_note, render_chaptered_transcript, speaker_name
 from .models import (
-    AIStageStats,
-    AITotals,
     Chapter,
     ChapterSummary,
     ChaptersPayload,
@@ -53,43 +53,6 @@ RunMinutes = Callable[
     tuple[MeetingMinutes, HermesResult | None],
 ]
 
-
-def _build_ai_stage_stats(stage: str, result: HermesResult | None) -> AIStageStats | None:
-    if result is None:
-        return None
-
-    return AIStageStats(
-        stage=stage,
-        model=result.model,
-        provider=result.provider,
-        api_calls=result.api_calls,
-        input_tokens=result.input_tokens,
-        output_tokens=result.output_tokens,
-        cache_read_tokens=result.cache_read_tokens,
-        cache_write_tokens=result.cache_write_tokens,
-        reasoning_tokens=result.reasoning_tokens,
-        prompt_tokens=result.prompt_tokens,
-        completion_tokens=result.completion_tokens,
-        total_tokens=result.total_tokens,
-        estimated_cost_usd=result.estimated_cost_usd,
-        repair_attempted=result.api_calls > 1,
-    )
-
-
-def _build_ai_totals(stage_stats: list[AIStageStats]) -> AITotals:
-    totals = AITotals(stage_count=len(stage_stats))
-    for stage in stage_stats:
-        totals.api_calls += stage.api_calls
-        totals.input_tokens += stage.input_tokens
-        totals.output_tokens += stage.output_tokens
-        totals.cache_read_tokens += stage.cache_read_tokens
-        totals.cache_write_tokens += stage.cache_write_tokens
-        totals.reasoning_tokens += stage.reasoning_tokens
-        totals.prompt_tokens += stage.prompt_tokens
-        totals.completion_tokens += stage.completion_tokens
-        totals.total_tokens += stage.total_tokens
-        totals.estimated_cost_usd += stage.estimated_cost_usd
-    return totals
 
 
 def _build_chapter_summaries(chapters: list[Chapter]) -> list[ChapterSummary]:
@@ -160,12 +123,12 @@ class ObsidianRecordingCoordinator:
                 normalise_turns(self._load_turns(paths.transcript))
             )
 
-            ai_stage_stats: list[AIStageStats] = []
+            ai_stage_stats = []
 
             speaker_mapping, speaker_mapping_result = self.map_speakers(
                 self.hermes, source, turns
             )
-            if stage_stats := _build_ai_stage_stats(
+            if stage_stats := build_ai_stage_stats(
                 "speaker_mapping", speaker_mapping_result
             ):
                 ai_stage_stats.append(stage_stats)
@@ -180,7 +143,7 @@ class ObsidianRecordingCoordinator:
             polished_turns = merge_consecutive_turns(
                 normalise_turns(polished_payload)
             )
-            if stage_stats := _build_ai_stage_stats(
+            if stage_stats := build_ai_stage_stats(
                 "transcript_polish", transcript_polish_result
             ):
                 ai_stage_stats.append(stage_stats)
@@ -188,7 +151,7 @@ class ObsidianRecordingCoordinator:
             chapters_payload, chaptering_result = self.build_chapters(
                 self.hermes, polished_turns
             )
-            if stage_stats := _build_ai_stage_stats("chaptering", chaptering_result):
+            if stage_stats := build_ai_stage_stats("chaptering", chaptering_result):
                 ai_stage_stats.append(stage_stats)
             paths.chapters.write_text(
                 json.dumps(chapters_payload.model_dump(mode="json"), indent=2),
@@ -203,7 +166,7 @@ class ObsidianRecordingCoordinator:
             minutes, meeting_minutes_result = self.build_minutes(
                 self.hermes, polished_turns, chapters_payload
             )
-            if stage_stats := _build_ai_stage_stats(
+            if stage_stats := build_ai_stage_stats(
                 "meeting_minutes", meeting_minutes_result
             ):
                 ai_stage_stats.append(stage_stats)
@@ -232,7 +195,7 @@ class ObsidianRecordingCoordinator:
                 updated=not self.dry_run,
                 chapter_summaries=_build_chapter_summaries(chapters_payload.chapters),
                 ai_stage_stats=ai_stage_stats,
-                ai_totals=_build_ai_totals(ai_stage_stats),
+                ai_totals=build_ai_totals(ai_stage_stats),
                 speaker_message_counts=_build_speaker_message_counts(polished_turns, speaker_mapping),
             )
 

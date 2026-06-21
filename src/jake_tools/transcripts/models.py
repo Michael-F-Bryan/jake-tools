@@ -5,6 +5,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from jake_tools.ai_usage import AIStageStats, AITotals
+
 
 class RecordingRef(BaseModel):
     raw_link: str
@@ -92,36 +94,6 @@ class SpeakerMessageCount(BaseModel):
     speaker: str
     messages: int
 
-
-class AIStageStats(BaseModel):
-    stage: str
-    model: str | None = None
-    provider: str | None = None
-    api_calls: int = 0
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
-    reasoning_tokens: int = 0
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-    estimated_cost_usd: float = 0.0
-    repair_attempted: bool = False
-
-
-class AITotals(BaseModel):
-    stage_count: int = 0
-    api_calls: int = 0
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
-    reasoning_tokens: int = 0
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-    estimated_cost_usd: float = 0.0
 
 
 class CoordinatorResult(BaseModel):
