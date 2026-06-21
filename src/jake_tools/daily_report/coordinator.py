@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -31,6 +33,195 @@ class DailyReportRunResult:
     run_id: str
     status: LaneStatus
     lanes: dict[LaneName, LaneRunResult]
+
+
+@dataclass(frozen=True)
+class DailyReportCommandOptions:
+    target_date: date
+    provider: str = "openrouter"
+    judgement_model: str = "openrouter/auto"
+    evidence_model: str = "openrouter/auto"
+    timezone_name: str = "Australia/Perth"
+    base_dir: Path = Path("_working")
+    state_db: Path = Path.home() / ".hermes" / "state.db"
+    himalaya_page_size: int = 25
+    run_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex
+
+
+@dataclass(frozen=True)
+class DailyReportCommandResult:
+    run_id: str
+    status: LaneStatus
+    report_path: Path
+    summary_path: Path
+    manifest_path: Path
+    failed_lanes: list[str]
+    summary: Any
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "status": self.status,
+            "report_path": str(self.report_path),
+            "summary_path": str(self.summary_path),
+            "manifest_path": str(self.manifest_path),
+            "failed_lanes": self.failed_lanes,
+            "summary": self.summary.model_dump(mode="json")
+            if hasattr(self.summary, "model_dump")
+            else self.summary,
+        }
+
+
+def run_daily_report_command(
+    *,
+    command_options: DailyReportCommandOptions,
+    stages: DailyReportStages,
+    himalaya_runner: Any | None = None,
+) -> DailyReportCommandResult:
+    """Run the full deterministic daily-report orchestration for the Click command."""
+
+    from jake_tools.daily_report.himalaya import run_himalaya_preflight
+    from jake_tools.daily_report.lanes import build_lane_specs
+    from jake_tools.daily_report.manifest import build_and_write_run_manifest
+    from jake_tools.daily_report.preflight import (
+        build_session_manifest,
+        write_json,
+        write_session_manifest,
+    )
+    from jake_tools.daily_report.synthesis import synthesize_daily_report
+    from jake_tools.daily_report.validation import apply_validation_to_lane_result, validate_lane_artifact
+
+    paths = DailyReportPaths.for_date(command_options.base_dir, command_options.target_date)
+    paths.create()
+
+    options = DailyReportLaneOptions(
+        run_id=command_options.run_id_factory(),
+        target_date=command_options.target_date.isoformat(),
+        timezone_name=command_options.timezone_name,
+        provider=command_options.provider,
+        model=command_options.judgement_model,
+        session_db=command_options.state_db if command_options.state_db.exists() else None,
+        extra_context={"evidence_model": command_options.evidence_model},
+    )
+
+    _write_session_manifest_evidence(
+        state_db=command_options.state_db,
+        target_date=command_options.target_date,
+        timezone_name=command_options.timezone_name,
+        path=paths.evidence / "session-manifest.json",
+        build_session_manifest=build_session_manifest,
+        write_session_manifest=write_session_manifest,
+        write_json=write_json,
+    )
+
+    himalaya_kwargs: dict[str, Any] = {"page_size": command_options.himalaya_page_size}
+    if himalaya_runner is not None:
+        himalaya_kwargs["runner"] = himalaya_runner
+    inbox_preflight = run_himalaya_preflight(**himalaya_kwargs)
+    write_json(paths.evidence / "inbox-preflight.json", inbox_preflight.to_json())
+    write_json(paths.evidence / "inbox-envelopes.json", _inbox_envelopes_json(inbox_preflight))
+
+    specs = build_lane_specs(options, paths, preflight=inbox_preflight)
+    run_result = run_daily_report(
+        options=options,
+        stages=stages,
+        specs=specs,
+        paths=paths,
+        max_workers=3,
+    )
+
+    validation_results = {
+        spec.name: validate_lane_artifact(
+            spec,
+            paths,
+            session_manifest_path=paths.evidence / "session-manifest.json",
+        )
+        for spec in specs
+    }
+    validated_lanes = {
+        name: apply_validation_to_lane_result(result, validation_results[name])
+        for name, result in run_result.lanes.items()
+    }
+    validated_status: LaneStatus = (
+        "fail"
+        if any(result.status == "fail" for result in validated_lanes.values())
+        else "ok"
+    )
+    validated_run_result = DailyReportRunResult(
+        run_id=run_result.run_id,
+        status=validated_status,
+        lanes=validated_lanes,
+    )
+
+    build_and_write_run_manifest(
+        options=options,
+        paths=paths,
+        specs=specs,
+        run_result=validated_run_result,
+        validation_results=validation_results,
+    )
+    summary = synthesize_daily_report(
+        options=options,
+        paths=paths,
+        specs=specs,
+        run_result=validated_run_result,
+        validation_results=validation_results,
+    )
+
+    return DailyReportCommandResult(
+        run_id=options.run_id,
+        status=summary.status,
+        report_path=paths.report,
+        summary_path=paths.summary,
+        manifest_path=paths.manifest,
+        failed_lanes=list(summary.failed_lanes),
+        summary=summary,
+    )
+
+
+def _write_session_manifest_evidence(**kwargs: Any) -> None:
+    state_db: Path = kwargs["state_db"]
+    if state_db.exists():
+        manifest = kwargs["build_session_manifest"](
+            state_db,
+            kwargs["target_date"],
+            timezone_name=kwargs["timezone_name"],
+        )
+        kwargs["write_session_manifest"](kwargs["path"], manifest)
+        return
+    start_epoch = end_epoch = 0.0
+    try:
+        from jake_tools.daily_report.preflight import day_epoch_bounds
+
+        start_epoch, end_epoch = day_epoch_bounds(kwargs["target_date"], kwargs["timezone_name"])
+    except Exception:
+        pass
+    kwargs["write_json"](
+        kwargs["path"],
+        {
+            "target_date": kwargs["target_date"].isoformat(),
+            "timezone": kwargs["timezone_name"],
+            "start_epoch": start_epoch,
+            "end_epoch": end_epoch,
+            "missing_columns": [],
+            "sessions": [],
+            "state_db": str(state_db),
+            "state_db_present": False,
+        },
+    )
+
+
+def _inbox_envelopes_json(preflight: Any) -> dict[str, Any]:
+    return {
+        "accounts": [
+            {
+                "account": account.account,
+                "inbox_envelopes": account.inbox_envelopes,
+                "sent_envelopes": account.sent_envelopes,
+            }
+            for account in preflight.account_preflights
+        ]
+    }
 
 
 def run_daily_report(

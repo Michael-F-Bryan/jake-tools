@@ -89,12 +89,13 @@ def _build_lane_spec(
     artefact_path = _artefact_path(paths, name)
     model_tier = _MODEL_TIERS[name]
     lane_options = replace(options, model_tier=model_tier)
+    model = _model_for_tier(lane_options)
     required_sections = _REQUIRED_SECTIONS[name]
     return LaneSpec(
         name=name,
         shape=_SHAPES[name],
         provider=lane_options.provider,
-        model=lane_options.model,
+        model=model,
         model_tier=lane_options.model_tier,
         enabled_toolsets=_TOOLSETS[name],
         prompt=build_prompt(
@@ -119,3 +120,9 @@ def _evidence_bundle_path(paths: DailyReportPaths, name: LaneName) -> Path:
 
 def _artefact_path(paths: DailyReportPaths, name: LaneName) -> Path:
     return paths.subtasks / f"{name.value}.json"
+
+
+def _model_for_tier(options: DailyReportLaneOptions) -> str:
+    if options.model_tier == "cheap":
+        return options.extra_context.get("evidence_model", options.model)
+    return options.model
