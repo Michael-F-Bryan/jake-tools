@@ -1,9 +1,12 @@
+import importlib
 from pathlib import Path
 
 from click.testing import CliRunner
 
 from jake_tools.cli.newsletter import newsletter
 from jake_tools.newsletters import NewsletterAttachment, NewsletterItem, body_from_html, body_to_html
+
+newsletter_cli = importlib.import_module("jake_tools.cli.newsletter")
 
 
 class FakeNewsletterClient:
@@ -56,14 +59,14 @@ class FakeNewsletterClient:
         )
 
 
-def test_list_newsletter_items() -> None:
+def test_list_newsletter_items(monkeypatch) -> None:
     client = FakeNewsletterClient()
+    monkeypatch.setattr(newsletter_cli, "NewsletterClient", lambda: client)
     runner = CliRunner()
 
     result = runner.invoke(
         newsletter,
         ["list", "--limit", "1", "--body"],
-        obj={"newsletter_client": client},
     )
 
     assert result.exit_code == 0
@@ -71,17 +74,19 @@ def test_list_newsletter_items() -> None:
     assert "Net Control station course" in result.output
 
 
-def test_add_newsletter_item_reads_body_from_stdin_and_accepts_attachments(tmp_path: Path) -> None:
+def test_add_newsletter_item_reads_body_from_stdin_and_accepts_attachments(
+    tmp_path: Path, monkeypatch
+) -> None:
     attachment = tmp_path / "flyer.pdf"
     attachment.write_bytes(b"fake pdf")
     client = FakeNewsletterClient()
+    monkeypatch.setattr(newsletter_cli, "NewsletterClient", lambda: client)
     runner = CliRunner()
 
     result = runner.invoke(
         newsletter,
         ["add", "Gosnells GPS Workshop", "--attach", str(attachment)],
         input="Gosnells SES are running their GPS workshop again this year.\n",
-        obj={"newsletter_client": client},
     )
 
     assert result.exit_code == 0
@@ -104,17 +109,17 @@ def test_add_requires_body_on_stdin() -> None:
     assert "newsletter body is required on stdin" in result.output
 
 
-def test_edit_updates_title_body_and_attachments(tmp_path: Path) -> None:
+def test_edit_updates_title_body_and_attachments(tmp_path: Path, monkeypatch) -> None:
     attachment = tmp_path / "map.png"
     attachment.write_bytes(b"fake image")
     client = FakeNewsletterClient()
+    monkeypatch.setattr(newsletter_cli, "NewsletterClient", lambda: client)
     runner = CliRunner()
 
     result = runner.invoke(
         newsletter,
         ["edit", "295", "--title", "Updated title", "--attach", str(attachment)],
         input="Updated body\n",
-        obj={"newsletter_client": client},
     )
 
     assert result.exit_code == 0

@@ -21,12 +21,11 @@ def newsletter():
 @click.option("--limit", default=10, show_default=True, type=click.IntRange(1, 100))
 @click.option("--body", is_flag=True, help="Include the plaintext body for each item.")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
-@click.pass_context
-def list_items(ctx: click.Context, limit: int, body: bool, as_json: bool):
+def list_items(limit: int, body: bool, as_json: bool):
     """
     Show recent CSU Weekly Newsletter items.
     """
-    client = _client(ctx)
+    client = NewsletterClient()
     try:
         items = client.list_items(limit=limit)
     except NewsletterError as exc:
@@ -45,8 +44,7 @@ def list_items(ctx: click.Context, limit: int, body: bool, as_json: bool):
     help="Attach a file to the newsletter item. Can be supplied multiple times.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
-@click.pass_context
-def add(ctx: click.Context, title: str, attachments: tuple[Path, ...], as_json: bool):
+def add(title: str, attachments: tuple[Path, ...], as_json: bool):
     """
     Create a CSU Weekly Newsletter item.
 
@@ -58,7 +56,7 @@ def add(ctx: click.Context, title: str, attachments: tuple[Path, ...], as_json: 
     if body is None:
         raise click.UsageError("newsletter body is required on stdin")
 
-    client = _client(ctx)
+    client = NewsletterClient()
     try:
         item = client.create_item(
             title=title,
@@ -82,9 +80,7 @@ def add(ctx: click.Context, title: str, attachments: tuple[Path, ...], as_json: 
     help="Attach a file to the newsletter item. Can be supplied multiple times.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
-@click.pass_context
 def edit(
-    ctx: click.Context,
     item_id: str,
     title: str | None,
     attachments: tuple[Path, ...],
@@ -100,7 +96,7 @@ def edit(
     if title is None and body is None and not attachments:
         raise click.UsageError("nothing to update: provide --title, stdin body, or --attach")
 
-    client = _client(ctx)
+    client = NewsletterClient()
     try:
         item = client.update_item(
             item_id,
@@ -112,13 +108,6 @@ def edit(
         raise click.ClickException(str(exc)) from exc
 
     _emit_item(item, include_body=True, as_json=as_json)
-
-
-def _client(ctx: click.Context) -> NewsletterClient:
-    if ctx.obj and "newsletter_client" in ctx.obj:
-        return ctx.obj["newsletter_client"]
-
-    return NewsletterClient()
 
 
 def _attachments(paths: tuple[Path, ...]) -> list[NewsletterAttachment]:

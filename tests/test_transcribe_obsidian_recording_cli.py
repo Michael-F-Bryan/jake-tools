@@ -1,8 +1,11 @@
+import importlib
 from pathlib import Path
 
 from click.testing import CliRunner
 
 from jake_tools.cli.transcribe import transcribe
+
+transcribe_cli = importlib.import_module("jake_tools.cli.transcribe")
 
 
 class DummyResult:
@@ -23,15 +26,19 @@ def fake_process_obsidian_recording(hermes, obsidian_note, dry_run):
     return DummyResult()
 
 
-def test_obsidian_recording_cli_human_output(tmp_path) -> None:
+def test_obsidian_recording_cli_human_output(tmp_path, monkeypatch) -> None:
     note = tmp_path / "Meeting.md"
     note.write_text("stub", encoding="utf-8")
+    monkeypatch.setattr(
+        transcribe_cli,
+        "process_obsidian_recording",
+        fake_process_obsidian_recording,
+    )
 
     runner = CliRunner()
     result = runner.invoke(
         transcribe,
         ["obsidian-recording", "--dry-run", str(note)],
-        obj={"process_obsidian_recording": fake_process_obsidian_recording},
     )
 
     assert result.exit_code == 0
@@ -39,15 +46,19 @@ def test_obsidian_recording_cli_human_output(tmp_path) -> None:
     assert "updated: False" in result.output
 
 
-def test_obsidian_recording_cli_json_output(tmp_path) -> None:
+def test_obsidian_recording_cli_json_output(tmp_path, monkeypatch) -> None:
     note = tmp_path / "Meeting.md"
     note.write_text("stub", encoding="utf-8")
+    monkeypatch.setattr(
+        transcribe_cli,
+        "process_obsidian_recording",
+        fake_process_obsidian_recording,
+    )
 
     runner = CliRunner()
     result = runner.invoke(
         transcribe,
         ["obsidian-recording", "--json", str(note)],
-        obj={"process_obsidian_recording": fake_process_obsidian_recording},
     )
 
     assert result.exit_code == 0

@@ -58,9 +58,7 @@ def _emit_obsidian_recording_result(
     "obsidian_note",
     type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
 )
-@click.pass_context
 def obsidian_recording(
-    ctx: click.Context,
     hermes: Hermes,
     dry_run: bool,
     as_json: bool,
@@ -69,11 +67,7 @@ def obsidian_recording(
     """
     Process an Obsidian recording into a polished, chapterised note.
     """
-    processor = process_obsidian_recording
-    if ctx.obj and "process_obsidian_recording" in ctx.obj:
-        processor = ctx.obj["process_obsidian_recording"]
-
-    result = processor(
+    result = process_obsidian_recording(
         hermes,
         obsidian_note,
         dry_run=dry_run,
