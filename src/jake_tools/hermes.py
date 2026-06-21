@@ -180,7 +180,7 @@ class AgentSpec(BaseModel):
     system_prompt: str | None = None
     parent_session_id: str | None = None
     max_iterations: int | None = None
-    session_db: str | None = None
+    session_db: Any | None = None
 
 
 AgentFactory = Callable[[AgentSpec], AgentConversation]

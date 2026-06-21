@@ -2,7 +2,7 @@ from typing import ClassVar
 
 from pydantic import BaseModel
 
-from jake_tools.hermes import AgentSpec, Hermes, HermesResult
+from jake_tools.hermes import AgentSpec, Hermes, HermesResult, _default_agent_factory
 from jake_tools.prompting import StructuredPrompt
 
 
@@ -41,6 +41,16 @@ class RecordingFactory:
         return self.agent
 
 
+class FakeAIAgent:
+    kwargs: dict[str, object] | None = None
+
+    def __init__(self, **kwargs: object):
+        type(self).kwargs = kwargs
+
+    def run_conversation(self, user_message: str) -> dict[str, object]:
+        return {"final_response": "ok", "completed": True}
+
+
 def test_hermes_result_aliases_final_response() -> None:
     result = HermesResult.model_validate({"final_response": "ok", "completed": True})
     assert result.response == "ok"
@@ -64,6 +74,36 @@ def test_new_agent_uses_default_model_and_empty_provider() -> None:
     assert hermes.new_agent() is agent
 
     assert factory.specs == [AgentSpec(model="default-model", provider="")]
+
+
+def test_default_agent_factory_maps_scoped_spec_to_ai_agent(monkeypatch) -> None:
+    import jake_tools.hermes as hermes_module
+
+    monkeypatch.setattr(hermes_module, "AIAgent", FakeAIAgent)
+
+    agent = _default_agent_factory(
+        AgentSpec(
+            model="model-a",
+            provider="provider-a",
+            enabled_toolsets=["session_search"],
+            system_prompt="system",
+            parent_session_id="parent-1",
+            max_iterations=3,
+            session_db="/tmp/state.db",
+        )
+    )
+
+    assert isinstance(agent, FakeAIAgent)
+    assert FakeAIAgent.kwargs == {
+        "model": "model-a",
+        "provider": "provider-a",
+        "quiet_mode": True,
+        "enabled_toolsets": ["session_search"],
+        "ephemeral_system_prompt": "system",
+        "parent_session_id": "parent-1",
+        "session_db": "/tmp/state.db",
+        "max_iterations": 3,
+    }
 
 
 def test_run_structured_with_result_parses_valid_json_without_repair() -> None:
