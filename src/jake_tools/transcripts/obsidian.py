@@ -112,14 +112,16 @@ def extract_recording_links(note_body: str) -> list[str]:
 
 def load_source_note(note_path: Path) -> SourceNote:
     body = note_path.read_text(encoding="utf-8")
-    recordings = [
-        RecordingRef(
-            raw_link=link,
-            resolved_path=resolve_recording_path(note_path, link),
-            created_at=_created_at(resolve_recording_path(note_path, link)),
+    recordings: list[RecordingRef] = []
+    for link in extract_recording_links(body):
+        resolved_path = resolve_recording_path(note_path, link)
+        recordings.append(
+            RecordingRef(
+                raw_link=link,
+                resolved_path=resolved_path,
+                created_at=_created_at(resolved_path),
+            )
         )
-        for link in extract_recording_links(body)
-    ]
     recordings.sort(key=lambda item: item.created_at)
     return SourceNote(
         path=note_path,
