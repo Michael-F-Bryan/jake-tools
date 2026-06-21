@@ -161,8 +161,6 @@ Return only corrected JSON that matches the schema. No markdown fences and no co
 """.strip()
 )
 
-T = TypeVar("T", bound=BaseModel)
-
 
 class AgentConversation(Protocol):
     def run_conversation(
@@ -197,7 +195,7 @@ class Hermes(BaseModel):
         self.last_result = HermesResult.model_validate(result)
         return self.last_result
 
-    def _parse_structured_response(self, response: Any, model_type: type[T]) -> T:
+    def _parse_structured_response[T: BaseModel](self, response: Any, model_type: type[T]) -> T:
         if response is None:
             raise ValueError("No response from Hermes")
 
@@ -206,15 +204,15 @@ class Hermes(BaseModel):
 
         return model_type.model_validate(response)
 
-    def run_structured(self, prompt: StructuredPrompt[T]) -> T:
+    def run_structured[T: BaseModel](self, prompt: StructuredPrompt[T]) -> T:
         """Render a typed prompt and parse the reply into its response model."""
-        return cast(T, self._oneshot_structured(prompt.render(), prompt.response_model))
+        return self._oneshot_structured(prompt.render(), prompt.response_model)
 
-    def _oneshot_structured(self, prompt: str, model_type: type[T]) -> T:
+    def _oneshot_structured[T: BaseModel](self, prompt: str, model_type: type[T]) -> T:
         payload, _ = self._oneshot_structured_with_result(prompt, model_type)
         return payload
 
-    def _oneshot_structured_with_result(
+    def _oneshot_structured_with_result[T: BaseModel](
         self, prompt: str, model_type: type[T]
     ) -> tuple[T, HermesResult]:
         """Run Hermes and parse the reply into ``model_type``.

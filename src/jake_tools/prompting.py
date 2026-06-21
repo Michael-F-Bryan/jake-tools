@@ -82,13 +82,20 @@ def _compile(cls: type[Prompt]) -> Template:
 
 
 class StructuredPrompt(Prompt, Generic[TResponse]):
-    """A prompt whose reply parses into ``response_model``.
+    """
+    A prompt whose reply parses into ``response_model``.
 
-    The response type is given twice on purpose: as the generic argument (so
-    ``Hermes.run_structured`` infers the return type) and as the ``response_model``
-    class variable (the runtime value passed to the parser). Pydantic strips the
-    parametrized base from ``__orig_bases__``, so the value can't be derived from
-    the generic argument automatically.
+    ``response_model`` is inferred from the generic argument, e.g.
+    ``StructuredPrompt[Foo]`` binds it to ``Foo``.
     """
 
-    response_model: ClassVar[type[BaseModel]]
+    @property
+    def response_model(self) -> type[TResponse]:
+        # Pydantic rewrites ``__orig_bases__``, so ``get_args(self)`` yields nothing.
+        # The parametrisation survives as an intermediate class in the MRO whose
+        # ``__pydantic_generic_metadata__`` records the origin and type argument.
+        for base in type(self).__mro__:
+            metadata = getattr(base, "__pydantic_generic_metadata__", None)
+            if metadata and metadata["origin"] is StructuredPrompt and metadata["args"]:
+                return metadata["args"][0]
+        raise TypeError(f"{type(self).__name__} does not bind a response model")

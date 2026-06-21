@@ -19,7 +19,6 @@ from .models import (
 
 
 class SpeakerMappingPrompt(StructuredPrompt[SpeakerMapping]):
-    response_model = SpeakerMapping
     template: ClassVar[
         str
     ] = """
@@ -40,7 +39,6 @@ Transcript turns:
 
 
 class ChapteringPrompt(StructuredPrompt[ChaptersPayload]):
-    response_model = ChaptersPayload
     template: ClassVar[
         str
     ] = """
@@ -56,7 +54,6 @@ Transcript turns:
 
 
 class MeetingMinutesPrompt(StructuredPrompt[MeetingMinutes]):
-    response_model = MeetingMinutes
     template: ClassVar[
         str
     ] = """
@@ -78,7 +75,6 @@ Chapter plan:
 
 
 class TranscriptPolishPrompt(StructuredPrompt[TranscriptTurnsPayload]):
-    response_model = TranscriptTurnsPayload
     template: ClassVar[
         str
     ] = """

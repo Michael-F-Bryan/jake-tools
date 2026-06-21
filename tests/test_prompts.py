@@ -90,10 +90,16 @@ def test_meeting_minutes_prompt_omits_chapter_block_when_absent() -> None:
 
 
 def test_every_structured_prompt_binds_a_response_model() -> None:
-    assert SpeakerMappingPrompt.response_model is SpeakerMapping
-    assert ChapteringPrompt.response_model is ChaptersPayload
-    assert MeetingMinutesPrompt.response_model is MeetingMinutes
-    assert TranscriptPolishPrompt.response_model is TranscriptTurnsPayload
+    turns = _turns()
+    speaker_prompt = SpeakerMappingPrompt(title="t", attendees=[], turns=turns)
+    polish_prompt = TranscriptPolishPrompt(
+        title="t", attendees=[], speaker_mapping={}, turns=turns
+    )
+
+    assert speaker_prompt.response_model is SpeakerMapping
+    assert ChapteringPrompt(turns=turns).response_model is ChaptersPayload
+    assert MeetingMinutesPrompt(turns=turns).response_model is MeetingMinutes
+    assert polish_prompt.response_model is TranscriptTurnsPayload
 
 
 def test_run_structured_renders_prompt_and_parses_response_model() -> None:
