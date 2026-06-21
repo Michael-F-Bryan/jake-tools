@@ -17,9 +17,12 @@ def hermes[F: Callable[..., Any]](func: F) -> F:
         default=DEFAULT_MODEL,
         help="The default model to use for the Hermes instance.",
     )
+    @click.pass_context
     @functools.wraps(func)
-    def wrapper(default_model: str, *args: Any, **kwargs: Any) -> Any:
-        hermes = Hermes(default_model=default_model)
-        return func(hermes, *args, **kwargs)
+    def wrapper(
+        ctx: click.Context, default_model: str, *args: Any, **kwargs: Any
+    ) -> Any:
+        instance = Hermes(default_model=default_model)
+        return ctx.invoke(func, instance, *args, **kwargs)
 
     return cast(F, wrapper)
