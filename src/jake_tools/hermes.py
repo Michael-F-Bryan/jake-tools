@@ -211,8 +211,9 @@ class Hermes(BaseModel):
         self, prompt: StructuredPrompt[T]
     ) -> tuple[T, HermesResult]:
         """Render a typed prompt and return both parsed payload and Hermes usage."""
+        response_model = cast(type[T], prompt.response_model)
         return self._oneshot_structured_with_result(
-            prompt.render(), prompt.response_model
+            prompt.render(), response_model
         )
 
     def _oneshot_structured[T: BaseModel](self, prompt: str, model_type: type[T]) -> T:

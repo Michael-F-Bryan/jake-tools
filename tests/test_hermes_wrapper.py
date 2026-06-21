@@ -11,6 +11,7 @@ class Payload(BaseModel):
 
 
 class PayloadPrompt(StructuredPrompt[Payload]):
+    response_model: ClassVar[type[BaseModel]] = Payload
     template: ClassVar[str] = "{{ instruction }}"
 
     instruction: str
