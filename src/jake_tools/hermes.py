@@ -171,11 +171,37 @@ class AgentConversation(Protocol):
     ) -> dict[str, Any]: ...
 
 
-AgentFactory = Callable[[str, str], AgentConversation]
+class AgentSpec(BaseModel):
+    """Configuration for constructing a Hermes worker agent."""
+
+    model: str
+    provider: str = ""
+    enabled_toolsets: list[str] = Field(default_factory=list)
+    system_prompt: str | None = None
+    parent_session_id: str | None = None
+    max_iterations: int | None = None
+    session_db: str | None = None
 
 
-def _default_agent_factory(model: str, provider: str) -> AgentConversation:
-    return AIAgent(model=model, provider=provider, quiet_mode=True)
+AgentFactory = Callable[[AgentSpec], AgentConversation]
+
+
+def _default_agent_factory(spec: AgentSpec) -> AgentConversation:
+    kwargs: dict[str, Any] = {
+        "model": spec.model,
+        "provider": spec.provider,
+        "quiet_mode": True,
+        "enabled_toolsets": spec.enabled_toolsets,
+    }
+    if spec.system_prompt is not None:
+        kwargs["ephemeral_system_prompt"] = spec.system_prompt
+    if spec.parent_session_id is not None:
+        kwargs["parent_session_id"] = spec.parent_session_id
+    if spec.session_db is not None:
+        kwargs["session_db"] = spec.session_db
+    if spec.max_iterations is not None:
+        kwargs["max_iterations"] = spec.max_iterations
+    return AIAgent(**kwargs)
 
 
 class Hermes(BaseModel):
@@ -190,7 +216,8 @@ class Hermes(BaseModel):
     def new_agent(
         self, model: str | None = None, provider: str | None = None
     ) -> AgentConversation:
-        return self.agent_factory(model or self.default_model, provider or "")
+        spec = AgentSpec(model=model or self.default_model, provider=provider or "")
+        return self.agent_factory(spec)
 
     def oneshot(self, prompt: str) -> HermesResult:
         agent = self.new_agent()
@@ -220,6 +247,15 @@ class Hermes(BaseModel):
             prompt.render(), response_model
         )
 
+    def run_agent_structured[T: BaseModel](
+        self,
+        spec: AgentSpec,
+        prompt: StructuredPrompt[T],
+    ) -> tuple[T, HermesResult]:
+        """Run a structured prompt through a scoped, possibly tool-enabled agent."""
+        response_model = cast(type[T], prompt.response_model)
+        return self._structured_with_agent(self.agent_factory(spec), prompt.render(), response_model)
+
     def _oneshot_structured[T: BaseModel](self, prompt: str, model_type: type[T]) -> T:
         payload, _ = self._oneshot_structured_with_result(prompt, model_type)
         return payload
@@ -232,11 +268,18 @@ class Hermes(BaseModel):
         Retries once with an explicit repair prompt when the initial response does
         not validate as the requested structured payload.
         """
+        return self._structured_with_agent(self.new_agent(), prompt, model_type)
+
+    def _structured_with_agent[T: BaseModel](
+        self,
+        agent: AgentConversation,
+        prompt: str,
+        model_type: type[T],
+    ) -> tuple[T, HermesResult]:
         prompt = ONESHOT_STRUCTURED_PROMPT.render(
             schema_json=model_type.model_json_schema(),
             input=prompt,
         )
-        agent = self.new_agent()
         result = HermesResult.model_validate(agent.run_conversation(prompt))
 
         try:

@@ -2,7 +2,7 @@ from typing import ClassVar
 
 from pydantic import BaseModel
 
-from jake_tools.hermes import Hermes, HermesResult
+from jake_tools.hermes import AgentSpec, Hermes, HermesResult
 from jake_tools.prompting import StructuredPrompt
 
 
@@ -28,12 +28,42 @@ class FakeAgent:
 
 
 def hermes_with(agent: FakeAgent) -> Hermes:
-    return Hermes(agent_factory=lambda model, provider: agent)
+    return Hermes(agent_factory=lambda spec: agent)
+
+
+class RecordingFactory:
+    def __init__(self, agent: FakeAgent):
+        self.agent = agent
+        self.specs: list[AgentSpec] = []
+
+    def __call__(self, spec: AgentSpec) -> FakeAgent:
+        self.specs.append(spec)
+        return self.agent
 
 
 def test_hermes_result_aliases_final_response() -> None:
     result = HermesResult.model_validate({"final_response": "ok", "completed": True})
     assert result.response == "ok"
+
+
+def test_new_agent_builds_agent_spec_for_backwards_compatible_call() -> None:
+    agent = FakeAgent([])
+    factory = RecordingFactory(agent)
+    hermes = Hermes(default_model="default-model", agent_factory=factory)
+
+    assert hermes.new_agent("model-a", "provider-a") is agent
+
+    assert factory.specs == [AgentSpec(model="model-a", provider="provider-a")]
+
+
+def test_new_agent_uses_default_model_and_empty_provider() -> None:
+    agent = FakeAgent([])
+    factory = RecordingFactory(agent)
+    hermes = Hermes(default_model="default-model", agent_factory=factory)
+
+    assert hermes.new_agent() is agent
+
+    assert factory.specs == [AgentSpec(model="default-model", provider="")]
 
 
 def test_run_structured_with_result_parses_valid_json_without_repair() -> None:
@@ -124,6 +154,81 @@ def test_run_structured_with_result_returns_payload_and_usage() -> None:
 
     assert payload == Payload(answer=42)
     assert result.total_tokens == 9
+
+
+def test_run_agent_structured_passes_scoped_agent_spec_to_factory() -> None:
+    agent = FakeAgent(
+        [
+            {
+                "final_response": '{"answer": 11}',
+                "completed": True,
+                "api_calls": 1,
+            },
+        ]
+    )
+    factory = RecordingFactory(agent)
+    hermes = Hermes(agent_factory=factory)
+    spec = AgentSpec(
+        model="judgement-model",
+        provider="openrouter",
+        enabled_toolsets=["session_search", "file"],
+        system_prompt="stay scoped",
+        parent_session_id="parent-123",
+        max_iterations=4,
+        session_db="/tmp/hermes.db",
+    )
+
+    payload, result = hermes.run_agent_structured(
+        spec,
+        PayloadPrompt(instruction="Return the answer."),
+    )
+
+    assert payload == Payload(answer=11)
+    assert result.api_calls == 1
+    assert factory.specs == [spec]
+    assert len(agent.prompts) == 1
+
+
+def test_run_agent_structured_repairs_invalid_json_once() -> None:
+    agent = FakeAgent(
+        [
+            {
+                "final_response": "nope",
+                "completed": True,
+                "api_calls": 1,
+                "input_tokens": 5,
+                "output_tokens": 1,
+                "total_tokens": 6,
+                "estimated_cost_usd": 0.01,
+            },
+            {
+                "final_response": '{"answer": 9}',
+                "completed": True,
+                "api_calls": 1,
+                "input_tokens": 4,
+                "output_tokens": 2,
+                "total_tokens": 6,
+                "estimated_cost_usd": 0.02,
+            },
+        ]
+    )
+    factory = RecordingFactory(agent)
+    hermes = Hermes(agent_factory=factory)
+
+    payload, result = hermes.run_agent_structured(
+        AgentSpec(model="model-a", provider="provider-a", enabled_toolsets=["file"]),
+        PayloadPrompt(instruction="Return the answer."),
+    )
+
+    assert payload == Payload(answer=9)
+    assert len(factory.specs) == 1
+    assert len(agent.prompts) == 2
+    assert "Validation error:" in agent.prompts[1]
+    assert result.api_calls == 2
+    assert result.input_tokens == 9
+    assert result.output_tokens == 3
+    assert result.total_tokens == 12
+    assert result.estimated_cost_usd == 0.03
 
 
 def test_oneshot_structured_rejects_empty_response() -> None:
