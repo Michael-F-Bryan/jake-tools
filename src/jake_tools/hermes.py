@@ -8,6 +8,9 @@ from run_agent import AIAgent
 from .prompting import StructuredPrompt
 
 
+DEFAULT_MODEL = "gpt-5.4-mini"
+
+
 class HermesMessage(BaseModel):
     """One message in the agent conversation history (OpenAI-compatible shape)."""
 
@@ -180,7 +183,8 @@ class Hermes(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    default_model: str = "gpt-5.4-mini"
+    # Pin a cheap/fast tool-workflow model unless the CLI caller overrides it.
+    default_model: str = DEFAULT_MODEL
     agent_factory: AgentFactory = Field(default=_default_agent_factory)
 
     def new_agent(

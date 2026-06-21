@@ -4,7 +4,7 @@ from typing import Any, cast
 
 import click
 
-from ..hermes import Hermes
+from ..hermes import DEFAULT_MODEL, Hermes
 
 
 def hermes[F: Callable[..., Any]](func: F) -> F:
@@ -14,7 +14,7 @@ def hermes[F: Callable[..., Any]](func: F) -> F:
 
     @click.option(
         "--default-model",
-        default="gpt-5.4-mini",
+        default=DEFAULT_MODEL,
         help="The default model to use for the Hermes instance.",
     )
     @functools.wraps(func)
