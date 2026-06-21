@@ -12,6 +12,7 @@ Options:
   -h, --help  Show this message and exit.
 
 Commands:
+  newsletter  Read and update the CSU Weekly Newsletter list.
   transcribe  Tools for transcribing audio files.
 ```
 
