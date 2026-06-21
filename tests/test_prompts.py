@@ -3,7 +3,7 @@ from typing import ClassVar
 import pytest
 from jinja2 import UndefinedError
 
-from jake_tools.hermes import Hermes
+from jake_tools.hermes import AgentSpec, Hermes
 from jake_tools.prompting import Prompt
 from jake_tools.transcripts.models import (
     Chapter,
@@ -32,7 +32,10 @@ class FakeAgent:
 
 
 def hermes_with(agent: FakeAgent) -> Hermes:
-    return Hermes(agent_factory=lambda model, provider: agent)
+    def factory(_spec: AgentSpec) -> FakeAgent:
+        return agent
+
+    return Hermes(agent_factory=factory)
 
 
 def _turns() -> list[TranscriptTurn]:
