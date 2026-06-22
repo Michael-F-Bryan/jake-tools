@@ -8,9 +8,9 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from jake_tools.daily_report.coordinator import LaneRunResult
-from jake_tools.daily_report.models import LaneName, LaneOutput, LaneSpec
-from jake_tools.daily_report.paths import DailyReportPaths
+from .coordinator import LaneRunResult
+from .models import LaneName, LaneOutput, LaneSpec
+from .paths import DailyReportPaths
 
 
 @dataclass(frozen=True)
@@ -36,14 +36,25 @@ _BANNED_PLACEHOLDER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("todo", re.compile(r"\btodo\b", re.I)),
     ("tbd", re.compile(r"\btbd\b", re.I)),
     ("lorem ipsum", re.compile(r"\blorem\s+ipsum\b", re.I)),
-    ("placeholder", re.compile(r"\b(?:placeholder\s+(?:response|content|text|only)|as\s+a\s+placeholder)\b", re.I)),
+    (
+        "placeholder",
+        re.compile(
+            r"\b(?:placeholder\s+(?:response|content|text|only)|as\s+a\s+placeholder)\b",
+            re.I,
+        ),
+    ),
     ("insert details", re.compile(r"\binsert\s+details\b", re.I)),
     ("insert findings", re.compile(r"\binsert\s+findings\b", re.I)),
     ("coming soon", re.compile(r"\bcoming\s+soon\b", re.I)),
 )
 
-_NO_FINDINGS_RE = re.compile(r"\bno\s+(findings?|relevant findings?|items?|matches?|results?)\b", re.I)
-_TOOL_UNAVAILABLE_RE = re.compile(r"\b(tool|himalaya|session_search|file)\s+unavailable\b|\bunavailable\s+tool\b", re.I)
+_NO_FINDINGS_RE = re.compile(
+    r"\bno\s+(findings?|relevant findings?|items?|matches?|results?)\b", re.I
+)
+_TOOL_UNAVAILABLE_RE = re.compile(
+    r"\b(tool|himalaya|session_search|file)\s+unavailable\b|\bunavailable\s+tool\b",
+    re.I,
+)
 _INBOX_FORBIDDEN_RE = re.compile(
     r"\b(draft(?:ed|s|ing)?\s+(?:a\s+)?(?:reply|response|email)|"
     r"(?:reply|response|email)\s+draft(?:ed)?|"
@@ -137,7 +148,9 @@ def _load_lane_output(path: Path, errors: list[str]) -> LaneOutput | None:
         return None
 
 
-def _missing_required_headings(markdown: str, required_sections: tuple[str, ...]) -> list[str]:
+def _missing_required_headings(
+    markdown: str, required_sections: tuple[str, ...]
+) -> list[str]:
     headings = {_normalise_heading(heading) for heading in _markdown_headings(markdown)}
     return [
         f"required heading missing: {section}"
@@ -192,7 +205,9 @@ def _unsupported_tool_unavailable_errors(output: LaneOutput) -> list[str]:
     text = _combined_text(output)
     if not _TOOL_UNAVAILABLE_RE.search(text):
         return []
-    if "preflight" in text.lower() or any("preflight" in Path(path).name.lower() for path in output.evidence_paths):
+    if "preflight" in text.lower() or any(
+        "preflight" in Path(path).name.lower() for path in output.evidence_paths
+    ):
         return []
     return ["'tool unavailable' claim lacks preflight citation"]
 
@@ -203,7 +218,9 @@ def _inbox_boundary_errors(output: LaneOutput) -> list[str]:
     return []
 
 
-def _invented_session_id_errors(cited_session_ids: list[str], manifest_path: Path) -> list[str]:
+def _invented_session_id_errors(
+    cited_session_ids: list[str], manifest_path: Path
+) -> list[str]:
     if not cited_session_ids:
         return []
     if not manifest_path.exists():
@@ -211,7 +228,9 @@ def _invented_session_id_errors(cited_session_ids: list[str], manifest_path: Pat
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        return [f"session manifest unreadable for cited_session_id check: {type(error).__name__}: {error}"]
+        return [
+            f"session manifest unreadable for cited_session_id check: {type(error).__name__}: {error}"
+        ]
     sessions = payload.get("sessions")
     if not isinstance(sessions, list):
         return ["session manifest has no sessions list"]

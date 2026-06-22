@@ -8,11 +8,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from jake_tools.ai_usage import AIStageStats, AITotals, build_ai_stage_stats, build_ai_totals
-from jake_tools.daily_report.coordinator import DailyReportRunResult, LaneRunResult
-from jake_tools.daily_report.models import DailyReportLaneOptions, LaneName, LaneOutput, LaneSpec
-from jake_tools.daily_report.paths import DailyReportPaths
-from jake_tools.daily_report.validation import LaneValidationResult
+from ..ai_usage import AIStageStats, AITotals, build_ai_stage_stats, build_ai_totals
+from .coordinator import DailyReportRunResult, LaneRunResult
+from .models import DailyReportLaneOptions, LaneName, LaneOutput, LaneSpec
+from .paths import DailyReportPaths
+from .validation import LaneValidationResult
 
 SummaryStatus = Literal["ok", "fail"]
 
@@ -40,7 +40,10 @@ _SOURCE_CLASS_BY_LANE: dict[LaneName, str] = {
 
 _SOURCE_CLASS_TITLES: tuple[tuple[str, str], ...] = (
     ("verified_activity", "Verified target-date activity"),
-    ("retrospective_current_run_failures", "Retrospective context and current-run failures"),
+    (
+        "retrospective_current_run_failures",
+        "Retrospective context and current-run failures",
+    ),
     ("envelope_leads", "Envelope-only leads"),
 )
 
@@ -85,10 +88,14 @@ def aggregate_ai_usage(
     paths: DailyReportPaths | None = None,
 ) -> AITotals:
     if options.parent_session_id:
-        db_totals = _aggregate_parent_child_from_db(options.session_db, options.parent_session_id)
+        db_totals = _aggregate_parent_child_from_db(
+            options.session_db, options.parent_session_id
+        )
         if db_totals is not None:
             return db_totals
-        manifest_totals = _aggregate_parent_child_from_manifest(paths, options.parent_session_id)
+        manifest_totals = _aggregate_parent_child_from_manifest(
+            paths, options.parent_session_id
+        )
         if manifest_totals is not None:
             return manifest_totals
     return _aggregate_from_lane_results(run_result)
@@ -98,7 +105,9 @@ def _ordered_lane_results(
     specs: Sequence[LaneSpec],
     run_result: DailyReportRunResult,
 ) -> list[LaneRunResult]:
-    return [run_result.lanes[spec.name] for spec in specs if spec.name in run_result.lanes]
+    return [
+        run_result.lanes[spec.name] for spec in specs if spec.name in run_result.lanes
+    ]
 
 
 def _verified_outputs(
@@ -108,8 +117,17 @@ def _verified_outputs(
     verified: list[tuple[LaneRunResult, LaneOutput]] = []
     for result in results:
         validation = validation_results.get(result.name)
-        output = validation.output if validation is not None and validation.ok else result.output
-        if result.status == "ok" and validation is not None and validation.ok and output is not None:
+        output = (
+            validation.output
+            if validation is not None and validation.ok
+            else result.output
+        )
+        if (
+            result.status == "ok"
+            and validation is not None
+            and validation.ok
+            and output is not None
+        ):
             verified.append((result, output))
     return verified
 
@@ -121,7 +139,9 @@ def _write_report(
     validation_results: Mapping[LaneName, LaneValidationResult],
     verified: Sequence[tuple[LaneRunResult, LaneOutput]],
 ) -> None:
-    by_class: dict[str, list[tuple[LaneRunResult, LaneOutput]]] = {key: [] for key, _ in _SOURCE_CLASS_TITLES}
+    by_class: dict[str, list[tuple[LaneRunResult, LaneOutput]]] = {
+        key: [] for key, _ in _SOURCE_CLASS_TITLES
+    }
     for result, output in verified:
         by_class[_SOURCE_CLASS_BY_LANE[result.name]].append((result, output))
 
@@ -138,7 +158,9 @@ def _write_report(
         validation = validation_results.get(result.name)
         validation_status = validation.status if validation is not None else "missing"
         link = _markdown_link(result.artefact_path)
-        lines.append(f"- `{result.status}` / validation `{validation_status}` — [{result.name.value}]({link})")
+        lines.append(
+            f"- `{result.status}` / validation `{validation_status}` — [{result.name.value}]({link})"
+        )
     lines.append("")
 
     for key, title in _SOURCE_CLASS_TITLES:
@@ -150,7 +172,9 @@ def _write_report(
         for result, output in entries:
             lines.append(f"### {result.name.value}")
             lines.append("")
-            lines.append(f"Artefact: [{result.artefact_path.name}]({_markdown_link(result.artefact_path)})")
+            lines.append(
+                f"Artefact: [{result.artefact_path.name}]({_markdown_link(result.artefact_path)})"
+            )
             if output.findings:
                 lines.append("")
                 lines.append("Findings:")
@@ -159,7 +183,9 @@ def _write_report(
 
     lines.extend(["## Proposed actions", ""])
     actions = _prefixed_items(verified, "actions")
-    lines.extend([f"- {item}" for item in actions] or ["- No verified proposed actions."])
+    lines.extend(
+        [f"- {item}" for item in actions] or ["- No verified proposed actions."]
+    )
     lines.extend(["", "## Caveats", ""])
     caveats = _prefixed_items(verified, "caveats")
     lines.extend([f"- {item}" for item in caveats] or ["- No verified caveats."])
@@ -197,7 +223,9 @@ def _aggregate_from_lane_results(run_result: DailyReportRunResult) -> AITotals:
     return build_ai_totals(stage_stats)
 
 
-def _aggregate_parent_child_from_db(session_db: Any, parent_session_id: str) -> AITotals | None:
+def _aggregate_parent_child_from_db(
+    session_db: Any, parent_session_id: str
+) -> AITotals | None:
     if session_db is None:
         return None
     conn: sqlite3.Connection | None = None
@@ -246,7 +274,9 @@ def _aggregate_parent_child_from_db(session_db: Any, parent_session_id: str) -> 
             conn.close()
 
 
-def _aggregate_parent_child_from_manifest(paths: DailyReportPaths | None, parent_session_id: str) -> AITotals | None:
+def _aggregate_parent_child_from_manifest(
+    paths: DailyReportPaths | None, parent_session_id: str
+) -> AITotals | None:
     if paths is None:
         return None
     manifest_path = paths.evidence / "session-manifest.json"
@@ -263,7 +293,10 @@ def _aggregate_parent_child_from_manifest(paths: DailyReportPaths | None, parent
         session
         for session in sessions
         if isinstance(session, dict)
-        and (session.get("id") == parent_session_id or session.get("parent_session_id") == parent_session_id)
+        and (
+            session.get("id") == parent_session_id
+            or session.get("parent_session_id") == parent_session_id
+        )
     ]
     if not rows:
         return None

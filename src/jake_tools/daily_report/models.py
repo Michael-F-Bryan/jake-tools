@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from jake_tools.prompting import StructuredPrompt
+from ..prompting import StructuredPrompt
 
 
 class LaneShape(StrEnum):
@@ -55,7 +55,11 @@ class LaneSpec:
     def __post_init__(self) -> None:
         if self.shape is LaneShape.WORKER_AGENT and not self.enabled_toolsets:
             raise ValueError(f"{self.name.value} worker lane requires scoped toolsets")
-        if self.shape is LaneShape.PRE_FED and self.name is LaneName.INBOX_TRIAGE and self.enabled_toolsets:
+        if (
+            self.shape is LaneShape.PRE_FED
+            and self.name is LaneName.INBOX_TRIAGE
+            and self.enabled_toolsets
+        ):
             raise ValueError("inbox-triage must be tool-less")
         blocked = {"default", "all", "*", "broad"}
         if any(toolset.strip().lower() in blocked for toolset in self.enabled_toolsets):

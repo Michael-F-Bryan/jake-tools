@@ -5,11 +5,16 @@ from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 
-from jake_tools.ai_usage import build_ai_stage_stats, build_ai_totals
+from ..ai_usage import build_ai_stage_stats, build_ai_totals
 
 from ..hermes import Hermes, HermesResult
 from .audio import build_concat_plan, concatenate_recordings, run_scribe
-from .merge import format_timestamp, merge_note, render_chaptered_transcript, speaker_name
+from .merge import (
+    format_timestamp,
+    merge_note,
+    render_chaptered_transcript,
+    speaker_name,
+)
 from .models import (
     Chapter,
     ChapterSummary,
@@ -54,7 +59,6 @@ RunMinutes = Callable[
 ]
 
 
-
 def _build_chapter_summaries(chapters: list[Chapter]) -> list[ChapterSummary]:
     return [
         ChapterSummary(
@@ -80,7 +84,10 @@ def _build_speaker_message_counts(
         if name not in ordered_names:
             ordered_names.append(name)
 
-    return [SpeakerMessageCount(speaker=name, messages=counts[name]) for name in ordered_names]
+    return [
+        SpeakerMessageCount(speaker=name, messages=counts[name])
+        for name in ordered_names
+    ]
 
 
 class ObsidianRecordingCoordinator:
@@ -140,9 +147,7 @@ class ObsidianRecordingCoordinator:
             polished_payload, transcript_polish_result = self.polish_transcript(
                 self.hermes, source, turns, speaker_mapping
             )
-            polished_turns = merge_consecutive_turns(
-                normalise_turns(polished_payload)
-            )
+            polished_turns = merge_consecutive_turns(normalise_turns(polished_payload))
             if stage_stats := build_ai_stage_stats(
                 "transcript_polish", transcript_polish_result
             ):
@@ -196,7 +201,9 @@ class ObsidianRecordingCoordinator:
                 chapter_summaries=_build_chapter_summaries(chapters_payload.chapters),
                 ai_stage_stats=ai_stage_stats,
                 ai_totals=build_ai_totals(ai_stage_stats),
-                speaker_message_counts=_build_speaker_message_counts(polished_turns, speaker_mapping),
+                speaker_message_counts=_build_speaker_message_counts(
+                    polished_turns, speaker_mapping
+                ),
             )
 
     def _load_turns(self, transcript_json: Path) -> list[TranscriptTurn]:
@@ -227,7 +234,6 @@ class ObsidianRecordingCoordinator:
                 )
             )
         return turns
-
 
 
 def process_obsidian_recording(

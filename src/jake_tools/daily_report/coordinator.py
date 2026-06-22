@@ -10,10 +10,10 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from jake_tools.daily_report.models import DailyReportLaneOptions, LaneName, LaneOutput, LaneSpec
-from jake_tools.daily_report.paths import DailyReportPaths
-from jake_tools.daily_report.stages import DailyReportStages
-from jake_tools.hermes import HermesResult
+from .models import DailyReportLaneOptions, LaneName, LaneOutput, LaneSpec
+from .paths import DailyReportPaths
+from .stages import DailyReportStages
+from ..hermes import HermesResult
 
 LaneStatus = Literal["ok", "fail"]
 
@@ -66,9 +66,11 @@ class DailyReportCommandResult:
             "summary_path": str(self.summary_path),
             "manifest_path": str(self.manifest_path),
             "failed_lanes": self.failed_lanes,
-            "summary": self.summary.model_dump(mode="json")
-            if hasattr(self.summary, "model_dump")
-            else self.summary,
+            "summary": (
+                self.summary.model_dump(mode="json")
+                if hasattr(self.summary, "model_dump")
+                else self.summary
+            ),
         }
 
 
@@ -80,18 +82,20 @@ def run_daily_report_command(
 ) -> DailyReportCommandResult:
     """Run the full deterministic daily-report orchestration for the Click command."""
 
-    from jake_tools.daily_report.himalaya import run_himalaya_preflight
-    from jake_tools.daily_report.lanes import build_lane_specs
-    from jake_tools.daily_report.manifest import build_and_write_run_manifest
-    from jake_tools.daily_report.preflight import (
+    from .himalaya import run_himalaya_preflight
+    from .lanes import build_lane_specs
+    from .manifest import build_and_write_run_manifest
+    from .preflight import (
         build_session_manifest,
         write_json,
         write_session_manifest,
     )
-    from jake_tools.daily_report.synthesis import synthesize_daily_report
-    from jake_tools.daily_report.validation import apply_validation_to_lane_result, validate_lane_artifact
+    from .synthesis import synthesize_daily_report
+    from .validation import apply_validation_to_lane_result, validate_lane_artifact
 
-    paths = DailyReportPaths.for_date(command_options.base_dir, command_options.target_date)
+    paths = DailyReportPaths.for_date(
+        command_options.base_dir, command_options.target_date
+    )
     paths.create()
 
     options = DailyReportLaneOptions(
@@ -100,7 +104,9 @@ def run_daily_report_command(
         timezone_name=command_options.timezone_name,
         provider=command_options.provider,
         model=command_options.judgement_model,
-        session_db=command_options.state_db if command_options.state_db.exists() else None,
+        session_db=(
+            command_options.state_db if command_options.state_db.exists() else None
+        ),
         extra_context={"evidence_model": command_options.evidence_model},
     )
 
@@ -119,10 +125,14 @@ def run_daily_report_command(
         himalaya_kwargs["runner"] = himalaya_runner
     inbox_preflight = run_himalaya_preflight(**himalaya_kwargs)
     write_json(paths.evidence / "inbox-preflight.json", inbox_preflight.to_json())
-    write_json(paths.evidence / "inbox-envelopes.json", _inbox_envelopes_json(inbox_preflight))
+    write_json(
+        paths.evidence / "inbox-envelopes.json", _inbox_envelopes_json(inbox_preflight)
+    )
 
     specs = build_lane_specs(options, paths, preflight=inbox_preflight)
-    _write_lane_evidence_bundles(specs=specs, options=options, paths=paths, write_json=write_json)
+    _write_lane_evidence_bundles(
+        specs=specs, options=options, paths=paths, write_json=write_json
+    )
     run_result = run_daily_report(
         options=options,
         stages=stages,
@@ -192,9 +202,11 @@ def _write_session_manifest_evidence(**kwargs: Any) -> None:
         return
     start_epoch = end_epoch = 0.0
     try:
-        from jake_tools.daily_report.preflight import day_epoch_bounds
+        from .preflight import day_epoch_bounds
 
-        start_epoch, end_epoch = day_epoch_bounds(kwargs["target_date"], kwargs["timezone_name"])
+        start_epoch, end_epoch = day_epoch_bounds(
+            kwargs["target_date"], kwargs["timezone_name"]
+        )
     except Exception:
         pass
     kwargs["write_json"](
@@ -236,7 +248,10 @@ def _write_lane_evidence_bundles(
         source_paths = [paths.evidence / "session-manifest.json"]
         if spec.name is LaneName.INBOX_TRIAGE:
             source_paths.extend(
-                [paths.evidence / "inbox-preflight.json", paths.evidence / "inbox-envelopes.json"]
+                [
+                    paths.evidence / "inbox-preflight.json",
+                    paths.evidence / "inbox-envelopes.json",
+                ]
             )
 
         bundle: dict[str, Any] = {
@@ -260,7 +275,9 @@ def _write_lane_evidence_bundles(
                 bundle[f"inlined_{stem}"] = None
             else:
                 try:
-                    bundle[f"inlined_{stem}"] = json.loads(src_path.read_text(encoding="utf-8"))
+                    bundle[f"inlined_{stem}"] = json.loads(
+                        src_path.read_text(encoding="utf-8")
+                    )
                 except (OSError, json.JSONDecodeError):
                     bundle[f"inlined_{stem}"] = None
 
@@ -337,7 +354,9 @@ def run_daily_report(
                 )
             results[spec.name] = result
 
-    status: LaneStatus = "fail" if any(result.status == "fail" for result in results.values()) else "ok"
+    status: LaneStatus = (
+        "fail" if any(result.status == "fail" for result in results.values()) else "ok"
+    )
     return DailyReportRunResult(run_id=options.run_id, status=status, lanes=results)
 
 

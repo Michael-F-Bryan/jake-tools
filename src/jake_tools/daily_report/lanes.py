@@ -4,7 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from jake_tools.daily_report.models import (
+from .models import (
     DailyReportLaneOptions,
     LaneName,
     LaneShape,
@@ -12,8 +12,8 @@ from jake_tools.daily_report.models import (
     ModelTier,
     SafetyMode,
 )
-from jake_tools.daily_report.paths import DailyReportPaths
-from jake_tools.daily_report.prompts import build_prompt
+from .paths import DailyReportPaths
+from .prompts import build_prompt
 
 
 _REQUIRED_SECTIONS: dict[LaneName, tuple[str, ...]] = {

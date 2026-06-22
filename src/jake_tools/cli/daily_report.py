@@ -6,13 +6,13 @@ from pathlib import Path
 
 import click
 
-from jake_tools.daily_report.coordinator import (
+from ..daily_report.coordinator import (
     DailyReportCommandOptions,
     DailyReportCommandResult,
     run_daily_report_command,
 )
-from jake_tools.daily_report.stages import HermesDailyReportStages
-from jake_tools.hermes import Hermes
+from ..daily_report.stages import HermesDailyReportStages
+from ..hermes import Hermes
 
 
 def _parse_date(_ctx: click.Context, _param: click.Parameter, value: str) -> date:

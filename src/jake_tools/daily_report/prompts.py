@@ -6,13 +6,15 @@ from typing import ClassVar
 
 from pydantic import BaseModel
 
-from jake_tools.daily_report.models import LaneName, LaneOutput
-from jake_tools.prompting import StructuredPrompt
+from .models import LaneName, LaneOutput
+from ..prompting import StructuredPrompt
 
 
 class DailyReportLanePrompt(StructuredPrompt[LaneOutput]):
     response_model: ClassVar[type[BaseModel]] = LaneOutput
-    template: ClassVar[str] = """\
+    template: ClassVar[
+        str
+    ] = """\
 Run ID: {{ run_id }}
 Target date: {{ target_date }}
 Timezone: {{ timezone_name }}
@@ -103,7 +105,9 @@ def build_prompt(
         lane_name=name.value,
         evidence_bundle_path=evidence_bundle_path,
         required_sections=", ".join(required_sections),
-        required_section_headings="\n".join(f"## {section}" for section in required_sections),
+        required_section_headings="\n".join(
+            f"## {section}" for section in required_sections
+        ),
         safety_rules=_SAFETY_RULES[name],
         task=_TASKS[name],
         inline_evidence=inline_evidence,

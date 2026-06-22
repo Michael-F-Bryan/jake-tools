@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from jake_tools.daily_report.models import DailyReportLaneOptions, LaneOutput, LaneShape, LaneSpec
-from jake_tools.hermes import AgentSpec, Hermes, HermesResult
+from .models import DailyReportLaneOptions, LaneOutput, LaneShape, LaneSpec
+from ..hermes import AgentSpec, Hermes, HermesResult
 
 
 class DailyReportStages(Protocol):

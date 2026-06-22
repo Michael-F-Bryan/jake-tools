@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from jake_tools.ai_usage import AIStageStats, AITotals
+from ..ai_usage import AIStageStats, AITotals
 
 
 class RecordingRef(BaseModel):
@@ -95,7 +95,6 @@ class SpeakerMessageCount(BaseModel):
     messages: int
 
 
-
 class CoordinatorResult(BaseModel):
     note_path: Path
     updated: bool
@@ -106,8 +105,14 @@ class CoordinatorResult(BaseModel):
 
     def json_summary(self) -> dict[str, object]:
         return {
-            "chapter_summaries": [summary.model_dump(mode="json") for summary in self.chapter_summaries],
-            "ai_stage_stats": [stats.model_dump(mode="json") for stats in self.ai_stage_stats],
+            "chapter_summaries": [
+                summary.model_dump(mode="json") for summary in self.chapter_summaries
+            ],
+            "ai_stage_stats": [
+                stats.model_dump(mode="json") for stats in self.ai_stage_stats
+            ],
             "ai_totals": self.ai_totals.model_dump(mode="json"),
-            "speaker_message_counts": [count.model_dump(mode="json") for count in self.speaker_message_counts],
+            "speaker_message_counts": [
+                count.model_dump(mode="json") for count in self.speaker_message_counts
+            ],
         }

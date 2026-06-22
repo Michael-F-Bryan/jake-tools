@@ -5,10 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from jake_tools.daily_report.coordinator import DailyReportRunResult, LaneRunResult
-from jake_tools.daily_report.models import DailyReportLaneOptions, LaneName, LaneSpec
-from jake_tools.daily_report.paths import DailyReportPaths
-from jake_tools.daily_report.validation import LaneValidationResult
+from .coordinator import DailyReportRunResult, LaneRunResult
+from .models import DailyReportLaneOptions, LaneName, LaneSpec
+from .paths import DailyReportPaths
+from .validation import LaneValidationResult
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,12 @@ def build_run_manifest(
     run_result: DailyReportRunResult,
     validation_results: dict[LaneName, LaneValidationResult],
 ) -> DailyReportManifest:
-    status = "fail" if run_result.status == "fail" or any(not result.ok for result in validation_results.values()) else "ok"
+    status = (
+        "fail"
+        if run_result.status == "fail"
+        or any(not result.ok for result in validation_results.values())
+        else "ok"
+    )
     return DailyReportManifest(
         run_id=options.run_id,
         date=options.target_date,
