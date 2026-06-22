@@ -10,6 +10,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from .models import DailyReportLaneOptions, LaneName, LaneOutput, LaneSpec
 from .paths import DailyReportPaths
 from .stages import DailyReportStages
@@ -18,8 +20,9 @@ from ..hermes import HermesResult
 LaneStatus = Literal["ok", "fail"]
 
 
-@dataclass(frozen=True)
-class LaneRunResult:
+class LaneRunResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     name: LaneName
     status: LaneStatus
     artefact_path: Path
@@ -28,8 +31,9 @@ class LaneRunResult:
     error: str | None = None
 
 
-@dataclass(frozen=True)
-class DailyReportRunResult:
+class DailyReportRunResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     run_id: str
     status: LaneStatus
     lanes: dict[LaneName, LaneRunResult]
@@ -48,30 +52,16 @@ class DailyReportCommandOptions:
     run_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex
 
 
-@dataclass(frozen=True)
-class DailyReportCommandResult:
+class DailyReportCommandResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     run_id: str
     status: LaneStatus
     report_path: Path
     summary_path: Path
     manifest_path: Path
-    failed_lanes: list[str]
-    summary: Any
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "run_id": self.run_id,
-            "status": self.status,
-            "report_path": str(self.report_path),
-            "summary_path": str(self.summary_path),
-            "manifest_path": str(self.manifest_path),
-            "failed_lanes": self.failed_lanes,
-            "summary": (
-                self.summary.model_dump(mode="json")
-                if hasattr(self.summary, "model_dump")
-                else self.summary
-            ),
-        }
+    failed_lanes: list[str] = Field(default_factory=list)
+    summary: Any = None
 
 
 def run_daily_report_command(
@@ -124,7 +114,10 @@ def run_daily_report_command(
     if himalaya_runner is not None:
         himalaya_kwargs["runner"] = himalaya_runner
     inbox_preflight = run_himalaya_preflight(**himalaya_kwargs)
-    write_json(paths.evidence / "inbox-preflight.json", inbox_preflight.to_json())
+    write_json(
+        paths.evidence / "inbox-preflight.json",
+        inbox_preflight.model_dump(mode="json"),
+    )
     write_json(
         paths.evidence / "inbox-envelopes.json", _inbox_envelopes_json(inbox_preflight)
     )

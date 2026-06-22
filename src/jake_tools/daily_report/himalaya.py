@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 Command = tuple[str, ...]
 JsonValue = dict[str, Any] | list[Any] | str | int | float | bool | None
@@ -21,77 +23,52 @@ class CommandResult:
 Runner = Callable[[Command], CommandResult]
 
 
-@dataclass(frozen=True)
-class CommandEvidence:
+class CommandEvidence(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     command: list[str]
     returncode: int | None
     stdout: str = ""
     stderr: str = ""
     error: str | None = None
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def ok(self) -> bool:
         return self.returncode == 0 and self.error is None
 
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "command": self.command,
-            "returncode": self.returncode,
-            "stdout": self.stdout,
-            "stderr": self.stderr,
-            "error": self.error,
-            "ok": self.ok,
-        }
 
+class AccountPreflight(BaseModel):
+    model_config = ConfigDict(frozen=True)
 
-@dataclass(frozen=True)
-class AccountPreflight:
     account: str
     folders: JsonValue | None = None
     inbox_envelopes: JsonValue | None = None
     sent_envelopes: JsonValue | None = None
-    errors: list[str] = field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def ok(self) -> bool:
         return not self.errors
 
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "account": self.account,
-            "folders": self.folders,
-            "inbox_envelopes": self.inbox_envelopes,
-            "sent_envelopes": self.sent_envelopes,
-            "errors": self.errors,
-            "ok": self.ok,
-        }
 
+class HimalayaPreflight(BaseModel):
+    model_config = ConfigDict(frozen=True)
 
-@dataclass(frozen=True)
-class HimalayaPreflight:
     command_found: bool
     accounts: JsonValue | None
     account_names: list[str]
     account_preflights: list[AccountPreflight]
     commands: list[CommandEvidence]
-    errors: list[str] = field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def ok(self) -> bool:
         return self.command_found and not self.errors and all(
             account.ok for account in self.account_preflights
         )
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "command_found": self.command_found,
-            "accounts": self.accounts,
-            "account_names": self.account_names,
-            "account_preflights": [account.to_json() for account in self.account_preflights],
-            "commands": [command.to_json() for command in self.commands],
-            "errors": self.errors,
-            "ok": self.ok,
-        }
 
 
 _ALLOWED_STATIC_COMMANDS: frozenset[Command] = frozenset(

@@ -125,7 +125,10 @@ def _read_stdin_body(*, required: bool) -> str | None:
 
 def _emit_items(items: list[NewsletterItem], *, include_body: bool, as_json: bool) -> None:
     if as_json:
-        payload = [item.as_dict() if include_body else _item_summary(item) for item in items]
+        payload = [
+            item.model_dump(mode="json") if include_body else _item_summary(item)
+            for item in items
+        ]
         click.echo(json.dumps(payload, indent=2))
         return
 
@@ -136,7 +139,7 @@ def _emit_items(items: list[NewsletterItem], *, include_body: bool, as_json: boo
 
 def _emit_item(item: NewsletterItem, *, include_body: bool, as_json: bool) -> None:
     if as_json:
-        payload = item.as_dict() if include_body else _item_summary(item)
+        payload = item.model_dump(mode="json") if include_body else _item_summary(item)
         click.echo(json.dumps(payload, indent=2))
         return
 

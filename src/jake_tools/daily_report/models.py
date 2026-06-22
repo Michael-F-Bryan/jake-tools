@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..prompting import StructuredPrompt
 
@@ -66,8 +66,9 @@ class LaneSpec:
             raise ValueError(f"{self.name.value} declares a broad/default toolset")
 
 
-@dataclass(frozen=True)
-class DailyReportLaneOptions:
+class DailyReportLaneOptions(BaseModel):
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
     run_id: str
     target_date: str
     timezone_name: str = "Australia/Perth"
@@ -78,4 +79,4 @@ class DailyReportLaneOptions:
     parent_session_id: str | None = None
     session_db: Any | None = None
     max_iterations: int | None = None
-    extra_context: dict[str, str] = field(default_factory=dict)
+    extra_context: dict[str, str] = Field(default_factory=dict)

@@ -83,7 +83,7 @@ def daily_report(
 
 def _emit_result(result: DailyReportCommandResult, *, as_json: bool) -> None:
     if as_json:
-        click.echo(json.dumps(result.to_json(), sort_keys=True))
+        click.echo(json.dumps(result.model_dump(mode="json"), sort_keys=True))
         return
 
     click.echo(f"status: {result.status}")

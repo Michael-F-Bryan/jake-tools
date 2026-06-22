@@ -3,24 +3,24 @@ from __future__ import annotations
 import importlib
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 from click.testing import CliRunner
 
 from jake_tools.cli import main
 from jake_tools.cli.daily_report import daily_report
 from jake_tools.daily_report.coordinator import DailyReportCommandResult
+from jake_tools.daily_report.synthesis import DailyReportSummary
 
 cli_module = importlib.import_module("jake_tools.cli.daily_report")
 
 
 def _fake_result(status: str = "ok", failed_lanes: list[str] | None = None) -> DailyReportCommandResult:
-    summary = SimpleNamespace(
-        model_dump=lambda mode="json": {
-            "date": "2026-06-21",
-            "status": status,
-            "failed_lanes": failed_lanes or [],
-        }
+    summary = DailyReportSummary(
+        date="2026-06-21",
+        status=status,  # type: ignore[arg-type]
+        paths={},
+        lane_count=0,
+        failed_lanes=failed_lanes or [],
     )
     return DailyReportCommandResult(
         run_id="run-1",

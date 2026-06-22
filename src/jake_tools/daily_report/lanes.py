@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -88,7 +87,7 @@ def _build_lane_spec(
     evidence_bundle_path = _evidence_bundle_path(paths, name)
     artefact_path = _artefact_path(paths, name)
     model_tier = _MODEL_TIERS[name]
-    lane_options = replace(options, model_tier=model_tier)
+    lane_options = options.model_copy(update={"model_tier": model_tier})
     model = _model_for_tier(lane_options)
     required_sections = _REQUIRED_SECTIONS[name]
     return LaneSpec(

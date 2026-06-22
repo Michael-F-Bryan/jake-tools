@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import Self
+
+from pydantic import BaseModel, ConfigDict
 
 
-@dataclass(frozen=True)
-class DailyReportPaths:
+class DailyReportPaths(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     root: Path
     subtasks: Path
     evidence: Path
@@ -19,7 +22,7 @@ class DailyReportPaths:
     lane_events: Path
 
     @classmethod
-    def for_date(cls, base_dir: Path, target_date: date) -> "DailyReportPaths":
+    def for_date(cls, base_dir: Path, target_date: date) -> Self:
         root = base_dir / f"daily-report-{target_date.isoformat()}"
         return cls(
             root=root,
@@ -34,7 +37,7 @@ class DailyReportPaths:
             lane_events=root / "lane-events.jsonl",
         )
 
-    def create(self) -> "DailyReportPaths":
+    def create(self) -> Self:
         for directory in [
             self.root,
             self.subtasks,

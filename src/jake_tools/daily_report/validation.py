@@ -2,34 +2,26 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .coordinator import LaneRunResult
 from .models import LaneName, LaneOutput, LaneSpec
 from .paths import DailyReportPaths
 
 
-@dataclass(frozen=True)
-class LaneValidationResult:
+class LaneValidationResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     lane: LaneName
     status: str
-    errors: list[str] = field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
     output: LaneOutput | None = None
 
     @property
     def ok(self) -> bool:
         return self.status == "ok"
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "lane": self.lane.value,
-            "status": self.status,
-            "errors": self.errors,
-        }
 
 
 _BANNED_PLACEHOLDER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -114,13 +106,8 @@ def apply_validation_to_lane_result(
     if validation.ok:
         return lane_result
     error = "; ".join(validation.errors) or "validation failed"
-    return LaneRunResult(
-        name=lane_result.name,
-        status="fail",
-        artefact_path=lane_result.artefact_path,
-        output=lane_result.output,
-        hermes_result=lane_result.hermes_result,
-        error=error,
+    return lane_result.model_copy(
+        update={"status": "fail", "error": error},
     )
 
 

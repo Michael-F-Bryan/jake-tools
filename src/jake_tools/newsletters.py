@@ -13,7 +13,7 @@ import urllib.request
 
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 CSU_TENANT_ID = "0a3a5574-cfda-4314-952e-c0b3e1dcac6d"
@@ -44,24 +44,15 @@ class NewsletterAttachment:
             raise NewsletterError(f"unable to read attachment {self.path}: {exc}") from exc
 
 
-@dataclass(frozen=True)
-class NewsletterItem:
+class NewsletterItem(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     id: str
     title: str
     body: str
     created: str
     modified: str
     url: str
-
-    def as_dict(self) -> dict[str, str]:
-        return {
-            "id": self.id,
-            "title": self.title,
-            "body": self.body,
-            "created": self.created,
-            "modified": self.modified,
-            "url": self.url,
-        }
 
 
 class NewsletterError(RuntimeError):

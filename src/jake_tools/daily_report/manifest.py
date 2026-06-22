@@ -1,38 +1,18 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-from .coordinator import DailyReportRunResult, LaneRunResult
+from .coordinator import DailyReportRunResult
+from .manifest_models import (
+    DailyReportManifest,
+    manifest_lane_result,
+    manifest_lane_spec,
+    manifest_lane_validation,
+)
 from .models import DailyReportLaneOptions, LaneName, LaneSpec
 from .paths import DailyReportPaths
 from .validation import LaneValidationResult
-
-
-@dataclass(frozen=True)
-class DailyReportManifest:
-    run_id: str
-    date: str
-    parent_session_id: str | None
-    paths: dict[str, str]
-    lane_specs: list[dict[str, Any]]
-    lane_results: list[dict[str, Any]]
-    validation_results: list[dict[str, Any]]
-    status: str
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "run_id": self.run_id,
-            "date": self.date,
-            "parent_session_id": self.parent_session_id,
-            "paths": self.paths,
-            "lane_specs": self.lane_specs,
-            "lane_results": self.lane_results,
-            "validation_results": self.validation_results,
-            "status": self.status,
-        }
 
 
 def build_run_manifest(
@@ -54,14 +34,14 @@ def build_run_manifest(
         date=options.target_date,
         parent_session_id=options.parent_session_id,
         paths=_paths_json(paths),
-        lane_specs=[_lane_spec_json(spec) for spec in specs],
+        lane_specs=[manifest_lane_spec(spec) for spec in specs],
         lane_results=[
-            _lane_result_json(run_result.lanes[spec.name])
+            manifest_lane_result(run_result.lanes[spec.name])
             for spec in specs
             if spec.name in run_result.lanes
         ],
         validation_results=[
-            validation_results[spec.name].to_json()
+            manifest_lane_validation(validation_results[spec.name])
             for spec in specs
             if spec.name in validation_results
         ],
@@ -72,7 +52,7 @@ def build_run_manifest(
 def write_run_manifest(manifest: DailyReportManifest, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(manifest.to_json(), indent=2, sort_keys=True),
+        json.dumps(manifest.model_dump(mode="json"), indent=2, sort_keys=True),
         encoding="utf-8",
     )
 
@@ -109,33 +89,3 @@ def _paths_json(paths: DailyReportPaths) -> dict[str, str]:
         "manifest": str(paths.manifest),
         "lane_events": str(paths.lane_events),
     }
-
-
-def _lane_spec_json(spec: LaneSpec) -> dict[str, Any]:
-    return {
-        "name": spec.name.value,
-        "shape": spec.shape.value,
-        "provider": spec.provider,
-        "model": spec.model,
-        "model_tier": spec.model_tier,
-        "enabled_toolsets": list(spec.enabled_toolsets),
-        "evidence_bundle_path": str(spec.evidence_bundle_path),
-        "artefact_path": str(spec.artefact_path),
-        "required_sections": list(spec.required_sections),
-        "timeout_seconds": spec.timeout_seconds,
-        "safety_mode": spec.safety_mode,
-    }
-
-
-def _lane_result_json(result: LaneRunResult) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "name": result.name.value,
-        "status": result.status,
-        "artefact_path": str(result.artefact_path),
-        "error": result.error,
-    }
-    if result.output is not None:
-        payload["output"] = result.output.model_dump(mode="json")
-    if result.hermes_result is not None:
-        payload["hermes_result"] = result.hermes_result.model_dump(mode="json")
-    return payload

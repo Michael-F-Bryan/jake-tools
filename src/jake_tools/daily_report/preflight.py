@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from pydantic import BaseModel, ConfigDict, Field
 
-@dataclass(frozen=True)
-class SessionManifestEntry:
+
+class SessionManifestEntry(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     id: str
     source: str
     started_at: float
@@ -25,28 +27,16 @@ class SessionManifestEntry:
     cost_status: str | None = None
     cost_source: str | None = None
 
-    def to_json(self) -> dict[str, Any]:
-        return self.__dict__.copy()
 
+class SessionManifest(BaseModel):
+    model_config = ConfigDict(frozen=True)
 
-@dataclass(frozen=True)
-class SessionManifest:
     target_date: date
-    timezone_name: str
+    timezone_name: str = Field(serialization_alias="timezone")
     start_epoch: float
     end_epoch: float
     sessions: list[SessionManifestEntry]
-    missing_columns: list[str] = field(default_factory=list)
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "target_date": self.target_date.isoformat(),
-            "timezone": self.timezone_name,
-            "start_epoch": self.start_epoch,
-            "end_epoch": self.end_epoch,
-            "missing_columns": self.missing_columns,
-            "sessions": [session.to_json() for session in self.sessions],
-        }
+    missing_columns: list[str] = Field(default_factory=list)
 
 
 def day_epoch_bounds(target_date: date, timezone_name: str) -> tuple[float, float]:
@@ -122,7 +112,7 @@ def build_session_manifest(
         start_epoch=start_epoch,
         end_epoch=end_epoch,
         missing_columns=missing,
-        sessions=[SessionManifestEntry(**dict(row)) for row in rows],
+        sessions=[SessionManifestEntry.model_validate(dict(row)) for row in rows],
     )
 
 
@@ -132,4 +122,4 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def write_session_manifest(path: Path, manifest: SessionManifest) -> None:
-    write_json(path, manifest.to_json())
+    write_json(path, manifest.model_dump(mode="json", by_alias=True))
