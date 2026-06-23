@@ -1,5 +1,5 @@
-from collections.abc import Callable
 import functools
+from collections.abc import Callable
 from typing import Any, cast
 
 import click

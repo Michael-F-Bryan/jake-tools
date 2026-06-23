@@ -1,6 +1,9 @@
-from jake_tools.transcripts.merge import merge_note, render_chaptered_transcript, render_transcript
+from jake_tools.transcripts.merge import (
+    merge_note,
+    render_chaptered_transcript,
+    render_transcript,
+)
 from jake_tools.transcripts.models import Chapter, MeetingMinutes, TranscriptTurn
-
 
 ORIGINAL = "# Meeting\n\nAgenda line\n\n![[meeting.m4a]]\n"
 
@@ -38,7 +41,9 @@ def test_render_minutes_uses_dot_points() -> None:
         ORIGINAL,
         transcript_body="**Speaker** Hello",
         chapters=[Chapter(title="Kickoff", start=0, end=30, summary="Start")],
-        minutes=MeetingMinutes(summary="Summary", key_points=["First note", "Second note"]),
+        minutes=MeetingMinutes(
+            summary="Summary", key_points=["First note", "Second note"]
+        ),
     )
 
     assert "## Meeting Notes\n\n- First note\n- Second note" in merged

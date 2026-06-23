@@ -17,7 +17,9 @@ from jake_tools.daily_report.paths import DailyReportPaths
 
 def specs(tmp_path: Path) -> list[LaneSpec]:
     paths = DailyReportPaths.for_date(tmp_path, date(2026, 6, 21))
-    options = DailyReportLaneOptions(run_id="daily-2026-06-21", target_date="2026-06-21")
+    options = DailyReportLaneOptions(
+        run_id="daily-2026-06-21", target_date="2026-06-21"
+    )
     return build_lane_specs(options, paths)
 
 
@@ -49,8 +51,13 @@ def test_build_lane_specs_returns_all_six_lanes(tmp_path: Path) -> None:
         LaneName.TRANSCRIPTS_AND_DUMC,
         LaneName.INBOX_TRIAGE,
     ]
-    assert all(spec.evidence_bundle_path.name == f"{spec.name.value}.json" for spec in lane_specs)
-    assert all(spec.artefact_path.name == f"{spec.name.value}.json" for spec in lane_specs)
+    assert all(
+        spec.evidence_bundle_path.name == f"{spec.name.value}.json"
+        for spec in lane_specs
+    )
+    assert all(
+        spec.artefact_path.name == f"{spec.name.value}.json" for spec in lane_specs
+    )
 
 
 def test_inbox_lane_is_prefed_envelope_only_and_toolless(tmp_path: Path) -> None:
@@ -77,7 +84,10 @@ def test_worker_lanes_have_scoped_non_empty_toolsets(tmp_path: Path) -> None:
     }
     for spec in worker_specs:
         assert spec.enabled_toolsets
-        assert all(toolset not in {"default", "all", "*", "broad"} for toolset in spec.enabled_toolsets)
+        assert all(
+            toolset not in {"default", "all", "*", "broad"}
+            for toolset in spec.enabled_toolsets
+        )
         assert "Do not write files" in spec.prompt.render()
 
 

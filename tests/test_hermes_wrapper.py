@@ -76,7 +76,9 @@ def test_reply_from_run_extracts_text_error_and_usage() -> None:
 
 def test_agent_spec_merge_overrides_latest_values() -> None:
     base = AgentSpec(model="base", provider="openrouter", enabled_toolsets=["file"])
-    override = AgentSpec(model="override", provider="", enabled_toolsets=["session_search"])
+    override = AgentSpec(
+        model="override", provider="", enabled_toolsets=["session_search"]
+    )
 
     merged = base.merge(override)
 
@@ -161,7 +163,9 @@ def test_run_structured_parses_valid_json_without_repair() -> None:
     )
     hermes = Hermes(agent_factory=lambda spec: agent)
 
-    payload, reply = hermes.run_structured(PayloadPrompt(instruction="Return the answer."))
+    payload, reply = hermes.run_structured(
+        PayloadPrompt(instruction="Return the answer.")
+    )
 
     assert payload == Payload(answer=42)
     assert reply.usage.api_calls == 1
@@ -181,7 +185,9 @@ def test_run_structured_parses_fenced_json_without_repair() -> None:
     )
     hermes = Hermes(agent_factory=lambda spec: agent)
 
-    payload, reply = hermes.run_structured(PayloadPrompt(instruction="Return the answer."))
+    payload, reply = hermes.run_structured(
+        PayloadPrompt(instruction="Return the answer.")
+    )
 
     assert payload == Payload(answer=42)
     assert reply.usage.api_calls == 1
@@ -215,7 +221,9 @@ def test_run_structured_repairs_invalid_json_once_and_accumulates_usage() -> Non
     )
     hermes = Hermes(agent_factory=lambda spec: agent)
 
-    payload, reply = hermes.run_structured(PayloadPrompt(instruction="Return the answer."))
+    payload, reply = hermes.run_structured(
+        PayloadPrompt(instruction="Return the answer.")
+    )
 
     assert payload == Payload(answer=7)
     assert len(agent.prompts) == 2

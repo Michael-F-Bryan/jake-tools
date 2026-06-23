@@ -20,13 +20,11 @@ not hand-write a schema.
 from __future__ import annotations
 
 import json
-from functools import lru_cache
-from typing import Any, ClassVar, Generic, TypeVar
+from functools import cache
+from typing import Any, ClassVar
 
 from jinja2 import Environment, StrictUndefined, Template, meta
 from pydantic import BaseModel
-
-TResponse = TypeVar("TResponse", bound=BaseModel)
 
 
 def _to_json(value: Any) -> str:
@@ -76,12 +74,12 @@ class Prompt(BaseModel):
         return _compile(type(self)).render(**self.model_dump(mode="json"))
 
 
-@lru_cache(maxsize=None)
+@cache
 def _compile(cls: type[Prompt]) -> Template:
     return _ENV.from_string(cls.template.strip())
 
 
-class StructuredPrompt(Prompt, Generic[TResponse]):
+class StructuredPrompt[TResponse: BaseModel](Prompt):
     """
     A prompt whose reply parses into ``response_model``.
 

@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from jake_tools.ai_usage import Usage
 from jake_tools.hermes import Hermes, Reply
@@ -25,7 +25,7 @@ def build_source(note, tmp_path) -> SourceNote:
             RecordingRef(
                 raw_link="meeting.m4a",
                 resolved_path=tmp_path / "meeting.m4a",
-                created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
             )
         ],
     )
@@ -83,7 +83,9 @@ def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
         )
 
     def build_minutes(hermes, turns, chapters):
-        return MeetingMinutes(summary="Summary", key_points=["Opened the meeting"]), None
+        return MeetingMinutes(
+            summary="Summary", key_points=["Opened the meeting"]
+        ), None
 
     coordinator = ObsidianRecordingCoordinator(
         hermes=Hermes(),
@@ -188,7 +190,9 @@ def test_coordinator_builds_ai_stats_from_returned_stage_results(tmp_path) -> No
         )
 
     def build_minutes(hermes, turns, chapters):
-        return MeetingMinutes(summary="Summary", key_points=["Opened the meeting"]), None
+        return MeetingMinutes(
+            summary="Summary", key_points=["Opened the meeting"]
+        ), None
 
     coordinator = ObsidianRecordingCoordinator(
         hermes=Hermes(),

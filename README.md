@@ -8,6 +8,23 @@ Internal tools used by Jake.
 uv tool add -e .
 ```
 
+## Development
+
+Install dependencies and the git hooks once:
+
+```bash
+uv sync
+uv run pre-commit install
+```
+
+Every commit then runs `ruff check --fix`, `ruff format`, `pyright`, `pytest`,
+and a `uv lock` consistency check (plus standard file-hygiene hooks). Run them
+all manually at any time with:
+
+```bash
+uv run pre-commit run --all-files
+```
+
 ## Daily report
 
 ```bash

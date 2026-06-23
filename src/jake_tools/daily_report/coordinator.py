@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import uuid
@@ -12,11 +13,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..hermes import Reply
 from .models import DailyReportLaneOptions, LaneName, LaneOutput, LaneSpec
 from .paths import DailyReportPaths
 from .preflight import day_epoch_bounds
 from .stages import DailyReportStages
-from ..hermes import Reply
 
 LaneStatus = Literal["ok", "fail"]
 
@@ -203,10 +204,8 @@ def _write_session_manifest_evidence(
         write_session_manifest(path, manifest)
         return
     start_epoch = end_epoch = 0.0
-    try:
+    with contextlib.suppress(OSError):
         start_epoch, end_epoch = day_epoch_bounds(target_date, timezone_name)
-    except OSError:
-        pass
     write_json(
         path,
         {
@@ -276,7 +275,7 @@ def _write_lane_evidence_bundles(
                     bundle[f"inlined_{stem}"] = json.loads(
                         src_path.read_text(encoding="utf-8")
                     )
-                except (OSError, json.JSONDecodeError):
+                except OSError, json.JSONDecodeError:
                     bundle[f"inlined_{stem}"] = None
 
         write_json(spec.evidence_bundle_path, bundle)
@@ -285,10 +284,8 @@ def _write_lane_evidence_bundles(
 def _clear_lane_artefacts(specs: list[LaneSpec]) -> None:
     """Remove stale lane artefacts so validation can't read prior-run output."""
     for spec in specs:
-        try:
+        with contextlib.suppress(OSError):
             spec.artefact_path.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def run_daily_report(

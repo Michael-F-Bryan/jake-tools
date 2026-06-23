@@ -7,9 +7,7 @@ from ..prompting import Prompt
 
 
 class TranscriptSkillPolishPrompt(Prompt):
-    template: ClassVar[
-        str
-    ] = """
+    template: ClassVar[str] = """
 You are a helpful assistant that polishes transcripts.
 
 Polish the following transcript using the `transcript-polisher` skill:

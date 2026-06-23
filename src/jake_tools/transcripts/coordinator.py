@@ -6,7 +6,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ..ai_usage import build_ai_stage_stats, build_ai_totals
-
 from ..hermes import Hermes, Reply
 from .audio import build_concat_plan, concatenate_recordings, run_scribe
 from .merge import (
@@ -17,8 +16,8 @@ from .merge import (
 )
 from .models import (
     Chapter,
-    ChapterSummary,
     ChaptersPayload,
+    ChapterSummary,
     ConcatPlan,
     CoordinatorResult,
     MeetingMinutes,

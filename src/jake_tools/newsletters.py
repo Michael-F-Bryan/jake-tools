@@ -1,20 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 import html
 import json
 import re
 import subprocess
-from typing import cast
 import urllib.error
 import urllib.parse
 import urllib.request
-
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field
-
 
 CSU_TENANT_ID = "0a3a5574-cfda-4314-952e-c0b3e1dcac6d"
 CSU_SITE_HOST = "csuses.sharepoint.com"
@@ -41,7 +39,9 @@ class NewsletterAttachment:
         try:
             return self.path.read_bytes()
         except OSError as exc:
-            raise NewsletterError(f"unable to read attachment {self.path}: {exc}") from exc
+            raise NewsletterError(
+                f"unable to read attachment {self.path}: {exc}"
+            ) from exc
 
 
 class NewsletterItem(BaseModel):
@@ -194,13 +194,20 @@ class NewsletterClient:
             f"/web/lists(guid'{self._list_id}')/items({item_id})"
             f"/AttachmentFiles/add(FileName='{urllib.parse.quote(filename)}')"
         )
-        self._sharepoint("POST", path, attachment.read_bytes(), content_type="application/octet-stream")
+        self._sharepoint(
+            "POST",
+            path,
+            attachment.read_bytes(),
+            content_type="application/octet-stream",
+        )
 
     def _list_path(self, suffix: str) -> str:
         site_id = urllib.parse.quote(self._site_id, safe="")
         return f"/sites/{site_id}/lists/{self._list_id}{suffix}"
 
-    def _graph(self, method: str, path: str, payload: Mapping[str, object] | None = None) -> JsonObject:
+    def _graph(
+        self, method: str, path: str, payload: Mapping[str, object] | None = None
+    ) -> JsonObject:
         body = None if payload is None else json.dumps(payload).encode("utf-8")
         return self._request_json(
             method,
@@ -252,15 +259,23 @@ class NewsletterClient:
                 return cast(JsonObject, json.loads(raw))
         except urllib.error.HTTPError as exc:
             details = exc.read().decode(errors="replace")
-            raise NewsletterError(f"newsletter request failed: {exc.code} {exc.reason}\n{details}") from exc
+            raise NewsletterError(
+                f"newsletter request failed: {exc.code} {exc.reason}\n{details}"
+            ) from exc
         except urllib.error.URLError as exc:
             raise NewsletterError(f"newsletter request failed: {exc.reason}") from exc
 
+
 def body_to_html(body: str) -> str:
-    paragraphs = [paragraph.strip() for paragraph in body.strip().split("\n\n") if paragraph.strip()]
+    paragraphs = [
+        paragraph.strip()
+        for paragraph in body.strip().split("\n\n")
+        if paragraph.strip()
+    ]
     newline = "\n"
     return "".join(
-        f"<p>{html.escape(paragraph).replace(newline, '<br>')}</p>" for paragraph in paragraphs
+        f"<p>{html.escape(paragraph).replace(newline, '<br>')}</p>"
+        for paragraph in paragraphs
     )
 
 

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from ..hermes import AgentSpec, Reply
+from ..prompting import StructuredPrompt
 from .models import DailyReportLaneOptions, LaneOutput, LaneShape, LaneSpec
-from ..hermes import AgentSpec, Hermes, Reply
 
 
 class DailyReportStages(Protocol):
@@ -14,8 +15,18 @@ class DailyReportStages(Protocol):
     ) -> tuple[LaneOutput, Reply]: ...
 
 
+class LaneStructuredRunner(Protocol):
+    """The single Hermes capability lane stages depend on: one structured call per lane."""
+
+    def run_structured(
+        self,
+        prompt: StructuredPrompt[LaneOutput],
+        spec: AgentSpec | None = None,
+    ) -> tuple[LaneOutput, Reply]: ...
+
+
 class HermesDailyReportStages:
-    def __init__(self, hermes: Hermes) -> None:
+    def __init__(self, hermes: LaneStructuredRunner) -> None:
         self.hermes = hermes
 
     def run_lane(

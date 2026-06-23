@@ -5,13 +5,22 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
+from jake_tools.ai_usage import Usage
 from jake_tools.daily_report.coordinator import DailyReportRunResult, LaneRunResult
 from jake_tools.daily_report.lanes import build_lane_specs
-from jake_tools.daily_report.models import DailyReportLaneOptions, LaneName, LaneOutput, LaneSpec
+from jake_tools.daily_report.models import (
+    DailyReportLaneOptions,
+    LaneName,
+    LaneOutput,
+    LaneSpec,
+)
 from jake_tools.daily_report.paths import DailyReportPaths
-from jake_tools.daily_report.synthesis import DailyReportSummary, aggregate_ai_usage, synthesize_daily_report
+from jake_tools.daily_report.synthesis import (
+    DailyReportSummary,
+    aggregate_ai_usage,
+    synthesize_daily_report,
+)
 from jake_tools.daily_report.validation import LaneValidationResult
-from jake_tools.ai_usage import Usage
 from jake_tools.hermes import Reply
 
 
@@ -49,7 +58,9 @@ def lane_result(
     )
 
 
-def validation(spec: LaneSpec, output: LaneOutput, *, ok: bool = True) -> LaneValidationResult:
+def validation(
+    spec: LaneSpec, output: LaneOutput, *, ok: bool = True
+) -> LaneValidationResult:
     return LaneValidationResult(
         lane=spec.name,
         status="ok" if ok else "fail",
@@ -102,7 +113,9 @@ def test_returned_lane_usage_totals_ignore_negative_costs(tmp_path: Path) -> Non
     assert totals.estimated_cost_usd == 0.25
 
 
-def test_parent_child_sqlite_usage_aggregation_prefers_session_family(tmp_path: Path) -> None:
+def test_parent_child_sqlite_usage_aggregation_prefers_session_family(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(db_path)
     conn.execute(
@@ -131,7 +144,9 @@ def test_parent_child_sqlite_usage_aggregation_prefers_session_family(tmp_path: 
     )
     conn.commit()
     conn.close()
-    options, paths, specs = make_paths_options_specs(tmp_path, parent_session_id="parent-1", session_db=db_path)
+    options, paths, specs = make_paths_options_specs(
+        tmp_path, parent_session_id="parent-1", session_db=db_path
+    )
     fallback = DailyReportRunResult(
         run_id="run-1",
         status="ok",
@@ -159,14 +174,31 @@ def test_parent_child_sqlite_usage_aggregation_prefers_session_family(tmp_path: 
     assert totals.estimated_cost_usd == 0.40
 
 
-def test_report_index_contains_lane_links_statuses_and_separates_sources(tmp_path: Path) -> None:
+def test_report_index_contains_lane_links_statuses_and_separates_sources(
+    tmp_path: Path,
+) -> None:
     options, paths, specs = make_paths_options_specs(tmp_path)
-    session_lane = next(spec for spec in specs if spec.name is LaneName.SESSION_HINDSIGHT)
+    session_lane = next(
+        spec for spec in specs if spec.name is LaneName.SESSION_HINDSIGHT
+    )
     inbox_lane = next(spec for spec in specs if spec.name is LaneName.INBOX_TRIAGE)
-    failure_lane = next(spec for spec in specs if spec.name is LaneName.FAILURE_PATTERNS)
-    session_output = LaneOutput(markdown="session", findings=["worked on coordinator"], actions=["ship synthesis"])
-    inbox_output = LaneOutput(markdown="inbox", findings=["subject-only lead"], caveats=["envelope only"])
-    failure_output = LaneOutput(markdown="failures", findings=["retry pattern"], actions=["tighten prompt"], caveats=["partial evidence"])
+    failure_lane = next(
+        spec for spec in specs if spec.name is LaneName.FAILURE_PATTERNS
+    )
+    session_output = LaneOutput(
+        markdown="session",
+        findings=["worked on coordinator"],
+        actions=["ship synthesis"],
+    )
+    inbox_output = LaneOutput(
+        markdown="inbox", findings=["subject-only lead"], caveats=["envelope only"]
+    )
+    failure_output = LaneOutput(
+        markdown="failures",
+        findings=["retry pattern"],
+        actions=["tighten prompt"],
+        caveats=["partial evidence"],
+    )
     run_result = DailyReportRunResult(
         run_id="run-1",
         status="ok",
@@ -209,7 +241,9 @@ def test_report_index_contains_lane_links_statuses_and_separates_sources(tmp_pat
 def test_summary_json_shape_and_failed_lanes_counted(tmp_path: Path) -> None:
     options, paths, specs = make_paths_options_specs(tmp_path)
     ok_spec, failed_spec = specs[:2]
-    output = LaneOutput(markdown="ok", findings=["finding"], actions=["action"], caveats=["caveat"])
+    output = LaneOutput(
+        markdown="ok", findings=["finding"], actions=["action"], caveats=["caveat"]
+    )
     run_result = DailyReportRunResult(
         run_id="run-1",
         status="fail",

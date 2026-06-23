@@ -1,7 +1,6 @@
 from jake_tools.transcripts.models import Chapter
 from jake_tools.transcripts.verify import VerificationError, verify_note
 
-
 ORIGINAL = "# Meeting\n\n![[meeting.m4a]]\n"
 
 

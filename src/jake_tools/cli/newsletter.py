@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import click
 
-from ..newsletters import NewsletterAttachment, NewsletterClient, NewsletterError, NewsletterItem
+from ..newsletters import (
+    NewsletterAttachment,
+    NewsletterClient,
+    NewsletterError,
+    NewsletterItem,
+)
 
 
 @click.group()
@@ -94,7 +99,9 @@ def edit(
     """
     body = _read_stdin_body(required=False)
     if title is None and body is None and not attachments:
-        raise click.UsageError("nothing to update: provide --title, stdin body, or --attach")
+        raise click.UsageError(
+            "nothing to update: provide --title, stdin body, or --attach"
+        )
 
     client = NewsletterClient()
     try:
@@ -123,7 +130,9 @@ def _read_stdin_body(*, required: bool) -> str | None:
     return None
 
 
-def _emit_items(items: list[NewsletterItem], *, include_body: bool, as_json: bool) -> None:
+def _emit_items(
+    items: list[NewsletterItem], *, include_body: bool, as_json: bool
+) -> None:
     if as_json:
         payload = [
             item.model_dump(mode="json") if include_body else _item_summary(item)

@@ -13,7 +13,10 @@ class AudioPipelineError(RuntimeError):
 
 
 def build_concat_plan(recordings: list[RecordingRef], output_path: Path) -> ConcatPlan:
-    ordered = [recording.resolved_path for recording in sorted(recordings, key=lambda item: item.created_at)]
+    ordered = [
+        recording.resolved_path
+        for recording in sorted(recordings, key=lambda item: item.created_at)
+    ]
     return ConcatPlan(inputs_in_creation_order=ordered, output_merged_audio=output_path)
 
 
@@ -36,7 +39,9 @@ def concatenate_recordings(
     run_command: CommandRunner = _run,
 ) -> None:
     concat_file.write_text(
-        "\n".join(_concat_manifest_entry(path) for path in plan.inputs_in_creation_order),
+        "\n".join(
+            _concat_manifest_entry(path) for path in plan.inputs_in_creation_order
+        ),
         encoding="utf-8",
     )
 

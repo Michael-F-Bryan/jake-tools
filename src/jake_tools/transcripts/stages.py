@@ -20,9 +20,7 @@ from .models import (
 
 class SpeakerMappingPrompt(StructuredPrompt[SpeakerMapping]):
     response_model: ClassVar[type[BaseModel]] = SpeakerMapping
-    template: ClassVar[
-        str
-    ] = """
+    template: ClassVar[str] = """
 You are the speaker-mapping specialist for an Obsidian meeting recording workflow.
 
 Meeting title: {{ title }}
@@ -41,9 +39,7 @@ Transcript turns:
 
 class ChapteringPrompt(StructuredPrompt[ChaptersPayload]):
     response_model: ClassVar[type[BaseModel]] = ChaptersPayload
-    template: ClassVar[
-        str
-    ] = """
+    template: ClassVar[str] = """
 You are the chaptering specialist for an Obsidian meeting recording workflow.
 
 Create broad thematic chapters for the transcript. Prefer topic shifts and agenda changes over rigid time slices. Chapters must be contiguous, in order, and cover the whole transcript.
@@ -57,9 +53,7 @@ Transcript turns:
 
 class MeetingMinutesPrompt(StructuredPrompt[MeetingMinutes]):
     response_model: ClassVar[type[BaseModel]] = MeetingMinutes
-    template: ClassVar[
-        str
-    ] = """
+    template: ClassVar[str] = """
 You are the meeting-minutes specialist for an Obsidian meeting recording workflow.
 
 Write faithful high-level meeting notes from the transcript. Preserve uncertainty when the transcript is unclear.
@@ -79,9 +73,7 @@ Chapter plan:
 
 class TranscriptPolishPrompt(StructuredPrompt[TranscriptTurnsPayload]):
     response_model: ClassVar[type[BaseModel]] = TranscriptTurnsPayload
-    template: ClassVar[
-        str
-    ] = """
+    template: ClassVar[str] = """
 You are the transcript-polishing specialist for an Obsidian meeting recording workflow.
 
 Meeting title: {{ title }}

@@ -8,7 +8,6 @@ class VerificationError(RuntimeError):
     pass
 
 
-
 def verify_note(
     merged_body: str,
     *,

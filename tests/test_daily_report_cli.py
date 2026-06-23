@@ -14,7 +14,9 @@ from jake_tools.daily_report.synthesis import DailyReportSummary
 cli_module = importlib.import_module("jake_tools.cli.daily_report")
 
 
-def _fake_result(status: str = "ok", failed_lanes: list[str] | None = None) -> DailyReportCommandResult:
+def _fake_result(
+    status: str = "ok", failed_lanes: list[str] | None = None
+) -> DailyReportCommandResult:
     summary = DailyReportSummary(
         date="2026-06-21",
         status=status,  # type: ignore[arg-type]
@@ -47,14 +49,18 @@ def test_daily_report_invalid_date_rejected() -> None:
     assert "must be YYYY-MM-DD" in result.output
 
 
-def test_daily_report_json_emits_parseable_json_without_progress_chatter(monkeypatch) -> None:
+def test_daily_report_json_emits_parseable_json_without_progress_chatter(
+    monkeypatch,
+) -> None:
     calls = []
 
     def fake_run_daily_report_command(*, command_options, stages):
         calls.append((command_options, stages))
         return _fake_result()
 
-    monkeypatch.setattr(cli_module, "run_daily_report_command", fake_run_daily_report_command)
+    monkeypatch.setattr(
+        cli_module, "run_daily_report_command", fake_run_daily_report_command
+    )
 
     result = CliRunner().invoke(daily_report, ["--date", "2026-06-21", "--json"])
 
@@ -72,7 +78,9 @@ def test_daily_report_failure_summary_exits_nonzero(monkeypatch) -> None:
         del command_options, stages
         return _fake_result(status="fail", failed_lanes=["inbox-triage"])
 
-    monkeypatch.setattr(cli_module, "run_daily_report_command", fake_run_daily_report_command)
+    monkeypatch.setattr(
+        cli_module, "run_daily_report_command", fake_run_daily_report_command
+    )
 
     result = CliRunner().invoke(daily_report, ["--date", "2026-06-21"])
 

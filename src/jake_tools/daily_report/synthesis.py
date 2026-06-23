@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -227,57 +227,6 @@ def _aggregate_from_lane_results(run_result: DailyReportRunResult) -> AITotals:
     return build_ai_totals(stage_stats)
 
 
-def _aggregate_parent_child_from_db(
-    session_db: Any, parent_session_id: str
-) -> AITotals | None:
-    if session_db is None:
-        return None
-    conn: sqlite3.Connection | None = None
-    owns_connection = False
-    try:
-        if isinstance(session_db, sqlite3.Connection):
-            conn = session_db
-        else:
-            conn = sqlite3.connect(Path(session_db))
-            owns_connection = True
-        conn.row_factory = sqlite3.Row
-        columns = _table_columns(conn, "sessions")
-        if not {"id", "parent_session_id"}.issubset(columns):
-            return None
-        select_columns = [
-            _select_expr(columns, "id"),
-            _select_expr(columns, "model"),
-            _select_expr(columns, "provider"),
-            _select_expr(columns, "api_calls", "1"),
-            _select_expr(columns, "input_tokens", "0"),
-            _select_expr(columns, "output_tokens", "0"),
-            _select_expr(columns, "cache_read_tokens", "0"),
-            _select_expr(columns, "cache_write_tokens", "0"),
-            _select_expr(columns, "reasoning_tokens", "0"),
-            _select_expr(columns, "prompt_tokens", "0"),
-            _select_expr(columns, "completion_tokens", "0"),
-            _select_expr(columns, "total_tokens", "0"),
-            _select_expr(columns, "estimated_cost_usd", "0"),
-        ]
-        rows = conn.execute(
-            f"""
-            SELECT {", ".join(select_columns)}
-            FROM sessions
-            WHERE id = ? OR parent_session_id = ?
-            ORDER BY id ASC
-            """,
-            (parent_session_id, parent_session_id),
-        ).fetchall()
-        if not rows:
-            return None
-        return _totals_from_session_rows([dict(row) for row in rows])
-    except (OSError, sqlite3.Error, TypeError, ValueError):
-        return None
-    finally:
-        if owns_connection and conn is not None:
-            conn.close()
-
-
 def _aggregate_parent_child_from_manifest(
     paths: DailyReportPaths | None, parent_session_id: str
 ) -> AITotals | None:
@@ -288,7 +237,7 @@ def _aggregate_parent_child_from_manifest(
         return None
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return None
     sessions = payload.get("sessions")
     if not isinstance(sessions, list):
@@ -304,9 +253,7 @@ def _aggregate_parent_child_from_manifest(
     ]
     if not rows:
         return None
-    return totals_from_session_rows(
-        [SessionUsageRow.from_mapping(row) for row in rows]
-    )
+    return totals_from_session_rows([SessionUsageRow.from_mapping(row) for row in rows])
 
 
 def _prefixed_items(

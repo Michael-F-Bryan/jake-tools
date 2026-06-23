@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import pytest
@@ -27,7 +28,9 @@ class FakeRunner:
         )
 
 
-def result(command: Command, returncode: int = 0, stdout: object = "", stderr: str = "") -> CommandResult:
+def result(
+    command: Command, returncode: int = 0, stdout: object = "", stderr: str = ""
+) -> CommandResult:
     if not isinstance(stdout, str):
         stdout = json.dumps(stdout)
     return CommandResult(command, returncode, stdout=stdout, stderr=stderr)
@@ -106,7 +109,9 @@ def test_malformed_account_json_records_error() -> None:
     assert preflight.accounts is None
     assert preflight.account_names == []
     assert len(preflight.errors) == 1
-    assert preflight.errors[0].startswith("himalaya account list returned malformed JSON:")
+    assert preflight.errors[0].startswith(
+        "himalaya account list returned malformed JSON:"
+    )
     assert runner.calls == [COMMAND_V, ACCOUNT_LIST]
 
 
@@ -136,7 +141,13 @@ def test_happy_path_lists_accounts_folders_inbox_and_sent_envelopes() -> None:
     assert account.folders == folders
     assert account.inbox_envelopes == inbox
     assert account.sent_envelopes == sent
-    assert runner.calls == [COMMAND_V, ACCOUNT_LIST, FOLDER_LIST, INBOX_ENVELOPES, SENT_ENVELOPES]
+    assert runner.calls == [
+        COMMAND_V,
+        ACCOUNT_LIST,
+        FOLDER_LIST,
+        INBOX_ENVELOPES,
+        SENT_ENVELOPES,
+    ]
 
 
 def test_partial_folder_and_envelope_failures_are_kept_as_evidence() -> None:
@@ -186,8 +197,18 @@ def test_forbidden_commands_are_not_emitted() -> None:
     assert all("send" not in command for command in emitted)
     assert all("delete" not in command for command in emitted)
     assert all("move" not in command for command in emitted)
-    assert all(command[:7] != ("himalaya", "envelope", "list", "-a", "work", "--folder", "Inbox") for command in emitted)
-    assert emitted == [COMMAND_V, ACCOUNT_LIST, FOLDER_LIST, INBOX_ENVELOPES, SENT_ENVELOPES]
+    assert all(
+        command[:7]
+        != ("himalaya", "envelope", "list", "-a", "work", "--folder", "Inbox")
+        for command in emitted
+    )
+    assert emitted == [
+        COMMAND_V,
+        ACCOUNT_LIST,
+        FOLDER_LIST,
+        INBOX_ENVELOPES,
+        SENT_ENVELOPES,
+    ]
 
 
 def test_rejects_invalid_page_size_before_emitting_commands() -> None:
@@ -218,7 +239,7 @@ def test_himalaya_command_builders_produce_expected_tuples() -> None:
     ],
 )
 def test_himalaya_command_builder_rejects_invalid_inputs(
-    factory: object,
+    factory: Callable[[], HimalayaCommand],
     message: str,
 ) -> None:
     with pytest.raises(ValueError, match=message):
@@ -246,7 +267,17 @@ def test_himalaya_command_parse_round_trips_allowed_commands(command: Command) -
         ("himalaya", "message", "read", "-a", "work"),
         ("himalaya", "envelope", "list", "-a", "work", "--folder", "Inbox"),
         ("himalaya", "folder", "list", "-a", "", "--output", "json"),
-        ("himalaya", "envelope", "list", "-a", "work", "--page-size", "0", "--output", "json"),
+        (
+            "himalaya",
+            "envelope",
+            "list",
+            "-a",
+            "work",
+            "--page-size",
+            "0",
+            "--output",
+            "json",
+        ),
         ("himalaya", "account", "list"),
     ],
 )

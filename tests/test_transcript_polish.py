@@ -1,32 +1,40 @@
-from jake_tools.hermes import Reply
+from typing import Any
+
+import pytest
+
+from jake_tools.hermes import Hermes
 from jake_tools.transcripts.polish import polish_transcript
 
 
-class FakeHermes:
-    def __init__(self, reply: Reply) -> None:
-        self.reply = reply
+class StubAgent:
+    """Fake LLM agent injected at the `AgentConversation` seam."""
+
+    def __init__(self, final_response: str | None) -> None:
+        self.final_response = final_response
         self.prompts: list[str] = []
 
-    def run(self, prompt: str) -> Reply:
-        self.prompts.append(prompt)
-        return self.reply
+    def run_conversation(self, user_message: str) -> dict[str, Any]:
+        self.prompts.append(user_message)
+        return {"final_response": self.final_response}
 
 
-def test_polish_transcript_uses_run_text_response() -> None:
-    hermes = FakeHermes(Reply(text="Polished transcript"))
+def _hermes_returning(final_response: str | None) -> tuple[Hermes, StubAgent]:
+    agent = StubAgent(final_response)
+    hermes = Hermes(agent_factory=lambda _spec: agent)
+    return hermes, agent
+
+
+def test_polish_transcript_returns_agent_text() -> None:
+    hermes, agent = _hermes_returning("Polished transcript")
 
     polished = polish_transcript(hermes, "raw transcript text")
 
     assert polished == "Polished transcript"
-    assert "raw transcript text" in hermes.prompts[0]
+    assert "raw transcript text" in agent.prompts[0]
 
 
 def test_polish_transcript_raises_when_reply_has_no_text() -> None:
-    hermes = FakeHermes(Reply(text=None))
+    hermes, _ = _hermes_returning(None)
 
-    try:
+    with pytest.raises(ValueError, match="No response from Hermes"):
         polish_transcript(hermes, "raw transcript text")
-    except ValueError as exc:
-        assert str(exc) == "No response from Hermes"
-    else:
-        raise AssertionError("expected ValueError")

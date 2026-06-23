@@ -4,7 +4,9 @@ import re
 
 from .models import TranscriptTurn
 
-_WORD_REPEAT_RE = re.compile(r"\b(?P<word>[A-Za-z']+)(?:\s+(?P=word)\b)+", re.IGNORECASE)
+_WORD_REPEAT_RE = re.compile(
+    r"\b(?P<word>[A-Za-z']+)(?:\s+(?P=word)\b)+", re.IGNORECASE
+)
 _WHITESPACE_RE = re.compile(r"\s+")
 _SPACE_BEFORE_PUNCTUATION_RE = re.compile(r"\s+([,.;:?!])")
 
@@ -29,7 +31,11 @@ def normalise_turns(turns: list[TranscriptTurn]) -> list[TranscriptTurn]:
             speaker=turn.speaker,
             text=text,
         )
-        if normalised and normalised[-1].speaker == candidate.speaker and normalised[-1].text == candidate.text:
+        if (
+            normalised
+            and normalised[-1].speaker == candidate.speaker
+            and normalised[-1].text == candidate.text
+        ):
             normalised[-1] = TranscriptTurn(
                 start=normalised[-1].start,
                 end=max(normalised[-1].end, candidate.end),
@@ -51,7 +57,9 @@ def _join_turn_text(current: str, following: str) -> str:
     return f"{current}. {following}"
 
 
-def merge_consecutive_turns(turns: list[TranscriptTurn], *, max_gap_seconds: float = 3.0) -> list[TranscriptTurn]:
+def merge_consecutive_turns(
+    turns: list[TranscriptTurn], *, max_gap_seconds: float = 3.0
+) -> list[TranscriptTurn]:
     if not turns:
         return []
 

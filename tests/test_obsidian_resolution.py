@@ -1,6 +1,5 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from jake_tools.transcripts.models import RecordingRef
 from jake_tools.transcripts.obsidian import (
     RecordingResolutionError,
     extract_recording_links,
@@ -10,11 +9,13 @@ from jake_tools.transcripts.obsidian import (
 
 
 def test_extract_recording_links_filters_audio_only() -> None:
-    body = "\n".join([
-        "![[meeting-a.m4a]]",
-        "![[image.png]]",
-        "![alt](meeting-b.mp3)",
-    ])
+    body = "\n".join(
+        [
+            "![[meeting-a.m4a]]",
+            "![[image.png]]",
+            "![alt](meeting-b.mp3)",
+        ]
+    )
 
     assert extract_recording_links(body) == ["meeting-a.m4a", "meeting-b.mp3"]
 
@@ -28,7 +29,9 @@ def test_resolve_recording_path_prefers_note_relative_file(tmp_path) -> None:
     assert resolve_recording_path(note, "meeting.m4a") == recording.resolve()
 
 
-def test_load_source_note_resolves_attachments_and_sorts_by_creation_time(tmp_path) -> None:
+def test_load_source_note_resolves_attachments_and_sorts_by_creation_time(
+    tmp_path,
+) -> None:
     vault = tmp_path / "Vault"
     attachments = vault / "Attachments"
     notes = vault / "Notes"
@@ -40,11 +43,12 @@ def test_load_source_note_resolves_attachments_and_sorts_by_creation_time(tmp_pa
     first.write_text("a", encoding="utf-8")
     second.write_text("b", encoding="utf-8")
 
-    older = datetime.now(timezone.utc) - timedelta(minutes=10)
-    newer = datetime.now(timezone.utc)
+    older = datetime.now(UTC) - timedelta(minutes=10)
+    newer = datetime.now(UTC)
     first_ts = older.timestamp()
     second_ts = newer.timestamp()
     import os
+
     os.utime(first, (first_ts, first_ts))
     os.utime(second, (second_ts, second_ts))
 
@@ -55,7 +59,10 @@ def test_load_source_note_resolves_attachments_and_sorts_by_creation_time(tmp_pa
 
     assert source.title == "Meeting"
     assert source.attendees == []
-    assert [recording.resolved_path.name for recording in source.recordings] == ["a.m4a", "b.m4a"]
+    assert [recording.resolved_path.name for recording in source.recordings] == [
+        "a.m4a",
+        "b.m4a",
+    ]
 
 
 def test_load_source_note_parses_attendees_from_frontmatter(tmp_path) -> None:

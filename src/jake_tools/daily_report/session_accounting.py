@@ -28,7 +28,7 @@ class SessionUsageRow(BaseModel):
     estimated_cost_usd: float = 0.0
 
     @classmethod
-    def from_mapping(cls, row: Mapping[str, Any]) -> "SessionUsageRow":
+    def from_mapping(cls, row: Mapping[str, Any]) -> SessionUsageRow:
         return cls(
             id=str(row.get("id") or "session"),
             model=_optional_str(row.get("model")),
@@ -92,7 +92,7 @@ def aggregate_parent_child_from_db(
         return totals_from_session_rows(
             [SessionUsageRow.from_mapping(dict(row)) for row in rows]
         )
-    except (OSError, sqlite3.Error, TypeError, ValueError):
+    except OSError, sqlite3.Error, TypeError, ValueError:
         return None
     finally:
         if owns_connection and conn is not None:
@@ -142,7 +142,7 @@ def _non_negative_int(value: Any, *, default: int = 0) -> int:
         return default
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
     return parsed if parsed > 0 else 0
 
@@ -152,6 +152,6 @@ def _non_negative_float(value: Any) -> float:
         return 0.0
     try:
         parsed = float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0.0
     return parsed if parsed > 0 else 0.0

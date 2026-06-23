@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 from ..hermes import Reply
 from .coordinator import LaneRunResult
-from .models import LaneName, LaneOutput, LaneSpec
+from .models import LaneOutput, LaneSpec
 from .validation import LaneValidationResult
 
 
@@ -96,7 +96,9 @@ def manifest_lane_result(result: LaneRunResult) -> ManifestLaneResult:
     )
 
 
-def manifest_lane_validation(validation: LaneValidationResult) -> ManifestLaneValidation:
+def manifest_lane_validation(
+    validation: LaneValidationResult,
+) -> ManifestLaneValidation:
     return ManifestLaneValidation(
         lane=validation.lane.value,
         status=validation.status,

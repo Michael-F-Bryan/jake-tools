@@ -4,7 +4,7 @@ import json
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
@@ -13,7 +13,7 @@ Command = tuple[str, ...]
 JsonValue = dict[str, Any] | list[Any] | str | int | float | bool | None
 
 
-class HimalayaCommandKind(str, Enum):
+class HimalayaCommandKind(StrEnum):
     CHECK_INSTALLED = "check_installed"
     ACCOUNT_LIST = "account_list"
     FOLDER_LIST = "folder_list"
@@ -28,16 +28,24 @@ class HimalayaCommand:
     page_size: int = 0
 
     def __post_init__(self) -> None:
-        if self.kind in {
-            HimalayaCommandKind.FOLDER_LIST,
-            HimalayaCommandKind.INBOX_ENVELOPE_LIST,
-            HimalayaCommandKind.SENT_ENVELOPE_LIST,
-        } and not self.account:
+        if (
+            self.kind
+            in {
+                HimalayaCommandKind.FOLDER_LIST,
+                HimalayaCommandKind.INBOX_ENVELOPE_LIST,
+                HimalayaCommandKind.SENT_ENVELOPE_LIST,
+            }
+            and not self.account
+        ):
             raise ValueError("account must be non-empty")
-        if self.kind in {
-            HimalayaCommandKind.INBOX_ENVELOPE_LIST,
-            HimalayaCommandKind.SENT_ENVELOPE_LIST,
-        } and self.page_size < 1:
+        if (
+            self.kind
+            in {
+                HimalayaCommandKind.INBOX_ENVELOPE_LIST,
+                HimalayaCommandKind.SENT_ENVELOPE_LIST,
+            }
+            and self.page_size < 1
+        ):
             raise ValueError("page_size must be at least 1")
 
     @classmethod
@@ -54,11 +62,17 @@ class HimalayaCommand:
 
     @classmethod
     def inbox_envelopes(cls, account: str, page_size: int) -> HimalayaCommand:
-        return cls(HimalayaCommandKind.INBOX_ENVELOPE_LIST, account=account, page_size=page_size)
+        return cls(
+            HimalayaCommandKind.INBOX_ENVELOPE_LIST,
+            account=account,
+            page_size=page_size,
+        )
 
     @classmethod
     def sent_envelopes(cls, account: str, page_size: int) -> HimalayaCommand:
-        return cls(HimalayaCommandKind.SENT_ENVELOPE_LIST, account=account, page_size=page_size)
+        return cls(
+            HimalayaCommandKind.SENT_ENVELOPE_LIST, account=account, page_size=page_size
+        )
 
     def build(self) -> Command:
         match self.kind:
@@ -67,7 +81,15 @@ class HimalayaCommand:
             case HimalayaCommandKind.ACCOUNT_LIST:
                 return ("himalaya", "account", "list", "--output", "json")
             case HimalayaCommandKind.FOLDER_LIST:
-                return ("himalaya", "folder", "list", "-a", self.account, "--output", "json")
+                return (
+                    "himalaya",
+                    "folder",
+                    "list",
+                    "-a",
+                    self.account,
+                    "--output",
+                    "json",
+                )
             case HimalayaCommandKind.INBOX_ENVELOPE_LIST:
                 return (
                     "himalaya",
@@ -112,7 +134,13 @@ class HimalayaCommand:
                 except ValueError:
                     pass
 
-        if len(command) == 9 and command[:5] == ("himalaya", "envelope", "list", "-a", command[4]):
+        if len(command) == 9 and command[:5] == (
+            "himalaya",
+            "envelope",
+            "list",
+            "-a",
+            command[4],
+        ):
             account = command[4]
             if command[5] == "--page-size" and command[7:] == ("--output", "json"):
                 try:
@@ -128,9 +156,18 @@ class HimalayaCommand:
                         if parsed.build() == command:
                             return parsed
 
-        if len(command) == 11 and command[:5] == ("himalaya", "envelope", "list", "-a", command[4]):
+        if len(command) == 11 and command[:5] == (
+            "himalaya",
+            "envelope",
+            "list",
+            "-a",
+            command[4],
+        ):
             account = command[4]
-            if command[5:7] == ("--folder", "Sent Items") and command[7] == "--page-size":
+            if (
+                command[5:7] == ("--folder", "Sent Items")
+                and command[7] == "--page-size"
+            ):
                 try:
                     page_size = int(command[8])
                 except ValueError:
@@ -201,8 +238,10 @@ class HimalayaPreflight(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def ok(self) -> bool:
-        return self.command_found and not self.errors and all(
-            account.ok for account in self.account_preflights
+        return (
+            self.command_found
+            and not self.errors
+            and all(account.ok for account in self.account_preflights)
         )
 
 
@@ -353,7 +392,9 @@ def _run_account_preflight(
     )
 
 
-def _run(command: Command, runner: Runner, commands: list[CommandEvidence]) -> CommandEvidence:
+def _run(
+    command: Command, runner: Runner, commands: list[CommandEvidence]
+) -> CommandEvidence:
     _ensure_allowed(command)
     try:
         result = runner(command)

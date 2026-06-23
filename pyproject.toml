@@ -23,9 +23,28 @@ hermes-agent = { path = "../../.hermes/hermes-agent", editable = true }
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4.6.0",
     "pyright>=1.1.410",
     "pytest>=8.4.0",
+    "ruff>=0.15.18",
 ]
 
 [project.scripts]
 jake-tools = "jake_tools.__main__:main"
+
+[tool.ruff]
+target-version = "py314"
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "C4",  # flake8-comprehensions
+]
+# The formatter owns line wrapping; E501 only fires on unsplittable strings.
+ignore = ["E501"]

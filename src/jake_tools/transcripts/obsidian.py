@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .models import RecordingRef, SourceNote
@@ -68,7 +68,7 @@ def _parse_attendees(body: str) -> list[str]:
 def _created_at(path: Path) -> datetime:
     stat = path.stat()
     ts = stat.st_birthtime if hasattr(stat, "st_birthtime") else stat.st_mtime
-    return datetime.fromtimestamp(ts, tz=timezone.utc)
+    return datetime.fromtimestamp(ts, tz=UTC)
 
 
 def _candidate_paths(note_path: Path, target: str) -> list[Path]:
@@ -107,7 +107,11 @@ def resolve_recording_path(note_path: Path, raw_link: str) -> Path:
 
 def extract_recording_links(note_body: str) -> list[str]:
     links = [*EMBED_RE.findall(note_body), *MARKDOWN_LINK_RE.findall(note_body)]
-    return [link for link in links if Path(_normalise_link_target(link)).suffix.lower() in AUDIO_EXTENSIONS]
+    return [
+        link
+        for link in links
+        if Path(_normalise_link_target(link)).suffix.lower() in AUDIO_EXTENSIONS
+    ]
 
 
 def load_source_note(note_path: Path) -> SourceNote:

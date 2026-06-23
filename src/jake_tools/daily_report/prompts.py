@@ -6,15 +6,13 @@ from typing import ClassVar
 
 from pydantic import BaseModel
 
-from .models import LaneName, LaneOutput
 from ..prompting import StructuredPrompt
+from .models import LaneName, LaneOutput
 
 
 class DailyReportLanePrompt(StructuredPrompt[LaneOutput]):
     response_model: ClassVar[type[BaseModel]] = LaneOutput
-    template: ClassVar[
-        str
-    ] = """\
+    template: ClassVar[str] = """\
 Run ID: {{ run_id }}
 Target date: {{ target_date }}
 Timezone: {{ timezone_name }}
@@ -95,7 +93,7 @@ def build_prompt(
                     "\nInbox envelope metadata (inline evidence):\n"
                     + json.dumps(data, indent=2)
                 )
-            except (OSError, json.JSONDecodeError):
+            except OSError, json.JSONDecodeError:
                 inline_evidence = "\nInbox envelope metadata: (unreadable)"
 
     return prompt_type(

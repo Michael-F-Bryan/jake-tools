@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from datetime import date
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
+from jake_tools.ai_usage import Usage
 from jake_tools.daily_report.coordinator import (
     DailyReportCommandOptions,
     run_daily_report,
@@ -12,10 +13,15 @@ from jake_tools.daily_report.coordinator import (
 )
 from jake_tools.daily_report.himalaya import CommandResult
 from jake_tools.daily_report.lanes import build_lane_specs
-from jake_tools.daily_report.models import DailyReportLaneOptions, LaneName, LaneOutput, LaneShape, LaneSpec
+from jake_tools.daily_report.models import (
+    DailyReportLaneOptions,
+    LaneName,
+    LaneOutput,
+    LaneShape,
+    LaneSpec,
+)
 from jake_tools.daily_report.paths import DailyReportPaths
 from jake_tools.daily_report.stages import HermesDailyReportStages
-from jake_tools.ai_usage import Usage
 from jake_tools.hermes import AgentSpec, Reply
 from jake_tools.prompting import StructuredPrompt
 
@@ -47,7 +53,9 @@ class FakeStages:
         )
 
 
-def make_run(tmp_path: Path) -> tuple[DailyReportLaneOptions, DailyReportPaths, list[LaneSpec]]:
+def make_run(
+    tmp_path: Path,
+) -> tuple[DailyReportLaneOptions, DailyReportPaths, list[LaneSpec]]:
     paths = DailyReportPaths.for_date(tmp_path, date(2026, 6, 21))
     options = DailyReportLaneOptions(run_id="run-1", target_date="2026-06-21")
     specs = build_lane_specs(options, paths)
@@ -58,11 +66,15 @@ def read_events(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def test_coordinator_writes_start_complete_events_and_lane_artefacts(tmp_path: Path) -> None:
+def test_coordinator_writes_start_complete_events_and_lane_artefacts(
+    tmp_path: Path,
+) -> None:
     options, paths, specs = make_run(tmp_path)
     stages = FakeStages()
 
-    result = run_daily_report(options=options, stages=stages, specs=specs[:1], paths=paths)
+    result = run_daily_report(
+        options=options, stages=stages, specs=specs[:1], paths=paths
+    )
 
     assert result.status == "ok"
     events = read_events(paths.lane_events)
@@ -88,7 +100,9 @@ def test_coordinator_parallel_runner_calls_all_six_lanes(tmp_path: Path) -> None
     assert all(spec.artefact_path.exists() for spec in specs)
 
 
-def test_coordinator_records_lane_failure_and_still_returns_result(tmp_path: Path) -> None:
+def test_coordinator_records_lane_failure_and_still_returns_result(
+    tmp_path: Path,
+) -> None:
     options, paths, specs = make_run(tmp_path)
     failing_lane = specs[1].name
     stages = FakeStages(failing={failing_lane})
@@ -97,7 +111,7 @@ def test_coordinator_records_lane_failure_and_still_returns_result(tmp_path: Pat
 
     assert result.status == "fail"
     assert result.lanes[failing_lane].status == "fail"
-    assert "RuntimeError: boom memory-candidates" == result.lanes[failing_lane].error
+    assert result.lanes[failing_lane].error == "RuntimeError: boom memory-candidates"
     assert not specs[1].artefact_path.exists()
     assert any(
         event["event"] == "complete"
@@ -193,7 +207,7 @@ def test_run_daily_report_command_creates_lane_evidence_bundles(tmp_path: Path) 
             state_db=tmp_path / "missing-state.db",
             run_id_factory=lambda: "run-1",
         ),
-        stages=cast(Any, ValidatingFakeStages()),
+        stages=ValidatingFakeStages(),
         himalaya_runner=fake_himalaya_runner,
     )
 
@@ -209,17 +223,28 @@ def test_run_daily_report_command_creates_lane_evidence_bundles(tmp_path: Path) 
         assert bundle["code_owned"] is True
 
 
-def test_lane_prompt_renders_required_sections_as_exact_markdown_headings(tmp_path: Path) -> None:
+def test_lane_prompt_renders_required_sections_as_exact_markdown_headings(
+    tmp_path: Path,
+) -> None:
     options, paths, specs = make_run(tmp_path)
     del options, paths
     spec = next(spec for spec in specs if spec.name is LaneName.SESSION_HINDSIGHT)
 
     rendered = spec.prompt.render()
 
-    assert "Required Markdown headings:\n## summary\n## decisions\n## risks\n## open threads" in rendered
-    assert "must include every required section above as an exact Markdown heading" in rendered
+    assert (
+        "Required Markdown headings:\n## summary\n## decisions\n## risks\n## open threads"
+        in rendered
+    )
+    assert (
+        "must include every required section above as an exact Markdown heading"
+        in rendered
+    )
     assert "Set evidence_paths only to existing filesystem evidence files" in rendered
-    assert "Evidence unavailable from declared bundle; no body content reviewed." in rendered
+    assert (
+        "Evidence unavailable from declared bundle; no body content reviewed."
+        in rendered
+    )
 
 
 def test_hermes_daily_report_stages_passes_worker_agent_spec(tmp_path: Path) -> None:
@@ -232,10 +257,12 @@ def test_hermes_daily_report_stages_passes_worker_agent_spec(tmp_path: Path) -> 
         max_iterations=7,
     )
     worker = next(
-        spec for spec in build_lane_specs(options, paths) if spec.shape is LaneShape.WORKER_AGENT
+        spec
+        for spec in build_lane_specs(options, paths)
+        if spec.shape is LaneShape.WORKER_AGENT
     )
     fake_hermes = FakeHermes()
-    stages = HermesDailyReportStages(cast(Any, fake_hermes))
+    stages = HermesDailyReportStages(fake_hermes)
 
     output, result = stages.run_lane(worker, options)
 
@@ -257,7 +284,7 @@ def test_hermes_daily_report_stages_uses_prefed_structured_path(tmp_path: Path) 
     options, paths, specs = make_run(tmp_path)
     prefed = next(spec for spec in specs if spec.shape is LaneShape.PRE_FED)
     fake_hermes = FakeHermes()
-    stages = HermesDailyReportStages(cast(Any, fake_hermes))
+    stages = HermesDailyReportStages(fake_hermes)
 
     output, _ = stages.run_lane(prefed, options)
 

@@ -57,10 +57,16 @@ def create_state_db(path: Path) -> None:
 
 
 def epoch(value: str) -> float:
-    return datetime.fromisoformat(value).replace(tzinfo=ZoneInfo("Australia/Perth")).timestamp()
+    return (
+        datetime.fromisoformat(value)
+        .replace(tzinfo=ZoneInfo("Australia/Perth"))
+        .timestamp()
+    )
 
 
-def test_build_session_manifest_uses_epoch_bounds_in_local_timezone(tmp_path: Path) -> None:
+def test_build_session_manifest_uses_epoch_bounds_in_local_timezone(
+    tmp_path: Path,
+) -> None:
     db = tmp_path / "state.db"
     create_state_db(db)
     conn = sqlite3.connect(db)
@@ -73,9 +79,51 @@ def test_build_session_manifest_uses_epoch_bounds_in_local_timezone(tmp_path: Pa
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
-            ("before", "cli", "m", None, epoch("2026-06-20T23:59:59"), None, 1, 1, 2, 0.1, "ok", "test", "Before"),
-            ("inside", "discord", "gpt", "parent", epoch("2026-06-21T08:30:00"), None, 10, 5, 15, 0.2, "ok", "test", "Inside"),
-            ("after", "cli", "m", None, epoch("2026-06-22T00:00:00"), None, 1, 1, 2, 0.1, "ok", "test", "After"),
+            (
+                "before",
+                "cli",
+                "m",
+                None,
+                epoch("2026-06-20T23:59:59"),
+                None,
+                1,
+                1,
+                2,
+                0.1,
+                "ok",
+                "test",
+                "Before",
+            ),
+            (
+                "inside",
+                "discord",
+                "gpt",
+                "parent",
+                epoch("2026-06-21T08:30:00"),
+                None,
+                10,
+                5,
+                15,
+                0.2,
+                "ok",
+                "test",
+                "Inside",
+            ),
+            (
+                "after",
+                "cli",
+                "m",
+                None,
+                epoch("2026-06-22T00:00:00"),
+                None,
+                1,
+                1,
+                2,
+                0.1,
+                "ok",
+                "test",
+                "After",
+            ),
         ],
     )
     conn.commit()
@@ -91,7 +139,9 @@ def test_build_session_manifest_uses_epoch_bounds_in_local_timezone(tmp_path: Pa
     assert manifest.missing_columns == []
 
 
-def test_build_session_manifest_degrades_when_optional_columns_are_missing(tmp_path: Path) -> None:
+def test_build_session_manifest_degrades_when_optional_columns_are_missing(
+    tmp_path: Path,
+) -> None:
     db = tmp_path / "state.db"
     conn = sqlite3.connect(db)
     conn.execute(

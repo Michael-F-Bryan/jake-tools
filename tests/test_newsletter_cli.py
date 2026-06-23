@@ -4,7 +4,12 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from jake_tools.cli.newsletter import newsletter
-from jake_tools.newsletters import NewsletterAttachment, NewsletterItem, body_from_html, body_to_html
+from jake_tools.newsletters import (
+    NewsletterAttachment,
+    NewsletterItem,
+    body_from_html,
+    body_to_html,
+)
 
 newsletter_cli = importlib.import_module("jake_tools.cli.newsletter")
 
@@ -27,7 +32,9 @@ class FakeNewsletterClient:
     def list_items(self, *, limit: int):
         return self.items[:limit]
 
-    def create_item(self, *, title: str, body: str, attachments: list[NewsletterAttachment]):
+    def create_item(
+        self, *, title: str, body: str, attachments: list[NewsletterAttachment]
+    ):
         self.created.append({"title": title, "body": body, "attachments": attachments})
         return NewsletterItem(
             id="296",
@@ -47,7 +54,12 @@ class FakeNewsletterClient:
         attachments: list[NewsletterAttachment],
     ):
         self.updated.append(
-            {"item_id": item_id, "title": title, "body": body, "attachments": attachments}
+            {
+                "item_id": item_id,
+                "title": title,
+                "body": body,
+                "attachments": attachments,
+            }
         )
         return NewsletterItem(
             id=item_id,
@@ -148,5 +160,7 @@ def test_body_html_round_trip_preserves_paragraphs() -> None:
 
     html = body_to_html(body)
 
-    assert html == "<p>First paragraph<br>with a line break.</p><p>Second paragraph.</p>"
+    assert (
+        html == "<p>First paragraph<br>with a line break.</p><p>Second paragraph.</p>"
+    )
     assert body_from_html(html) == body

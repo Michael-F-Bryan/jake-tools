@@ -5,17 +5,27 @@ from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
+from jake_tools.ai_usage import Usage
 from jake_tools.daily_report.coordinator import DailyReportRunResult, LaneRunResult
 from jake_tools.daily_report.lanes import build_lane_specs
 from jake_tools.daily_report.manifest import build_and_write_run_manifest
-from jake_tools.daily_report.models import DailyReportLaneOptions, LaneName, LaneOutput, LaneSpec
+from jake_tools.daily_report.models import (
+    DailyReportLaneOptions,
+    LaneName,
+    LaneOutput,
+    LaneSpec,
+)
 from jake_tools.daily_report.paths import DailyReportPaths
-from jake_tools.daily_report.validation import apply_validation_to_lane_result, validate_lane_artifact
-from jake_tools.ai_usage import Usage
+from jake_tools.daily_report.validation import (
+    apply_validation_to_lane_result,
+    validate_lane_artifact,
+)
 from jake_tools.hermes import Reply
 
 
-def make_paths_and_specs(tmp_path: Path) -> tuple[DailyReportLaneOptions, DailyReportPaths, list[LaneSpec]]:
+def make_paths_and_specs(
+    tmp_path: Path,
+) -> tuple[DailyReportLaneOptions, DailyReportPaths, list[LaneSpec]]:
     paths = DailyReportPaths.for_date(tmp_path, date(2026, 6, 21)).create()
     options = DailyReportLaneOptions(
         run_id="run-1",
@@ -42,7 +52,9 @@ def write_session_manifest(paths: DailyReportPaths, session_ids: list[str]) -> N
 
 
 def markdown_for(spec: LaneSpec) -> str:
-    return "\n\n".join(f"## {heading}\nSupported detail." for heading in spec.required_sections)
+    return "\n\n".join(
+        f"## {heading}\nSupported detail." for heading in spec.required_sections
+    )
 
 
 def write_output(spec: LaneSpec, output: LaneOutput) -> None:
@@ -103,13 +115,17 @@ def test_validation_catches_missing_heading(tmp_path: Path) -> None:
     evidence.write_text("{}", encoding="utf-8")
     write_output(
         spec,
-        LaneOutput(markdown="## Summary\nOnly one section.", evidence_paths=[str(evidence)]),
+        LaneOutput(
+            markdown="## Summary\nOnly one section.", evidence_paths=[str(evidence)]
+        ),
     )
 
     result = validate_lane_artifact(spec, paths)
 
     assert result.status == "fail"
-    assert any("required heading missing: decisions" in error for error in result.errors)
+    assert any(
+        "required heading missing: decisions" in error for error in result.errors
+    )
 
 
 def test_validation_catches_missing_evidence(tmp_path: Path) -> None:
@@ -178,7 +194,9 @@ def test_validation_catches_tool_unavailable_without_preflight(tmp_path: Path) -
     assert any("preflight" in error for error in result.errors)
 
 
-def test_validation_catches_placeholder_filler_but_allows_word_in_context(tmp_path: Path) -> None:
+def test_validation_catches_placeholder_filler_but_allows_word_in_context(
+    tmp_path: Path,
+) -> None:
     _, paths, specs = make_paths_and_specs(tmp_path)
     spec = specs[0]
     evidence = paths.evidence / "source.json"
@@ -194,7 +212,10 @@ def test_validation_catches_placeholder_filler_but_allows_word_in_context(tmp_pa
     )
     filler = validate_lane_artifact(spec, paths)
     assert filler.status == "fail"
-    assert any("banned placeholder phrase present: placeholder" in error for error in filler.errors)
+    assert any(
+        "banned placeholder phrase present: placeholder" in error
+        for error in filler.errors
+    )
 
     write_output(
         spec,
@@ -208,11 +229,15 @@ def test_validation_catches_placeholder_filler_but_allows_word_in_context(tmp_pa
     assert contextual.status == "ok"
 
 
-def test_validation_failure_can_be_represented_as_lane_status_fail_data(tmp_path: Path) -> None:
+def test_validation_failure_can_be_represented_as_lane_status_fail_data(
+    tmp_path: Path,
+) -> None:
     _, paths, specs = make_paths_and_specs(tmp_path)
     spec = specs[0]
     write_output(spec, LaneOutput(markdown="{}"))
-    lane_result = LaneRunResult(name=spec.name, status="ok", artefact_path=spec.artefact_path)
+    lane_result = LaneRunResult(
+        name=spec.name, status="ok", artefact_path=spec.artefact_path
+    )
     validation = validate_lane_artifact(spec, paths)
 
     updated = apply_validation_to_lane_result(lane_result, validation)
@@ -262,4 +287,6 @@ def test_manifest_writes_expected_json(tmp_path: Path) -> None:
     assert payload["lane_specs"][0]["name"] == spec.name.value
     assert payload["lane_results"][0]["status"] == "ok"
     assert payload["lane_results"][0]["hermes_result"]["api_calls"] == 1
-    assert payload["validation_results"] == [{"lane": spec.name.value, "status": "ok", "errors": []}]
+    assert payload["validation_results"] == [
+        {"lane": spec.name.value, "status": "ok", "errors": []}
+    ]

@@ -15,9 +15,21 @@ class DummyResult:
 
     def json_summary(self) -> dict:
         return {
-            "chapter_summaries": [{"title": "Kickoff", "start_timestamp": "00:00", "end_timestamp": "00:30"}],
-            "ai_stage_stats": [{"stage": "chaptering", "total_tokens": 42, "estimated_cost_usd": 0.01}],
-            "ai_totals": {"stage_count": 1, "total_tokens": 42, "estimated_cost_usd": 0.01},
+            "chapter_summaries": [
+                {
+                    "title": "Kickoff",
+                    "start_timestamp": "00:00",
+                    "end_timestamp": "00:30",
+                }
+            ],
+            "ai_stage_stats": [
+                {"stage": "chaptering", "total_tokens": 42, "estimated_cost_usd": 0.01}
+            ],
+            "ai_totals": {
+                "stage_count": 1,
+                "total_tokens": 42,
+                "estimated_cost_usd": 0.01,
+            },
             "speaker_message_counts": [{"speaker": "Vet West", "messages": 3}],
         }
 

@@ -8,7 +8,6 @@ from run_agent import AIAgent
 from .ai_usage import Usage
 from .prompting import Prompt, StructuredPrompt
 
-
 DEFAULT_MODEL = "gpt-5.4-mini"
 DEFAULT_PROVIDER = "openai-code"
 TModel = TypeVar("TModel", bound=BaseModel)
@@ -20,7 +19,7 @@ class Reply(BaseModel):
     usage: Usage = Field(default_factory=Usage)
 
     @classmethod
-    def from_run(cls, raw: dict[str, Any]) -> "Reply":
+    def from_run(cls, raw: dict[str, Any]) -> Reply:
         return cls(
             text=raw.get("final_response"),
             error=raw.get("error"),
@@ -95,7 +94,7 @@ class AgentSpec(BaseModel):
     max_iterations: int | None = None
     session_db: Any | None = None
 
-    def merge(self, override: "AgentSpec | None") -> "AgentSpec":
+    def merge(self, override: AgentSpec | None) -> AgentSpec:
         if override is None:
             return self.model_copy(deep=True)
         merged = self.model_dump()
@@ -183,7 +182,7 @@ def _render_repair_prompt(last_error: str, previous_response: str | None) -> str
     )
 
 
-def _parse_structured_response(
+def _parse_structured_response[TModel: BaseModel](
     response: Any, model_type: type[TModel]
 ) -> TModel:
     if response is None:
