@@ -11,7 +11,8 @@ from jake_tools.daily_report.manifest import build_and_write_run_manifest
 from jake_tools.daily_report.models import DailyReportLaneOptions, LaneName, LaneOutput, LaneSpec
 from jake_tools.daily_report.paths import DailyReportPaths
 from jake_tools.daily_report.validation import apply_validation_to_lane_result, validate_lane_artifact
-from jake_tools.hermes import HermesResult
+from jake_tools.ai_usage import Usage
+from jake_tools.hermes import Reply
 
 
 def make_paths_and_specs(tmp_path: Path) -> tuple[DailyReportLaneOptions, DailyReportPaths, list[LaneSpec]]:
@@ -234,7 +235,9 @@ def test_manifest_writes_expected_json(tmp_path: Path) -> None:
         status="ok",
         artefact_path=spec.artefact_path,
         output=output,
-        hermes_result=HermesResult(completed=True, model=spec.model, provider=spec.provider, api_calls=1),
+        hermes_result=Reply(
+            usage=Usage(model=spec.model, provider=spec.provider, api_calls=1)
+        ),
     )
     run_result = DailyReportRunResult(
         run_id=options.run_id,

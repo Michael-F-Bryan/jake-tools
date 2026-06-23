@@ -15,7 +15,8 @@ from jake_tools.daily_report.lanes import build_lane_specs
 from jake_tools.daily_report.models import DailyReportLaneOptions, LaneName, LaneOutput, LaneShape, LaneSpec
 from jake_tools.daily_report.paths import DailyReportPaths
 from jake_tools.daily_report.stages import HermesDailyReportStages
-from jake_tools.hermes import AgentSpec, HermesResult
+from jake_tools.ai_usage import Usage
+from jake_tools.hermes import AgentSpec, Reply
 from jake_tools.prompting import StructuredPrompt
 
 
@@ -28,7 +29,7 @@ class FakeStages:
         self,
         spec: LaneSpec,
         options: DailyReportLaneOptions,
-    ) -> tuple[LaneOutput, HermesResult]:
+    ) -> tuple[LaneOutput, Reply]:
         del options
         self.calls.append(spec.name)
         if spec.name in self.failing:
@@ -42,7 +43,7 @@ class FakeStages:
                 evidence_paths=[str(spec.evidence_bundle_path)],
                 cited_session_ids=["session-1"],
             ),
-            HermesResult(completed=True, model=spec.model, provider=spec.provider, api_calls=1),
+            Reply(usage=Usage(model=spec.model, provider=spec.provider, api_calls=1)),
         )
 
 
@@ -143,26 +144,25 @@ def test_coordinator_clears_stale_artefacts_before_dispatch(tmp_path: Path) -> N
 
 class FakeHermes:
     def __init__(self) -> None:
-        self.structured_calls: list[tuple[StructuredPrompt[LaneOutput], str | None, str | None]] = []
-        self.agent_calls: list[tuple[AgentSpec, StructuredPrompt[LaneOutput]]] = []
+        self.calls: list[tuple[StructuredPrompt[LaneOutput], AgentSpec | None]] = []
 
-    def run_structured_with_result(
+    def run_structured(
         self,
         prompt: StructuredPrompt[LaneOutput],
-        *,
-        model: str | None = None,
-        provider: str | None = None,
-    ) -> tuple[LaneOutput, HermesResult]:
-        self.structured_calls.append((prompt, model, provider))
-        return LaneOutput(markdown="prefed"), HermesResult(completed=True, model=model, provider=provider)
-
-    def run_agent_structured(
-        self,
-        spec: AgentSpec,
-        prompt: StructuredPrompt[LaneOutput],
-    ) -> tuple[LaneOutput, HermesResult]:
-        self.agent_calls.append((spec, prompt))
-        return LaneOutput(markdown="worker"), HermesResult(completed=True)
+        spec: AgentSpec | None = None,
+    ) -> tuple[LaneOutput, Reply]:
+        self.calls.append((prompt, spec))
+        if spec is not None and spec.enabled_toolsets:
+            return LaneOutput(markdown="worker"), Reply(
+                usage=Usage(model=spec.model, provider=spec.provider, api_calls=1)
+            )
+        return LaneOutput(markdown="prefed"), Reply(
+            usage=Usage(
+                model=spec.model if spec else None,
+                provider=spec.provider if spec else None,
+                api_calls=1,
+            )
+        )
 
 
 class ValidatingFakeStages:
@@ -170,7 +170,7 @@ class ValidatingFakeStages:
         self,
         spec: LaneSpec,
         options: DailyReportLaneOptions,
-    ) -> tuple[LaneOutput, HermesResult]:
+    ) -> tuple[LaneOutput, Reply]:
         del options
         markdown = "\n".join(f"## {section}" for section in spec.required_sections)
         return (
@@ -178,7 +178,7 @@ class ValidatingFakeStages:
                 markdown=markdown,
                 evidence_paths=[str(spec.evidence_bundle_path)],
             ),
-            HermesResult(completed=True, model=spec.model, provider=spec.provider, api_calls=1),
+            Reply(usage=Usage(model=spec.model, provider=spec.provider, api_calls=1)),
         )
 
 
@@ -240,10 +240,11 @@ def test_hermes_daily_report_stages_passes_worker_agent_spec(tmp_path: Path) -> 
     output, result = stages.run_lane(worker, options)
 
     assert output.markdown == "worker"
-    assert result.completed is True
-    assert len(fake_hermes.agent_calls) == 1
-    agent_spec, prompt = fake_hermes.agent_calls[0]
+    assert result.usage.api_calls == 1
+    assert len(fake_hermes.calls) == 1
+    prompt, agent_spec = fake_hermes.calls[0]
     assert prompt is worker.prompt
+    assert agent_spec is not None
     assert agent_spec.model == worker.model
     assert agent_spec.provider == worker.provider
     assert agent_spec.enabled_toolsets == list(worker.enabled_toolsets)
@@ -261,5 +262,10 @@ def test_hermes_daily_report_stages_uses_prefed_structured_path(tmp_path: Path) 
     output, _ = stages.run_lane(prefed, options)
 
     assert output.markdown == "prefed"
-    assert fake_hermes.structured_calls == [(prefed.prompt, prefed.model, prefed.provider)]
-    assert fake_hermes.agent_calls == []
+    assert len(fake_hermes.calls) == 1
+    prompt, agent_spec = fake_hermes.calls[0]
+    assert prompt is prefed.prompt
+    assert agent_spec is not None
+    assert agent_spec.model == prefed.model
+    assert agent_spec.provider == prefed.provider
+    assert agent_spec.enabled_toolsets == []

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
-from ..hermes import HermesResult
+from ..hermes import Reply
 from .coordinator import LaneRunResult
 from .models import LaneName, LaneOutput, LaneSpec
 from .validation import LaneValidationResult
@@ -34,7 +34,18 @@ class ManifestLaneResult(BaseModel):
     artefact_path: str
     error: str | None = None
     output: LaneOutput | None = None
-    hermes_result: HermesResult | None = None
+    hermes_result: Reply | None = None
+
+    @field_serializer("hermes_result", when_used="json")
+    def _serialize_hermes_result(self, reply: Reply | None) -> dict[str, object] | None:
+        if reply is None:
+            return None
+        payload: dict[str, object] = {
+            "text": reply.text,
+            "error": reply.error,
+        }
+        payload.update(reply.usage.model_dump(mode="json"))
+        return payload
 
 
 class ManifestLaneValidation(BaseModel):

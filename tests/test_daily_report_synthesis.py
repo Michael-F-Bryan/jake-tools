@@ -11,7 +11,8 @@ from jake_tools.daily_report.models import DailyReportLaneOptions, LaneName, Lan
 from jake_tools.daily_report.paths import DailyReportPaths
 from jake_tools.daily_report.synthesis import DailyReportSummary, aggregate_ai_usage, synthesize_daily_report
 from jake_tools.daily_report.validation import LaneValidationResult
-from jake_tools.hermes import HermesResult
+from jake_tools.ai_usage import Usage
+from jake_tools.hermes import Reply
 
 
 def make_paths_options_specs(
@@ -35,7 +36,7 @@ def lane_result(
     *,
     status: str = "ok",
     output: LaneOutput | None = None,
-    hermes_result: HermesResult | None = None,
+    hermes_result: Reply | None = None,
     error: str | None = None,
 ) -> LaneRunResult:
     return LaneRunResult(
@@ -66,22 +67,26 @@ def test_returned_lane_usage_totals_ignore_negative_costs(tmp_path: Path) -> Non
         lanes={
             first.name: lane_result(
                 first,
-                hermes_result=HermesResult(
-                    api_calls=1,
-                    input_tokens=10,
-                    output_tokens=20,
-                    total_tokens=30,
-                    estimated_cost_usd=0.25,
+                hermes_result=Reply(
+                    usage=Usage(
+                        api_calls=1,
+                        input_tokens=10,
+                        output_tokens=20,
+                        total_tokens=30,
+                        estimated_cost_usd=0.25,
+                    ),
                 ),
             ),
             second.name: lane_result(
                 second,
-                hermes_result=HermesResult(
-                    api_calls=2,
-                    input_tokens=3,
-                    output_tokens=4,
-                    total_tokens=7,
-                    estimated_cost_usd=-9.0,
+                hermes_result=Reply(
+                    usage=Usage(
+                        api_calls=2,
+                        input_tokens=3,
+                        output_tokens=4,
+                        total_tokens=7,
+                        estimated_cost_usd=-9.0,
+                    ),
                 ),
             ),
         },
@@ -133,7 +138,13 @@ def test_parent_child_sqlite_usage_aggregation_prefers_session_family(tmp_path: 
         lanes={
             specs[0].name: lane_result(
                 specs[0],
-                hermes_result=HermesResult(api_calls=99, total_tokens=99, estimated_cost_usd=99.0),
+                hermes_result=Reply(
+                    usage=Usage(
+                        api_calls=99,
+                        total_tokens=99,
+                        estimated_cost_usd=99.0,
+                    )
+                ),
             )
         },
     )
@@ -203,7 +214,11 @@ def test_summary_json_shape_and_failed_lanes_counted(tmp_path: Path) -> None:
         run_id="run-1",
         status="fail",
         lanes={
-            ok_spec.name: lane_result(ok_spec, output=output, hermes_result=HermesResult(api_calls=1, total_tokens=3)),
+            ok_spec.name: lane_result(
+                ok_spec,
+                output=output,
+                hermes_result=Reply(usage=Usage(api_calls=1, total_tokens=3)),
+            ),
             failed_spec.name: lane_result(failed_spec, status="fail", error="boom"),
         },
     )

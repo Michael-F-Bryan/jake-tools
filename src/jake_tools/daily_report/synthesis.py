@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
@@ -12,6 +11,11 @@ from ..ai_usage import AIStageStats, AITotals, build_ai_stage_stats, build_ai_to
 from .coordinator import DailyReportRunResult, LaneRunResult
 from .models import DailyReportLaneOptions, LaneName, LaneOutput, LaneSpec
 from .paths import DailyReportPaths
+from .session_accounting import (
+    SessionUsageRow,
+    aggregate_parent_child_from_db,
+    totals_from_session_rows,
+)
 from .validation import LaneValidationResult
 
 SummaryStatus = Literal["ok", "fail"]
@@ -88,7 +92,7 @@ def aggregate_ai_usage(
     paths: DailyReportPaths | None = None,
 ) -> AITotals:
     if options.parent_session_id:
-        db_totals = _aggregate_parent_child_from_db(
+        db_totals = aggregate_parent_child_from_db(
             options.session_db, options.parent_session_id
         )
         if db_totals is not None:
@@ -217,8 +221,8 @@ def _aggregate_from_lane_results(run_result: DailyReportRunResult) -> AITotals:
         stats = build_ai_stage_stats(name.value, run_result.lanes[name].hermes_result)
         if stats is None:
             continue
-        if stats.estimated_cost_usd < 0:
-            stats.estimated_cost_usd = 0.0
+        if stats.usage.estimated_cost_usd < 0:
+            stats.usage.estimated_cost_usd = 0.0
         stage_stats.append(stats)
     return build_ai_totals(stage_stats)
 
@@ -300,39 +304,9 @@ def _aggregate_parent_child_from_manifest(
     ]
     if not rows:
         return None
-    return _totals_from_session_rows(rows)
-
-
-def _totals_from_session_rows(rows: Sequence[Mapping[str, Any]]) -> AITotals:
-    stage_stats = [
-        AIStageStats(
-            stage=str(row.get("id") or "session"),
-            model=_optional_str(row.get("model")),
-            provider=_optional_str(row.get("provider")),
-            api_calls=_non_negative_int(row.get("api_calls"), default=1),
-            input_tokens=_non_negative_int(row.get("input_tokens")),
-            output_tokens=_non_negative_int(row.get("output_tokens")),
-            cache_read_tokens=_non_negative_int(row.get("cache_read_tokens")),
-            cache_write_tokens=_non_negative_int(row.get("cache_write_tokens")),
-            reasoning_tokens=_non_negative_int(row.get("reasoning_tokens")),
-            prompt_tokens=_non_negative_int(row.get("prompt_tokens")),
-            completion_tokens=_non_negative_int(row.get("completion_tokens")),
-            total_tokens=_non_negative_int(row.get("total_tokens")),
-            estimated_cost_usd=_non_negative_float(row.get("estimated_cost_usd")),
-        )
-        for row in rows
-    ]
-    return build_ai_totals(stage_stats)
-
-
-def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-
-
-def _select_expr(columns: set[str], name: str, fallback: str = "NULL") -> str:
-    if name in columns:
-        return name
-    return f"{fallback} AS {name}"
+    return totals_from_session_rows(
+        [SessionUsageRow.from_mapping(row) for row in rows]
+    )
 
 
 def _prefixed_items(
@@ -379,27 +353,3 @@ def _failed_lane_names(
 
 def _markdown_link(path: Path) -> str:
     return str(path).replace(" ", "%20")
-
-
-def _optional_str(value: Any) -> str | None:
-    return value if isinstance(value, str) else None
-
-
-def _non_negative_int(value: Any, *, default: int = 0) -> int:
-    if value is None:
-        return default
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else 0
-
-
-def _non_negative_float(value: Any) -> float:
-    if value is None:
-        return 0.0
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    return parsed if parsed > 0 else 0.0

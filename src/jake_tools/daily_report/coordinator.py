@@ -14,8 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .models import DailyReportLaneOptions, LaneName, LaneOutput, LaneSpec
 from .paths import DailyReportPaths
+from .preflight import day_epoch_bounds
 from .stages import DailyReportStages
-from ..hermes import HermesResult
+from ..hermes import Reply
 
 LaneStatus = Literal["ok", "fail"]
 
@@ -27,7 +28,7 @@ class LaneRunResult(BaseModel):
     status: LaneStatus
     artefact_path: Path
     output: LaneOutput | None = None
-    hermes_result: HermesResult | None = None
+    hermes_result: Reply | None = None
     error: str | None = None
 
 
@@ -183,30 +184,34 @@ def run_daily_report_command(
     )
 
 
-def _write_session_manifest_evidence(**kwargs: Any) -> None:
-    state_db: Path = kwargs["state_db"]
+def _write_session_manifest_evidence(
+    *,
+    state_db: Path,
+    target_date: date,
+    timezone_name: str,
+    path: Path,
+    build_session_manifest: Callable[..., Any],
+    write_session_manifest: Callable[[Path, Any], None],
+    write_json: Callable[[Path, dict[str, Any]], None],
+) -> None:
     if state_db.exists():
-        manifest = kwargs["build_session_manifest"](
+        manifest = build_session_manifest(
             state_db,
-            kwargs["target_date"],
-            timezone_name=kwargs["timezone_name"],
+            target_date,
+            timezone_name=timezone_name,
         )
-        kwargs["write_session_manifest"](kwargs["path"], manifest)
+        write_session_manifest(path, manifest)
         return
     start_epoch = end_epoch = 0.0
     try:
-        from .preflight import day_epoch_bounds
-
-        start_epoch, end_epoch = day_epoch_bounds(
-            kwargs["target_date"], kwargs["timezone_name"]
-        )
-    except Exception:
+        start_epoch, end_epoch = day_epoch_bounds(target_date, timezone_name)
+    except OSError:
         pass
-    kwargs["write_json"](
-        kwargs["path"],
+    write_json(
+        path,
         {
-            "target_date": kwargs["target_date"].isoformat(),
-            "timezone": kwargs["timezone_name"],
+            "target_date": target_date.isoformat(),
+            "timezone": timezone_name,
             "start_epoch": start_epoch,
             "end_epoch": end_epoch,
             "missing_columns": [],
@@ -357,7 +362,7 @@ def _run_one_lane(
     stages: DailyReportStages,
     options: DailyReportLaneOptions,
     spec: LaneSpec,
-) -> tuple[LaneOutput, HermesResult]:
+) -> tuple[LaneOutput, Reply]:
     return stages.run_lane(spec, options)
 
 
