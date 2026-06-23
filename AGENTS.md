@@ -1,52 +1,134 @@
 # Jake's Tools
 
-This repository contains a collection of tools that Jake uses to help him with his work.
+Internal Python CLI tools for Jake. Stack: Python 3.14, `uv`, Click, Pydantic,
+and Hermes (`hermes-agent`) for LLM calls. Package layout lives under
+`src/jake_tools/`. Human onboarding is in [README.md](README.md).
 
-When in doubt, check the help text.
+When in doubt, run `jake-tools <command> --help` for current flags.
 
-```console
-$ jake-tools --help
-Usage: jake-tools [OPTIONS] COMMAND [ARGS]...
+## Project layout
 
-Options:
-  -h, --help  Show this message and exit.
-
-Commands:
-  daily-report  Run the deterministic daily-report coordinator.
-  newsletter    Read and update the CSU Weekly Newsletter list.
-  transcribe    Tools for transcribing audio files.
+```text
+src/jake_tools/
+  cli/           # Click commands (keep thin)
+  daily_report/  # coordinator, lanes, synthesis, Himalaya preflight
+  transcripts/   # Obsidian recording pipeline
+  hermes.py      # Hermes wrapper and structured prompts
+  newsletters.py # SharePoint Graph client
+tests/           # mirrors packages above
+.agents/skills/daily-report/  # deep workflow guidance (not CLI code)
 ```
 
-*(update this help text as the CLI changes)*
+## Developing
 
-## Daily report CLI
+Install once:
 
-```console
-$ jake-tools daily-report --help
-Usage: jake-tools daily-report [OPTIONS]
-
-  Run the deterministic daily-report coordinator.
-
-Options:
-  --date YYYY-MM-DD       Target local date for the report.  [required]
-  --provider TEXT         LLM provider for lane workers.  [default:
-                          openrouter]
-  --judgement-model TEXT  Model for judgement-heavy lanes.  [default:
-                          openrouter/auto]
-  --evidence-model TEXT   Model for evidence-fed lanes.  [default:
-                          openrouter/auto]
-  --json                  Emit a machine-readable JSON summary only.
-  -h, --help              Show this message and exit.
+```bash
+uv sync
+uv run pre-commit install
 ```
 
-Notes:
+Before finishing work, all of these must pass:
 
-- all six lanes always run: session hindsight, memory candidates, skill review,
-  failure patterns, transcripts and DUM-C, and inbox triage
-- inbox triage is envelope-only via Himalaya; it does not read message bodies or
-  mutate mail
-- the workflow does not write memory, skills, email, cron, Obsidian,
-  SharePoint, or git
-- artefacts live under `_working/daily-report-YYYY-MM-DD/`
-- use `--json` for automation; `summary.json` includes token and estimated cost
-  totals
+```bash
+uv run pre-commit run --all-files
+```
+
+That runs `ruff check --fix`, `ruff format`, `pyright`, `pytest -q`, and a
+`uv lock` consistency check. For a quicker loop on Python changes:
+
+```bash
+uv run ruff check --fix src tests
+uv run ruff format src tests
+uv run pyright
+uv run pytest -q
+```
+
+### Code conventions
+
+- Keep CLI commands thin; put orchestration and domain logic in package modules.
+- Match surrounding code. Prefer typed Pydantic models over ad hoc dicts.
+- Ruff rules: `E`, `F`, `I`, `UP`, `B`, `SIM`, `C4` (see `pyproject.toml`).
+- Pyright must pass (`pyrightconfig.json`).
+- Hermes-injected commands use the `@hermes` decorator in `cli/options.py`.
+  `daily-report` constructs `Hermes()` directly with `--judgement-model` and
+  `--evidence-model`.
+
+## External dependencies
+
+| Tool               | Used by                                               |
+| ------------------ | ----------------------------------------------------- |
+| `uv`               | dependency management and script runner               |
+| `hermes-agent`     | LLM calls (editable path dep in `pyproject.toml`)     |
+| `himalaya`         | daily-report inbox lane preflight and envelope export |
+| `ffmpeg`, `scribe` | `transcribe obsidian-recording` audio pipeline        |
+| `az` (Azure CLI)   | `newsletter` commands (Microsoft Graph token)         |
+
+If a required external tool is missing, report the blocker. Do not mock
+preflight checks or skip them silently.
+
+## Commands
+
+### `daily-report`
+
+```bash
+jake-tools daily-report --date YYYY-MM-DD
+jake-tools daily-report --date YYYY-MM-DD --json
+```
+
+Read-only outside `_working/daily-report-YYYY-MM-DD/` under the current working
+directory. Does not mutate memory, skills, email, cron, Obsidian, SharePoint,
+or git.
+
+- All six lanes always run: session hindsight, memory candidates, skill review,
+  failure patterns, transcripts and DUM-C, and inbox triage.
+- Inbox triage is envelope-only via Himalaya; it does not read message bodies,
+  draft replies, send mail, move mail, or delete mail.
+- `--judgement-model` drives standard-tier lanes; `--evidence-model` drives
+  cheap-tier lanes. `--provider` defaults to `openrouter`.
+- `--json` emits a machine-readable summary; `summary.json` includes token and
+  estimated cost totals.
+- Exits `1` when any lane fails.
+
+Key artefacts: `report.md`, `summary.json`, `manifest.json`,
+`lane-events.jsonl`, plus `evidence/`, `subtasks/`, `prompts/`, and `logs/`.
+
+For lane orchestration, validation gates, and usage forensics, see
+[.agents/skills/daily-report/SKILL.md](.agents/skills/daily-report/SKILL.md).
+
+### `transcribe`
+
+```bash
+jake-tools transcribe obsidian-recording NOTE.md
+jake-tools transcribe obsidian-recording --dry-run --json NOTE.md
+jake-tools transcribe polish TRANSCRIPT.txt
+```
+
+`obsidian-recording` rewrites the Obsidian note in place unless `--dry-run`.
+Output sections: `## Meeting Notes`, `## Chapters`, `## Transcript`.
+`polish` writes polished text to stdout only.
+
+Both subcommands accept `--default-model` and `--provider` via the `@hermes`
+decorator.
+
+### `newsletter`
+
+```bash
+jake-tools newsletter list --limit 10
+jake-tools newsletter list --body --json
+jake-tools newsletter add "Title" < body.txt
+jake-tools newsletter edit ITEM_ID --title "New title" < body.txt
+```
+
+`list` is read-only. `add` and `edit` mutate the CSU Weekly Newsletter
+SharePoint list via Microsoft Graph. Body text is read from stdin for `add`
+(required) and `edit` (optional). `--attach` can be supplied multiple times.
+
+Requires `az login` to the CSU tenant for a Graph access token.
+
+## Boundaries
+
+- Do not commit secrets, tokens, or credentials.
+- `daily-report` is read-only outside its dated work directory; other commands
+  may write to Obsidian notes or SharePoint by design.
+- Do not assume the whole repo is read-only because daily-report is.

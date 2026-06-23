@@ -19,7 +19,7 @@ requires = ["uv_build>=0.9.21,<0.10.0"]
 build-backend = "uv_build"
 
 [tool.uv.sources]
-hermes-agent = { path = "../../.hermes/hermes-agent", editable = true }
+hermes-agent = { git = "https://github.com/NousResearch/hermes-agent.git", rev = "44c0c2d4ac05eb7ee0e32d9002bdcdbe8589f7f6" }
 
 [dependency-groups]
 dev = [

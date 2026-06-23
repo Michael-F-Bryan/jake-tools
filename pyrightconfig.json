@@ -1,7 +1,4 @@
 {
     "venvPath": ".",
-    "venv": ".venv",
-    "extraPaths": [
-        "/Users/work/.hermes/hermes-agent"
-    ]
+    "venv": ".venv"
 }
