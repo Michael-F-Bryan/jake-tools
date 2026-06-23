@@ -258,7 +258,10 @@ class NewsletterClient:
 
 def body_to_html(body: str) -> str:
     paragraphs = [paragraph.strip() for paragraph in body.strip().split("\n\n") if paragraph.strip()]
-    return "".join(f"<p>{html.escape(paragraph).replace('\n', '<br>')}</p>" for paragraph in paragraphs)
+    newline = "\n"
+    return "".join(
+        f"<p>{html.escape(paragraph).replace(newline, '<br>')}</p>" for paragraph in paragraphs
+    )
 
 
 def body_from_html(value: str) -> str:
