@@ -8,9 +8,6 @@ from run_agent import AIAgent
 from .prompting import StructuredPrompt
 
 
-DEFAULT_MODEL = "gpt-5.4-mini"
-
-
 class HermesMessage(BaseModel):
     """One message in the agent conversation history (OpenAI-compatible shape)."""
 
@@ -174,7 +171,7 @@ The input is:
 )
 
 ONESHOT_STRUCTURED_INVALID_JSON_PROMPT = Template(
-    '''
+    """
 The previous response did not validate against the required schema.
 
 Return only corrected JSON that matches the schema and includes all required fields. Populate all fields with relevant content based on the previous response and the schema. Preserve content from the previous response where possible. Do not include markdown fences or commentary.
@@ -184,7 +181,7 @@ Validation error:
 
 Previous response:
 {{ previous_response }}
-'''.strip()
+""".strip()
 )
 
 
@@ -233,13 +230,17 @@ class Hermes(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     # Pin a cheap/fast tool-workflow model unless the CLI caller overrides it.
-    default_model: str = DEFAULT_MODEL
+    default_model: str = "gpt-5.4-mini"
+    default_provider: str = "openai-code"
     agent_factory: AgentFactory = Field(default=_default_agent_factory)
 
     def new_agent(
         self, model: str | None = None, provider: str | None = None
     ) -> AgentConversation:
-        spec = AgentSpec(model=model or self.default_model, provider=provider or "")
+        spec = AgentSpec(
+            model=model or self.default_model,
+            provider=provider if provider is not None else self.default_provider,
+        )
         return self.agent_factory(spec)
 
     def oneshot(self, prompt: str) -> HermesResult:
@@ -247,7 +248,9 @@ class Hermes(BaseModel):
         result = agent.run_conversation(prompt)
         return HermesResult.model_validate(result)
 
-    def _parse_structured_response[T: BaseModel](self, response: Any, model_type: type[T]) -> T:
+    def _parse_structured_response[T: BaseModel](
+        self, response: Any, model_type: type[T]
+    ) -> T:
         if response is None:
             raise ValueError("No response from Hermes")
 
@@ -281,7 +284,9 @@ class Hermes(BaseModel):
     ) -> tuple[T, HermesResult]:
         """Run a structured prompt through a scoped, possibly tool-enabled agent."""
         response_model = cast(type[T], prompt.response_model)
-        return self._structured_with_agent(self.agent_factory(spec), prompt.render(), response_model)
+        return self._structured_with_agent(
+            self.agent_factory(spec), prompt.render(), response_model
+        )
 
     def _oneshot_structured[T: BaseModel](self, prompt: str, model_type: type[T]) -> T:
         payload, _ = self._oneshot_structured_with_result(prompt, model_type)

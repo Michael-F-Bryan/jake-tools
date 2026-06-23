@@ -17,12 +17,23 @@ def hermes[F: Callable[..., Any]](func: F) -> F:
         default=DEFAULT_MODEL,
         help="The default model to use for the Hermes instance.",
     )
+    @click.option(
+        "--provider",
+        default="",
+        help="Override the LLM provider (e.g. 'openai-codex', 'openrouter').",
+    )
     @click.pass_context
     @functools.wraps(func)
     def wrapper(
-        ctx: click.Context, default_model: str, *args: Any, **kwargs: Any
+        ctx: click.Context,
+        default_model: str,
+        provider: str,
+        *args: Any,
+        **kwargs: Any,
     ) -> Any:
-        instance = Hermes(default_model=default_model)
+        instance = Hermes(
+            default_model=default_model, default_provider=provider or ""
+        )
         return ctx.invoke(func, instance, *args, **kwargs)
 
     return cast(F, wrapper)
