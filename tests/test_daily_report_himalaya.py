@@ -5,7 +5,13 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from jake_tools.daily_report.himalaya import Command, CommandResult, run_himalaya_preflight
+from jake_tools.daily_report.himalaya import (
+    Command,
+    CommandResult,
+    HimalayaCommand,
+    default_runner,
+    run_himalaya_preflight,
+)
 
 
 @dataclass
@@ -191,3 +197,64 @@ def test_rejects_invalid_page_size_before_emitting_commands() -> None:
         run_himalaya_preflight(page_size=0, runner=runner)
 
     assert runner.calls == []
+
+
+def test_himalaya_command_builders_produce_expected_tuples() -> None:
+    assert HimalayaCommand.check_installed().build() == COMMAND_V
+    assert HimalayaCommand.account_list().build() == ACCOUNT_LIST
+    assert HimalayaCommand.folder_list("work").build() == FOLDER_LIST
+    assert HimalayaCommand.inbox_envelopes("work", 5).build() == INBOX_ENVELOPES
+    assert HimalayaCommand.sent_envelopes("work", 5).build() == SENT_ENVELOPES
+
+
+@pytest.mark.parametrize(
+    ("factory", "message"),
+    [
+        (lambda: HimalayaCommand.folder_list(""), "account"),
+        (lambda: HimalayaCommand.inbox_envelopes("", 5), "account"),
+        (lambda: HimalayaCommand.sent_envelopes("", 5), "account"),
+        (lambda: HimalayaCommand.inbox_envelopes("work", 0), "page_size"),
+        (lambda: HimalayaCommand.sent_envelopes("work", -1), "page_size"),
+    ],
+)
+def test_himalaya_command_builder_rejects_invalid_inputs(
+    factory: object,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        factory()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        COMMAND_V,
+        ACCOUNT_LIST,
+        FOLDER_LIST,
+        INBOX_ENVELOPES,
+        SENT_ENVELOPES,
+    ],
+)
+def test_himalaya_command_parse_round_trips_allowed_commands(command: Command) -> None:
+    parsed = HimalayaCommand.parse(command)
+    assert parsed.build() == command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ("himalaya", "message", "read", "-a", "work"),
+        ("himalaya", "envelope", "list", "-a", "work", "--folder", "Inbox"),
+        ("himalaya", "folder", "list", "-a", "", "--output", "json"),
+        ("himalaya", "envelope", "list", "-a", "work", "--page-size", "0", "--output", "json"),
+        ("himalaya", "account", "list"),
+    ],
+)
+def test_himalaya_command_parse_rejects_forbidden_commands(command: Command) -> None:
+    with pytest.raises(ValueError, match="Forbidden Himalaya command"):
+        HimalayaCommand.parse(command)
+
+
+def test_default_runner_rejects_forbidden_commands() -> None:
+    with pytest.raises(ValueError, match="Forbidden Himalaya command"):
+        default_runner(("himalaya", "message", "read", "-a", "work"))

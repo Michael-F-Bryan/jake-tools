@@ -4,12 +4,147 @@ import json
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 Command = tuple[str, ...]
 JsonValue = dict[str, Any] | list[Any] | str | int | float | bool | None
+
+
+class HimalayaCommandKind(str, Enum):
+    CHECK_INSTALLED = "check_installed"
+    ACCOUNT_LIST = "account_list"
+    FOLDER_LIST = "folder_list"
+    INBOX_ENVELOPE_LIST = "inbox_envelope_list"
+    SENT_ENVELOPE_LIST = "sent_envelope_list"
+
+
+@dataclass(frozen=True)
+class HimalayaCommand:
+    kind: HimalayaCommandKind
+    account: str = ""
+    page_size: int = 0
+
+    def __post_init__(self) -> None:
+        if self.kind in {
+            HimalayaCommandKind.FOLDER_LIST,
+            HimalayaCommandKind.INBOX_ENVELOPE_LIST,
+            HimalayaCommandKind.SENT_ENVELOPE_LIST,
+        } and not self.account:
+            raise ValueError("account must be non-empty")
+        if self.kind in {
+            HimalayaCommandKind.INBOX_ENVELOPE_LIST,
+            HimalayaCommandKind.SENT_ENVELOPE_LIST,
+        } and self.page_size < 1:
+            raise ValueError("page_size must be at least 1")
+
+    @classmethod
+    def check_installed(cls) -> HimalayaCommand:
+        return cls(HimalayaCommandKind.CHECK_INSTALLED)
+
+    @classmethod
+    def account_list(cls) -> HimalayaCommand:
+        return cls(HimalayaCommandKind.ACCOUNT_LIST)
+
+    @classmethod
+    def folder_list(cls, account: str) -> HimalayaCommand:
+        return cls(HimalayaCommandKind.FOLDER_LIST, account=account)
+
+    @classmethod
+    def inbox_envelopes(cls, account: str, page_size: int) -> HimalayaCommand:
+        return cls(HimalayaCommandKind.INBOX_ENVELOPE_LIST, account=account, page_size=page_size)
+
+    @classmethod
+    def sent_envelopes(cls, account: str, page_size: int) -> HimalayaCommand:
+        return cls(HimalayaCommandKind.SENT_ENVELOPE_LIST, account=account, page_size=page_size)
+
+    def build(self) -> Command:
+        match self.kind:
+            case HimalayaCommandKind.CHECK_INSTALLED:
+                return ("command", "-v", "himalaya")
+            case HimalayaCommandKind.ACCOUNT_LIST:
+                return ("himalaya", "account", "list", "--output", "json")
+            case HimalayaCommandKind.FOLDER_LIST:
+                return ("himalaya", "folder", "list", "-a", self.account, "--output", "json")
+            case HimalayaCommandKind.INBOX_ENVELOPE_LIST:
+                return (
+                    "himalaya",
+                    "envelope",
+                    "list",
+                    "-a",
+                    self.account,
+                    "--page-size",
+                    str(self.page_size),
+                    "--output",
+                    "json",
+                )
+            case HimalayaCommandKind.SENT_ENVELOPE_LIST:
+                return (
+                    "himalaya",
+                    "envelope",
+                    "list",
+                    "-a",
+                    self.account,
+                    "--folder",
+                    "Sent Items",
+                    "--page-size",
+                    str(self.page_size),
+                    "--output",
+                    "json",
+                )
+
+    @classmethod
+    def parse(cls, command: Command) -> HimalayaCommand:
+        for candidate in (
+            cls.check_installed(),
+            cls.account_list(),
+        ):
+            if command == candidate.build():
+                return candidate
+
+        if len(command) == 7 and command[:4] == ("himalaya", "folder", "list", "-a"):
+            account = command[4]
+            if command[5:] == ("--output", "json"):
+                try:
+                    return cls.folder_list(account)
+                except ValueError:
+                    pass
+
+        if len(command) == 9 and command[:5] == ("himalaya", "envelope", "list", "-a", command[4]):
+            account = command[4]
+            if command[5] == "--page-size" and command[7:] == ("--output", "json"):
+                try:
+                    page_size = int(command[6])
+                except ValueError:
+                    pass
+                else:
+                    try:
+                        parsed = cls.inbox_envelopes(account, page_size)
+                    except ValueError:
+                        pass
+                    else:
+                        if parsed.build() == command:
+                            return parsed
+
+        if len(command) == 11 and command[:5] == ("himalaya", "envelope", "list", "-a", command[4]):
+            account = command[4]
+            if command[5:7] == ("--folder", "Sent Items") and command[7] == "--page-size":
+                try:
+                    page_size = int(command[8])
+                except ValueError:
+                    pass
+                else:
+                    try:
+                        parsed = cls.sent_envelopes(account, page_size)
+                    except ValueError:
+                        pass
+                    else:
+                        if parsed.build() == command:
+                            return parsed
+
+        raise ValueError(f"Forbidden Himalaya command: {list(command)!r}")
 
 
 @dataclass(frozen=True)
@@ -71,17 +206,9 @@ class HimalayaPreflight(BaseModel):
         )
 
 
-_ALLOWED_STATIC_COMMANDS: frozenset[Command] = frozenset(
-    {
-        ("command", "-v", "himalaya"),
-        ("himalaya", "account", "list", "--output", "json"),
-    }
-)
-
-
 def default_runner(command: Command) -> CommandResult:
     _ensure_allowed(command)
-    if command == ("command", "-v", "himalaya"):
+    if command == HimalayaCommand.check_installed().build():
         completed = subprocess.run(
             "command -v himalaya",
             shell=True,
@@ -115,7 +242,7 @@ def run_himalaya_preflight(
     commands: list[CommandEvidence] = []
     errors: list[str] = []
 
-    command_found = _run(("command", "-v", "himalaya"), runner, commands).ok
+    command_found = _run(HimalayaCommand.check_installed().build(), runner, commands).ok
     if not command_found:
         errors.append("himalaya command not found")
         return HimalayaPreflight(
@@ -127,9 +254,7 @@ def run_himalaya_preflight(
             errors=errors,
         )
 
-    accounts_evidence = _run(
-        ("himalaya", "account", "list", "--output", "json"), runner, commands
-    )
+    accounts_evidence = _run(HimalayaCommand.account_list().build(), runner, commands)
     if not accounts_evidence.ok:
         errors.append("himalaya account list failed")
         return HimalayaPreflight(
@@ -184,7 +309,7 @@ def _run_account_preflight(
     sent_envelopes: JsonValue | None = None
 
     folder_evidence = _run(
-        ("himalaya", "folder", "list", "-a", account, "--output", "json"),
+        HimalayaCommand.folder_list(account).build(),
         runner,
         commands,
     )
@@ -196,17 +321,7 @@ def _run_account_preflight(
         errors.append("folder list failed")
 
     inbox_evidence = _run(
-        (
-            "himalaya",
-            "envelope",
-            "list",
-            "-a",
-            account,
-            "--page-size",
-            str(page_size),
-            "--output",
-            "json",
-        ),
+        HimalayaCommand.inbox_envelopes(account, page_size).build(),
         runner,
         commands,
     )
@@ -218,19 +333,7 @@ def _run_account_preflight(
         errors.append("inbox envelope list failed")
 
     sent_evidence = _run(
-        (
-            "himalaya",
-            "envelope",
-            "list",
-            "-a",
-            account,
-            "--folder",
-            "Sent Items",
-            "--page-size",
-            str(page_size),
-            "--output",
-            "json",
-        ),
+        HimalayaCommand.sent_envelopes(account, page_size).build(),
         runner,
         commands,
     )
@@ -272,54 +375,7 @@ def _run(command: Command, runner: Runner, commands: list[CommandEvidence]) -> C
 
 
 def _ensure_allowed(command: Command) -> None:
-    if command in _ALLOWED_STATIC_COMMANDS:
-        return
-    if _matches_folder_list(command):
-        return
-    if _matches_inbox_envelope_list(command):
-        return
-    if _matches_sent_envelope_list(command):
-        return
-    raise ValueError(f"Forbidden Himalaya command: {list(command)!r}")
-
-
-def _matches_folder_list(command: Command) -> bool:
-    return (
-        len(command) == 7
-        and command[:5] == ("himalaya", "folder", "list", "-a", command[4])
-        and command[5:] == ("--output", "json")
-        and command[4] != ""
-    )
-
-
-def _matches_inbox_envelope_list(command: Command) -> bool:
-    return (
-        len(command) == 9
-        and command[:5] == ("himalaya", "envelope", "list", "-a", command[4])
-        and command[5] == "--page-size"
-        and _is_positive_int(command[6])
-        and command[7:] == ("--output", "json")
-        and command[4] != ""
-    )
-
-
-def _matches_sent_envelope_list(command: Command) -> bool:
-    return (
-        len(command) == 11
-        and command[:5] == ("himalaya", "envelope", "list", "-a", command[4])
-        and command[5:7] == ("--folder", "Sent Items")
-        and command[7] == "--page-size"
-        and _is_positive_int(command[8])
-        and command[9:] == ("--output", "json")
-        and command[4] != ""
-    )
-
-
-def _is_positive_int(value: str) -> bool:
-    try:
-        return int(value) > 0
-    except ValueError:
-        return False
+    HimalayaCommand.parse(command)
 
 
 def _parse_json(payload: str) -> tuple[JsonValue | None, str | None]:
