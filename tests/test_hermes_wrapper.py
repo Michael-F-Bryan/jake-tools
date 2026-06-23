@@ -2,8 +2,13 @@ from typing import ClassVar
 
 from pydantic import BaseModel
 
-from jake_tools.hermes import AgentSpec, Hermes, HermesResult, _default_agent_factory
-from jake_tools.prompting import StructuredPrompt
+from jake_tools.hermes import AgentSpec, Hermes, Reply, _default_agent_factory
+from jake_tools.prompting import Prompt, StructuredPrompt
+
+
+class EchoPrompt(Prompt):
+    template: ClassVar[str] = "Echo: {{ instruction }}"
+    instruction: str
 
 
 class Payload(BaseModel):
@@ -27,10 +32,6 @@ class FakeAgent:
         return self._responses.pop(0)
 
 
-def hermes_with(agent: FakeAgent) -> Hermes:
-    return Hermes(agent_factory=lambda spec: agent)
-
-
 class RecordingFactory:
     def __init__(self, agent: FakeAgent):
         self.agent = agent
@@ -48,39 +49,52 @@ class FakeAIAgent:
         type(self).kwargs = kwargs
 
     def run_conversation(self, user_message: str) -> dict[str, object]:
-        return {"final_response": "ok", "completed": True}
+        return {"final_response": "ok"}
 
 
-def test_hermes_result_aliases_final_response() -> None:
-    result = HermesResult.model_validate({"final_response": "ok", "completed": True})
-    assert result.response == "ok"
+def test_reply_from_run_extracts_text_error_and_usage() -> None:
+    reply = Reply.from_run(
+        {
+            "final_response": "ok",
+            "error": "boom",
+            "model": "model-a",
+            "provider": "provider-a",
+            "api_calls": 2,
+            "total_tokens": 9,
+            "estimated_cost_usd": 0.03,
+        }
+    )
+
+    assert reply.text == "ok"
+    assert reply.error == "boom"
+    assert reply.usage.model == "model-a"
+    assert reply.usage.provider == "provider-a"
+    assert reply.usage.api_calls == 2
+    assert reply.usage.total_tokens == 9
+    assert reply.usage.estimated_cost_usd == 0.03
 
 
-def test_new_agent_builds_agent_spec_for_backwards_compatible_call() -> None:
-    agent = FakeAgent([])
-    factory = RecordingFactory(agent)
-    hermes = Hermes(default_model="default-model", agent_factory=factory)
+def test_agent_spec_merge_overrides_latest_values() -> None:
+    base = AgentSpec(model="base", provider="openrouter", enabled_toolsets=["file"])
+    override = AgentSpec(model="override", provider="", enabled_toolsets=["session_search"])
 
-    assert hermes.new_agent("model-a", "provider-a") is agent
+    merged = base.merge(override)
 
-    assert factory.specs == [AgentSpec(model="model-a", provider="provider-a")]
-
-
-def test_new_agent_uses_default_model_and_empty_provider() -> None:
-    agent = FakeAgent([])
-    factory = RecordingFactory(agent)
-    hermes = Hermes(default_model="default-model", agent_factory=factory)
-
-    assert hermes.new_agent() is agent
-
-    assert factory.specs == [AgentSpec(model="default-model", provider="")]
+    assert merged == AgentSpec(
+        model="override",
+        provider="",
+        enabled_toolsets=["session_search"],
+        system_prompt=None,
+        parent_session_id=None,
+        max_iterations=None,
+        session_db=None,
+    )
 
 
 def test_default_agent_factory_maps_scoped_spec_to_ai_agent(monkeypatch) -> None:
     import jake_tools.hermes as hermes_module
 
     monkeypatch.setattr(hermes_module, "AIAgent", FakeAIAgent)
-
     agent = _default_agent_factory(
         AgentSpec(
             model="model-a",
@@ -106,107 +120,81 @@ def test_default_agent_factory_maps_scoped_spec_to_ai_agent(monkeypatch) -> None
     }
 
 
-def test_run_structured_with_result_parses_valid_json_without_repair() -> None:
+def test_run_accepts_prompt_model_and_passes_merged_spec() -> None:
+    agent = FakeAgent([{"final_response": "ok", "model": "override"}])
+    factory = RecordingFactory(agent)
+    hermes = Hermes(
+        defaults=AgentSpec(model="default-model", provider="default-provider"),
+        agent_factory=factory,
+    )
+
+    reply = hermes.run(
+        EchoPrompt(instruction="hello"),
+        spec=AgentSpec(model="override-model", provider="", enabled_toolsets=["file"]),
+    )
+
+    assert reply.text == "ok"
+    assert factory.specs == [
+        AgentSpec(
+            model="override-model",
+            provider="",
+            enabled_toolsets=["file"],
+            system_prompt=None,
+            parent_session_id=None,
+            max_iterations=None,
+            session_db=None,
+        )
+    ]
+    assert agent.prompts == ["Echo: hello"]
+
+
+def test_run_structured_parses_valid_json_without_repair() -> None:
     agent = FakeAgent(
         [
             {
                 "final_response": '{"answer": 42}',
-                "completed": True,
                 "api_calls": 1,
                 "total_tokens": 12,
                 "estimated_cost_usd": 0.03,
-            },
+            }
         ]
     )
-    hermes = hermes_with(agent)
+    hermes = Hermes(agent_factory=lambda spec: agent)
 
-    payload, result = hermes.run_structured_with_result(
-        PayloadPrompt(instruction="Return the answer.")
-    )
+    payload, reply = hermes.run_structured(PayloadPrompt(instruction="Return the answer."))
 
     assert payload == Payload(answer=42)
+    assert reply.usage.api_calls == 1
+    assert reply.usage.total_tokens == 12
+    assert reply.usage.estimated_cost_usd == 0.03
     assert len(agent.prompts) == 1
-    assert result == HermesResult(
-        final_response='{"answer": 42}',
-        completed=True,
-        api_calls=1,
-        total_tokens=12,
-        estimated_cost_usd=0.03,
-    )
 
 
-def test_run_structured_with_result_uses_requested_model_and_provider() -> None:
-    agent = FakeAgent(
-        [
-            {
-                "final_response": '{"answer": 42}',
-                "completed": True,
-            },
-        ]
-    )
-    factory = RecordingFactory(agent)
-    hermes = Hermes(default_model="default-model", agent_factory=factory)
-
-    payload, _ = hermes.run_structured_with_result(
-        PayloadPrompt(instruction="Return the answer."),
-        model="model-a",
-        provider="provider-a",
-    )
-
-    assert payload == Payload(answer=42)
-    assert factory.specs == [AgentSpec(model="model-a", provider="provider-a")]
-
-
-def test_run_structured_with_result_parses_fenced_json_without_repair() -> None:
+def test_run_structured_parses_fenced_json_without_repair() -> None:
     agent = FakeAgent(
         [
             {
                 "final_response": '```json\n{"answer": 42}\n```',
-                "completed": True,
                 "api_calls": 1,
-            },
+            }
         ]
     )
-    hermes = hermes_with(agent)
+    hermes = Hermes(agent_factory=lambda spec: agent)
 
-    payload, result = hermes.run_structured_with_result(
-        PayloadPrompt(instruction="Return the answer.")
-    )
+    payload, reply = hermes.run_structured(PayloadPrompt(instruction="Return the answer."))
 
     assert payload == Payload(answer=42)
-    assert result.api_calls == 1
+    assert reply.usage.api_calls == 1
     assert len(agent.prompts) == 1
 
 
-def test_run_agent_structured_parses_fenced_json_without_repair() -> None:
-    agent = FakeAgent(
-        [
-            {
-                "final_response": '```\n{"answer": 12}\n```',
-                "completed": True,
-                "api_calls": 1,
-            },
-        ]
-    )
-    factory = RecordingFactory(agent)
-    hermes = Hermes(agent_factory=factory)
-
-    payload, result = hermes.run_agent_structured(
-        AgentSpec(model="model-a", provider="provider-a", enabled_toolsets=["file"]),
-        PayloadPrompt(instruction="Return the answer."),
-    )
-
-    assert payload == Payload(answer=12)
-    assert result.api_calls == 1
-    assert len(agent.prompts) == 1
-
-
-def test_run_structured_with_result_repairs_invalid_json_once() -> None:
+def test_run_structured_repairs_invalid_json_once_and_accumulates_usage() -> None:
     agent = FakeAgent(
         [
             {
                 "final_response": "nope",
-                "completed": True,
+                "model": "model-a",
+                "provider": "provider-a",
                 "api_calls": 1,
                 "input_tokens": 11,
                 "output_tokens": 2,
@@ -215,7 +203,8 @@ def test_run_structured_with_result_repairs_invalid_json_once() -> None:
             },
             {
                 "final_response": '{"answer": 7}',
-                "completed": True,
+                "model": "model-b",
+                "provider": "provider-b",
                 "api_calls": 1,
                 "input_tokens": 7,
                 "output_tokens": 3,
@@ -224,130 +213,34 @@ def test_run_structured_with_result_repairs_invalid_json_once() -> None:
             },
         ]
     )
-    hermes = hermes_with(agent)
+    hermes = Hermes(agent_factory=lambda spec: agent)
 
-    payload, result = hermes.run_structured_with_result(
-        PayloadPrompt(instruction="Return the answer.")
-    )
+    payload, reply = hermes.run_structured(PayloadPrompt(instruction="Return the answer."))
 
     assert payload == Payload(answer=7)
     assert len(agent.prompts) == 2
     assert "Validation error:" in agent.prompts[1]
     assert "Previous response:" in agent.prompts[1]
-    assert result.api_calls == 2
-    assert result.input_tokens == 18
-    assert result.output_tokens == 5
-    assert result.total_tokens == 23
-    assert result.estimated_cost_usd == 0.03
+    assert reply.usage.api_calls == 2
+    assert reply.usage.input_tokens == 18
+    assert reply.usage.output_tokens == 5
+    assert reply.usage.total_tokens == 23
+    assert reply.usage.estimated_cost_usd == 0.03
+    assert reply.usage.model == "model-b"
+    assert reply.usage.provider == "provider-b"
 
 
-def test_run_structured_with_result_returns_payload_and_usage() -> None:
+def test_run_structured_raises_on_missing_response_after_repair() -> None:
     agent = FakeAgent(
         [
-            {
-                "final_response": '{"answer": 42}',
-                "completed": True,
-                "api_calls": 1,
-                "total_tokens": 9,
-            },
+            {"final_response": None},
+            {"final_response": None},
         ]
     )
-    hermes = hermes_with(agent)
-
-    payload, result = hermes.run_structured_with_result(
-        PayloadPrompt(instruction="Return the answer.")
-    )
-
-    assert payload == Payload(answer=42)
-    assert result.total_tokens == 9
-
-
-def test_run_agent_structured_passes_scoped_agent_spec_to_factory() -> None:
-    agent = FakeAgent(
-        [
-            {
-                "final_response": '{"answer": 11}',
-                "completed": True,
-                "api_calls": 1,
-            },
-        ]
-    )
-    factory = RecordingFactory(agent)
-    hermes = Hermes(agent_factory=factory)
-    spec = AgentSpec(
-        model="judgement-model",
-        provider="openrouter",
-        enabled_toolsets=["session_search", "file"],
-        system_prompt="stay scoped",
-        parent_session_id="parent-123",
-        max_iterations=4,
-        session_db="/tmp/hermes.db",
-    )
-
-    payload, result = hermes.run_agent_structured(
-        spec,
-        PayloadPrompt(instruction="Return the answer."),
-    )
-
-    assert payload == Payload(answer=11)
-    assert result.api_calls == 1
-    assert factory.specs == [spec]
-    assert len(agent.prompts) == 1
-
-
-def test_run_agent_structured_repairs_invalid_json_once() -> None:
-    agent = FakeAgent(
-        [
-            {
-                "final_response": "nope",
-                "completed": True,
-                "api_calls": 1,
-                "input_tokens": 5,
-                "output_tokens": 1,
-                "total_tokens": 6,
-                "estimated_cost_usd": 0.01,
-            },
-            {
-                "final_response": '{"answer": 9}',
-                "completed": True,
-                "api_calls": 1,
-                "input_tokens": 4,
-                "output_tokens": 2,
-                "total_tokens": 6,
-                "estimated_cost_usd": 0.02,
-            },
-        ]
-    )
-    factory = RecordingFactory(agent)
-    hermes = Hermes(agent_factory=factory)
-
-    payload, result = hermes.run_agent_structured(
-        AgentSpec(model="model-a", provider="provider-a", enabled_toolsets=["file"]),
-        PayloadPrompt(instruction="Return the answer."),
-    )
-
-    assert payload == Payload(answer=9)
-    assert len(factory.specs) == 1
-    assert len(agent.prompts) == 2
-    assert "Validation error:" in agent.prompts[1]
-    assert result.api_calls == 2
-    assert result.input_tokens == 9
-    assert result.output_tokens == 3
-    assert result.total_tokens == 12
-    assert result.estimated_cost_usd == 0.03
-
-
-def test_oneshot_structured_rejects_empty_response() -> None:
-    agent = FakeAgent(
-        [
-            {"final_response": None, "completed": True},
-            {"final_response": None, "completed": True},
-        ]
-    )
-    hermes = hermes_with(agent)
+    hermes = Hermes(agent_factory=lambda spec: agent)
 
     try:
-        hermes._oneshot_structured("Return the answer.", Payload)
+        hermes.run_structured(PayloadPrompt(instruction="Return the answer."))
     except ValueError as exc:
         assert str(exc) == "No response from Hermes"
     else:

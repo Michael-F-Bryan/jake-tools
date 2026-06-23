@@ -4,7 +4,7 @@ from typing import Any, cast
 
 import click
 
-from ..hermes import DEFAULT_MODEL, Hermes
+from ..hermes import DEFAULT_MODEL, AgentSpec, Hermes
 
 
 def hermes[F: Callable[..., Any]](func: F) -> F:
@@ -32,7 +32,7 @@ def hermes[F: Callable[..., Any]](func: F) -> F:
         **kwargs: Any,
     ) -> Any:
         instance = Hermes(
-            default_model=default_model, default_provider=provider or ""
+            defaults=AgentSpec(model=default_model, provider=provider or "")
         )
         return ctx.invoke(func, instance, *args, **kwargs)
 
