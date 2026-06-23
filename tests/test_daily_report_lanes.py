@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from jake_tools.daily_report.lanes import build_lane_specs
+from jake_tools.daily_report.lanes import LANE_DEFINITIONS, build_lane_specs
 from jake_tools.daily_report.models import (
     DailyReportLaneOptions,
     LaneName,
@@ -23,6 +23,19 @@ def specs(tmp_path: Path) -> list[LaneSpec]:
 
 def by_name(specs: list[LaneSpec]) -> dict[LaneName, LaneSpec]:
     return {spec.name: spec for spec in specs}
+
+
+def test_lane_definitions_single_table_covers_all_lanes_in_order() -> None:
+    assert len(LANE_DEFINITIONS) == 6
+    assert [lane.name for lane in LANE_DEFINITIONS] == [
+        LaneName.SESSION_HINDSIGHT,
+        LaneName.MEMORY_CANDIDATES,
+        LaneName.SKILL_REVIEW,
+        LaneName.FAILURE_PATTERNS,
+        LaneName.TRANSCRIPTS_AND_DUMC,
+        LaneName.INBOX_TRIAGE,
+    ]
+    assert {lane.name for lane in LANE_DEFINITIONS} == set(LaneName)
 
 
 def test_build_lane_specs_returns_all_six_lanes(tmp_path: Path) -> None:

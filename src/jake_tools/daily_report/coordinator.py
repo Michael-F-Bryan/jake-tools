@@ -122,7 +122,7 @@ def run_daily_report_command(
         paths.evidence / "inbox-envelopes.json", _inbox_envelopes_json(inbox_preflight)
     )
 
-    specs = build_lane_specs(options, paths, preflight=inbox_preflight)
+    specs = build_lane_specs(options, paths)
     _write_lane_evidence_bundles(
         specs=specs, options=options, paths=paths, write_json=write_json
     )
