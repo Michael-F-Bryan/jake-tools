@@ -25,8 +25,8 @@ Respond with just the polished transcript, no other text, additional commentary,
 
 
 def polish_transcript(hermes: Hermes, transcript: str) -> str:
-    result = hermes.oneshot(TranscriptSkillPolishPrompt(transcript=transcript).render())
-    if not result.response:
+    reply = hermes.run(TranscriptSkillPolishPrompt(transcript=transcript).render())
+    if not reply.text:
         raise ValueError("No response from Hermes")
 
-    return result.response
+    return reply.text

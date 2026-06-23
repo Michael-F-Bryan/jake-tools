@@ -1,7 +1,8 @@
 import json
 from datetime import datetime, timezone
 
-from jake_tools.hermes import Hermes, HermesResult
+from jake_tools.ai_usage import Usage
+from jake_tools.hermes import Hermes, Reply
 from jake_tools.transcripts.coordinator import ObsidianRecordingCoordinator
 from jake_tools.transcripts.models import (
     Chapter,
@@ -109,7 +110,7 @@ def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
         }
     ]
     assert result.ai_stage_stats == []
-    assert result.ai_totals.model_dump() == {
+    assert result.ai_totals.model_dump(mode="json", exclude={"usage"}) == {
         "stage_count": 0,
         "api_calls": 0,
         "input_tokens": 0,
@@ -164,12 +165,14 @@ def test_coordinator_builds_ai_stats_from_returned_stage_results(tmp_path) -> No
                     )
                 }
             ),
-            HermesResult(
-                api_calls=1,
-                input_tokens=10,
-                output_tokens=5,
-                total_tokens=15,
-                estimated_cost_usd=0.02,
+            Reply(
+                usage=Usage(
+                    api_calls=1,
+                    input_tokens=10,
+                    output_tokens=5,
+                    total_tokens=15,
+                    estimated_cost_usd=0.02,
+                )
             ),
         )
 
@@ -202,7 +205,10 @@ def test_coordinator_builds_ai_stats_from_returned_stage_results(tmp_path) -> No
 
     result = coordinator.run()
 
-    assert [stats.model_dump() for stats in result.ai_stage_stats] == [
+    assert [
+        stats.model_dump(mode="json", exclude={"usage"})
+        for stats in result.ai_stage_stats
+    ] == [
         {
             "stage": "speaker_mapping",
             "model": None,

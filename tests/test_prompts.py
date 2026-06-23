@@ -111,13 +111,11 @@ def test_run_structured_renders_prompt_and_parses_response_model() -> None:
     )
     hermes = hermes_with(agent)
 
-    minutes, result = hermes.run_structured_with_result(
-        MeetingMinutesPrompt(turns=_turns())
-    )
+    minutes, result = hermes.run_structured(MeetingMinutesPrompt(turns=_turns()))
 
     assert minutes == MeetingMinutes(summary="Quick sync", key_points=["Shipped it"])
     assert "Hello team" in agent.prompts[0]
-    assert result.api_calls == 1
+    assert result.usage.api_calls == 1
 
 
 def test_run_structured_response_model_is_reflected_in_the_request_schema() -> None:

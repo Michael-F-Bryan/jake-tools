@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ..ai_usage import build_ai_stage_stats, build_ai_totals
 
-from ..hermes import Hermes, HermesResult
+from ..hermes import Hermes, Reply
 from .audio import build_concat_plan, concatenate_recordings, run_scribe
 from .merge import (
     format_timestamp,
@@ -43,19 +43,19 @@ ConcatenateRecordings = Callable[[ConcatPlan, Path], None]
 RunScribe = Callable[[Path, Path], object]
 MapSpeakers = Callable[
     [Hermes, SourceNote, list[TranscriptTurn]],
-    tuple[SpeakerMapping, HermesResult | None],
+    tuple[SpeakerMapping, Reply | None],
 ]
 PolishTranscript = Callable[
     [Hermes, SourceNote, list[TranscriptTurn], SpeakerMapping],
-    tuple[list[TranscriptTurn], HermesResult | None],
+    tuple[list[TranscriptTurn], Reply | None],
 ]
 RunChaptering = Callable[
     [Hermes, list[TranscriptTurn]],
-    tuple[ChaptersPayload, HermesResult | None],
+    tuple[ChaptersPayload, Reply | None],
 ]
 RunMinutes = Callable[
     [Hermes, list[TranscriptTurn], ChaptersPayload | None],
-    tuple[MeetingMinutes, HermesResult | None],
+    tuple[MeetingMinutes, Reply | None],
 ]
 
 
@@ -130,15 +130,12 @@ class ObsidianRecordingCoordinator:
                 normalise_turns(self._load_turns(paths.transcript))
             )
 
-            ai_stage_stats = []
+            stage_replies: list[tuple[str, Reply | None]] = []
 
             speaker_mapping, speaker_mapping_result = self.map_speakers(
                 self.hermes, source, turns
             )
-            if stage_stats := build_ai_stage_stats(
-                "speaker_mapping", speaker_mapping_result
-            ):
-                ai_stage_stats.append(stage_stats)
+            stage_replies.append(("speaker_mapping", speaker_mapping_result))
             paths.speaker_mapping.write_text(
                 json.dumps(speaker_mapping.model_dump(mode="json"), indent=2),
                 encoding="utf-8",
@@ -148,16 +145,12 @@ class ObsidianRecordingCoordinator:
                 self.hermes, source, turns, speaker_mapping
             )
             polished_turns = merge_consecutive_turns(normalise_turns(polished_payload))
-            if stage_stats := build_ai_stage_stats(
-                "transcript_polish", transcript_polish_result
-            ):
-                ai_stage_stats.append(stage_stats)
+            stage_replies.append(("transcript_polish", transcript_polish_result))
 
             chapters_payload, chaptering_result = self.build_chapters(
                 self.hermes, polished_turns
             )
-            if stage_stats := build_ai_stage_stats("chaptering", chaptering_result):
-                ai_stage_stats.append(stage_stats)
+            stage_replies.append(("chaptering", chaptering_result))
             paths.chapters.write_text(
                 json.dumps(chapters_payload.model_dump(mode="json"), indent=2),
                 encoding="utf-8",
@@ -171,14 +164,17 @@ class ObsidianRecordingCoordinator:
             minutes, meeting_minutes_result = self.build_minutes(
                 self.hermes, polished_turns, chapters_payload
             )
-            if stage_stats := build_ai_stage_stats(
-                "meeting_minutes", meeting_minutes_result
-            ):
-                ai_stage_stats.append(stage_stats)
+            stage_replies.append(("meeting_minutes", meeting_minutes_result))
             paths.minutes.write_text(
                 json.dumps(minutes.model_dump(mode="json"), indent=2),
                 encoding="utf-8",
             )
+
+            ai_stage_stats = [
+                stage_stats
+                for stage, reply in stage_replies
+                if (stage_stats := build_ai_stage_stats(stage, reply)) is not None
+            ]
 
             updated_note = merge_note(
                 source.body,

@@ -4,7 +4,7 @@ from typing import ClassVar
 
 from pydantic import BaseModel
 
-from ..hermes import Hermes, HermesResult
+from ..hermes import Hermes, Reply
 from ..prompting import StructuredPrompt
 from .models import (
     Chapter,
@@ -160,20 +160,20 @@ def _fallback_two_party_call_mapping(
 
 def run_speaker_mapping_stage(
     hermes: Hermes, source: SourceNote, turns: list[TranscriptTurn]
-) -> tuple[SpeakerMapping, HermesResult]:
-    mapping, result = hermes.run_structured_with_result(
+) -> tuple[SpeakerMapping, Reply]:
+    mapping, reply = hermes.run_structured(
         SpeakerMappingPrompt(
             title=source.title, attendees=source.attendees, turns=turns
         )
     )
     if mapping.mapping:
-        return mapping, result
+        return mapping, reply
 
     fallback = _fallback_two_party_call_mapping(source, turns)
     if fallback is not None:
-        return fallback, result
+        return fallback, reply
 
-    return mapping, result
+    return mapping, reply
 
 
 def run_transcript_polish_stage(
@@ -181,8 +181,8 @@ def run_transcript_polish_stage(
     source: SourceNote,
     turns: list[TranscriptTurn],
     speaker_mapping: SpeakerMapping,
-) -> tuple[list[TranscriptTurn], HermesResult]:
-    payload, result = hermes.run_structured_with_result(
+) -> tuple[list[TranscriptTurn], Reply]:
+    payload, reply = hermes.run_structured(
         TranscriptPolishPrompt(
             title=source.title,
             attendees=source.attendees,
@@ -194,22 +194,22 @@ def run_transcript_polish_stage(
         )
     )
     if len(payload.turns) != len(turns):
-        return turns, result
-    return payload.turns, result
+        return turns, reply
+    return payload.turns, reply
 
 
 def run_chaptering_stage(
     hermes: Hermes, turns: list[TranscriptTurn]
-) -> tuple[ChaptersPayload, HermesResult]:
-    return hermes.run_structured_with_result(ChapteringPrompt(turns=turns))
+) -> tuple[ChaptersPayload, Reply]:
+    return hermes.run_structured(ChapteringPrompt(turns=turns))
 
 
 def run_minutes_stage(
     hermes: Hermes,
     turns: list[TranscriptTurn],
     chapters: ChaptersPayload | None = None,
-) -> tuple[MeetingMinutes, HermesResult]:
-    return hermes.run_structured_with_result(
+) -> tuple[MeetingMinutes, Reply]:
+    return hermes.run_structured(
         MeetingMinutesPrompt(
             turns=turns, chapters=chapters.chapters if chapters else None
         )
