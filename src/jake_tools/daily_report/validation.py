@@ -92,13 +92,6 @@ def validate_lane_artifact(
     )
 
 
-def validate_lane_results(
-    specs: list[LaneSpec],
-    paths: DailyReportPaths,
-) -> dict[LaneName, LaneValidationResult]:
-    return {spec.name: validate_lane_artifact(spec, paths) for spec in specs}
-
-
 def apply_validation_to_lane_result(
     lane_result: LaneRunResult,
     validation: LaneValidationResult,
