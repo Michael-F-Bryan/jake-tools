@@ -6,6 +6,7 @@ from pathlib import Path
 import click
 from pydantic import BaseModel, ValidationError
 
+from ..hermes import Hermes
 from ..transcripts.models import (
     ChapterPlan,
     SourceArtifact,
@@ -26,6 +27,14 @@ from ..transcripts.source_primitives import (
     source_from_gemini_text,
     source_from_obsidian_note,
 )
+from ..transcripts.stage_primitives import (
+    StagePrimitiveError,
+    load_transcript_or_manifest,
+    run_map_speakers_stage,
+    run_minutes_stage,
+    run_polish_stage,
+    run_title_chapters_stage,
+)
 from ..transcripts.transform_primitives import (
     TransformPrimitiveError,
     draft_chapter_boundaries,
@@ -45,6 +54,7 @@ from ..transcripts.verify_primitives import (
     verify_note,
     verify_turns,
 )
+from .options import hermes
 
 
 def _public_artifact_model_names() -> list[str]:
@@ -531,11 +541,272 @@ def transform_chapter_boundaries(
     _emit_written_model(plan, out_path=out_path, as_json=as_json)
 
 
-@transcript.group(
-    help="Placeholder for LLM stage primitives (Phase 4+). Use `transcript schema` today.",
-)
+@transcript.group(help="Structured LLM stage primitives over transcript artefacts.")
 def stage() -> None:
     pass
+
+
+@stage.command("polish")
+@hermes
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="Path to write polished TranscriptArtifact JSON.",
+)
+@click.option(
+    "--ledger-out",
+    "ledger_out_path",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="Optional path to write polish ledger JSON (defaults beside --out).",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit polished TranscriptArtifact JSON to stdout.",
+)
+@click.option(
+    "--max-attempts",
+    default=2,
+    show_default=True,
+    type=int,
+    help="Maximum structured-output attempts before failing.",
+)
+@click.argument(
+    "input_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+def stage_polish(
+    hermes: Hermes,
+    out_path: Path,
+    ledger_out_path: Path | None,
+    as_json: bool,
+    max_attempts: int,
+    input_path: Path,
+) -> None:
+    """
+    Polish transcript turns with schema-validated LLM output.
+
+    Input: TranscriptArtifact JSON or chunk RunManifest JSON.
+    Output: Polished TranscriptArtifact at --out and polish ledger JSON.
+    Side effects: Reads input artefacts and writes --out plus --ledger-out.
+    """
+    try:
+        transcript = load_transcript_or_manifest(input_path)
+        polished, ledger, _reply = run_polish_stage(
+            hermes,
+            transcript,
+            max_attempts=max_attempts,
+        )
+    except (StagePrimitiveError, ValidationError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _emit_written_model(polished, out_path=out_path, as_json=as_json)
+    resolved_ledger_path = ledger_out_path or out_path.with_suffix(".ledger.json")
+    resolved_ledger_path.write_text(
+        json.dumps(ledger.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    if not as_json:
+        click.echo(f"wrote {resolved_ledger_path}")
+
+
+@stage.command("map-speakers")
+@hermes
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="Path to write SpeakerMapping JSON.",
+)
+@click.option(
+    "--attendee",
+    "attendees",
+    multiple=True,
+    help="Known attendee name; can be supplied multiple times.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit SpeakerMapping JSON to stdout.",
+)
+@click.option(
+    "--max-attempts",
+    default=2,
+    show_default=True,
+    type=int,
+    help="Maximum structured-output attempts before failing.",
+)
+@click.argument(
+    "transcript_artifact_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+def stage_map_speakers(
+    hermes: Hermes,
+    out_path: Path,
+    attendees: tuple[str, ...],
+    as_json: bool,
+    max_attempts: int,
+    transcript_artifact_path: Path,
+) -> None:
+    """
+    Infer structured speaker identities from transcript turns.
+
+    Input: TranscriptArtifact JSON and optional --attendee hints.
+    Output: SpeakerMapping JSON at --out, optionally echoed via --json.
+    Side effects: Reads transcript input and writes --out.
+    """
+    transcript = TranscriptArtifact.model_validate_json(
+        transcript_artifact_path.read_text(encoding="utf-8")
+    )
+    try:
+        speaker_mapping, _reply = run_map_speakers_stage(
+            hermes,
+            transcript,
+            attendees=list(attendees),
+            max_attempts=max_attempts,
+        )
+    except StagePrimitiveError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit_written_model(speaker_mapping, out_path=out_path, as_json=as_json)
+
+
+@stage.command("title-chapters")
+@hermes
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="Path to write ChapterPlan JSON.",
+)
+@click.option(
+    "--chapters",
+    "draft_chapters_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+    help="Optional draft ChapterPlan JSON with boundaries to preserve.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit ChapterPlan JSON to stdout.",
+)
+@click.option(
+    "--max-attempts",
+    default=2,
+    show_default=True,
+    type=int,
+    help="Maximum structured-output attempts before failing.",
+)
+@click.argument(
+    "transcript_artifact_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+def stage_title_chapters(
+    hermes: Hermes,
+    out_path: Path,
+    draft_chapters_path: Path | None,
+    as_json: bool,
+    max_attempts: int,
+    transcript_artifact_path: Path,
+) -> None:
+    """
+    Generate structured chapter titles and summaries.
+
+    Input: TranscriptArtifact JSON and optional draft ChapterPlan JSON.
+    Output: ChapterPlan JSON at --out, optionally echoed via --json.
+    Side effects: Reads transcript/draft chapter artefacts and writes --out.
+    """
+    transcript = TranscriptArtifact.model_validate_json(
+        transcript_artifact_path.read_text(encoding="utf-8")
+    )
+    draft_plan = None
+    if draft_chapters_path is not None:
+        draft_plan = ChapterPlan.model_validate_json(
+            draft_chapters_path.read_text(encoding="utf-8")
+        )
+    try:
+        chapter_plan, _reply = run_title_chapters_stage(
+            hermes,
+            transcript,
+            draft_plan=draft_plan,
+            max_attempts=max_attempts,
+        )
+    except StagePrimitiveError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit_written_model(chapter_plan, out_path=out_path, as_json=as_json)
+
+
+@stage.command("minutes")
+@hermes
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="Path to write MeetingMinutes JSON.",
+)
+@click.option(
+    "--chapters",
+    "chapters_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+    help="Optional ChapterPlan JSON to guide minutes structure.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit MeetingMinutes JSON to stdout.",
+)
+@click.option(
+    "--max-attempts",
+    default=2,
+    show_default=True,
+    type=int,
+    help="Maximum structured-output attempts before failing.",
+)
+@click.argument(
+    "transcript_artifact_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+def stage_minutes(
+    hermes: Hermes,
+    out_path: Path,
+    chapters_path: Path | None,
+    as_json: bool,
+    max_attempts: int,
+    transcript_artifact_path: Path,
+) -> None:
+    """
+    Produce structured meeting minutes from transcript turns.
+
+    Input: TranscriptArtifact JSON and optional ChapterPlan JSON.
+    Output: MeetingMinutes JSON at --out, optionally echoed via --json.
+    Side effects: Reads transcript/chapter artefacts and writes --out.
+    """
+    transcript = TranscriptArtifact.model_validate_json(
+        transcript_artifact_path.read_text(encoding="utf-8")
+    )
+    chapters = None
+    if chapters_path is not None:
+        chapters = ChapterPlan.model_validate_json(
+            chapters_path.read_text(encoding="utf-8")
+        )
+    try:
+        minutes, _reply = run_minutes_stage(
+            hermes,
+            transcript,
+            chapters=chapters,
+            max_attempts=max_attempts,
+        )
+    except StagePrimitiveError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit_written_model(minutes, out_path=out_path, as_json=as_json)
 
 
 @transcript.group(

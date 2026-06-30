@@ -31,7 +31,11 @@ def hermes[F: Callable[..., Any]](func: F) -> F:
         *args: Any,
         **kwargs: Any,
     ) -> Any:
-        instance = Hermes(
+        injected = None
+        if isinstance(ctx.obj, dict):
+            injected = ctx.obj.get("hermes")
+
+        instance = injected or Hermes(
             defaults=AgentSpec(model=default_model, provider=provider or "")
         )
         return ctx.invoke(func, instance, *args, **kwargs)
