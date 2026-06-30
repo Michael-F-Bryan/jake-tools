@@ -66,10 +66,6 @@ from ..transcripts.transform_primitives import (
     strip_source_boilerplate,
 )
 from ..transcripts.verify_primitives import (
-    BOILERPLATE_CHECK_IDS,
-    CHAPTERS_CHECK_IDS,
-    NOTE_CHECK_IDS,
-    TURNS_CHECK_IDS,
     read_source_text_for_verification,
     verify_boilerplate_text,
     verify_chapters,
@@ -151,13 +147,21 @@ def schema() -> None:
     pass
 
 
-@schema.command("list", help="List all public transcript artefact models.")
+@schema.command("list")
 def schema_list() -> None:
+    """
+    List every public transcript artefact model name.
+
+    Input: None.
+    Output: One model name per line on stdout.
+    Side effects: Read-only.
+    Next steps: Use `transcript schema show MODEL` or `transcript schema example MODEL`.
+    """
     for model in list_public_transcript_artifact_models():
         click.echo(model.__name__)
 
 
-@schema.command("show", help="Show a model schema.")
+@schema.command("show")
 @click.argument("model", type=MODEL_NAME_ARGUMENT)
 @click.option(
     "--format",
@@ -168,6 +172,14 @@ def schema_list() -> None:
     help="Output schema format.",
 )
 def schema_show(model: str, schema_format: str) -> None:
+    """
+    Show the JSON schema for a public transcript artefact model.
+
+    Input: MODEL name and --format selector.
+    Output: JSON schema document on stdout.
+    Side effects: Read-only.
+    Next steps: Use `transcript schema example MODEL` for a minimal payload.
+    """
     model_type = resolve_public_transcript_artifact_model(model)
     if model_type is None:
         raise click.ClickException(f"unknown model: {model}")
@@ -177,9 +189,17 @@ def schema_show(model: str, schema_format: str) -> None:
     click.echo(json.dumps(model_type.model_json_schema(), sort_keys=True))
 
 
-@schema.command("example", help="Emit a minimal valid model example.")
+@schema.command("example")
 @click.argument("model", type=MODEL_NAME_ARGUMENT)
 def schema_example(model: str) -> None:
+    """
+    Emit a minimal valid JSON example for a public artefact model.
+
+    Input: MODEL name.
+    Output: Minimal model JSON on stdout.
+    Side effects: Read-only.
+    Next steps: Use emitted JSON as input to matching primitive commands.
+    """
     example = example_for_public_transcript_artifact(model)
     if example is None:
         raise click.ClickException(f"unknown model: {model}")
@@ -216,6 +236,7 @@ def source_obsidian_note(out_path: Path, as_json: bool, obsidian_note: Path) -> 
     Input: Obsidian note markdown path with recording embeds.
     Output: SourceArtifact JSON at --out, optionally echoed via --json.
     Side effects: Reads note and referenced recordings; writes --out.
+    Next steps: Run `transcript parse scribe` or `transcript recipe obsidian-recording`.
     """
     artifact = source_from_obsidian_note(obsidian_note)
     _emit_written_model(artifact, out_path=out_path, as_json=as_json)
@@ -246,6 +267,7 @@ def source_gemini_pdf(out_path: Path, as_json: bool, pdf_path: Path) -> None:
     Input: PDF note export path.
     Output: SourceArtifact JSON at --out and extracted text beside it.
     Side effects: Runs pdftotext, writes extracted text, writes --out.
+    Next steps: Run `transcript parse gemini` on the emitted SourceArtifact.
     """
     try:
         artifact = source_from_gemini_pdf(pdf_path, source_output_path=out_path)
@@ -279,6 +301,7 @@ def source_gemini_text(out_path: Path, as_json: bool, text_path: Path) -> None:
     Input: Plain-text file containing Gemini transcript notes.
     Output: SourceArtifact JSON at --out, optionally echoed via --json.
     Side effects: Reads text input and writes --out.
+    Next steps: Run `transcript parse gemini` on the emitted SourceArtifact.
     """
     artifact = source_from_gemini_text(text_path)
     _emit_written_model(artifact, out_path=out_path, as_json=as_json)
@@ -314,6 +337,7 @@ def parse_gemini(out_path: Path, as_json: bool, source_artifact_path: Path) -> N
     Input: SourceArtifact JSON that references Gemini text via raw_text_path.
     Output: TranscriptArtifact JSON at --out, optionally echoed via --json.
     Side effects: Reads source and text files; writes --out.
+    Next steps: Run `transcript transform normalise` then `transcript stage polish`.
     """
     source_payload = SourceArtifact.model_validate_json(
         source_artifact_path.read_text(encoding="utf-8")
@@ -350,6 +374,7 @@ def parse_scribe(out_path: Path, as_json: bool, scribe_transcript_path: Path) ->
     Input: Scribe JSON with a top-level segments list.
     Output: TranscriptArtifact JSON at --out, optionally echoed via --json.
     Side effects: Reads Scribe JSON and writes --out.
+    Next steps: Run `transcript transform normalise` then `transcript stage map-speakers`.
     """
     try:
         artifact = parse_scribe_transcript(scribe_transcript_path)
@@ -390,6 +415,7 @@ def transform_strip_boilerplate(
     Input: SourceArtifact JSON with raw_text_path or source_path.
     Output: SourceArtifact JSON at --out, with raw_text_path set to cleaned text.
     Side effects: Reads source text and writes --out plus a sibling .clean.txt file.
+    Next steps: Run `transcript parse gemini` on the cleaned source artefact.
     """
     source = SourceArtifact.model_validate_json(
         source_artifact_path.read_text(encoding="utf-8")
@@ -428,6 +454,7 @@ def transform_normalise(
     Input: TranscriptArtifact JSON.
     Output: TranscriptArtifact JSON at --out, optionally echoed via --json.
     Side effects: Reads transcript input and writes --out.
+    Next steps: Run `transcript transform merge-adjacent` or `transcript transform split`.
     """
     artifact = TranscriptArtifact.model_validate_json(
         transcript_artifact_path.read_text(encoding="utf-8")
@@ -471,6 +498,7 @@ def transform_merge_adjacent(
     Input: TranscriptArtifact JSON plus --max-gap threshold in seconds.
     Output: TranscriptArtifact JSON at --out, optionally echoed via --json.
     Side effects: Reads transcript input and writes --out.
+    Next steps: Run `transcript stage polish` or `transcript render transcript`.
     """
     artifact = TranscriptArtifact.model_validate_json(
         transcript_artifact_path.read_text(encoding="utf-8")
@@ -519,6 +547,7 @@ def transform_split(
     Input: TranscriptArtifact JSON and --target-minutes chunk budget.
     Output: RunManifest JSON at --out, optionally echoed via --json.
     Side effects: Reads transcript input and writes --out.
+    Next steps: Run `transcript stage polish` with the emitted manifest.
     """
     artifact = TranscriptArtifact.model_validate_json(
         transcript_artifact_path.read_text(encoding="utf-8")
@@ -567,6 +596,7 @@ def transform_chapter_boundaries(
     Input: TranscriptArtifact JSON and --window-minutes chapter window.
     Output: ChapterPlan JSON at --out, optionally echoed via --json.
     Side effects: Reads transcript input and writes --out.
+    Next steps: Run `transcript stage title-chapters` or `transcript render chapters`.
     """
     artifact = TranscriptArtifact.model_validate_json(
         transcript_artifact_path.read_text(encoding="utf-8")
@@ -629,6 +659,7 @@ def stage_polish(
     Input: TranscriptArtifact JSON or chunk RunManifest JSON.
     Output: Polished TranscriptArtifact at --out and polish ledger JSON.
     Side effects: Reads input artefacts and writes --out plus --ledger-out.
+    Next steps: Run `transcript verify turns` or downstream render/stage commands.
     """
     try:
         transcript = load_transcript_or_manifest(input_path)
@@ -696,6 +727,7 @@ def stage_map_speakers(
     Input: TranscriptArtifact JSON and optional --attendee hints.
     Output: SpeakerMapping JSON at --out, optionally echoed via --json.
     Side effects: Reads transcript input and writes --out.
+    Next steps: Run `transcript render transcript --speakers MAPPING.json`.
     """
     transcript = TranscriptArtifact.model_validate_json(
         transcript_artifact_path.read_text(encoding="utf-8")
@@ -758,6 +790,7 @@ def stage_title_chapters(
     Input: TranscriptArtifact JSON and optional draft ChapterPlan JSON.
     Output: ChapterPlan JSON at --out, optionally echoed via --json.
     Side effects: Reads transcript/draft chapter artefacts and writes --out.
+    Next steps: Run `transcript render transcript --chapters PLAN.json` or `stage minutes`.
     """
     transcript = TranscriptArtifact.model_validate_json(
         transcript_artifact_path.read_text(encoding="utf-8")
@@ -825,6 +858,7 @@ def stage_minutes(
     Input: TranscriptArtifact JSON and optional ChapterPlan JSON.
     Output: MeetingMinutes JSON at --out, optionally echoed via --json.
     Side effects: Reads transcript/chapter artefacts and writes --out.
+    Next steps: Run `transcript render meeting-note SOURCE.json MINUTES.json`.
     """
     transcript = TranscriptArtifact.model_validate_json(
         transcript_artifact_path.read_text(encoding="utf-8")
@@ -894,6 +928,7 @@ def render_transcript_command(
     Input: TranscriptArtifact JSON plus optional ChapterPlan and SpeakerMapping.
     Output: Markdown transcript at --out and optional RenderedNote metadata via --json.
     Side effects: Reads transcript/chapter/speaker artefacts and writes --out.
+    Next steps: Provide transcript markdown to `transcript render meeting-note`.
     """
     transcript = TranscriptArtifact.model_validate_json(
         transcript_artifact_path.read_text(encoding="utf-8")
@@ -962,6 +997,7 @@ def render_chapters_command(
     Input: ChapterPlan JSON.
     Output: Markdown chapter index at --out and optional RenderedNote metadata via --json.
     Side effects: Reads chapter plan and writes --out.
+    Next steps: Include rendered output in notes or review with `transcript verify chapters`.
     """
     chapters = ChapterPlan.model_validate_json(
         chapter_plan_path.read_text(encoding="utf-8")
@@ -1031,6 +1067,7 @@ def render_meeting_note_command(
     Input: SourceArtifact JSON, MeetingMinutes JSON, optional transcript markdown and ChapterPlan.
     Output: Meeting-note markdown at --out and optional RenderedNote metadata via --json.
     Side effects: Reads input artefacts and writes --out.
+    Next steps: Run `transcript note merge` then `transcript note write`.
     """
     source = SourceArtifact.model_validate_json(
         source_artifact_path.read_text(encoding="utf-8")
@@ -1106,6 +1143,7 @@ def note_merge_command(
     Input: Existing note markdown path and generated meeting-note markdown path.
     Output: Merged note markdown at --out and optional RenderedNote metadata via --json.
     Side effects: Reads both note inputs and writes --out.
+    Next steps: Run `transcript note write NOTE.md MERGED.md` to apply changes.
     """
     existing_note = note_path.read_text(encoding="utf-8")
     generated_note = generated_note_path.read_text(encoding="utf-8")
@@ -1159,6 +1197,7 @@ def note_write_command(
     Input: Destination NOTE markdown path and merged note markdown path.
     Output: Optional RenderedNote metadata via --json.
     Side effects: Mutates NOTE unless --dry-run is set.
+    Next steps: Run `transcript verify note NOTE.md` after writing.
     """
     merged_note = merged_note_path.read_text(encoding="utf-8")
     updated = write_note(note_path, merged_note, dry_run=dry_run)
@@ -1224,6 +1263,7 @@ def note_attach_command(
     Input: NOTE markdown path and source file path.
     Output: Optional RenderedNote metadata via --json.
     Side effects: Copies source file and mutates NOTE unless --dry-run is set.
+    Next steps: Run `transcript verify note NOTE.md` to confirm note integrity.
     """
     try:
         destination_path, attached_name, updated = attach_source_file(
@@ -1264,9 +1304,7 @@ def verify() -> None:
     pass
 
 
-@verify.command(
-    "boilerplate", help=f"Stable checks: {', '.join(BOILERPLATE_CHECK_IDS)}"
-)
+@verify.command("boilerplate")
 @click.option(
     "--out",
     "out_path",
@@ -1292,6 +1330,7 @@ def verify_boilerplate_command(
     Input: SourceArtifact JSON or plain text path.
     Output: VerificationReport via --json and optionally written with --out.
     Side effects: Reads input path and writes --out when provided.
+    Next steps: If checks fail, run `transcript transform strip-boilerplate`.
     Stable check IDs: boilerplate.no-operational-chatter, boilerplate.no-markdown-fences.
     """
     raw_input = source_or_text_path.read_text(encoding="utf-8")
@@ -1305,7 +1344,7 @@ def verify_boilerplate_command(
     _emit_verification_report(report, out_path=out_path, as_json=as_json)
 
 
-@verify.command("turns", help=f"Stable checks: {', '.join(TURNS_CHECK_IDS)}")
+@verify.command("turns")
 @click.option(
     "--out",
     "out_path",
@@ -1338,6 +1377,7 @@ def verify_turns_command(
     Input: BEFORE and AFTER TranscriptArtifact JSON paths.
     Output: VerificationReport via --json and optionally written with --out.
     Side effects: Reads both transcript artefacts and writes --out when provided.
+    Next steps: Re-run failed transform/stage command and verify again.
     Stable check IDs: turns.non-empty, turns.monotonic-order, turns.coverage-preserved, turns.speakers-preserved.
     """
     before = TranscriptArtifact.model_validate_json(
@@ -1354,7 +1394,7 @@ def verify_turns_command(
     _emit_verification_report(report, out_path=out_path, as_json=as_json)
 
 
-@verify.command("chapters", help=f"Stable checks: {', '.join(CHAPTERS_CHECK_IDS)}")
+@verify.command("chapters")
 @click.option(
     "--out",
     "out_path",
@@ -1389,6 +1429,7 @@ def verify_chapters_command(
     Input: ChapterPlan JSON and optional --turns TranscriptArtifact JSON.
     Output: VerificationReport via --json and optionally written with --out.
     Side effects: Reads chapter/turn artefacts and writes --out when provided.
+    Next steps: Rebuild chapter boundaries with `transform chapter-boundaries` or `stage title-chapters`.
     Stable check IDs: chapters.non-empty, chapters.monotonic-order, chapters.non-overlapping, chapters.covers-transcript-span.
     """
     chapter_plan = ChapterPlan.model_validate_json(
@@ -1409,7 +1450,7 @@ def verify_chapters_command(
     _emit_verification_report(report, out_path=out_path, as_json=as_json)
 
 
-@verify.command("note", help=f"Stable checks: {', '.join(NOTE_CHECK_IDS)}")
+@verify.command("note")
 @click.option(
     "--out",
     "out_path",
@@ -1451,6 +1492,7 @@ def verify_note_command(
     Input: Note markdown path with optional --source and --chapters artefacts.
     Output: VerificationReport via --json and optionally written with --out.
     Side effects: Reads note and optional artefacts; writes --out when provided.
+    Next steps: Re-render note sections and re-run `transcript note merge` / `note write`.
     Stable check IDs: note.has-meeting-notes, note.has-chapters, note.has-transcript, note.chapter-heading-count, note.no-operational-chatter.
     """
     expected_chapter_count = None
@@ -1528,6 +1570,7 @@ def recipe_obsidian_recording(
     Input: Obsidian note markdown path with recording embeds.
     Output: Human or JSON summary, plus optional --manifest RunManifest JSON.
     Side effects: Reads recordings, runs ffmpeg/scribe/LLM stages, writes note unless --dry-run.
+    Next steps: Use `--show-plan` to inspect stages or `transcript verify note` after execution.
     """
     if show_plan:
         if as_json:
