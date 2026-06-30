@@ -147,6 +147,12 @@ def test_transcript_transform_normalise_merge_split_and_chapter_boundaries(
     split_payload = json.loads(split_result.output)
     assert split_payload["run_id"] == "split-manifest"
     assert split_payload["stages"]
+    for stage in split_payload["stages"]:
+        for artefact in stage["artefacts"]:
+            chunk_path = split_out.parent / artefact
+            assert chunk_path.exists()
+            chunk_payload = json.loads(chunk_path.read_text(encoding="utf-8"))
+            assert chunk_payload["turns"]
 
     chapters_result = CliRunner().invoke(
         main,

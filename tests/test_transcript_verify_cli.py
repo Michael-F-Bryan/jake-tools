@@ -102,6 +102,34 @@ def test_transcript_verify_turns_fails_and_returns_non_zero(tmp_path: Path) -> N
     assert "turns.non-empty" in payload["failed_gate_ids"]
 
 
+def test_transcript_verify_turns_flags_adjacent_duplicate_turns(
+    tmp_path: Path,
+) -> None:
+    turns_out, _ = _build_normalised_turns(tmp_path)
+    after_path = tmp_path / "turns.duplicated.json"
+    payload = json.loads(turns_out.read_text(encoding="utf-8"))
+    payload["turns"].insert(1, dict(payload["turns"][0]))
+    payload["turns"][1]["start"] = payload["turns"][0]["end"]
+    payload["turns"][1]["end"] = payload["turns"][1]["start"] + 1
+    after_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "transcript",
+            "verify",
+            "turns",
+            str(turns_out),
+            str(after_path),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert "turns.no-adjacent-duplicates" in payload["failed_gate_ids"]
+
+
 def test_transcript_verify_boilerplate_detects_operational_chatter(
     tmp_path: Path,
 ) -> None:

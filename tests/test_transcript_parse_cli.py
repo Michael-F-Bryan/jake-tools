@@ -57,6 +57,79 @@ def test_transcript_parse_gemini_reads_source_artifact(tmp_path: Path) -> None:
     assert payload["source_refs"][0]["source_ref"].endswith(":lines 5-6")
 
 
+def test_transcript_parse_gemini_accepts_standalone_timestamp_blocks(
+    tmp_path: Path,
+) -> None:
+    source_text = tmp_path / "gemini-standalone.txt"
+    source_text.write_text(
+        """Meeting notes
+
+📖 Transcript
+
+Jun 18, 2026
+
+Meeting Jun 18, 2026 at 10:52
+IST - Transcript
+00:00:01
+
+Akshay Sharma: Hey, Michael. How are you?
+Michael Bryan: Yeah, I'm not too bad. What about you?
+
+00:01:10
+
+Akshay Sharma: I know that it's about medical insurance and to work in the
+pipeline to enforce policy.
+Michael Bryan: Yep.
+
+Transcription ended after 00:40:18
+""",
+        encoding="utf-8",
+    )
+    source_path = tmp_path / "source.json"
+    source_path.write_text(
+        json.dumps(
+            {
+                "kind": "gemini-text",
+                "source_path": str(source_text),
+                "raw_text_path": str(source_text),
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_path = tmp_path / "turns.json"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "transcript",
+            "parse",
+            "gemini",
+            str(source_path),
+            "--out",
+            str(out_path),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert [turn["speaker"] for turn in payload["turns"]] == [
+        "Akshay Sharma",
+        "Michael Bryan",
+        "Akshay Sharma",
+        "Michael Bryan",
+    ]
+    assert payload["turns"][0]["start"] == 1.0
+    assert payload["turns"][1]["end"] == 70.0
+    assert payload["turns"][2]["text"] == (
+        "I know that it's about medical insurance and to work in the "
+        "pipeline to enforce policy."
+    )
+    assert payload["warnings"] == [
+        "Parsed Gemini transcript from standalone timestamp blocks; turn times inside each block are interpolated."
+    ]
+
+
 def test_transcript_parse_scribe_converts_segments(tmp_path: Path) -> None:
     turns_out = tmp_path / "scribe-turns.json"
     scribe_input = FIXTURES_DIR / "scribe-sample.json"

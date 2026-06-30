@@ -11,8 +11,10 @@ from ..prompting import StructuredPrompt
 from .models import (
     ChapterPlan,
     MeetingMinutes,
+    RunManifest,
     SpeakerMapping,
     TranscriptArtifact,
+    TranscriptSourceRef,
     TranscriptTurn,
 )
 from .verify_primitives import verify_turns
@@ -258,21 +260,10 @@ def run_minutes_stage(
     )
 
 
-def load_transcript_or_manifest(input_path: Path) -> TranscriptArtifact:
-    raw = input_path.read_text(encoding="utf-8")
-    try:
-        return TranscriptArtifact.model_validate_json(raw)
-    except ValidationError:
-        pass
-
-    from .models import RunManifest
-
-    manifest = RunManifest.model_validate_json(raw)
-    base_dir = input_path.parent
-    merged_turns: list[TranscriptTurn] = []
-    merged_source_refs = []
-    merged_warnings: list[str] = []
-
+def _resolve_manifest_chunks(
+    manifest: RunManifest, *, base_dir: Path
+) -> list[tuple[str, TranscriptArtifact]]:
+    chunks: list[tuple[str, TranscriptArtifact]] = []
     for stage in manifest.stages:
         for artefact in stage.artefacts:
             chunk_path = artefact if artefact.is_absolute() else (base_dir / artefact)
@@ -280,21 +271,108 @@ def load_transcript_or_manifest(input_path: Path) -> TranscriptArtifact:
                 raise StagePrimitiveError(
                     f"Chunk artefact referenced by manifest does not exist: {chunk_path}"
                 )
-            chunk = TranscriptArtifact.model_validate_json(
-                chunk_path.read_text(encoding="utf-8")
+            chunks.append(
+                (
+                    stage.stage,
+                    TranscriptArtifact.model_validate_json(
+                        chunk_path.read_text(encoding="utf-8")
+                    ),
+                )
             )
-            merged_turns.extend(chunk.turns)
-            merged_source_refs.extend(chunk.source_refs)
-            merged_warnings.extend(chunk.warnings)
-
-    if not merged_turns:
+    if not chunks:
         raise StagePrimitiveError(
             "Manifest did not resolve to any transcript turns for stage input."
         )
+    return chunks
 
+
+def _merge_transcript_chunks(chunks: list[TranscriptArtifact]) -> TranscriptArtifact:
+    merged_turns: list[TranscriptTurn] = []
+    merged_source_refs: list[TranscriptSourceRef] = []
+    merged_warnings: list[str] = []
+    for chunk in chunks:
+        turn_offset = len(merged_turns)
+        merged_turns.extend(chunk.turns)
+        merged_source_refs.extend(
+            source_ref.model_copy(
+                update={"turn_index": source_ref.turn_index + turn_offset}
+            )
+            for source_ref in chunk.source_refs
+        )
+        merged_warnings.extend(chunk.warnings)
     return TranscriptArtifact(
         turns=merged_turns,
         source_refs=merged_source_refs,
         speakers={},
         warnings=merged_warnings,
     )
+
+
+def polish_manifest_chunks(
+    hermes: Hermes,
+    manifest_path: Path,
+    *,
+    max_attempts: int,
+) -> tuple[TranscriptArtifact, PolishLedger, Reply | None]:
+    manifest = RunManifest.model_validate_json(
+        manifest_path.read_text(encoding="utf-8")
+    )
+    chunks = _resolve_manifest_chunks(manifest, base_dir=manifest_path.parent)
+    polished_chunks: list[TranscriptArtifact] = []
+    ledger_entries: list[PolishLedgerEntry] = []
+    ledger_notes: list[str] = []
+    merge_allowed = False
+    last_reply: Reply | None = None
+
+    for stage_name, chunk in chunks:
+        polished, ledger, reply = run_polish_stage(
+            hermes,
+            chunk,
+            max_attempts=max_attempts,
+        )
+        turn_offset = sum(len(previous.turns) for previous in polished_chunks)
+        polished_chunks.append(polished)
+        last_reply = reply
+        merge_allowed = merge_allowed or ledger.merge_allowed
+        ledger_entries.extend(
+            entry.model_copy(
+                update={
+                    "source_turn_indices": [
+                        index + turn_offset for index in entry.source_turn_indices
+                    ],
+                    "output_turn_indices": [
+                        index + turn_offset for index in entry.output_turn_indices
+                    ],
+                }
+            )
+            for entry in ledger.entries
+        )
+        if ledger.notes:
+            ledger_notes.append(f"{stage_name}: {ledger.notes}")
+
+    return (
+        _merge_transcript_chunks(polished_chunks),
+        PolishLedger(
+            merge_allowed=merge_allowed,
+            entries=ledger_entries,
+            notes="\n".join(ledger_notes),
+        ),
+        last_reply,
+    )
+
+
+def load_transcript_or_manifest(input_path: Path) -> TranscriptArtifact:
+    raw = input_path.read_text(encoding="utf-8")
+    try:
+        return TranscriptArtifact.model_validate_json(raw)
+    except ValidationError:
+        pass
+
+    manifest = RunManifest.model_validate_json(raw)
+    chunks = [
+        chunk
+        for _stage_name, chunk in _resolve_manifest_chunks(
+            manifest, base_dir=input_path.parent
+        )
+    ]
+    return _merge_transcript_chunks(chunks)

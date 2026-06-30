@@ -51,7 +51,7 @@ from ..transcripts.source_primitives import (
 )
 from ..transcripts.stage_primitives import (
     StagePrimitiveError,
-    load_transcript_or_manifest,
+    polish_manifest_chunks,
     run_map_speakers_stage,
     run_minutes_stage,
     run_polish_stage,
@@ -62,6 +62,7 @@ from ..transcripts.transform_primitives import (
     draft_chapter_boundaries,
     merge_adjacent_turns,
     normalise_transcript_artifact,
+    split_transcript_chunks,
     split_transcript_manifest,
     strip_source_boilerplate,
 )
@@ -542,11 +543,12 @@ def transform_split(
     transcript_artifact_path: Path,
 ) -> None:
     """
-    Split transcript turns into deterministic chunk manifest stages.
+    Split transcript turns into deterministic chunk artefacts and a manifest.
 
     Input: TranscriptArtifact JSON and --target-minutes chunk budget.
     Output: RunManifest JSON at --out, optionally echoed via --json.
-    Side effects: Reads transcript input and writes --out.
+    Side effects: Reads transcript input, writes --out, and writes each referenced
+    chunk JSON beside --out. Manifest paths are relative to the manifest file.
     Next steps: Run `transcript stage polish` with the emitted manifest.
     """
     artifact = TranscriptArtifact.model_validate_json(
@@ -554,8 +556,24 @@ def transform_split(
     )
     try:
         manifest = split_transcript_manifest(artifact, target_minutes=target_minutes)
+        chunks = split_transcript_chunks(
+            artifact,
+            manifest,
+            target_minutes=target_minutes,
+        )
     except TransformPrimitiveError as exc:
         raise click.ClickException(str(exc)) from exc
+    for relative_path, chunk in chunks.items():
+        chunk_path = (
+            relative_path
+            if relative_path.is_absolute()
+            else out_path.parent / relative_path
+        )
+        chunk_path.parent.mkdir(parents=True, exist_ok=True)
+        chunk_path.write_text(
+            json.dumps(chunk.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     _emit_written_model(manifest, out_path=out_path, as_json=as_json)
 
 
@@ -656,18 +674,28 @@ def stage_polish(
     """
     Polish transcript turns with schema-validated LLM output.
 
-    Input: TranscriptArtifact JSON or chunk RunManifest JSON.
+    Input: TranscriptArtifact JSON or chunk RunManifest JSON. Manifest inputs are
+    polished one chunk per LLM call, then merged in manifest order.
     Output: Polished TranscriptArtifact at --out and polish ledger JSON.
     Side effects: Reads input artefacts and writes --out plus --ledger-out.
     Next steps: Run `transcript verify turns` or downstream render/stage commands.
     """
     try:
-        transcript = load_transcript_or_manifest(input_path)
-        polished, ledger, _reply = run_polish_stage(
-            hermes,
-            transcript,
-            max_attempts=max_attempts,
-        )
+        try:
+            polished, ledger, _reply = polish_manifest_chunks(
+                hermes,
+                input_path,
+                max_attempts=max_attempts,
+            )
+        except ValidationError:
+            transcript = TranscriptArtifact.model_validate_json(
+                input_path.read_text(encoding="utf-8")
+            )
+            polished, ledger, _reply = run_polish_stage(
+                hermes,
+                transcript,
+                max_attempts=max_attempts,
+            )
     except (StagePrimitiveError, ValidationError) as exc:
         raise click.ClickException(str(exc)) from exc
 

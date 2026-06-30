@@ -125,6 +125,47 @@ def split_transcript_manifest(
     )
 
 
+def split_transcript_chunks(
+    artifact: TranscriptArtifact, manifest: RunManifest, *, target_minutes: float
+) -> dict[Path, TranscriptArtifact]:
+    chunk_seconds = target_minutes * 60.0
+    first_start = artifact.turns[0].start
+    chunks: dict[Path, TranscriptArtifact] = {}
+
+    for stage in manifest.stages:
+        if not stage.artefacts:
+            continue
+        chunk_path = stage.artefacts[0]
+        chunk_index = int(stage.stage.rsplit("-", maxsplit=1)[1]) - 1
+        start = first_start + (chunk_index * chunk_seconds)
+        end = start + chunk_seconds
+        selected = [
+            (turn_index, turn)
+            for turn_index, turn in enumerate(artifact.turns)
+            if turn.start < end and turn.end >= start
+        ]
+        if not selected:
+            continue
+        old_to_new = {
+            old_index: new_index
+            for new_index, (old_index, _turn) in enumerate(selected)
+        }
+        source_refs = [
+            source_ref.model_copy(
+                update={"turn_index": old_to_new[source_ref.turn_index]}
+            )
+            for source_ref in artifact.source_refs
+            if source_ref.turn_index in old_to_new
+        ]
+        chunks[chunk_path] = TranscriptArtifact(
+            turns=[turn for _old_index, turn in selected],
+            source_refs=source_refs,
+            speakers=artifact.speakers,
+            warnings=artifact.warnings,
+        )
+    return chunks
+
+
 def draft_chapter_boundaries(
     artifact: TranscriptArtifact, *, window_minutes: float
 ) -> ChapterPlan:

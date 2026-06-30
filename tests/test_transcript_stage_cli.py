@@ -14,10 +14,12 @@ from jake_tools.hermes import Reply
 class FakeHermes:
     def __init__(self, responses: list[dict[str, Any]]) -> None:
         self._responses = list(responses)
+        self.prompt_turn_counts: list[int] = []
 
     def run_structured(self, prompt: Any) -> tuple[BaseModel, Reply]:
         if not self._responses:
             raise AssertionError("No fake response configured for run_structured call.")
+        self.prompt_turn_counts.append(len(getattr(prompt, "turns", [])))
         payload = self._responses.pop(0)
         model = prompt.response_model
         return model.model_validate(payload), Reply(text=json.dumps(payload))
@@ -212,6 +214,130 @@ def test_transcript_stage_polish_accepts_manifest_input(tmp_path: Path) -> None:
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert len(payload["turns"]) == 2
+
+
+def test_transcript_stage_polish_processes_manifest_chunks_individually(
+    tmp_path: Path,
+) -> None:
+    chunk_one = tmp_path / "chunk-001.json"
+    chunk_two = tmp_path / "chunk-002.json"
+    chunk_one.write_text(
+        json.dumps(
+            {
+                "turns": [
+                    {
+                        "start": 0.0,
+                        "end": 5.0,
+                        "speaker": "Speaker 1",
+                        "text": "hello there",
+                    }
+                ],
+                "source_refs": [],
+                "speakers": {},
+                "warnings": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    chunk_two.write_text(
+        json.dumps(
+            {
+                "turns": [
+                    {
+                        "start": 5.0,
+                        "end": 9.0,
+                        "speaker": "Speaker 2",
+                        "text": "general kenobi",
+                    }
+                ],
+                "source_refs": [],
+                "speakers": {},
+                "warnings": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest_path = tmp_path / "chunks.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "run_id": "split-manifest",
+                "stages": [
+                    {
+                        "stage": "chunk-001",
+                        "status": "pass",
+                        "artefacts": ["chunk-001.json"],
+                    },
+                    {
+                        "stage": "chunk-002",
+                        "status": "pass",
+                        "artefacts": ["chunk-002.json"],
+                    },
+                ],
+                "artefact_paths": {
+                    "chunk-001": "chunk-001.json",
+                    "chunk-002": "chunk-002.json",
+                },
+                "command_metadata": [],
+                "ai_totals": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_path = tmp_path / "turns.polished.json"
+    ledger_out = tmp_path / "turns.polished.ledger.json"
+    fake_hermes = FakeHermes(
+        responses=[
+            {
+                "turns": [
+                    {
+                        "start": 0.0,
+                        "end": 5.0,
+                        "speaker": "Speaker 1",
+                        "text": "Hello there.",
+                    }
+                ],
+                "ledger": {"merge_allowed": False, "entries": [], "notes": "chunk 1"},
+            },
+            {
+                "turns": [
+                    {
+                        "start": 5.0,
+                        "end": 9.0,
+                        "speaker": "Speaker 2",
+                        "text": "General Kenobi.",
+                    }
+                ],
+                "ledger": {"merge_allowed": False, "entries": [], "notes": "chunk 2"},
+            },
+        ]
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "transcript",
+            "stage",
+            "polish",
+            str(manifest_path),
+            "--out",
+            str(out_path),
+            "--ledger-out",
+            str(ledger_out),
+            "--json",
+        ],
+        obj={"hermes": fake_hermes},
+    )
+
+    assert result.exit_code == 0
+    assert fake_hermes.prompt_turn_counts == [1, 1]
+    payload = json.loads(result.output)
+    assert [turn["text"] for turn in payload["turns"]] == [
+        "Hello there.",
+        "General Kenobi.",
+    ]
+    ledger_payload = json.loads(ledger_out.read_text(encoding="utf-8"))
+    assert ledger_payload["notes"] == "chunk-001: chunk 1\nchunk-002: chunk 2"
 
 
 def test_transcript_stage_map_speakers_title_chapters_and_minutes(

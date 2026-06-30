@@ -20,6 +20,7 @@ TURNS_CHECK_IDS: tuple[str, ...] = (
     "turns.monotonic-order",
     "turns.coverage-preserved",
     "turns.speakers-preserved",
+    "turns.no-adjacent-duplicates",
 )
 CHAPTERS_CHECK_IDS: tuple[str, ...] = (
     "chapters.non-empty",
@@ -131,6 +132,19 @@ def verify_turns(
             check_id="turns.speakers-preserved",
             status="pass" if before_speakers.issubset(after_speakers) else "fail",
             message="All speakers from input transcript remain represented.",
+        )
+    )
+
+    adjacent_duplicate = any(
+        previous.speaker == current.speaker
+        and previous.text.strip().casefold() == current.text.strip().casefold()
+        for previous, current in zip(after.turns, after.turns[1:], strict=False)
+    )
+    checks.append(
+        VerificationCheck(
+            check_id="turns.no-adjacent-duplicates",
+            status="fail" if adjacent_duplicate else "pass",
+            message="Transcript does not contain adjacent duplicate turns with the same speaker and text.",
         )
     )
 
