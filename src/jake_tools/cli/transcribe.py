@@ -4,9 +4,12 @@ from pathlib import Path
 import click
 
 from ..hermes import Hermes
-from ..transcripts.coordinator import process_obsidian_recording
 from ..transcripts.models import CoordinatorResult
 from ..transcripts.polish import polish_transcript
+from ..transcripts.recipe_primitives import (
+    RecipePrimitiveError,
+    run_obsidian_recording_recipe,
+)
 from .options import hermes
 
 
@@ -67,9 +70,12 @@ def obsidian_recording(
     """
     Process an Obsidian recording into a polished, chapterised note.
     """
-    result = process_obsidian_recording(
-        hermes,
-        obsidian_note,
-        dry_run=dry_run,
-    )
+    try:
+        result = run_obsidian_recording_recipe(
+            hermes,
+            obsidian_note,
+            dry_run=dry_run,
+        )
+    except RecipePrimitiveError as exc:
+        raise click.ClickException(str(exc)) from exc
     _emit_obsidian_recording_result(result, as_json=as_json)

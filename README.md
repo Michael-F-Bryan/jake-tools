@@ -50,6 +50,7 @@ directory:
 ```bash
 jake-tools transcribe obsidian-recording NOTE.md
 jake-tools transcribe obsidian-recording --dry-run --json NOTE.md
+jake-tools transcript recipe obsidian-recording NOTE.md --show-plan
 ```
 
 The Obsidian recording pipeline always writes the same shape:
@@ -59,3 +60,5 @@ The Obsidian recording pipeline always writes the same shape:
 - `## Transcript` with polished transcript text grouped by chapter
 
 This command expects local `ffmpeg` and `scribe` executables to be available.
+The `transcript recipe` variant exposes the same workflow over primitives with
+`--show-plan`, `--workdir`, and optional `--manifest` output.

@@ -43,7 +43,7 @@ def test_obsidian_recording_cli_human_output(tmp_path, monkeypatch) -> None:
     note.write_text("stub", encoding="utf-8")
     monkeypatch.setattr(
         transcribe_cli,
-        "process_obsidian_recording",
+        "run_obsidian_recording_recipe",
         fake_process_obsidian_recording,
     )
 
@@ -63,7 +63,7 @@ def test_obsidian_recording_cli_json_output(tmp_path, monkeypatch) -> None:
     note.write_text("stub", encoding="utf-8")
     monkeypatch.setattr(
         transcribe_cli,
-        "process_obsidian_recording",
+        "run_obsidian_recording_recipe",
         fake_process_obsidian_recording,
     )
 

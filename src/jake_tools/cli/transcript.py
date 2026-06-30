@@ -30,6 +30,12 @@ from ..transcripts.parse_primitives import (
     parse_gemini_transcript,
     parse_scribe_transcript,
 )
+from ..transcripts.recipe_primitives import (
+    RecipePrimitiveError,
+    obsidian_recording_recipe_plan,
+    render_obsidian_recording_recipe_plan,
+    run_obsidian_recording_recipe,
+)
 from ..transcripts.render_primitives import (
     RenderPrimitiveError,
     build_rendered_note_metadata,
@@ -1468,7 +1474,82 @@ def verify_note_command(
 
 
 @transcript.group(
-    help="Placeholder for recipe primitives (Phase 6+). Use `transcript schema` today.",
+    help="Common transcript workflows composed from primitive commands.",
 )
 def recipe() -> None:
     pass
+
+
+@recipe.command("obsidian-recording")
+@hermes
+@click.option(
+    "--show-plan",
+    is_flag=True,
+    help="Show the primitive sequence without executing the workflow.",
+)
+@click.option(
+    "--workdir",
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+    help="Optional working directory for intermediate artefacts.",
+)
+@click.option(
+    "--manifest",
+    "manifest_path",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="Optional path to write a RunManifest JSON summary.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Run the recipe without writing the updated note back to disk.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit machine-readable output for plan or run summary.",
+)
+@click.argument(
+    "obsidian_note",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+def recipe_obsidian_recording(
+    hermes: Hermes,
+    show_plan: bool,
+    workdir: Path | None,
+    manifest_path: Path | None,
+    dry_run: bool,
+    as_json: bool,
+    obsidian_note: Path,
+) -> None:
+    """
+    Execute the Obsidian recording workflow as a recipe over primitives.
+
+    Input: Obsidian note markdown path with recording embeds.
+    Output: Human or JSON summary, plus optional --manifest RunManifest JSON.
+    Side effects: Reads recordings, runs ffmpeg/scribe/LLM stages, writes note unless --dry-run.
+    """
+    if show_plan:
+        if as_json:
+            click.echo(json.dumps(obsidian_recording_recipe_plan(), sort_keys=True))
+            return
+        click.echo(render_obsidian_recording_recipe_plan())
+        return
+
+    try:
+        result = run_obsidian_recording_recipe(
+            hermes,
+            obsidian_note,
+            dry_run=dry_run,
+            workdir=workdir,
+            manifest_path=manifest_path,
+        )
+    except RecipePrimitiveError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if as_json:
+        click.echo(json.dumps(result.json_summary(), sort_keys=True))
+        return
+
+    click.echo(f"note: {result.note_path}")
+    click.echo(f"updated: {result.updated}")
