@@ -9,17 +9,33 @@ from pydantic import BaseModel, ValidationError
 from ..hermes import Hermes
 from ..transcripts.models import (
     ChapterPlan,
+    MeetingMinutes,
+    RenderedNote,
     SourceArtifact,
+    SpeakerMapping,
     TranscriptArtifact,
     VerificationReport,
     example_for_public_transcript_artifact,
     list_public_transcript_artifact_models,
     resolve_public_transcript_artifact_model,
 )
+from ..transcripts.note_primitives import (
+    NotePrimitiveError,
+    attach_source_file,
+    merge_generated_note,
+    write_note,
+)
 from ..transcripts.parse_primitives import (
     ParsePrimitiveError,
     parse_gemini_transcript,
     parse_scribe_transcript,
+)
+from ..transcripts.render_primitives import (
+    RenderPrimitiveError,
+    build_rendered_note_metadata,
+    render_chapters_markdown,
+    render_meeting_note_markdown,
+    render_transcript_markdown,
 )
 from ..transcripts.source_primitives import (
     SourcePrimitiveError,
@@ -100,6 +116,21 @@ def _emit_verification_report(
 
     if report.failed_gate_ids:
         raise click.exceptions.Exit(1)
+
+
+def _emit_written_markdown(
+    *,
+    markdown: str,
+    out_path: Path,
+    rendered_note: RenderedNote,
+    as_json: bool,
+) -> None:
+    out_path.write_text(markdown, encoding="utf-8")
+    _emit_written_model(
+        rendered_note, out_path=out_path.with_suffix(".rendered.json"), as_json=as_json
+    )
+    if not as_json:
+        click.echo(f"wrote {out_path}")
 
 
 @click.group(
@@ -809,18 +840,417 @@ def stage_minutes(
     _emit_written_model(minutes, out_path=out_path, as_json=as_json)
 
 
-@transcript.group(
-    help="Placeholder for rendering primitives (Phase 5+). Use `transcript schema` today.",
-)
+@transcript.group(help="Deterministic markdown rendering primitives.")
 def render() -> None:
     pass
 
 
-@transcript.group(
-    help="Placeholder for note primitives (Phase 5+). Use `transcript schema` today.",
+@render.command("transcript")
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="Path to write rendered transcript markdown.",
 )
+@click.option(
+    "--chapters",
+    "chapters_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+    help="Optional ChapterPlan JSON to render chapter headings.",
+)
+@click.option(
+    "--speakers",
+    "speakers_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+    help="Optional SpeakerMapping JSON for speaker display names.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit RenderedNote metadata JSON to stdout.",
+)
+@click.argument(
+    "transcript_artifact_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+def render_transcript_command(
+    out_path: Path,
+    chapters_path: Path | None,
+    speakers_path: Path | None,
+    as_json: bool,
+    transcript_artifact_path: Path,
+) -> None:
+    """
+    Render TranscriptArtifact turns into markdown.
+
+    Input: TranscriptArtifact JSON plus optional ChapterPlan and SpeakerMapping.
+    Output: Markdown transcript at --out and optional RenderedNote metadata via --json.
+    Side effects: Reads transcript/chapter/speaker artefacts and writes --out.
+    """
+    transcript = TranscriptArtifact.model_validate_json(
+        transcript_artifact_path.read_text(encoding="utf-8")
+    )
+    chapters = None
+    if chapters_path is not None:
+        chapters = ChapterPlan.model_validate_json(
+            chapters_path.read_text(encoding="utf-8")
+        )
+    speaker_mapping = None
+    if speakers_path is not None:
+        speaker_mapping = SpeakerMapping.model_validate_json(
+            speakers_path.read_text(encoding="utf-8")
+        )
+
+    try:
+        markdown = render_transcript_markdown(
+            transcript,
+            chapters=chapters,
+            speaker_mapping=speaker_mapping,
+        )
+    except RenderPrimitiveError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    sections = ["transcript"]
+    if chapters is not None and chapters.chapters:
+        sections.insert(0, "chapters")
+    rendered_note = build_rendered_note_metadata(
+        rendered_markdown_path=out_path,
+        sections_included=sections,
+    )
+    _emit_written_markdown(
+        markdown=markdown,
+        out_path=out_path,
+        rendered_note=rendered_note,
+        as_json=as_json,
+    )
+
+
+@render.command("chapters")
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="Path to write rendered chapter index markdown.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit RenderedNote metadata JSON to stdout.",
+)
+@click.argument(
+    "chapter_plan_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+def render_chapters_command(
+    out_path: Path,
+    as_json: bool,
+    chapter_plan_path: Path,
+) -> None:
+    """
+    Render a ChapterPlan into markdown chapter index bullets.
+
+    Input: ChapterPlan JSON.
+    Output: Markdown chapter index at --out and optional RenderedNote metadata via --json.
+    Side effects: Reads chapter plan and writes --out.
+    """
+    chapters = ChapterPlan.model_validate_json(
+        chapter_plan_path.read_text(encoding="utf-8")
+    )
+    try:
+        markdown = render_chapters_markdown(chapters)
+    except RenderPrimitiveError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    rendered_note = build_rendered_note_metadata(
+        rendered_markdown_path=out_path,
+        sections_included=["chapters"],
+    )
+    _emit_written_markdown(
+        markdown=markdown + "\n",
+        out_path=out_path,
+        rendered_note=rendered_note,
+        as_json=as_json,
+    )
+
+
+@render.command("meeting-note")
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="Path to write rendered meeting-note markdown.",
+)
+@click.option(
+    "--transcript",
+    "transcript_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+    help="Optional rendered transcript markdown to include as ## Transcript.",
+)
+@click.option(
+    "--chapters",
+    "chapters_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+    help="Optional ChapterPlan JSON for chapter index rendering.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit RenderedNote metadata JSON to stdout.",
+)
+@click.argument(
+    "source_artifact_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+@click.argument(
+    "minutes_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+def render_meeting_note_command(
+    out_path: Path,
+    transcript_path: Path | None,
+    chapters_path: Path | None,
+    as_json: bool,
+    source_artifact_path: Path,
+    minutes_path: Path,
+) -> None:
+    """
+    Render meeting-note markdown from source and minutes artefacts.
+
+    Input: SourceArtifact JSON, MeetingMinutes JSON, optional transcript markdown and ChapterPlan.
+    Output: Meeting-note markdown at --out and optional RenderedNote metadata via --json.
+    Side effects: Reads input artefacts and writes --out.
+    """
+    source = SourceArtifact.model_validate_json(
+        source_artifact_path.read_text(encoding="utf-8")
+    )
+    minutes = MeetingMinutes.model_validate_json(
+        minutes_path.read_text(encoding="utf-8")
+    )
+    transcript_markdown = (
+        transcript_path.read_text(encoding="utf-8")
+        if transcript_path is not None
+        else None
+    )
+    chapters = None
+    if chapters_path is not None:
+        chapters = ChapterPlan.model_validate_json(
+            chapters_path.read_text(encoding="utf-8")
+        )
+    markdown, sections = render_meeting_note_markdown(
+        source,
+        minutes,
+        transcript_markdown=transcript_markdown,
+        chapters=chapters,
+    )
+    rendered_note = build_rendered_note_metadata(
+        rendered_markdown_path=out_path,
+        sections_included=sections,
+        source=source,
+    )
+    _emit_written_markdown(
+        markdown=markdown,
+        out_path=out_path,
+        rendered_note=rendered_note,
+        as_json=as_json,
+    )
+
+
+@transcript.group(help="Note merge and mutation primitives.")
 def note() -> None:
     pass
+
+
+@note.command("merge")
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="Path to write merged note markdown.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit RenderedNote metadata JSON to stdout.",
+)
+@click.argument(
+    "note_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+@click.argument(
+    "generated_note_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+def note_merge_command(
+    out_path: Path,
+    as_json: bool,
+    note_path: Path,
+    generated_note_path: Path,
+) -> None:
+    """
+    Merge generated markdown sections into an existing note body.
+
+    Input: Existing note markdown path and generated meeting-note markdown path.
+    Output: Merged note markdown at --out and optional RenderedNote metadata via --json.
+    Side effects: Reads both note inputs and writes --out.
+    """
+    existing_note = note_path.read_text(encoding="utf-8")
+    generated_note = generated_note_path.read_text(encoding="utf-8")
+    try:
+        merged_markdown = merge_generated_note(existing_note, generated_note)
+    except NotePrimitiveError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    rendered_note = build_rendered_note_metadata(
+        rendered_markdown_path=out_path,
+        destination_path=note_path,
+        sections_included=["meeting-notes", "chapters", "transcript"],
+    )
+    _emit_written_markdown(
+        markdown=merged_markdown,
+        out_path=out_path,
+        rendered_note=rendered_note,
+        as_json=as_json,
+    )
+
+
+@note.command("write")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show planned write without mutating NOTE.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit RenderedNote metadata JSON to stdout.",
+)
+@click.argument(
+    "note_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+@click.argument(
+    "merged_note_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+def note_write_command(
+    dry_run: bool,
+    as_json: bool,
+    note_path: Path,
+    merged_note_path: Path,
+) -> None:
+    """
+    Write merged markdown content into the destination note.
+
+    Input: Destination NOTE markdown path and merged note markdown path.
+    Output: Optional RenderedNote metadata via --json.
+    Side effects: Mutates NOTE unless --dry-run is set.
+    """
+    merged_note = merged_note_path.read_text(encoding="utf-8")
+    updated = write_note(note_path, merged_note, dry_run=dry_run)
+    rendered_note = build_rendered_note_metadata(
+        rendered_markdown_path=merged_note_path,
+        destination_path=note_path,
+        sections_included=["meeting-notes", "chapters", "transcript"],
+        warnings=["Dry run: no write performed."] if dry_run else [],
+    )
+    if as_json:
+        payload = rendered_note.model_dump(mode="json")
+        payload["updated"] = updated
+        click.echo(json.dumps(payload, sort_keys=True))
+        return
+    if dry_run:
+        click.echo(f"dry-run: would write {note_path} from {merged_note_path}")
+        return
+    click.echo(f"wrote {note_path}")
+
+
+@note.command("attach")
+@click.option(
+    "--name",
+    "display_name",
+    help="Optional destination filename and display name for the attachment link.",
+)
+@click.option(
+    "--attachments-dir",
+    default="Attachments",
+    show_default=True,
+    help="Directory (relative to NOTE parent) where source attachments are copied.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show planned attachment copy/link update without mutating NOTE.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit RenderedNote metadata JSON to stdout.",
+)
+@click.argument(
+    "note_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+@click.argument(
+    "source_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+def note_attach_command(
+    display_name: str | None,
+    attachments_dir: str,
+    dry_run: bool,
+    as_json: bool,
+    note_path: Path,
+    source_path: Path,
+) -> None:
+    """
+    Copy a source file into the note attachments area and link it from the note.
+
+    Input: NOTE markdown path and source file path.
+    Output: Optional RenderedNote metadata via --json.
+    Side effects: Copies source file and mutates NOTE unless --dry-run is set.
+    """
+    try:
+        destination_path, attached_name, updated = attach_source_file(
+            note_path,
+            source_path,
+            display_name=display_name,
+            attachments_dir=attachments_dir,
+            dry_run=dry_run,
+        )
+    except NotePrimitiveError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    rendered_note = build_rendered_note_metadata(
+        rendered_markdown_path=note_path,
+        destination_path=note_path,
+        sections_included=["sources"],
+        warnings=["Dry run: no copy or note mutation performed."] if dry_run else [],
+    )
+    rendered_note = rendered_note.model_copy(
+        update={"attachments_or_source_links": [str(destination_path)]}
+    )
+    if as_json:
+        payload = rendered_note.model_dump(mode="json")
+        payload["updated"] = updated
+        payload["attachment_name"] = attached_name
+        click.echo(json.dumps(payload, sort_keys=True))
+        return
+    if dry_run:
+        click.echo(
+            f"dry-run: would copy {source_path} to {destination_path} and update {note_path}"
+        )
+        return
+    click.echo(f"attached {attached_name} to {note_path}")
 
 
 @transcript.group(help="Verification primitives with stable check IDs.")
