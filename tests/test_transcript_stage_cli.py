@@ -105,6 +105,53 @@ def test_transcript_stage_polish_happy_path_with_structured_output(
     assert ledger_payload["merge_allowed"] is False
 
 
+def test_transcript_stage_polish_flags_possible_over_simplification(
+    tmp_path: Path,
+) -> None:
+    turns_path = tmp_path / "turns.json"
+    out_path = tmp_path / "turns.polished.json"
+    _write_transcript(turns_path)
+
+    fake_hermes = FakeHermes(
+        responses=[
+            {
+                "turns": [
+                    {
+                        "start": 0.0,
+                        "end": 5.0,
+                        "speaker": "Speaker 1",
+                        "text": "Hello.",
+                    },
+                    {
+                        "start": 5.0,
+                        "end": 9.0,
+                        "speaker": "Speaker 2",
+                        "text": "General Kenobi.",
+                    },
+                ],
+                "ledger": {"merge_allowed": False, "entries": [], "notes": ""},
+            }
+        ]
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "transcript",
+            "stage",
+            "polish",
+            str(turns_path),
+            "--out",
+            str(out_path),
+        ],
+        obj={"hermes": fake_hermes},
+    )
+
+    assert result.exit_code != 0
+    assert "polish.content-retention" in result.output
+    assert "possible over-simplification" in result.output
+
+
 def test_transcript_stage_polish_rejects_operational_chatter_regression(
     tmp_path: Path,
 ) -> None:

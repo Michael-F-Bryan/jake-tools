@@ -28,6 +28,8 @@ _SOURCE_BOILERPLATE_RE = re.compile(
     r"^\s*##\s*(Meeting Notes|Chapters|Transcript)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+_CONTENT_WORD_RE = re.compile(r"\b[\w']+\b")
+MAX_POLISH_CONTENT_CUT_RATIO = 0.15
 
 
 class StagePrimitiveError(RuntimeError):
@@ -172,6 +174,30 @@ def _merge_ledger_is_explicit(ledger: PolishLedger) -> bool:
     return ledger.merge_allowed and bool(ledger.entries)
 
 
+def _turns_word_count(turns: list[TranscriptTurn]) -> int:
+    return sum(len(_CONTENT_WORD_RE.findall(turn.text)) for turn in turns)
+
+
+def _ensure_polish_preserves_content(
+    source_turns: list[TranscriptTurn], polished_turns: list[TranscriptTurn]
+) -> None:
+    source_words = _turns_word_count(source_turns)
+    if source_words == 0:
+        return
+
+    polished_words = _turns_word_count(polished_turns)
+    cut_ratio = (source_words - polished_words) / source_words
+    if cut_ratio <= MAX_POLISH_CONTENT_CUT_RATIO:
+        return
+
+    raise StagePrimitiveError(
+        "Polished transcript failed audit gate: polish.content-retention "
+        f"possible over-simplification; source_words={source_words}, "
+        f"polished_words={polished_words}, cut_ratio={cut_ratio:.1%}, "
+        f"max_allowed={MAX_POLISH_CONTENT_CUT_RATIO:.1%}"
+    )
+
+
 def run_polish_stage(
     hermes: Hermes,
     transcript: TranscriptArtifact,
@@ -184,6 +210,7 @@ def run_polish_stage(
         max_attempts=max_attempts,
     )
     _ensure_no_forbidden_output(payload.turns)
+    _ensure_polish_preserves_content(transcript.turns, payload.turns)
 
     polished = transcript.model_copy(update={"turns": payload.turns})
     verification = verify_turns(transcript, polished, affected_paths=[])
