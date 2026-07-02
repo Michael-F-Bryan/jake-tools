@@ -6,7 +6,11 @@ from pathlib import Path
 
 from jake_tools.ai_usage import Usage
 from jake_tools.ai_watch.audit_models import DeliveryStatus
-from jake_tools.ai_watch.delivery import FakeSender
+from jake_tools.ai_watch.delivery import (
+    DISCORD_PAYLOAD_MAX_CHARS,
+    FakeSender,
+    build_discord_payload,
+)
 from jake_tools.ai_watch.models import (
     AiWatchCommandOptions,
     CuratorDecision,
@@ -169,7 +173,9 @@ def test_integration_dry_run_full_pipeline(tmp_path: Path) -> None:
 
     payload = paths.root / "delivery-payload.txt"
     assert payload.exists()
-    assert payload.read_text(encoding="utf-8") == digest_text
+    payload_text = payload.read_text(encoding="utf-8")
+    assert payload_text == build_discord_payload(digest_text)
+    assert len(payload_text) <= DISCORD_PAYLOAD_MAX_CHARS
 
     delivery_rows = [
         json.loads(line)
