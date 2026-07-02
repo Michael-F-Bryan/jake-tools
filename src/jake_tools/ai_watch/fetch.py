@@ -46,6 +46,9 @@ def run_fetch(
     calibration_cases = load_calibration_cases() if options.calibration_only else []
 
     for candidate in _discovered_candidates(paths):
+        if fetched + failed >= options.max_candidates:
+            break
+
         seen = state.check_seen(url=candidate.url, title=candidate.title)
         if seen and seen.latest_content_path and not options.calibration_only:
             skipped += 1

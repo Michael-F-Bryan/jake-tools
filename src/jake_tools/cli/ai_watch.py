@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from ..ai_watch.collect import run_collect
+from ..ai_watch.config import resolve_discord_target
 from ..ai_watch.curate import run_curate
 from ..ai_watch.delivery import run_delivery
 from ..ai_watch.digest import run_digest
@@ -84,13 +85,15 @@ def collect(
         max_candidates=max_candidates,
         calibration_only=calibration_only,
     )
-    result = run_collect(
-        options=options,
-        paths=paths,
-        state=state,
-        web_tools=HermesWebTools(),
+    _run_stage(
+        lambda: run_collect(
+            options=options,
+            paths=paths,
+            state=state,
+            web_tools=HermesWebTools(),
+        ),
+        as_json=as_json,
     )
-    _emit_stage(result.__dict__, as_json=as_json)
 
 
 @ai_watch.command()
@@ -112,13 +115,15 @@ def fetch(
         max_candidates=max_candidates,
         calibration_only=calibration_only,
     )
-    result = run_fetch(
-        options=options,
-        paths=paths,
-        state=state,
-        web_tools=HermesWebTools(),
+    _run_stage(
+        lambda: run_fetch(
+            options=options,
+            paths=paths,
+            state=state,
+            web_tools=HermesWebTools(),
+        ),
+        as_json=as_json,
     )
-    _emit_stage(result.__dict__, as_json=as_json)
 
 
 @ai_watch.command()
@@ -145,12 +150,14 @@ def scout(
         scout_model=scout_model,
         scout_provider=scout_provider,
     )
-    result = run_scout(
-        options=options,
-        paths=paths,
-        stages=HermesAiWatchStages(Hermes()),
+    _run_stage(
+        lambda: run_scout(
+            options=options,
+            paths=paths,
+            stages=HermesAiWatchStages(Hermes()),
+        ),
+        as_json=as_json,
     )
-    _emit_stage(result.__dict__, as_json=as_json)
 
 
 @ai_watch.command()
@@ -180,12 +187,14 @@ def curate(
         curator_provider=curator_provider,
         force_candidate=force_candidate,
     )
-    result = run_curate(
-        options=options,
-        paths=paths,
-        stages=HermesAiWatchStages(Hermes()),
+    _run_stage(
+        lambda: run_curate(
+            options=options,
+            paths=paths,
+            stages=HermesAiWatchStages(Hermes()),
+        ),
+        as_json=as_json,
     )
-    _emit_stage(result.__dict__, as_json=as_json)
 
 
 @ai_watch.command("obsidian-sync")
@@ -261,7 +270,7 @@ def deliver(
         dry_run=dry_run,
         max_candidates=max_candidates,
         calibration_only=calibration_only,
-        discord_target=discord_target,
+        discord_target=resolve_discord_target(discord_target),
     )
     result = run_delivery(options=options, paths=paths)
     _emit_stage({**result.__dict__, "target": delivery_target}, as_json=as_json)
@@ -305,7 +314,7 @@ def run(
         scout_provider=scout_provider,
         curator_model=curator_model,
         curator_provider=curator_provider,
-        discord_target=discord_target,
+        discord_target=resolve_discord_target(discord_target),
         vault_path=vault_path,
         cost_cap_usd=cost_cap_usd,
     )
@@ -356,3 +365,12 @@ def _emit_stage(payload: dict, *, as_json: bool) -> None:
         return
     for key, value in payload.items():
         click.echo(f"{key}: {value}")
+
+
+def _run_stage(stage_fn, *, as_json: bool):
+    try:
+        result = stage_fn()
+    except RuntimeError as error:
+        raise click.exceptions.Exit(1) from error
+    _emit_stage(result.__dict__, as_json=as_json)
+    return result
