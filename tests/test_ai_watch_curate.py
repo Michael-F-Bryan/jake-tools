@@ -7,7 +7,7 @@ from jake_tools.ai_watch.models import (
     DigestLane,
     ObsidianRecommendation,
 )
-from jake_tools.ai_watch.validation import validate_curated
+from jake_tools.ai_watch.validation import sanitize_digest_summary, validate_curated
 
 
 def test_validate_curated_rejects_generic_reason() -> None:
@@ -42,6 +42,35 @@ def test_validate_curated_requires_vault_relative_placement() -> None:
     )
     errors = validate_curated([record], vault_root="/Users/work/Documents/Vault")
     assert any("outside vault" in error for error in errors)
+
+
+def test_sanitize_digest_summary_truncates_overlong_text() -> None:
+    overlong = "Harness pattern " * 80
+    truncated = sanitize_digest_summary(overlong)
+    assert len(truncated) <= 500
+    assert truncated.endswith("...")
+    assert not truncated.endswith(" ...")
+
+
+def test_validate_curated_accepts_sanitized_digest_summary() -> None:
+    overlong = "Transferable evaluator loop pattern for long-running agents. " * 20
+    record = CuratorDecisionRecord(
+        run_id="2026-07-02",
+        candidate_id="sha256:long-summary",
+        timestamp="2026-07-02T00:00:00+00:00",
+        model="gpt-5.5",
+        decision=CuratorDecisionType.SURFACE,
+        lane=DigestLane.MAIN_DIGEST,
+        reason="Transferable harness evaluator pattern for long-running agents.",
+        digest_summary=sanitize_digest_summary(overlong),
+        obsidian_recommendation=ObsidianRecommendation(
+            should_create_note=True,
+            path="3 Resources/AI Watch/long-summary.md",
+            placement_reason="Concrete harness pattern.",
+        ),
+    )
+    errors = validate_curated([record], vault_root="/Users/work/Documents/Vault")
+    assert errors == []
 
 
 def test_curator_decision_surface_requires_obsidian_note() -> None:

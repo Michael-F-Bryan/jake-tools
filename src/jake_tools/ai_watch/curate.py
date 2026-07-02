@@ -9,7 +9,7 @@ from .audit_models import CuratorDecisionRecord, ScoutEvaluationRecord
 from .models import AiWatchCommandOptions, ScoutRecommendation
 from .paths import AiWatchPaths
 from .stages import AiWatchStages, load_interest_profile
-from .validation import validate_curated
+from .validation import sanitize_digest_summary, validate_curated
 
 
 @dataclass
@@ -61,6 +61,9 @@ def run_curate(
             metadata=metadata,
             options=options,
             interest_profile=interest_profile,
+        )
+        decision = decision.model_copy(
+            update={"digest_summary": sanitize_digest_summary(decision.digest_summary)}
         )
         usage = usage + reply.usage
         append_model(

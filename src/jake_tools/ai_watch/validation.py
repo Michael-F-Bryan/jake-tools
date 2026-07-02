@@ -29,6 +29,7 @@ _QUOTE_CHAR_REPLACEMENTS = {
 
 _RESOLVE_MIN_WORDS = 3
 _RESOLVE_MIN_COVERAGE = 0.75
+_DIGEST_SUMMARY_MAX_CHARS = 500
 
 
 def _strip_markdown_inline(text: str) -> str:
@@ -91,6 +92,22 @@ def resolve_evidence_quote(*, quote: str, article: str) -> str | None:
         if line.strip() == resolved:
             return resolved
     return None
+
+
+def sanitize_digest_summary(
+    summary: str, *, max_chars: int = _DIGEST_SUMMARY_MAX_CHARS
+) -> str:
+    cleaned = summary.strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+
+    ellipsis = "..."
+    cutoff = max_chars - len(ellipsis)
+    truncated = cleaned[:cutoff].rstrip()
+    last_space = truncated.rfind(" ")
+    if last_space > 0:
+        truncated = truncated[:last_space].rstrip()
+    return f"{truncated}{ellipsis}"
 
 
 def sanitize_evidence_quotes(*, quotes: list[str], article: str) -> list[str]:

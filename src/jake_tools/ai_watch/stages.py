@@ -83,6 +83,7 @@ Article text (may be truncated):
 {{ article_text }}
 
 Decide surface only for concrete, transferable patterns relevant to agents, harnesses, MCP, generative UI, or workflow automation.
+For surface decisions, digest_summary must be at most 500 characters — a concise digest blurb for the newsletter.
 For surface decisions, include obsidian_recommendation with a vault-relative path under 3 Resources/.
 
 {% if calibration_replay -%}
