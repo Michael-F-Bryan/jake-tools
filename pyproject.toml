@@ -48,3 +48,8 @@ select = [
 ]
 # The formatter owns line wrapping; E501 only fires on unsplittable strings.
 ignore = ["E501"]
+
+[tool.pytest.ini_options]
+markers = [
+    "live: marks tests that hit real external services",
+]
