@@ -56,9 +56,12 @@ def run_delivery(
     digest_text = (
         paths.digest.read_text(encoding="utf-8") if paths.digest.exists() else ""
     )
-    surfaced_count = digest_text.count("\n## ") if digest_text.strip() else 0
     if digest_text.startswith("_No items"):
         surfaced_count = 0
+    else:
+        surfaced_count = sum(
+            1 for line in digest_text.splitlines() if line.startswith("## ")
+        )
     speculative_count = len(
         [
             record

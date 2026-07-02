@@ -11,11 +11,13 @@ When in doubt, run `jake-tools <command> --help` for current flags.
 ```text
 src/jake_tools/
   cli/           # Click commands (keep thin)
+  ai_watch/      # collect→fetch→scout→curate→obsidian→digest→deliver
   daily_report/  # coordinator, lanes, synthesis, Himalaya preflight
   transcripts/   # Obsidian recording pipeline
   hermes.py      # Hermes wrapper and structured prompts
   newsletters.py # SharePoint Graph client
 tests/           # mirrors packages above
+.agents/skills/ai-watch/      # deep workflow guidance (not CLI code)
 .agents/skills/daily-report/  # deep workflow guidance (not CLI code)
 ```
 
@@ -95,6 +97,41 @@ Key artefacts: `report.md`, `summary.json`, `manifest.json`,
 
 For lane orchestration, validation gates, and usage forensics, see
 [.agents/skills/daily-report/SKILL.md](.agents/skills/daily-report/SKILL.md).
+
+### `ai-watch`
+
+```bash
+jake-tools ai-watch run --date YYYY-MM-DD
+jake-tools ai-watch run --date today --dry-run --max-candidates 10
+jake-tools ai-watch collect --date today
+jake-tools ai-watch deliver --date today --target discord --dry-run
+jake-tools ai-watch audit --since 7d
+```
+
+Low-noise AI developments radar. Archives checked articles, surfaces almost
+nothing, syncs curated items to Obsidian, and DMs a digest on Discord when items
+clear the bar.
+
+- Pipeline stages: collect, fetch, scout, curate, obsidian-sync, digest,
+  deliver. `run` executes all stages sequentially; individual subcommands call
+  the same domain functions.
+- Discovery and fetch use Hermes `web_search` / `web_extract` (no hand-rolled
+  HTTP). Scout uses `--scout-model`; curator uses `--curator-model`. Provider
+  defaults to `openai-codex`.
+- `--dry-run` skips vault writes and live Discord send; still writes run
+  artefacts including `delivery-payload.txt`.
+- Empty main digest is **silent** (no Discord message; audit records still
+  written). Speculative items go to `speculative.md` only (not Discord in v1).
+- Discord target from `--discord-target` or `AI_WATCH_DISCORD_TARGET`.
+- `--max-candidates` and `--cost-cap-usd` guard run cost. Exits `1` when any
+  stage fails.
+
+Key artefacts under `_working/ai-watch/YYYY-MM-DD/`: `manifest.json`,
+`summary.json`, `digest.md`, `speculative.md`, stage JSONL files, `articles/`,
+and `delivery-payload.txt`.
+
+For checkpoint gates, calibration replay, artefact layout, and audit-driven
+tuning, see [.agents/skills/ai-watch/SKILL.md](.agents/skills/ai-watch/SKILL.md).
 
 ### `transcribe`
 
