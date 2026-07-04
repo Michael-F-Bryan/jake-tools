@@ -13,6 +13,7 @@ from .audit_models import (
     ObsidianSyncStatus,
     ScoutEvaluationRecord,
 )
+from .cleanup import strip_page_chrome
 from .models import AiWatchCommandOptions
 from .paths import AiWatchPaths
 
@@ -105,9 +106,10 @@ def run_obsidian_sync(
                 f"{metadata.title if metadata else candidate_id}.md"
             )
         note_path = vault / rel_path
-        body = (
+        raw_body = (
             markdown_path.read_text(encoding="utf-8") if markdown_path.exists() else ""
         )
+        body = strip_page_chrome(raw_body)
         note = render_obsidian_note(
             title=metadata.title if metadata else candidate_id,
             url=metadata.url if metadata else "",
