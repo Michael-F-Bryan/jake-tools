@@ -6,7 +6,7 @@ from pathlib import Path
 from jake_tools.ai_watch.collect import run_collect
 from jake_tools.ai_watch.models import AiWatchCommandOptions, SearchResult
 from jake_tools.ai_watch.paths import AiWatchPaths
-from jake_tools.ai_watch.sources import SourceQuery
+from jake_tools.ai_watch.sources import DEFAULT_SOURCE_QUERIES, SourceQuery
 from jake_tools.ai_watch.state import SeenIndex
 from jake_tools.ai_watch.web_tools import FakeWebTools
 
@@ -71,3 +71,16 @@ def test_collect_discovers_new_candidates(tmp_path: Path) -> None:
     )
     assert result.discovered == 1
     assert paths.candidates.exists()
+
+
+def test_default_queries_cover_anthropic_sdk_and_builder_sources() -> None:
+    queries = {query.source_id: query.query for query in DEFAULT_SOURCE_QUERIES}
+    all_queries = "\n".join(query.query for query in DEFAULT_SOURCE_QUERIES)
+
+    assert "anthropic_engineering" in queries
+    assert "anthropic_news" in queries
+    assert "anthropic_cookbook" in queries
+    assert "anthropic_sdk_python" in queries
+    assert "anthropic_sdk_typescript" in queries
+    assert "claude_code_sdk" in queries
+    assert "Claude SDK" in all_queries
