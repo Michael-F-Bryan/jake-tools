@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import html
-import json
 import re
 import subprocess
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, Protocol, cast
 
+import requests
 from pydantic import BaseModel, ConfigDict, Field
 
 CSU_TENANT_ID = "0a3a5574-cfda-4314-952e-c0b3e1dcac6d"
@@ -25,6 +23,10 @@ GRAPH_RESOURCE = "https://graph.microsoft.com"
 SHAREPOINT_RESOURCE = f"https://{CSU_SITE_HOST}"
 
 JsonObject = dict[str, object]
+
+
+class HttpSession(Protocol):
+    def request(self, method: str, url: str, **kwargs: Any) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -128,12 +130,14 @@ class NewsletterClient:
         sharepoint_root: str = SHAREPOINT_ROOT,
         site_id: str = CSU_SITE_ID,
         list_id: str = CSU_WEEKLY_NEWSLETTER_LIST_ID,
+        session: HttpSession | None = None,
     ) -> None:
         self._token_provider = token_provider or AzureCliTokenProvider()
         self._graph_root = graph_root.rstrip("/")
         self._sharepoint_root = sharepoint_root.rstrip("/")
         self._site_id = site_id
         self._list_id = list_id
+        self._session = session or requests.Session()
 
     def list_items(self, *, limit: int = 10) -> list[NewsletterItem]:
         query = urllib.parse.urlencode(
@@ -208,12 +212,11 @@ class NewsletterClient:
     def _graph(
         self, method: str, path: str, payload: Mapping[str, object] | None = None
     ) -> JsonObject:
-        body = None if payload is None else json.dumps(payload).encode("utf-8")
         return self._request_json(
             method,
             GRAPH_RESOURCE,
             f"{self._graph_root}{path}",
-            body=body,
+            body=payload,
             content_type="application/json",
         )
 
@@ -234,36 +237,34 @@ class NewsletterClient:
         resource: str,
         url: str,
         *,
-        body: bytes | None,
+        body: Mapping[str, object] | bytes | None,
         content_type: str,
     ) -> JsonObject:
-        request = urllib.request.Request(
-            url,
-            data=body,
-            method=method,
-            headers={
-                "Authorization": f"Bearer {self._token_provider(resource)}",
-                "Accept": "application/json",
-                "Content-Type": content_type,
-            },
-        )
         try:
-            with urllib.request.urlopen(request) as response:
-                if response.status == 204:
-                    return {}
+            response = self._session.request(
+                method,
+                url,
+                headers={
+                    "Authorization": f"Bearer {self._token_provider(resource)}",
+                    "Accept": "application/json",
+                    "Content-Type": content_type,
+                },
+                json=body if isinstance(body, Mapping) else None,
+                data=body if isinstance(body, bytes) else None,
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            raise NewsletterError(f"newsletter request failed: {exc}") from exc
 
-                raw = response.read()
-                if not raw:
-                    return {}
-
-                return cast(JsonObject, json.loads(raw))
-        except urllib.error.HTTPError as exc:
-            details = exc.read().decode(errors="replace")
+        if response.status_code >= 400:
             raise NewsletterError(
-                f"newsletter request failed: {exc.code} {exc.reason}\n{details}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise NewsletterError(f"newsletter request failed: {exc.reason}") from exc
+                f"newsletter request failed: {response.status_code} {response.reason}\n{response.text}"
+            )
+
+        if response.status_code == 204 or not response.content:
+            return {}
+
+        return cast(JsonObject, response.json())
 
 
 def body_to_html(body: str) -> str:

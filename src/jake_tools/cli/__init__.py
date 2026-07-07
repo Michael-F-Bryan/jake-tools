@@ -1,6 +1,7 @@
 import click
 
 from .ai_watch import ai_watch
+from .clockify import clockify
 from .daily_report import daily_report
 from .newsletter import newsletter
 from .transcribe import transcribe
@@ -14,6 +15,7 @@ def main():
 
 main.add_command(daily_report)
 main.add_command(ai_watch)
+main.add_command(clockify)
 main.add_command(newsletter)
 main.add_command(transcript)
 main.add_command(transcribe)

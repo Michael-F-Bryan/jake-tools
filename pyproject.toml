@@ -12,6 +12,7 @@ dependencies = [
     "hermes-agent",
     "jinja2>=3.1.6",
     "pydantic>=2.13.4",
+    "requests>=2.33.0",
 ]
 
 [build-system]

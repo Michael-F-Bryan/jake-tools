@@ -411,6 +411,7 @@ dependencies = [
     { name = "hermes-agent" },
     { name = "jinja2" },
     { name = "pydantic" },
+    { name = "requests" },
 ]
 
 [package.dev-dependencies]
@@ -427,6 +428,7 @@ requires-dist = [
     { name = "hermes-agent", git = "https://github.com/NousResearch/hermes-agent.git?rev=44ddc552f5e054759a6970af8997ea588a9d81c9" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "pydantic", specifier = ">=2.13.4" },
+    { name = "requests", specifier = ">=2.33.0" },
 ]
 
 [package.metadata.requires-dev]
