@@ -6,9 +6,10 @@ from ..ai_usage import Usage
 from .archive import load_article_metadata
 from .audit import append_model, read_models, truncate_records, utc_now_iso
 from .audit_models import CuratorDecisionRecord, ScoutEvaluationRecord
-from .models import AiWatchCommandOptions, ScoutRecommendation
+from .models import AiWatchCommandOptions, CuratorDecisionType, ScoutRecommendation
 from .paths import AiWatchPaths
 from .stages import AiWatchStages, load_interest_profile
+from .tuning import apply_surface_policy
 from .validation import sanitize_digest_summary, validate_curated
 
 
@@ -84,10 +85,24 @@ def run_curate(
         if evaluated >= options.max_candidates:
             break
 
-    errors = validate_curated(
-        read_models(paths.curator_decisions, CuratorDecisionRecord),
-        vault_root=str(options.vault_path),
+    apply_surface_policy(options=options, paths=paths)
+    final_records = read_models(paths.curator_decisions, CuratorDecisionRecord)
+    surfaced = len(
+        [
+            record
+            for record in final_records
+            if record.decision == CuratorDecisionType.SURFACE
+        ]
     )
+    speculative = len(
+        [
+            record
+            for record in final_records
+            if record.decision == CuratorDecisionType.SPECULATIVE_WATCH
+        ]
+    )
+
+    errors = validate_curated(final_records, vault_root=str(options.vault_path))
     if errors:
         raise RuntimeError("; ".join(errors))
     return CurateRunResult(

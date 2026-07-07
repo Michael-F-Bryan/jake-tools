@@ -127,6 +127,7 @@ class AiWatchCommandOptions(BaseModel):
     discord_target: str = ""
     dry_run: bool = False
     max_candidates: int = 80
+    surface_limit: int | None = 2
     cost_cap_usd: float | None = None
     calibration_only: bool = False
     save_raw: bool = False

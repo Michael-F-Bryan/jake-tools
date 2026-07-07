@@ -6,12 +6,14 @@ from pathlib import Path
 
 import click
 
+from ..ai_usage import AITotals
 from ..ai_watch.collect import run_collect
 from ..ai_watch.config import resolve_discord_target
 from ..ai_watch.curate import run_curate
-from ..ai_watch.delivery import run_delivery
+from ..ai_watch.delivery import build_discord_payload, run_delivery
 from ..ai_watch.digest import run_digest
 from ..ai_watch.fetch import run_fetch
+from ..ai_watch.manifest import write_manifest
 from ..ai_watch.models import AiWatchCommandOptions, RunStatus
 from ..ai_watch.obsidian import run_obsidian_sync
 from ..ai_watch.paths import AiWatchPaths
@@ -19,6 +21,7 @@ from ..ai_watch.runner import run_ai_watch_command
 from ..ai_watch.scout import run_scout
 from ..ai_watch.stages import HermesAiWatchStages
 from ..ai_watch.state import SeenIndex
+from ..ai_watch.tuning import apply_surface_policy
 from ..ai_watch.web_tools import HermesWebTools
 from ..hermes import Hermes
 
@@ -276,6 +279,74 @@ def deliver(
     _emit_stage({**result.__dict__, "target": delivery_target}, as_json=as_json)
 
 
+@ai_watch.command("tune")
+@_common_options
+@click.option("--surface-limit", default=2, show_default=True, type=int)
+@click.option(
+    "--vault-path",
+    type=click.Path(path_type=Path),
+    default=Path("/Users/work/Documents/Vault"),
+)
+@click.option(
+    "--remove-unsurfaced-notes",
+    is_flag=True,
+    help="Delete generated Obsidian notes for demoted items when run markers match.",
+)
+def tune(
+    target_date: date,
+    base_dir: Path,
+    dry_run: bool,
+    max_candidates: int,
+    calibration_only: bool,
+    as_json: bool,
+    surface_limit: int,
+    vault_path: Path,
+    remove_unsurfaced_notes: bool,
+) -> None:
+    del max_candidates, calibration_only
+    paths = AiWatchPaths.for_date(base_dir, target_date)
+    options = AiWatchCommandOptions(
+        target_date=target_date,
+        base_dir=base_dir,
+        dry_run=dry_run,
+        surface_limit=surface_limit,
+        vault_path=vault_path,
+    )
+    result = apply_surface_policy(
+        options=options,
+        paths=paths,
+        remove_notes=remove_unsurfaced_notes and not dry_run,
+    )
+    surfaced, speculative = run_digest(options=options, paths=paths)
+    digest_text = paths.digest.read_text(encoding="utf-8")
+    (paths.root / "delivery-payload.txt").write_text(
+        build_discord_payload(digest_text) if surfaced else digest_text,
+        encoding="utf-8",
+    )
+    summary = (
+        AITotals.model_validate_json(paths.summary.read_text(encoding="utf-8"))
+        if paths.summary.exists()
+        else AITotals()
+    )
+    write_manifest(
+        paths=paths,
+        options=options,
+        status=RunStatus.OK,
+        surfaced_count=surfaced,
+        speculative_count=speculative,
+        failed_stages=[],
+        summary=summary,
+    )
+    _emit_stage(
+        {
+            **result.__dict__,
+            "digest_surfaced": surfaced,
+            "digest_speculative": speculative,
+        },
+        as_json=as_json,
+    )
+
+
 @ai_watch.command()
 @_common_options
 @click.option("--scout-model", default="gpt-5.4-mini", show_default=True)
@@ -287,6 +358,13 @@ def deliver(
     "--vault-path",
     type=click.Path(path_type=Path),
     default=Path("/Users/work/Documents/Vault"),
+)
+@click.option(
+    "--surface-limit",
+    default=2,
+    show_default=True,
+    type=int,
+    help="Maximum main-digest items per run. Extra surfaced items become speculative.",
 )
 @click.option("--cost-cap-usd", type=float, default=None)
 def run(
@@ -302,6 +380,7 @@ def run(
     curator_provider: str,
     discord_target: str,
     vault_path: Path,
+    surface_limit: int,
     cost_cap_usd: float | None,
 ) -> None:
     options = AiWatchCommandOptions(
@@ -316,6 +395,7 @@ def run(
         curator_provider=curator_provider,
         discord_target=resolve_discord_target(discord_target),
         vault_path=vault_path,
+        surface_limit=surface_limit,
         cost_cap_usd=cost_cap_usd,
     )
     result = run_ai_watch_command(options=options)
