@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Literal
 
 from .models import (
     ChapterPlan,
@@ -35,6 +36,21 @@ NOTE_CHECK_IDS: tuple[str, ...] = (
     "note.chapter-heading-count",
     "note.no-operational-chatter",
 )
+DUMC_NOTE_CHECK_IDS: tuple[str, ...] = (
+    "note.has-summary-callout",
+    "note.has-discussion-notes",
+    "note.has-chapters",
+    "note.has-transcript",
+    "note.chapter-heading-count",
+    "note.no-meeting-notes",
+    "note.no-notes-heading",
+    "note.no-next-steps",
+    "note.no-task-checkboxes",
+    "note.no-action-labels",
+    "note.no-raw-vtt-link",
+    "note.no-operational-chatter",
+)
+NoteVerificationProfile = Literal["default", "dumc"]
 
 _OPERATIONAL_CHATTER_RE = re.compile(
     r"^\s*Loading the transcript-polisher skill\.?\s*$",
@@ -213,7 +229,17 @@ def verify_note(
     *,
     expected_chapter_count: int | None,
     affected_path: Path,
+    profile: NoteVerificationProfile = "default",
 ) -> VerificationReport:
+    if profile == "dumc":
+        return _verify_dumc_note(
+            note_body,
+            expected_chapter_count=expected_chapter_count,
+            affected_path=affected_path,
+        )
+    if profile != "default":
+        raise ValueError(f"unknown note verification profile: {profile}")
+
     checks = [
         VerificationCheck(
             check_id="note.has-meeting-notes",
@@ -239,6 +265,99 @@ def verify_note(
             )
             else "fail",
             message="Chapter heading count matches expected chapter count.",
+        ),
+        VerificationCheck(
+            check_id="note.no-operational-chatter",
+            status="fail" if _OPERATIONAL_CHATTER_RE.search(note_body) else "pass",
+            message="Note does not contain transcript-polisher operational chatter.",
+        ),
+    ]
+    return _build_report(checks, affected_paths=[affected_path])
+
+
+def _heading_index(note_body: str, heading: str) -> int | None:
+    index = note_body.find(heading)
+    return index if index >= 0 else None
+
+
+def _verify_dumc_note(
+    note_body: str,
+    *,
+    expected_chapter_count: int | None,
+    affected_path: Path,
+) -> VerificationReport:
+    summary_index = _heading_index(note_body, "> [!summary]")
+    discussion_index = _heading_index(note_body, "## Discussion Notes")
+    checks = [
+        VerificationCheck(
+            check_id="note.has-summary-callout",
+            status="pass"
+            if summary_index is not None
+            and discussion_index is not None
+            and summary_index < discussion_index
+            else "fail",
+            message="DUM-C note has a summary callout before Discussion Notes.",
+        ),
+        VerificationCheck(
+            check_id="note.has-discussion-notes",
+            status="pass" if "## Discussion Notes" in note_body else "fail",
+            message="DUM-C note contains a ## Discussion Notes section.",
+        ),
+        VerificationCheck(
+            check_id="note.has-chapters",
+            status="pass" if "## Chapters" in note_body else "fail",
+            message="DUM-C note contains a ## Chapters section.",
+        ),
+        VerificationCheck(
+            check_id="note.has-transcript",
+            status="pass" if "## Transcript" in note_body else "fail",
+            message="DUM-C note contains a ## Transcript section.",
+        ),
+        VerificationCheck(
+            check_id="note.chapter-heading-count",
+            status="pass"
+            if (
+                expected_chapter_count is None
+                or note_body.count("### ") == expected_chapter_count
+            )
+            else "fail",
+            message="Chapter heading count matches expected chapter count.",
+        ),
+        VerificationCheck(
+            check_id="note.no-meeting-notes",
+            status="fail" if "## Meeting Notes" in note_body else "pass",
+            message="DUM-C note does not use the generic ## Meeting Notes heading.",
+        ),
+        VerificationCheck(
+            check_id="note.no-notes-heading",
+            status="fail"
+            if re.search(r"^## Notes\s*$", note_body, re.MULTILINE)
+            else "pass",
+            message="DUM-C note does not include a generic ## Notes heading.",
+        ),
+        VerificationCheck(
+            check_id="note.no-next-steps",
+            status="fail" if "## Next Steps" in note_body else "pass",
+            message="DUM-C note does not include an assigned next-steps section.",
+        ),
+        VerificationCheck(
+            check_id="note.no-task-checkboxes",
+            status="fail"
+            if re.search(r"^\s*- \[[ xX]\]", note_body, re.MULTILINE)
+            else "pass",
+            message="DUM-C note does not contain task checkboxes.",
+        ),
+        VerificationCheck(
+            check_id="note.no-action-labels",
+            status="fail" if re.search(r"\bAction:\s*", note_body) else "pass",
+            message="DUM-C note does not contain Action: labels.",
+        ),
+        VerificationCheck(
+            check_id="note.no-raw-vtt-link",
+            status="fail"
+            if re.search(r"\.vtt\b", note_body, re.IGNORECASE)
+            else "pass",
+            message="DUM-C note does not link raw VTT by default.",
         ),
         VerificationCheck(
             check_id="note.no-operational-chatter",

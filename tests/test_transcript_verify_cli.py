@@ -245,3 +245,97 @@ def test_transcript_verify_note_missing_file_fails() -> None:
 
     assert result.exit_code != 0
     assert "does not exist" in result.output
+
+
+def test_transcript_verify_dumc_note_rejects_generic_meeting_shape(
+    tmp_path: Path,
+) -> None:
+    note_path = tmp_path / "generic-note.md"
+    note_path.write_text(
+        "\n".join(
+            [
+                "# Meeting",
+                "",
+                "## Meeting Notes",
+                "- Action: Follow up.",
+                "- [ ] Assigned task",
+                "",
+                "## Chapters",
+                "",
+                "## Transcript",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "transcript",
+            "verify",
+            "note",
+            str(note_path),
+            "--profile",
+            "dumc",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert "note.has-discussion-notes" in payload["failed_gate_ids"]
+    assert "note.no-meeting-notes" in payload["failed_gate_ids"]
+    assert "note.no-task-checkboxes" in payload["failed_gate_ids"]
+    assert "note.no-action-labels" in payload["failed_gate_ids"]
+
+
+def test_transcript_verify_dumc_note_accepts_profile_shape(tmp_path: Path) -> None:
+    note_path = tmp_path / "dumc-note.md"
+    note_path.write_text(
+        "\n".join(
+            [
+                "---",
+                'message-id: "msgraph-teams:meeting-123:transcript-abc"',
+                'timezone: "Australia/Perth"',
+                "---",
+                "",
+                "> [!summary]",
+                "> Comms support briefing.",
+                "",
+                "## Discussion Notes",
+                "",
+                "- Confirmed support roster.",
+                "\t- Joanne to check availability outside the transcript note.",
+                "",
+                "## Chapters",
+                "",
+                "- 00:00 — Briefing",
+                "",
+                "## Transcript",
+                "",
+                "### 00:00 — Briefing",
+                "",
+                "**Joanne Olsen** So much.",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "transcript",
+            "verify",
+            "note",
+            str(note_path),
+            "--profile",
+            "dumc",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["status"] == "pass"

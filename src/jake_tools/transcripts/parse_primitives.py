@@ -23,6 +23,14 @@ _TRANSCRIPT_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+transcript\b", re.IGNOREC
 _TRANSCRIPT_MARKER_RE = re.compile(r"\btranscript\b", re.IGNORECASE)
 _TRANSCRIPTION_ENDED_RE = re.compile(r"^\s*Transcription ended after\b", re.IGNORECASE)
 _ANY_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
+_VTT_TIMESTAMP_RE = re.compile(
+    r"^\s*(?P<start>\d{1,2}:\d{2}(?::\d{2})?\.\d{3})\s+-->\s+(?P<end>\d{1,2}:\d{2}(?::\d{2})?\.\d{3})"
+)
+_VTT_VOICE_RE = re.compile(
+    r"<v\s+(?P<speaker>[^>]+)>\s*(?P<text>.*?)\s*</v>",
+    re.IGNORECASE | re.DOTALL,
+)
+_VTT_TAG_RE = re.compile(r"<[^>]+>")
 
 
 class ParsePrimitiveError(ValueError):
@@ -63,6 +71,26 @@ def _timestamp_to_seconds(timestamp: str) -> float:
         hours, minutes, seconds = parts
         return float(hours * 3600 + minutes * 60 + seconds)
     raise ParsePrimitiveError(f"Unsupported timestamp format: {timestamp!r}")
+
+
+def _vtt_timestamp_to_seconds(timestamp: str) -> float:
+    seconds_part, milliseconds_part = timestamp.rsplit(".", maxsplit=1)
+    return _timestamp_to_seconds(seconds_part) + (int(milliseconds_part) / 1000)
+
+
+def _strip_vtt_tags(text: str) -> str:
+    return _VTT_TAG_RE.sub("", text).replace("\n", " ").strip()
+
+
+def _parse_vtt_voice_text(lines: list[str]) -> tuple[str, str]:
+    body = "\n".join(lines).strip()
+    voice_match = _VTT_VOICE_RE.search(body)
+    if voice_match is None:
+        return "Unknown speaker", _strip_vtt_tags(body)
+    return (
+        voice_match.group("speaker").strip(),
+        _strip_vtt_tags(voice_match.group("text")),
+    )
 
 
 def _parse_timestamp_line(line: str) -> tuple[float, str, str] | None:
@@ -138,6 +166,56 @@ def parse_gemini_transcript(source: SourceArtifact) -> TranscriptArtifact:
     raise ParsePrimitiveError(
         f"No Gemini transcript timestamp lines found in {source_text_path}"
     )
+
+
+def parse_teams_vtt(source: SourceArtifact) -> TranscriptArtifact:
+    vtt_path = _resolve_source_text_path(source)
+    if not vtt_path.exists():
+        raise ParsePrimitiveError(f"Teams VTT path does not exist: {vtt_path}")
+
+    lines = vtt_path.read_text(encoding="utf-8-sig").splitlines()
+    turns: list[TranscriptTurn] = []
+    source_refs: list[TranscriptSourceRef] = []
+    warnings: list[str] = []
+
+    index = 0
+    while index < len(lines):
+        timestamp_match = _VTT_TIMESTAMP_RE.match(lines[index])
+        if timestamp_match is None:
+            index += 1
+            continue
+
+        start_line = index + 1
+        start = _vtt_timestamp_to_seconds(timestamp_match.group("start"))
+        end = _vtt_timestamp_to_seconds(timestamp_match.group("end"))
+        cue_lines: list[str] = []
+        index += 1
+        while index < len(lines) and lines[index].strip():
+            cue_lines.append(lines[index])
+            index += 1
+
+        speaker, text = _parse_vtt_voice_text(cue_lines)
+        if not text:
+            warnings.append(f"Skipped empty Teams VTT cue at line {start_line}.")
+            continue
+        turns.append(
+            TranscriptTurn(
+                start=round(start, 3),
+                end=round(max(end, start), 3),
+                speaker=speaker,
+                text=text,
+            )
+        )
+        source_refs.append(
+            TranscriptSourceRef(
+                turn_index=len(turns) - 1,
+                source_ref=f"{vtt_path}:cue line {start_line}",
+            )
+        )
+
+    if not turns:
+        raise ParsePrimitiveError(f"No Teams VTT cues found in {vtt_path}")
+    return TranscriptArtifact(turns=turns, source_refs=source_refs, warnings=warnings)
 
 
 def _parse_inline_gemini_transcript(

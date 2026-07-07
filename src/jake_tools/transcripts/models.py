@@ -141,6 +141,7 @@ class SourceArtifact(BaseModel):
     project: str | None = None
     attachments: list[Path] = Field(default_factory=list)
     raw_text_path: Path | None = None
+    metadata: dict[str, object] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
 
 

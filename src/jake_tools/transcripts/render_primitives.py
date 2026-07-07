@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from .merge import (
     render_chaptered_transcript,
@@ -21,6 +22,9 @@ from .models import (
 
 class RenderPrimitiveError(RuntimeError):
     pass
+
+
+MeetingNoteProfile = Literal["default", "dumc"]
 
 
 def _plan_to_chapters(plan: ChapterPlan) -> list[Chapter]:
@@ -64,7 +68,18 @@ def render_meeting_note_markdown(
     *,
     transcript_markdown: str | None = None,
     chapters: ChapterPlan | None = None,
+    profile: MeetingNoteProfile = "default",
 ) -> tuple[str, list[str]]:
+    if profile == "dumc":
+        return _render_dumc_meeting_note_markdown(
+            source,
+            minutes,
+            transcript_markdown=transcript_markdown,
+            chapters=chapters,
+        )
+    if profile != "default":
+        raise RenderPrimitiveError(f"unknown meeting-note profile: {profile}")
+
     title = source.title
     if not title and source.source_path is not None:
         title = source.source_path.stem
@@ -83,6 +98,50 @@ def render_meeting_note_markdown(
                 render_chapters_markdown(chapters),
             ]
         )
+
+    if transcript_markdown is not None:
+        sections_included.append("transcript")
+        lines.extend(["", "## Transcript", "", transcript_markdown.strip()])
+
+    return "\n".join(lines).rstrip() + "\n", sections_included
+
+
+def _render_dumc_meeting_note_markdown(
+    source: SourceArtifact,
+    minutes: MeetingMinutes,
+    *,
+    transcript_markdown: str | None,
+    chapters: ChapterPlan | None,
+) -> tuple[str, list[str]]:
+    title = source.title
+    if not title and source.source_path is not None:
+        title = source.source_path.stem
+    title = title or "DUM-C meeting"
+
+    frontmatter = ["---", f'title: "{title}"']
+    if source.date is not None:
+        frontmatter.append(f"date: {source.date.isoformat()}")
+    if source.message_id:
+        frontmatter.append(f'message-id: "{source.message_id}"')
+    frontmatter.extend(['timezone: "Australia/Perth"', "---"])
+
+    sections_included = ["summary", "discussion-notes"]
+    lines = [
+        *frontmatter,
+        "",
+        "> [!summary]",
+        f"> {minutes.summary.strip() or 'Meeting transcript processed.'}",
+        "",
+        f"# {title}",
+        "",
+        "## Discussion Notes",
+        "",
+        render_minutes(minutes),
+    ]
+
+    if chapters is not None and chapters.chapters:
+        sections_included.append("chapters")
+        lines.extend(["", "## Chapters", "", render_chapters_markdown(chapters)])
 
     if transcript_markdown is not None:
         sections_included.append("transcript")

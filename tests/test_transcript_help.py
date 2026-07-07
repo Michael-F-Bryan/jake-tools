@@ -25,9 +25,18 @@ GROUP_HELP_CASES: tuple[tuple[list[str], tuple[str, ...]], ...] = (
     (["transcript", "schema", "--help"], ("schema", "artefact", "show", "example")),
     (
         ["transcript", "source", "--help"],
-        ("SourceArtifact", "obsidian-note", "gemini-pdf", "gemini-text"),
+        (
+            "SourceArtifact",
+            "obsidian-note",
+            "gemini-pdf",
+            "gemini-text",
+            "teams-meeting",
+        ),
     ),
-    (["transcript", "parse", "--help"], ("TranscriptArtifact", "gemini", "scribe")),
+    (
+        ["transcript", "parse", "--help"],
+        ("TranscriptArtifact", "gemini", "scribe", "teams-vtt"),
+    ),
     (
         ["transcript", "transform", "--help"],
         ("source", "transcript", "strip-boilerplate", "chapter-boundaries"),
@@ -42,7 +51,10 @@ GROUP_HELP_CASES: tuple[tuple[list[str], tuple[str, ...]], ...] = (
     ),
     (["transcript", "note", "--help"], ("merge", "write", "attach", "mutation")),
     (["transcript", "verify", "--help"], ("stable", "check", "boilerplate", "note")),
-    (["transcript", "recipe", "--help"], ("workflow", "obsidian-recording")),
+    (
+        ["transcript", "recipe", "--help"],
+        ("workflow", "obsidian-recording", "teams-meeting"),
+    ),
 )
 
 LEAF_COMMANDS: tuple[list[str], ...] = (
@@ -52,8 +64,10 @@ LEAF_COMMANDS: tuple[list[str], ...] = (
     ["transcript", "source", "obsidian-note", "--help"],
     ["transcript", "source", "gemini-pdf", "--help"],
     ["transcript", "source", "gemini-text", "--help"],
+    ["transcript", "source", "teams-meeting", "--help"],
     ["transcript", "parse", "gemini", "--help"],
     ["transcript", "parse", "scribe", "--help"],
+    ["transcript", "parse", "teams-vtt", "--help"],
     ["transcript", "transform", "strip-boilerplate", "--help"],
     ["transcript", "transform", "normalise", "--help"],
     ["transcript", "transform", "merge-adjacent", "--help"],
@@ -74,6 +88,7 @@ LEAF_COMMANDS: tuple[list[str], ...] = (
     ["transcript", "verify", "chapters", "--help"],
     ["transcript", "verify", "note", "--help"],
     ["transcript", "recipe", "obsidian-recording", "--help"],
+    ["transcript", "recipe", "teams-meeting", "--help"],
 )
 
 

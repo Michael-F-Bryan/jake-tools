@@ -115,6 +115,92 @@ def test_render_meeting_note_with_optional_transcript(tmp_path: Path) -> None:
     assert "## Transcript" in note
 
 
+def test_render_dumc_meeting_note_profile_uses_discussion_notes(tmp_path: Path) -> None:
+    source_path = tmp_path / "source.json"
+    minutes_path = tmp_path / "minutes.json"
+    chapters_path = tmp_path / "chapters.json"
+    transcript_path = tmp_path / "transcript.md"
+    out_path = tmp_path / "dumc-note.md"
+
+    _write_json(
+        source_path,
+        {
+            "kind": "msgraph-teams",
+            "title": "Marine Rescue Comms Support presentation for SES",
+            "date": "2026-07-06",
+            "message_id": "msgraph-teams:meeting-123:transcript-abc",
+            "raw_text_path": str(tmp_path / "transcript.vtt"),
+        },
+    )
+    _write_json(
+        minutes_path,
+        {
+            "summary": "Comms support briefing for DUM-C.",
+            "key_points": [
+                "Confirmed comms support roster.",
+                "Check volunteer availability before Sunday.",
+            ],
+        },
+    )
+    _write_json(
+        chapters_path,
+        {
+            "chapters": [
+                {
+                    "start": 0.0,
+                    "end": 10.0,
+                    "title": "Briefing",
+                    "summary": "Comms support discussed.",
+                }
+            ],
+            "boundary_source": "deterministic",
+        },
+    )
+    transcript_path.write_text(
+        "### 00:00 — Briefing\n\n**Joanne Olsen** So much.\n", encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "transcript",
+            "render",
+            "meeting-note",
+            str(source_path),
+            str(minutes_path),
+            "--profile",
+            "dumc",
+            "--chapters",
+            str(chapters_path),
+            "--transcript",
+            str(transcript_path),
+            "--out",
+            str(out_path),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    metadata = json.loads(result.output)
+    assert metadata["sections_included"] == [
+        "summary",
+        "discussion-notes",
+        "chapters",
+        "transcript",
+    ]
+    assert metadata["attachments_or_source_links"] == []
+    note = out_path.read_text(encoding="utf-8")
+    assert note.startswith("---\n")
+    assert note.index("> [!summary]") < note.index("## Discussion Notes")
+    assert 'message-id: "msgraph-teams:meeting-123:transcript-abc"' in note
+    assert 'timezone: "Australia/Perth"' in note
+    assert "## Discussion Notes" in note
+    assert "## Chapters" in note
+    assert "## Transcript" in note
+    assert "## Meeting Notes" not in note
+    assert ".vtt" not in note
+
+
 def test_render_chapters_helper(tmp_path: Path) -> None:
     chapters_path = tmp_path / "chapters.json"
     out_path = tmp_path / "chapters.md"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import click
 from pydantic import BaseModel, ValidationError
@@ -29,14 +30,19 @@ from ..transcripts.parse_primitives import (
     ParsePrimitiveError,
     parse_gemini_transcript,
     parse_scribe_transcript,
+    parse_teams_vtt,
 )
 from ..transcripts.recipe_primitives import (
     RecipePrimitiveError,
     obsidian_recording_recipe_plan,
     render_obsidian_recording_recipe_plan,
+    render_teams_meeting_recipe_plan,
     run_obsidian_recording_recipe,
+    run_teams_meeting_recipe,
+    teams_meeting_recipe_plan,
 )
 from ..transcripts.render_primitives import (
+    MeetingNoteProfile,
     RenderPrimitiveError,
     build_rendered_note_metadata,
     render_chapters_markdown,
@@ -57,6 +63,7 @@ from ..transcripts.stage_primitives import (
     run_polish_stage,
     run_title_chapters_stage,
 )
+from ..transcripts.teams_graph import TeamsGraphError, source_from_teams_meeting
 from ..transcripts.transform_primitives import (
     TransformPrimitiveError,
     draft_chapter_boundaries,
@@ -67,6 +74,7 @@ from ..transcripts.transform_primitives import (
     strip_source_boilerplate,
 )
 from ..transcripts.verify_primitives import (
+    NoteVerificationProfile,
     read_source_text_for_verification,
     verify_boilerplate_text,
     verify_chapters,
@@ -308,6 +316,75 @@ def source_gemini_text(out_path: Path, as_json: bool, text_path: Path) -> None:
     _emit_written_model(artifact, out_path=out_path, as_json=as_json)
 
 
+@source.command("teams-meeting")
+@click.option(
+    "--account",
+    default="csu-teams",
+    show_default=True,
+    help="Configured Teams/Graph account to use.",
+)
+@click.option(
+    "--token-file",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="OAuth token JSON file. Defaults from --account.",
+)
+@click.option("--event-id", help="Exact Outlook calendar event ID to import.")
+@click.option(
+    "--days-back",
+    default=14,
+    show_default=True,
+    type=int,
+    help="Calendar search window when --event-id is not supplied.",
+)
+@click.option(
+    "--query",
+    help="Optional case-insensitive event subject filter for recent calendar search.",
+)
+@click.option(
+    "--out-dir",
+    required=True,
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+    help="Run artefact directory for Graph JSON, raw VTT, and SourceArtifact JSON.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit SourceArtifact JSON to stdout.",
+)
+def source_teams_meeting(
+    account: str,
+    token_file: Path | None,
+    event_id: str | None,
+    days_back: int,
+    query: str | None,
+    out_dir: Path,
+    as_json: bool,
+) -> None:
+    """
+    Fetch a Teams meeting transcript through Microsoft Graph.
+
+    Input: --account plus either --event-id or --days-back/--query discovery.
+    Output: SourceArtifact JSON at OUT_DIR/source.json and raw VTT at OUT_DIR/transcript.vtt.
+    Side effects: Reads Graph token, calls Microsoft Graph, writes run artefacts.
+    Next steps: Run `transcript parse teams-vtt OUT_DIR/source.json --out OUT_DIR/transcript-raw.json`.
+    """
+    try:
+        result = source_from_teams_meeting(
+            account=account,
+            out_dir=out_dir,
+            token_file=token_file,
+            event_id=event_id,
+            days_back=days_back,
+            query=query,
+        )
+    except TeamsGraphError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit_written_model(
+        result.source, out_path=out_dir / "source.json", as_json=as_json
+    )
+
+
 @transcript.group(help="Parse source formats into TranscriptArtifact JSON.")
 def parse() -> None:
     pass
@@ -379,6 +456,45 @@ def parse_scribe(out_path: Path, as_json: bool, scribe_transcript_path: Path) ->
     """
     try:
         artifact = parse_scribe_transcript(scribe_transcript_path)
+    except ParsePrimitiveError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _emit_written_model(artifact, out_path=out_path, as_json=as_json)
+
+
+@parse.command("teams-vtt")
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="Path to write TranscriptArtifact JSON.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit TranscriptArtifact JSON to stdout.",
+)
+@click.argument(
+    "source_artifact_path",
+    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
+)
+def parse_teams_vtt_command(
+    out_path: Path, as_json: bool, source_artifact_path: Path
+) -> None:
+    """
+    Parse Microsoft Teams WebVTT into canonical transcript turns.
+
+    Input: SourceArtifact JSON whose raw_text_path points at Teams VTT.
+    Output: TranscriptArtifact JSON at --out, optionally echoed via --json.
+    Side effects: Reads SourceArtifact and VTT input; writes --out.
+    Next steps: Run `transcript transform normalise` then `transcript transform merge-adjacent`.
+    """
+    source_payload = SourceArtifact.model_validate_json(
+        source_artifact_path.read_text(encoding="utf-8")
+    )
+    try:
+        artifact = parse_teams_vtt(source_payload)
     except ParsePrimitiveError as exc:
         raise click.ClickException(str(exc)) from exc
     _emit_written_model(artifact, out_path=out_path, as_json=as_json)
@@ -1068,6 +1184,13 @@ def render_chapters_command(
     help="Optional ChapterPlan JSON for chapter index rendering.",
 )
 @click.option(
+    "--profile",
+    type=click.Choice(["default", "dumc"], case_sensitive=True),
+    default="default",
+    show_default=True,
+    help="Meeting-note render profile.",
+)
+@click.option(
     "--json",
     "as_json",
     is_flag=True,
@@ -1085,6 +1208,7 @@ def render_meeting_note_command(
     out_path: Path,
     transcript_path: Path | None,
     chapters_path: Path | None,
+    profile: str,
     as_json: bool,
     source_artifact_path: Path,
     minutes_path: Path,
@@ -1118,6 +1242,7 @@ def render_meeting_note_command(
         minutes,
         transcript_markdown=transcript_markdown,
         chapters=chapters,
+        profile=cast(MeetingNoteProfile, profile),
     )
     rendered_note = build_rendered_note_metadata(
         rendered_markdown_path=out_path,
@@ -1503,6 +1628,13 @@ def verify_chapters_command(
     type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
     help="Optional ChapterPlan JSON to enforce chapter heading count.",
 )
+@click.option(
+    "--profile",
+    type=click.Choice(["default", "dumc"], case_sensitive=True),
+    default="default",
+    show_default=True,
+    help="Note verification profile.",
+)
 @click.argument(
     "note_path",
     type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
@@ -1512,6 +1644,7 @@ def verify_note_command(
     as_json: bool,
     source_path: Path | None,
     chapters_path: Path | None,
+    profile: str,
     note_path: Path,
 ) -> None:
     """
@@ -1538,6 +1671,7 @@ def verify_note_command(
         note_path.read_text(encoding="utf-8"),
         expected_chapter_count=expected_chapter_count,
         affected_path=note_path,
+        profile=cast(NoteVerificationProfile, profile),
     )
     report = report.model_copy(update={"affected_artifact_paths": affected_paths})
     _emit_verification_report(report, out_path=out_path, as_json=as_json)
@@ -1624,3 +1758,117 @@ def recipe_obsidian_recording(
 
     click.echo(f"note: {result.note_path}")
     click.echo(f"updated: {result.updated}")
+
+
+@recipe.command("teams-meeting")
+@click.option(
+    "--show-plan",
+    is_flag=True,
+    help="Show the primitive sequence without executing the workflow.",
+)
+@click.option(
+    "--account",
+    default="csu-teams",
+    show_default=True,
+    help="Configured Teams/Graph account to use.",
+)
+@click.option(
+    "--profile",
+    type=click.Choice(["default", "dumc"], case_sensitive=True),
+    default="dumc",
+    show_default=True,
+    help="Meeting-note render and verification profile.",
+)
+@click.option(
+    "--token-file",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="OAuth token JSON file. Defaults from --account.",
+)
+@click.option("--event-id", help="Exact Outlook calendar event ID to import.")
+@click.option(
+    "--days-back",
+    default=14,
+    show_default=True,
+    type=int,
+    help="Calendar search window when --event-id is not supplied.",
+)
+@click.option(
+    "--query",
+    help="Optional case-insensitive event subject filter for recent calendar search.",
+)
+@click.option(
+    "--out-dir",
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+    help="Run artefact directory for Graph JSON, raw VTT, canonical JSON, and rendered note.",
+)
+@click.option(
+    "--vault-note",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="Optional Obsidian note path to write after verification.",
+)
+@click.option(
+    "--write-vault",
+    is_flag=True,
+    help="Write to the profile default vault destination when --vault-note is omitted.",
+)
+@click.option("--dry-run", is_flag=True, help="Run without writing the vault note.")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit machine-readable output for plan or run summary.",
+)
+def recipe_teams_meeting(
+    show_plan: bool,
+    account: str,
+    profile: str,
+    token_file: Path | None,
+    event_id: str | None,
+    days_back: int,
+    query: str | None,
+    out_dir: Path | None,
+    vault_note: Path | None,
+    write_vault: bool,
+    dry_run: bool,
+    as_json: bool,
+) -> None:
+    """
+    Import a Teams transcript through Graph and render a profiled note.
+
+    Input: Teams account and either --event-id or recent calendar discovery.
+    Output: Run artefacts under --out-dir, including raw VTT and canonical TranscriptArtifact JSON.
+    Side effects: Calls Microsoft Graph; writes run artefacts; writes vault note only with --vault-note or --write-vault.
+    Next steps: Inspect rendered-note.md or rerun with --vault-note after verification passes.
+    """
+    if show_plan:
+        if as_json:
+            click.echo(json.dumps(teams_meeting_recipe_plan(), sort_keys=True))
+            return
+        click.echo(render_teams_meeting_recipe_plan())
+        return
+    if out_dir is None:
+        raise click.ClickException("--out-dir is required unless --show-plan is set.")
+    try:
+        result = run_teams_meeting_recipe(
+            account=account,
+            profile=profile,
+            out_dir=out_dir,
+            token_file=token_file,
+            event_id=event_id,
+            days_back=days_back,
+            query=query,
+            vault_note=vault_note,
+            write_vault=write_vault,
+            dry_run=dry_run,
+        )
+    except RecipePrimitiveError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if as_json:
+        click.echo(json.dumps(result, sort_keys=True))
+        return
+    click.echo(f"out_dir: {result['out_dir']}")
+    click.echo(f"rendered_note: {result['rendered_note']}")
+    click.echo(f"raw_vtt: {result['raw_vtt']}")
+    click.echo(f"note: {result['note']}")
+    click.echo(f"updated: {result['updated']}")

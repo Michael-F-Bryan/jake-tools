@@ -153,3 +153,52 @@ def test_transcript_parse_scribe_converts_segments(tmp_path: Path) -> None:
     assert payload["turns"][1]["speaker"] == "SPEAKER_02"
     assert payload["turns"][2]["speaker"] == "Michael"
     assert payload["source_refs"][2]["source_ref"].endswith("segments[2]")
+
+
+def test_transcript_parse_teams_vtt_preserves_speaker_timestamps_and_refs(
+    tmp_path: Path,
+) -> None:
+    vtt_path = FIXTURES_DIR / "teams-sample.vtt"
+    source_path = tmp_path / "source.json"
+    out_path = tmp_path / "teams-turns.json"
+    source_path.write_text(
+        json.dumps(
+            {
+                "kind": "msgraph-teams",
+                "title": "Marine Rescue Comms Support presentation for SES",
+                "message_id": "msgraph-teams:meeting-123:transcript-abc",
+                "raw_text_path": str(vtt_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "transcript",
+            "parse",
+            "teams-vtt",
+            str(source_path),
+            "--out",
+            str(out_path),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert [turn["speaker"] for turn in payload["turns"]] == [
+        "Joanne Olsen",
+        "Michael Bryan",
+        "Joanne Olsen",
+    ]
+    assert payload["turns"][0] == {
+        "start": 3.277,
+        "end": 3.917,
+        "speaker": "Joanne Olsen",
+        "text": "So much.",
+    }
+    assert payload["turns"][2]["start"] == 7.0
+    assert payload["source_refs"][0]["turn_index"] == 0
+    assert "cue line" in payload["source_refs"][0]["source_ref"]
