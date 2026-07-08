@@ -10,6 +10,10 @@ The core theme:
 
 This profile should bias towards practical AI engineering, interface design, and automation patterns that Michael could adapt into Hermes, jake-tools, Obsidian, Sunfish, or his daily software-development workflow.
 
+Recency matters. Prefer newly released AI techniques, tools, and product surfaces. Old evergreen agent advice, familiar harness patterns, and articles Michael has effectively been applying in his day-to-day workflows for months should be rejected unless they introduce a genuinely new capability or unusually concrete evidence.
+
+Michael uses Cursor for development and dislikes Xcode. Xcode-specific AI tooling is low value unless the article contains a clearly transferable non-Xcode pattern.
+
 ## Calibration examples
 
 Source notes Michael provided from the Obsidian vault:
@@ -28,6 +32,7 @@ Examples:
 - Products exposing headless or agent-operable surfaces.
 - Agent workflows that replace brittle manual UI work with typed APIs, CLI commands, or repeatable local automation.
 - Articles that show real traces, artefacts, diffs, generated apps, or failure modes rather than polished demos only.
+- New or recently changed tools, APIs, agent harnesses, workflows, or techniques with clear release timing.
 
 Why it matters: Michael wants agents integrated into the toolchain, not chatbots pasted beside existing software.
 
@@ -114,6 +119,8 @@ Examples:
 - Tools that help with typed systems, compilers, Rust/Go/TypeScript/Python, and durable software maintenance.
 
 Why it matters: Michael is a senior software engineer; useful AI developments should affect building, reviewing, debugging, or operating software.
+
+Avoid surfacing IDE-specific news for tools Michael does not use, especially Xcode-specific workflows. Prefer Cursor, CLI, MCP, web, API, or editor-agnostic developments.
 
 ### Obsidian and knowledge-work automation
 

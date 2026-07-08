@@ -282,6 +282,7 @@ def deliver(
 @ai_watch.command("tune")
 @_common_options
 @click.option("--surface-limit", default=2, show_default=True, type=int)
+@click.option("--max-article-age-days", default=90, show_default=True, type=int)
 @click.option(
     "--vault-path",
     type=click.Path(path_type=Path),
@@ -300,6 +301,7 @@ def tune(
     calibration_only: bool,
     as_json: bool,
     surface_limit: int,
+    max_article_age_days: int,
     vault_path: Path,
     remove_unsurfaced_notes: bool,
 ) -> None:
@@ -310,6 +312,7 @@ def tune(
         base_dir=base_dir,
         dry_run=dry_run,
         surface_limit=surface_limit,
+        max_article_age_days=max_article_age_days,
         vault_path=vault_path,
     )
     result = apply_surface_policy(
@@ -366,6 +369,13 @@ def tune(
     type=int,
     help="Maximum main-digest items per run. Extra surfaced items become speculative.",
 )
+@click.option(
+    "--max-article-age-days",
+    default=90,
+    show_default=True,
+    type=int,
+    help="Demote surfaced articles older than this many days.",
+)
 @click.option("--cost-cap-usd", type=float, default=None)
 def run(
     target_date: date,
@@ -381,6 +391,7 @@ def run(
     discord_target: str,
     vault_path: Path,
     surface_limit: int,
+    max_article_age_days: int,
     cost_cap_usd: float | None,
 ) -> None:
     options = AiWatchCommandOptions(
@@ -396,6 +407,7 @@ def run(
         discord_target=resolve_discord_target(discord_target),
         vault_path=vault_path,
         surface_limit=surface_limit,
+        max_article_age_days=max_article_age_days,
         cost_cap_usd=cost_cap_usd,
     )
     result = run_ai_watch_command(options=options)

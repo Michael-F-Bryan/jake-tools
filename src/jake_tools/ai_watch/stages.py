@@ -38,6 +38,7 @@ class ScoutPrompt(StructuredPrompt[ScoutOutput]):
     template = """You are the cheap scout lane for AI Watch.
 
 Score this article against Michael's interest profile. Be inclusive: your job is recall, not final judgement.
+Treat old evergreen agent advice and Xcode-only developer tooling as low priority unless the article contains a genuinely new, transferable technique.
 
 Interest profile:
 {{ interest_profile }}
@@ -69,6 +70,7 @@ class CuratorPrompt(StructuredPrompt[CuratorDecision]):
     template = """You are the smart curator lane for AI Watch.
 
 Apply Michael's interest profile with high precision. Most items should be reject.
+Prefer recent AI techniques, tools, releases, and workflow changes. Reject old evergreen agent advice unless it adds genuinely new capability or unusually concrete evidence. Reject Xcode-specific tooling unless the non-Xcode transfer value is explicit.
 
 Interest profile:
 {{ interest_profile }}

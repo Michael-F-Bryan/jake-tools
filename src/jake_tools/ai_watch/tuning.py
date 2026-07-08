@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 
 from .audit import read_models, truncate_records
@@ -22,6 +24,44 @@ class SurfacePolicyResult:
     demoted_count: int
     removed_note_count: int = 0
     skipped_note_paths: list[str] = field(default_factory=list)
+
+
+MONTHS = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+
+DATE_PATTERNS = [
+    re.compile(
+        r"(?:published\s+)?(?P<month>[A-Z][a-z]+)\s+(?P<day>\d{1,2}),\s+(?P<year>20\d{2})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:published\s+)?(?P<year>20\d{2})-(?P<month>\d{1,2})-(?P<day>\d{1,2})",
+        re.IGNORECASE,
+    ),
+]
 
 
 def _surface_rank(
@@ -45,8 +85,59 @@ def _surface_rank(
     )
 
 
+def _read_article_text(paths: AiWatchPaths, candidate_id: str) -> str:
+    path = paths.article_markdown(candidate_id)
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
+def _extract_published_date(article_text: str) -> date | None:
+    for pattern in DATE_PATTERNS:
+        match = pattern.search(article_text[:2000])
+        if match is None:
+            continue
+        month = match.group("month")
+        if not month.isdigit():
+            month_number = MONTHS.get(month.lower())
+            if month_number is None:
+                continue
+            month = str(month_number)
+        try:
+            return datetime(
+                int(match.group("year")), int(month), int(match.group("day"))
+            ).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _demotion_reason_for_article(
+    *,
+    record: CuratorDecisionRecord,
+    article_text: str,
+    options: AiWatchCommandOptions,
+) -> str | None:
+    combined = (
+        f"{record.digest_summary}\n{record.reason}\n{article_text[:2000]}".lower()
+    )
+    if "xcode" in combined and "cursor" not in combined:
+        return "Xcode-specific developer tooling is low value for Michael's Cursor-based workflow."
+
+    published = _extract_published_date(article_text)
+    if published is None:
+        return None
+    age_days = (options.target_date - published).days
+    if age_days > options.max_article_age_days:
+        return (
+            f"Article is {age_days} days old, older than "
+            f"{options.max_article_age_days} days; AI Watch should prioritise recent developments."
+        )
+    return None
+
+
 def _demote_surface_record(
-    record: CuratorDecisionRecord, surface_limit: int
+    record: CuratorDecisionRecord, reason: str
 ) -> CuratorDecisionRecord:
     recommendation = record.obsidian_recommendation.model_copy(
         update={"should_create_note": False}
@@ -55,10 +146,7 @@ def _demote_surface_record(
         update={
             "decision": CuratorDecisionType.SPECULATIVE_WATCH,
             "lane": DigestLane.SPECULATIVE_WATCH,
-            "reason": (
-                f"{record.reason} Demoted from the main digest by the "
-                f"per-run surface limit ({surface_limit})."
-            ),
+            "reason": f"{record.reason} Demoted from the main digest: {reason}",
             "obsidian_recommendation": recommendation,
         }
     )
@@ -113,8 +201,24 @@ def apply_surface_policy(
         record for record in records if record.decision == CuratorDecisionType.SURFACE
     ]
     before_surface_count = len(surface_records)
-    if not remove_notes and (
-        options.surface_limit is None or before_surface_count <= options.surface_limit
+    hard_demotions = {
+        record.candidate_id: reason
+        for record in surface_records
+        if (
+            reason := _demotion_reason_for_article(
+                record=record,
+                article_text=_read_article_text(paths, record.candidate_id),
+                options=options,
+            )
+        )
+    }
+    if (
+        not remove_notes
+        and not hard_demotions
+        and (
+            options.surface_limit is None
+            or before_surface_count <= options.surface_limit
+        )
     ):
         return SurfacePolicyResult(
             before_surface_count=before_surface_count,
@@ -143,12 +247,20 @@ def apply_surface_policy(
     demoted_originals: list[CuratorDecisionRecord] = []
     rewritten: list[CuratorDecisionRecord] = []
     for record in records:
-        if (
-            record.decision == CuratorDecisionType.SURFACE
-            and record.candidate_id not in keep_ids
-        ):
+        if record.decision != CuratorDecisionType.SURFACE:
+            rewritten.append(record)
+            continue
+        if reason := hard_demotions.get(record.candidate_id):
             demoted_originals.append(record)
-            rewritten.append(_demote_surface_record(record, surface_limit))
+            rewritten.append(_demote_surface_record(record, reason))
+            continue
+        if record.candidate_id not in keep_ids:
+            demoted_originals.append(record)
+            rewritten.append(
+                _demote_surface_record(
+                    record, f"per-run surface limit ({surface_limit})."
+                )
+            )
             continue
         rewritten.append(record)
 
@@ -177,7 +289,7 @@ def apply_surface_policy(
 
     return SurfacePolicyResult(
         before_surface_count=before_surface_count,
-        after_surface_count=len(keep_ids),
+        after_surface_count=len(keep_ids - set(hard_demotions)),
         demoted_count=len(demoted_originals),
         removed_note_count=removed_note_count,
         skipped_note_paths=skipped_note_paths,

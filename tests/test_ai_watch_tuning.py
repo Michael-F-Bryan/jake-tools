@@ -79,6 +79,10 @@ def _append_candidate_run(
             ),
         ),
     )
+    paths.article_markdown(candidate_id).write_text(
+        f"# {title}\n\nPublished Jul 1, 2026\n\nAgent harness details.",
+        encoding="utf-8",
+    )
 
 
 def test_surface_policy_keeps_only_highest_ranked_items(tmp_path: Path) -> None:
@@ -222,3 +226,66 @@ def test_surface_policy_does_not_remove_unmarked_notes(tmp_path: Path) -> None:
     assert note.exists()
     skipped = json.loads(result.skipped_note_paths[0])
     assert skipped["reason"] == "marker_mismatch"
+
+
+def test_surface_policy_demotes_stale_articles_even_under_limit(tmp_path: Path) -> None:
+    paths = AiWatchPaths.for_date(tmp_path, date(2026, 7, 7)).create()
+    _append_candidate_run(
+        paths,
+        candidate_id="sha256:old",
+        title="Old agent advice",
+        fit=5,
+        practicality=5,
+        novelty=5,
+        noise=1,
+    )
+    paths.article_markdown("sha256:old").write_text(
+        "# Old agent advice\n\nPublished Dec 19, 2024\n\nUseful but old agent patterns.",
+        encoding="utf-8",
+    )
+    options = AiWatchCommandOptions(
+        target_date=date(2026, 7, 7),
+        base_dir=tmp_path,
+        surface_limit=2,
+        max_article_age_days=90,
+    )
+
+    result = apply_surface_policy(options=options, paths=paths)
+
+    assert result.before_surface_count == 1
+    assert result.after_surface_count == 0
+    assert result.demoted_count == 1
+    decision = CuratorDecisionRecord.model_validate_json(
+        paths.curator_decisions.read_text(encoding="utf-8").strip()
+    )
+    assert decision.decision == CuratorDecisionType.SPECULATIVE_WATCH
+    assert "older than 90 days" in decision.reason
+
+
+def test_surface_policy_demotes_xcode_only_articles(tmp_path: Path) -> None:
+    paths = AiWatchPaths.for_date(tmp_path, date(2026, 7, 7)).create()
+    _append_candidate_run(
+        paths,
+        candidate_id="sha256:xcode",
+        title="Xcode Claude Agent SDK",
+        fit=5,
+        practicality=5,
+        novelty=5,
+        noise=1,
+    )
+    options = AiWatchCommandOptions(
+        target_date=date(2026, 7, 7),
+        base_dir=tmp_path,
+        surface_limit=2,
+    )
+
+    result = apply_surface_policy(options=options, paths=paths)
+
+    assert result.before_surface_count == 1
+    assert result.after_surface_count == 0
+    assert result.demoted_count == 1
+    decision = CuratorDecisionRecord.model_validate_json(
+        paths.curator_decisions.read_text(encoding="utf-8").strip()
+    )
+    assert decision.decision == CuratorDecisionType.SPECULATIVE_WATCH
+    assert "Xcode-specific" in decision.reason

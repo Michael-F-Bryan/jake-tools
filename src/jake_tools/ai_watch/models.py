@@ -128,6 +128,7 @@ class AiWatchCommandOptions(BaseModel):
     dry_run: bool = False
     max_candidates: int = 80
     surface_limit: int | None = 2
+    max_article_age_days: int = 90
     cost_cap_usd: float | None = None
     calibration_only: bool = False
     save_raw: bool = False
