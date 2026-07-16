@@ -62,3 +62,29 @@ The Obsidian recording pipeline always writes the same shape:
 This command expects local `ffmpeg` and `scribe` executables to be available.
 The `transcript recipe` variant exposes the same workflow over primitives with
 `--show-plan`, `--workdir`, and optional `--manifest` output.
+
+## Jira to Clockify sync
+
+```bash
+jake-tools clockify jira-sync --dry-run
+jake-tools clockify jira-sync --dry-run --json
+jake-tools clockify jira-sync --apply
+```
+
+The command reconciles Jira project `SF` with the active Clockify projects for
+the `Sunfish Robotics` client. These defaults can be overridden with
+`--jira-project` and `--clockify-client`.
+
+Dry-run is the default. The plan can create projects and tasks, rename records,
+reactivate tasks assigned to the current Jira user in an active status, and
+mark tasks done when Jira's status category is Done. It ignores archived
+Clockify projects and never deletes projects, tasks, or time entries. Ambiguous
+active duplicates are reported as conflicts and block `--apply`.
+
+The command requires:
+
+- an authenticated `acli` session for Jira
+- `CLOCKIFY_API_KEY`, or the Clockify group-level `--api-key` option
+
+For unattended runs, inject `CLOCKIFY_API_KEY` through the scheduler's secret
+environment. Do not depend on an interactive 1Password unlock in cron.
