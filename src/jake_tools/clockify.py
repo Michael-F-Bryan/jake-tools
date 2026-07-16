@@ -114,8 +114,11 @@ class ClockifyClient:
     ) -> None:
         if not api_key.strip():
             raise ClockifyError("Clockify API key is required")
+        normalised_base_url = base_url.strip().rstrip("/")
+        if not normalised_base_url:
+            raise ClockifyError("Clockify API base URL is required")
         self._api_key = api_key
-        self._base_url = base_url.rstrip("/")
+        self._base_url = normalised_base_url
         self._session = session or requests.Session()
 
     def get_user(self) -> ClockifyUser:
@@ -279,7 +282,14 @@ class ClockifyClient:
         if not response.content:
             return None
 
-        return response.json()
+        try:
+            return response.json()
+        except ValueError as exc:
+            body = str(response.text)[:500]
+            raise ClockifyError(
+                f"Clockify returned invalid JSON for {method} {path}: {exc}; "
+                f"body={body!r}"
+            ) from exc
 
     @staticmethod
     def _validate(
@@ -318,4 +328,5 @@ def clockify_api_key_from_env() -> str:
 
 
 def clockify_base_url_from_env() -> str:
-    return os.environ.get("CLOCKIFY_API_BASE_URL", CLOCKIFY_API_ROOT).strip()
+    base_url = os.environ.get("CLOCKIFY_API_BASE_URL", "").strip()
+    return base_url or CLOCKIFY_API_ROOT

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from jake_tools.clockify import (
     ClockifyClient,
     ClockifyClientRecord,
@@ -11,6 +13,7 @@ from jake_tools.clockify import (
     ClockifyTask,
     ClockifyUser,
     JiraIssueRef,
+    clockify_base_url_from_env,
     clockify_project_name_for_jira,
     clockify_task_name_for_jira,
     normalise_jira_key,
@@ -27,6 +30,16 @@ class FakeResponse:
 
     def json(self) -> object:
         return self._payload
+
+
+class InvalidJsonResponse(FakeResponse):
+    def __init__(self) -> None:
+        super().__init__(200, "not-json")
+        self.text = "not-json"
+        self.content = b"not-json"
+
+    def json(self) -> object:
+        raise ValueError("invalid JSON")
 
 
 class FakeSession:
@@ -75,6 +88,31 @@ def test_clockify_get_user_uses_requests_session_and_api_key() -> None:
             "timeout": 30,
         }
     ]
+
+
+def test_clockify_wraps_invalid_json_responses_with_request_context() -> None:
+    client = ClockifyClient(
+        api_key="secret-key",
+        session=FakeSession(InvalidJsonResponse()),
+    )
+
+    with pytest.raises(ClockifyError) as raised:
+        client.get_user()
+
+    assert "invalid JSON" in str(raised.value)
+    assert "GET /user" in str(raised.value)
+    assert "not-json" in str(raised.value)
+
+
+def test_clockify_rejects_blank_base_url() -> None:
+    with pytest.raises(ClockifyError, match="base URL is required"):
+        ClockifyClient(api_key="secret-key", base_url="  ")
+
+
+def test_clockify_blank_base_url_env_uses_default(monkeypatch) -> None:
+    monkeypatch.setenv("CLOCKIFY_API_BASE_URL", "  ")
+
+    assert clockify_base_url_from_env() == "https://api.clockify.me/api/v1"
 
 
 def test_clockify_jira_project_names_do_not_start_with_ticket_key() -> None:
