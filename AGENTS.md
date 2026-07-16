@@ -64,6 +64,7 @@ uv run pytest -q
 | `hermes-agent`     | LLM calls (editable path dep in `pyproject.toml`)     |
 | `himalaya`         | daily-report inbox lane preflight and envelope export |
 | `ffmpeg`, `scribe` | `transcribe obsidian-recording` audio pipeline        |
+| `yt-dlp`           | YouTube caption and metadata source adapter            |
 | `az` (Azure CLI)   | `newsletter` commands (Microsoft Graph token)         |
 
 If a required external tool is missing, report the blocker. Do not mock

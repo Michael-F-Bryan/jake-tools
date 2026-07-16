@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Protocol
 
 from pydantic import BaseModel, Field, ValidationError
 
-from ..hermes import Hermes, Reply
+from ..hermes import Reply
 from ..prompting import StructuredPrompt
 from .models import (
     ChapterPlan,
     MeetingMinutes,
-    RunManifest,
+    SourceArtifact,
+    SourceNotePlan,
     SpeakerMapping,
     TranscriptArtifact,
-    TranscriptSourceRef,
     TranscriptTurn,
 )
 from .verify_primitives import verify_turns
@@ -32,56 +31,47 @@ _CONTENT_WORD_RE = re.compile(r"\b[\w']+\b")
 MAX_POLISH_CONTENT_CUT_RATIO = 0.15
 
 
+class StructuredHermes(Protocol):
+    def run_structured[TModel: BaseModel](
+        self, prompt: StructuredPrompt[TModel]
+    ) -> tuple[TModel, Reply]: ...
+
+
 class StagePrimitiveError(RuntimeError):
     pass
 
 
-class PolishLedgerEntry(BaseModel):
-    action: str
-    source_turn_indices: list[int] = Field(default_factory=list)
-    output_turn_indices: list[int] = Field(default_factory=list)
-    reason: str = ""
-
-
-class PolishLedger(BaseModel):
-    merge_allowed: bool = False
-    entries: list[PolishLedgerEntry] = Field(default_factory=list)
-    notes: str = ""
-
-
 class PolishStagePayload(BaseModel):
     turns: list[TranscriptTurn] = Field(default_factory=list)
-    ledger: PolishLedger = Field(default_factory=PolishLedger)
 
 
 class PolishStagePrompt(StructuredPrompt[PolishStagePayload]):
     response_model: ClassVar[type[BaseModel]] = PolishStagePayload
     template: ClassVar[str] = """
-You are the transcript-polishing specialist for transcript stage primitives.
-
-Rewrite the transcript turns conservatively for readability while preserving meaning.
+Polish these transcript turns conservatively for readability while preserving meaning.
 
 Rules:
 - Return JSON only.
-- Keep turn order unchanged.
-- Keep every turn's `start`, `end`, and `speaker` unchanged unless `ledger.merge_allowed` is true.
+- Keep turn order and turn count unchanged.
+- Keep every turn's `start`, `end`, and `speaker` unchanged.
 - Never include operational chatter.
 - Never include markdown fences.
 - Never include source boilerplate headings such as "## Transcript".
-- If any merge/split/drop happened, set `ledger.merge_allowed=true` and provide detailed ledger entries.
+
+Source context:
+{{ context }}
 
 Transcript turns:
 {{ turns | json }}
 """
 
+    context: str = ""
     turns: list[TranscriptTurn]
 
 
 class SpeakerMapPrompt(StructuredPrompt[SpeakerMapping]):
     response_model: ClassVar[type[BaseModel]] = SpeakerMapping
     template: ClassVar[str] = """
-You are the speaker-mapping specialist for transcript stage primitives.
-
 Known attendees:
 {{ attendees | json }}
 
@@ -99,10 +89,11 @@ Transcript turns:
 class ChapterTitlePrompt(StructuredPrompt[ChapterPlan]):
     response_model: ClassVar[type[BaseModel]] = ChapterPlan
     template: ClassVar[str] = """
-You are the chapter-title specialist for transcript stage primitives.
-
 Return a ChapterPlan with concise, descriptive chapter titles and summaries.
 When draft chapters are provided, keep chapter boundaries unchanged.
+
+Source context:
+{{ context }}
 
 Transcript turns:
 {{ turns | json }}
@@ -111,6 +102,7 @@ Draft chapters:
 {{ draft_chapters | json }}
 """
 
+    context: str = ""
     turns: list[TranscriptTurn]
     draft_chapters: list[dict[str, object]]
 
@@ -118,8 +110,6 @@ Draft chapters:
 class MinutesPrompt(StructuredPrompt[MeetingMinutes]):
     response_model: ClassVar[type[BaseModel]] = MeetingMinutes
     template: ClassVar[str] = """
-You are the meeting-minutes specialist for transcript stage primitives.
-
 Write faithful minutes in structured JSON.
 Prioritize outcomes, decisions, and concrete actions over generic summary prose.
 
@@ -134,11 +124,38 @@ Chapter plan:
     chapters: list[dict[str, object]]
 
 
+class SourceNotePlanPrompt(StructuredPrompt[SourceNotePlan]):
+    response_model: ClassVar[type[BaseModel]] = SourceNotePlan
+    template: ClassVar[str] = """
+Create a faithful source-note plan for this recorded talk.
+
+Return:
+- a concise summary and 3-7 high-signal key points grounded only in the source
+- concise chapter titles and summaries, keeping every draft chapter boundary unchanged
+
+Preserve technical names and terminology. Do not add advice, credibility judgements,
+or claims that are not present in the transcript.
+
+Source metadata:
+{{ source | json }}
+
+Transcript turns:
+{{ turns | json }}
+
+Draft chapters:
+{{ draft_chapters | json }}
+"""
+
+    source: dict[str, object]
+    turns: list[TranscriptTurn]
+    draft_chapters: list[dict[str, object]]
+
+
 def run_structured_with_retries[TModel: BaseModel](
-    hermes: Hermes, prompt: StructuredPrompt[TModel], *, max_attempts: int
+    hermes: StructuredHermes, prompt: StructuredPrompt[TModel], *, max_attempts: int
 ) -> tuple[TModel, Reply]:
     if max_attempts < 1:
-        raise StagePrimitiveError("--max-attempts must be at least 1.")
+        raise StagePrimitiveError("max_attempts must be at least 1.")
 
     errors: list[str] = []
     for _ in range(max_attempts):
@@ -148,7 +165,7 @@ def run_structured_with_retries[TModel: BaseModel](
             errors.append(str(exc))
 
     raise StagePrimitiveError(
-        "Structured stage failed schema validation after retries: "
+        "Structured response failed schema validation after retries: "
         + " | ".join(errors[-2:])
     )
 
@@ -168,10 +185,6 @@ def _ensure_no_forbidden_output(turns: list[TranscriptTurn]) -> None:
                 "Polished transcript failed output gate: "
                 "boilerplate.no-operational-chatter/no-markdown-fences/no-source-boilerplate"
             )
-
-
-def _merge_ledger_is_explicit(ledger: PolishLedger) -> bool:
-    return ledger.merge_allowed and bool(ledger.entries)
 
 
 def _turns_word_count(turns: list[TranscriptTurn]) -> int:
@@ -199,43 +212,42 @@ def _ensure_polish_preserves_content(
 
 
 def run_polish_stage(
-    hermes: Hermes,
+    hermes: StructuredHermes,
     transcript: TranscriptArtifact,
     *,
+    context: str = "",
     max_attempts: int,
-) -> tuple[TranscriptArtifact, PolishLedger, Reply]:
+) -> tuple[TranscriptArtifact, Reply]:
     payload, reply = run_structured_with_retries(
         hermes,
-        PolishStagePrompt(turns=transcript.turns),
+        PolishStagePrompt(context=context, turns=transcript.turns),
         max_attempts=max_attempts,
     )
     _ensure_no_forbidden_output(payload.turns)
     _ensure_polish_preserves_content(transcript.turns, payload.turns)
 
+    same_structure = len(payload.turns) == len(transcript.turns) and all(
+        (source.start, source.end, source.speaker)
+        == (polished.start, polished.end, polished.speaker)
+        for source, polished in zip(transcript.turns, payload.turns, strict=True)
+    )
+    if not same_structure:
+        raise StagePrimitiveError(
+            "Polished transcript changed turn count, timestamps, or speakers."
+        )
+
     polished = transcript.model_copy(update={"turns": payload.turns})
     verification = verify_turns(transcript, polished, affected_paths=[])
     if verification.failed_gate_ids:
-        if verification.failed_gate_ids == [
-            "turns.coverage-preserved"
-        ] and _merge_ledger_is_explicit(payload.ledger):
-            return polished, payload.ledger, reply
         raise StagePrimitiveError(
             "Polished transcript failed verification gates: "
             + ", ".join(verification.failed_gate_ids)
         )
-
-    if len(payload.turns) != len(transcript.turns) and not _merge_ledger_is_explicit(
-        payload.ledger
-    ):
-        raise StagePrimitiveError(
-            "Turn coverage changed without explicit merge ledger entries."
-        )
-
-    return polished, payload.ledger, reply
+    return polished, reply
 
 
 def run_map_speakers_stage(
-    hermes: Hermes,
+    hermes: StructuredHermes,
     transcript: TranscriptArtifact,
     *,
     attendees: list[str],
@@ -249,10 +261,11 @@ def run_map_speakers_stage(
 
 
 def run_title_chapters_stage(
-    hermes: Hermes,
+    hermes: StructuredHermes,
     transcript: TranscriptArtifact,
     *,
     draft_plan: ChapterPlan | None,
+    context: str = "",
     max_attempts: int,
 ) -> tuple[ChapterPlan, Reply]:
     draft = (
@@ -262,14 +275,33 @@ def run_title_chapters_stage(
     )
     chapter_plan, reply = run_structured_with_retries(
         hermes,
-        ChapterTitlePrompt(turns=transcript.turns, draft_chapters=draft),
+        ChapterTitlePrompt(
+            context=context,
+            turns=transcript.turns,
+            draft_chapters=draft,
+        ),
         max_attempts=max_attempts,
     )
-    return chapter_plan.model_copy(update={"boundary_source": "llm"}), reply
+    if draft_plan is None:
+        return chapter_plan.model_copy(update={"boundary_source": "llm"}), reply
+    if len(chapter_plan.chapters) != len(draft_plan.chapters):
+        raise StagePrimitiveError(
+            "Chapter-title stage changed deterministic chapter count."
+        )
+    titled_chapters = [
+        generated.model_copy(update={"start": draft.start, "end": draft.end})
+        for generated, draft in zip(
+            chapter_plan.chapters, draft_plan.chapters, strict=True
+        )
+    ]
+    return ChapterPlan(
+        chapters=titled_chapters,
+        boundary_source=draft_plan.boundary_source,
+    ), reply
 
 
 def run_minutes_stage(
-    hermes: Hermes,
+    hermes: StructuredHermes,
     transcript: TranscriptArtifact,
     *,
     chapters: ChapterPlan | None,
@@ -287,119 +319,33 @@ def run_minutes_stage(
     )
 
 
-def _resolve_manifest_chunks(
-    manifest: RunManifest, *, base_dir: Path
-) -> list[tuple[str, TranscriptArtifact]]:
-    chunks: list[tuple[str, TranscriptArtifact]] = []
-    for stage in manifest.stages:
-        for artefact in stage.artefacts:
-            chunk_path = artefact if artefact.is_absolute() else (base_dir / artefact)
-            if not chunk_path.exists():
-                raise StagePrimitiveError(
-                    f"Chunk artefact referenced by manifest does not exist: {chunk_path}"
-                )
-            chunks.append(
-                (
-                    stage.stage,
-                    TranscriptArtifact.model_validate_json(
-                        chunk_path.read_text(encoding="utf-8")
-                    ),
-                )
-            )
-    if not chunks:
-        raise StagePrimitiveError(
-            "Manifest did not resolve to any transcript turns for stage input."
-        )
-    return chunks
-
-
-def _merge_transcript_chunks(chunks: list[TranscriptArtifact]) -> TranscriptArtifact:
-    merged_turns: list[TranscriptTurn] = []
-    merged_source_refs: list[TranscriptSourceRef] = []
-    merged_warnings: list[str] = []
-    for chunk in chunks:
-        turn_offset = len(merged_turns)
-        merged_turns.extend(chunk.turns)
-        merged_source_refs.extend(
-            source_ref.model_copy(
-                update={"turn_index": source_ref.turn_index + turn_offset}
-            )
-            for source_ref in chunk.source_refs
-        )
-        merged_warnings.extend(chunk.warnings)
-    return TranscriptArtifact(
-        turns=merged_turns,
-        source_refs=merged_source_refs,
-        speakers={},
-        warnings=merged_warnings,
-    )
-
-
-def polish_manifest_chunks(
-    hermes: Hermes,
-    manifest_path: Path,
+def run_source_note_plan_stage(
+    hermes: StructuredHermes,
+    source: SourceArtifact,
+    transcript: TranscriptArtifact,
     *,
+    draft_plan: ChapterPlan,
     max_attempts: int,
-) -> tuple[TranscriptArtifact, PolishLedger, Reply | None]:
-    manifest = RunManifest.model_validate_json(
-        manifest_path.read_text(encoding="utf-8")
-    )
-    chunks = _resolve_manifest_chunks(manifest, base_dir=manifest_path.parent)
-    polished_chunks: list[TranscriptArtifact] = []
-    ledger_entries: list[PolishLedgerEntry] = []
-    ledger_notes: list[str] = []
-    merge_allowed = False
-    last_reply: Reply | None = None
-
-    for stage_name, chunk in chunks:
-        polished, ledger, reply = run_polish_stage(
-            hermes,
-            chunk,
-            max_attempts=max_attempts,
-        )
-        turn_offset = sum(len(previous.turns) for previous in polished_chunks)
-        polished_chunks.append(polished)
-        last_reply = reply
-        merge_allowed = merge_allowed or ledger.merge_allowed
-        ledger_entries.extend(
-            entry.model_copy(
-                update={
-                    "source_turn_indices": [
-                        index + turn_offset for index in entry.source_turn_indices
-                    ],
-                    "output_turn_indices": [
-                        index + turn_offset for index in entry.output_turn_indices
-                    ],
-                }
-            )
-            for entry in ledger.entries
-        )
-        if ledger.notes:
-            ledger_notes.append(f"{stage_name}: {ledger.notes}")
-
-    return (
-        _merge_transcript_chunks(polished_chunks),
-        PolishLedger(
-            merge_allowed=merge_allowed,
-            entries=ledger_entries,
-            notes="\n".join(ledger_notes),
+) -> tuple[SourceNotePlan, Reply]:
+    plan, reply = run_structured_with_retries(
+        hermes,
+        SourceNotePlanPrompt(
+            source=source.model_dump(mode="json"),
+            turns=transcript.turns,
+            draft_chapters=[
+                chapter.model_dump(mode="json") for chapter in draft_plan.chapters
+            ],
         ),
-        last_reply,
+        max_attempts=max_attempts,
     )
-
-
-def load_transcript_or_manifest(input_path: Path) -> TranscriptArtifact:
-    raw = input_path.read_text(encoding="utf-8")
-    try:
-        return TranscriptArtifact.model_validate_json(raw)
-    except ValidationError:
-        pass
-
-    manifest = RunManifest.model_validate_json(raw)
-    chunks = [
-        chunk
-        for _stage_name, chunk in _resolve_manifest_chunks(
-            manifest, base_dir=input_path.parent
-        )
+    expected_boundaries = [
+        (chapter.start, chapter.end) for chapter in draft_plan.chapters
     ]
-    return _merge_transcript_chunks(chunks)
+    actual_boundaries = [
+        (chapter.start, chapter.end) for chapter in plan.chapters.chapters
+    ]
+    if actual_boundaries != expected_boundaries:
+        raise StagePrimitiveError(
+            "Source-note plan changed deterministic chapter boundaries."
+        )
+    return plan, reply

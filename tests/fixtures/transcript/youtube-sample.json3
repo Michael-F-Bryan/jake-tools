@@ -1,0 +1,51 @@
+{
+  "events": [
+    {
+      "tStartMs": 0,
+      "dDurationMs": 120000,
+      "id": 1
+    },
+    {
+      "tStartMs": 1200,
+      "dDurationMs": 2200,
+      "segs": [
+        {"utf8": "MAVLink"},
+        {"utf8": " tools", "tOffsetMs": 400},
+        {"utf8": " solve", "tOffsetMs": 900},
+        {"utf8": " integration", "tOffsetMs": 1300},
+        {"utf8": " problems.", "tOffsetMs": 1700}
+      ]
+    },
+    {
+      "tStartMs": 3390,
+      "dDurationMs": 10,
+      "aAppend": 1,
+      "segs": [{"utf8": "\n"}]
+    },
+    {
+      "tStartMs": 3400,
+      "dDurationMs": 1800,
+      "segs": [
+        {"utf8": "The"},
+        {"utf8": " protocol", "tOffsetMs": 300},
+        {"utf8": " stays", "tOffsetMs": 800},
+        {"utf8": " interoperable.", "tOffsetMs": 1200}
+      ]
+    },
+    {
+      "tStartMs": 5200,
+      "dDurationMs": 900,
+      "segs": [{"utf8": "[Music]"}]
+    },
+    {
+      "tStartMs": 6200,
+      "dDurationMs": 1400,
+      "segs": [{"utf8": "The protocol stays interoperable."}]
+    },
+    {
+      "tStartMs": 7800,
+      "dDurationMs": 1600,
+      "segs": [{"utf8": "Blue Robotics uses the same messages."}]
+    }
+  ]
+}

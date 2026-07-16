@@ -50,7 +50,6 @@ directory:
 ```bash
 jake-tools transcribe obsidian-recording NOTE.md
 jake-tools transcribe obsidian-recording --dry-run --json NOTE.md
-jake-tools transcript recipe obsidian-recording NOTE.md --show-plan
 ```
 
 The Obsidian recording pipeline always writes the same shape:
@@ -60,8 +59,30 @@ The Obsidian recording pipeline always writes the same shape:
 - `## Transcript` with polished transcript text grouped by chapter
 
 This command expects local `ffmpeg` and `scribe` executables to be available.
-The `transcript recipe` variant exposes the same workflow over primitives with
-`--show-plan`, `--workdir`, and optional `--manifest` output.
+
+## Creating source notes from YouTube
+
+```bash
+jake-tools transcript youtube \
+  'https://www.youtube.com/watch?v=VIDEO_ID' \
+  --out-dir _working/youtube/VIDEO_ID
+
+jake-tools transcript youtube \
+  'https://www.youtube.com/watch?v=VIDEO_ID' \
+  --out-dir _working/youtube/VIDEO_ID \
+  --vault-note "$HOME/Documents/Vault/3 Resources/VIDEO_TITLE.md"
+```
+
+The command prefers authored captions in the requested language, then automatic
+captions. It keeps selected public metadata, raw captions, raw and polished
+transcripts, the rendered note, and a concise manifest under `--out-dir`. Vault
+writes occur only after verification passes and only when `--vault-note` is
+supplied without `--dry-run`.
+
+Source notes contain provenance frontmatter, a summary callout, key points,
+chapter summaries, clickable YouTube timestamps, and the polished transcript.
+Videos without suitable captions currently fail explicitly rather than silently
+starting a local audio transcription.
 
 ## Jira to Clockify sync
 

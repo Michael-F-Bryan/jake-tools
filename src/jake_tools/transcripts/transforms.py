@@ -35,6 +35,7 @@ def normalise_turns(turns: list[TranscriptTurn]) -> list[TranscriptTurn]:
             normalised
             and normalised[-1].speaker == candidate.speaker
             and normalised[-1].text == candidate.text
+            and candidate.start < normalised[-1].end
         ):
             normalised[-1] = TranscriptTurn(
                 start=normalised[-1].start,
