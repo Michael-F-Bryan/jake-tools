@@ -718,6 +718,7 @@ class AcliJiraClient:
                 "--fields",
                 fields,
                 "--json",
+                "--paginate",
             ]
         )
         try:

@@ -110,6 +110,7 @@ def test_acli_jira_client_hydrates_active_assigned_issues() -> None:
         "--fields",
         "key,summary,status,priority",
         "--json",
+        "--paginate",
     ]
     assert runner.commands[1] == [
         "acli",
@@ -160,6 +161,7 @@ def test_acli_jira_client_batches_issue_lookup_by_key() -> None:
     assert issues[0].status_category == "Done"
     assert issues[1].assignee is None
     assert runner.commands[0][5] == "key in (SF-304,SF-438) ORDER BY key"
+    assert runner.commands[0][-1] == "--paginate"
 
 
 def test_acli_jira_client_skips_command_for_empty_issue_lookup() -> None:
