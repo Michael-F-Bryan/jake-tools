@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Protocol, cast
 
 import requests
 from pydantic import BaseModel, ConfigDict, Field
 
 CLOCKIFY_API_ROOT = "https://api.clockify.me/api/v1"
+JIRA_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 
 JsonObject = dict[str, object]
 
@@ -19,6 +21,27 @@ class ClockifyError(RuntimeError):
     pass
 
 
+def normalise_jira_key(key: str) -> str:
+    normalised = key.strip().upper()
+    if not JIRA_KEY_PATTERN.fullmatch(normalised):
+        raise ClockifyError(f"Invalid Jira issue key: {key!r}")
+    return normalised
+
+
+def clockify_project_name_for_jira(summary: str) -> str:
+    project_name = summary.strip()
+    if not project_name:
+        raise ClockifyError("Jira summary is required for a Clockify project name")
+    return project_name
+
+
+def clockify_task_name_for_jira(key: str, summary: str) -> str:
+    task_summary = summary.strip()
+    if not task_summary:
+        raise ClockifyError("Jira summary is required for a Clockify task name")
+    return f"{normalise_jira_key(key)} {task_summary}"
+
+
 class ClockifyUser(BaseModel):
     model_config = ConfigDict(frozen=True, populate_by_name=True)
 
@@ -27,6 +50,25 @@ class ClockifyUser(BaseModel):
     email: str = ""
     active_workspace: str = Field(default="", alias="activeWorkspace")
     default_workspace: str = Field(default="", alias="defaultWorkspace")
+
+
+class JiraIssueRef(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    key: str
+    summary: str
+
+    @property
+    def project_name(self) -> str:
+        return clockify_project_name_for_jira(self.summary)
+
+    @property
+    def task_name(self) -> str:
+        return clockify_task_name_for_jira(self.key, self.summary)
+
+    @property
+    def project_note(self) -> str:
+        return f"Jira: {normalise_jira_key(self.key)}"
 
 
 class ClockifyClient:

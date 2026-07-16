@@ -3,7 +3,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from jake_tools.clockify import ClockifyClient, ClockifyUser
+from jake_tools.clockify import (
+    ClockifyClient,
+    ClockifyError,
+    ClockifyUser,
+    JiraIssueRef,
+    clockify_project_name_for_jira,
+    clockify_task_name_for_jira,
+    normalise_jira_key,
+)
 
 
 class FakeResponse:
@@ -64,3 +72,39 @@ def test_clockify_get_user_uses_requests_session_and_api_key() -> None:
             "timeout": 30,
         }
     ]
+
+
+def test_clockify_jira_project_names_do_not_start_with_ticket_key() -> None:
+    assert (
+        clockify_project_name_for_jira(
+            "Production Vehicle - Investigations and Overhead"
+        )
+        == "Production Vehicle - Investigations and Overhead"
+    )
+
+
+def test_clockify_jira_task_names_keep_ticket_key() -> None:
+    assert (
+        clockify_task_name_for_jira(
+            "sf-353",
+            "Vehicle Control Logic - Preliminary Architecture",
+        )
+        == "SF-353 Vehicle Control Logic - Preliminary Architecture"
+    )
+
+
+def test_jira_issue_ref_keeps_project_note_separate_from_project_name() -> None:
+    issue = JiraIssueRef(key="SF-131", summary="Production Vehicle")
+
+    assert issue.project_name == "Production Vehicle"
+    assert issue.task_name == "SF-131 Production Vehicle"
+    assert issue.project_note == "Jira: SF-131"
+
+
+def test_clockify_jira_names_reject_invalid_ticket_keys() -> None:
+    try:
+        normalise_jira_key("not a key")
+    except ClockifyError as exc:
+        assert "Invalid Jira issue key" in str(exc)
+    else:
+        raise AssertionError("invalid Jira key was accepted")

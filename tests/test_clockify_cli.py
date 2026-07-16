@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 
 from click.testing import CliRunner
 
@@ -50,3 +51,39 @@ def test_whoami_requires_api_key(monkeypatch) -> None:
 
     assert result.exit_code != 0
     assert "CLOCKIFY_API_KEY" in result.output
+
+
+def test_jira_name_renders_project_without_key_and_task_with_key() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        clockify,
+        [
+            "jira-name",
+            "SF-353",
+            "Vehicle Control Logic - Preliminary Architecture",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "project: Vehicle Control Logic - Preliminary Architecture" in result.output
+    assert (
+        "task: SF-353 Vehicle Control Logic - Preliminary Architecture" in result.output
+    )
+    assert "note: Jira: SF-353" in result.output
+
+
+def test_jira_name_can_emit_json() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        clockify,
+        ["jira-name", "sf-4", "Zoda - Internal Tooling & Upkeep", "--json"],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "project": "Zoda - Internal Tooling & Upkeep",
+        "task": "SF-4 Zoda - Internal Tooling & Upkeep",
+        "note": "Jira: SF-4",
+    }

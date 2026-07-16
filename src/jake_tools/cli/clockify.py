@@ -9,6 +9,7 @@ from ..clockify import (
     ClockifyClient,
     ClockifyError,
     ClockifyUser,
+    JiraIssueRef,
     clockify_api_key_from_env,
     clockify_base_url_from_env,
 )
@@ -32,6 +33,43 @@ def clockify(ctx: click.Context, api_key: str | None, api_base_url: str | None) 
         "api_key": api_key,
         "api_base_url": api_base_url,
     }
+
+
+@clockify.command("jira-name")
+@click.argument("key")
+@click.argument("summary")
+@click.option(
+    "--kind",
+    type=click.Choice(["all", "project", "task", "note"]),
+    default="all",
+    show_default=True,
+    help="Which Clockify name to emit.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def jira_name(key: str, summary: str, kind: str, as_json: bool) -> None:
+    """Render Clockify names for a Jira-backed item.
+
+    Jira project/phase work becomes a Clockify project named from the summary
+    only. Individual Jira tickets remain Clockify tasks prefixed with the
+    ticket key.
+    """
+    try:
+        issue = JiraIssueRef(key=key, summary=summary)
+        values = {
+            "project": issue.project_name,
+            "task": issue.task_name,
+            "note": issue.project_note,
+        }
+    except ClockifyError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    selected = values if kind == "all" else {kind: values[kind]}
+    if as_json:
+        click.echo(json.dumps(selected, indent=2))
+        return
+
+    for label, value in selected.items():
+        click.echo(f"{label}: {value}")
 
 
 @clockify.command()
