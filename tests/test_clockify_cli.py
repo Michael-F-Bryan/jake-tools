@@ -13,7 +13,7 @@ from jake_tools.clockify import (
     ClockifyUser,
     TaskStatus,
 )
-from jake_tools.clockify_jira_sync import JiraIssue
+from jake_tools.jira import JiraIssue
 
 clockify_cli = importlib.import_module("jake_tools.cli.clockify")
 

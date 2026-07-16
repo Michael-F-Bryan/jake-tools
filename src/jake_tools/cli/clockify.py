@@ -14,8 +14,6 @@ from ..clockify import (
     clockify_base_url_from_env,
 )
 from ..clockify_jira_sync import (
-    AcliJiraClient,
-    JiraError,
     SyncAction,
     SyncActionKind,
     SyncApplyError,
@@ -23,6 +21,7 @@ from ..clockify_jira_sync import (
     apply_sync_plan,
     prepare_jira_sync,
 )
+from ..jira import AcliJiraClient, JiraError
 
 
 @click.group()
