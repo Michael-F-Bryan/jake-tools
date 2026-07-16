@@ -6,57 +6,17 @@ from typing import Literal
 
 from .models import (
     ChapterPlan,
-    SourceArtifact,
     TranscriptArtifact,
     VerificationCheck,
     VerificationReport,
 )
 
-BOILERPLATE_CHECK_IDS: tuple[str, ...] = (
-    "boilerplate.no-operational-chatter",
-    "boilerplate.no-markdown-fences",
-)
-TURNS_CHECK_IDS: tuple[str, ...] = (
-    "turns.non-empty",
-    "turns.monotonic-order",
-    "turns.coverage-preserved",
-    "turns.speakers-preserved",
-    "turns.no-adjacent-duplicates",
-)
-CHAPTERS_CHECK_IDS: tuple[str, ...] = (
-    "chapters.non-empty",
-    "chapters.monotonic-order",
-    "chapters.non-overlapping",
-    "chapters.covers-transcript-span",
-)
-NOTE_CHECK_IDS: tuple[str, ...] = (
-    "note.has-meeting-notes",
-    "note.has-chapters",
-    "note.has-transcript",
-    "note.chapter-heading-count",
-    "note.no-operational-chatter",
-)
-DUMC_NOTE_CHECK_IDS: tuple[str, ...] = (
-    "note.has-summary-callout",
-    "note.has-discussion-notes",
-    "note.has-chapters",
-    "note.has-transcript",
-    "note.chapter-heading-count",
-    "note.no-meeting-notes",
-    "note.no-notes-heading",
-    "note.no-next-steps",
-    "note.no-task-checkboxes",
-    "note.no-action-labels",
-    "note.no-raw-vtt-link",
-    "note.no-operational-chatter",
-)
-NoteVerificationProfile = Literal["default", "dumc"]
+NoteVerificationProfile = Literal["default", "dumc", "source"]
 
 _OPERATIONAL_CHATTER_RE = re.compile(
     r"^\s*Loading the transcript-polisher skill\.?\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
-_MARKDOWN_FENCE_RE = re.compile(r"^\s*```{3,}", re.MULTILINE)
 
 
 def _build_report(
@@ -77,29 +37,6 @@ def _build_report(
         if failed_gate_ids
         else None,
     )
-
-
-def verify_boilerplate_text(text: str, *, affected_path: Path) -> VerificationReport:
-    checks = [
-        VerificationCheck(
-            check_id="boilerplate.no-operational-chatter",
-            status="fail" if _OPERATIONAL_CHATTER_RE.search(text) else "pass",
-            message="Transcript output does not contain operational chatter.",
-        ),
-        VerificationCheck(
-            check_id="boilerplate.no-markdown-fences",
-            status="fail" if _MARKDOWN_FENCE_RE.search(text) else "pass",
-            message="Transcript output does not include markdown fence markers.",
-        ),
-    ]
-    return _build_report(checks, affected_paths=[affected_path])
-
-
-def read_source_text_for_verification(source: SourceArtifact) -> tuple[Path, str]:
-    source_text_path = source.raw_text_path or source.source_path
-    if source_text_path is None:
-        raise ValueError("SourceArtifact is missing raw_text_path and source_path.")
-    return source_text_path, source_text_path.read_text(encoding="utf-8")
 
 
 def verify_turns(
@@ -151,16 +88,17 @@ def verify_turns(
         )
     )
 
-    adjacent_duplicate = any(
+    overlapping_duplicate = any(
         previous.speaker == current.speaker
         and previous.text.strip().casefold() == current.text.strip().casefold()
+        and current.start < previous.end
         for previous, current in zip(after.turns, after.turns[1:], strict=False)
     )
     checks.append(
         VerificationCheck(
             check_id="turns.no-adjacent-duplicates",
-            status="fail" if adjacent_duplicate else "pass",
-            message="Transcript does not contain adjacent duplicate turns with the same speaker and text.",
+            status="fail" if overlapping_duplicate else "pass",
+            message="Transcript does not contain overlapping duplicate turns.",
         )
     )
 
@@ -237,6 +175,8 @@ def verify_note(
             expected_chapter_count=expected_chapter_count,
             affected_path=affected_path,
         )
+    if profile == "source":
+        return _verify_source_note(note_body, affected_path=affected_path)
     if profile != "default":
         raise ValueError(f"unknown note verification profile: {profile}")
 
@@ -270,6 +210,55 @@ def verify_note(
             check_id="note.no-operational-chatter",
             status="fail" if _OPERATIONAL_CHATTER_RE.search(note_body) else "pass",
             message="Note does not contain transcript-polisher operational chatter.",
+        ),
+    ]
+    return _build_report(checks, affected_paths=[affected_path])
+
+
+def _verify_source_note(
+    note_body: str,
+    *,
+    affected_path: Path,
+) -> VerificationReport:
+    provenance_fields = (
+        "title:",
+        "source:",
+        "channel:",
+        "published:",
+        "duration:",
+        "video-id:",
+        "subtitle-track:",
+        "subtitle-kind:",
+        "capture-method:",
+    )
+    provenance_ok = True
+    for field in provenance_fields:
+        match = re.search(
+            rf"^{re.escape(field)}\s*(?P<value>.*)$", note_body, re.MULTILINE
+        )
+        if match is None or not match.group("value").strip().strip("\"'"):
+            provenance_ok = False
+            break
+    caption_artifacts = re.search(
+        r"(?:^WEBVTT\s*$|\s-->\s|<c(?:\s|>)|<\d{2}:\d{2}:\d{2}\.\d{3}>)",
+        note_body,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    checks = [
+        VerificationCheck(
+            check_id="note.has-required-provenance",
+            status="pass" if provenance_ok else "fail",
+            message="Source note records the required video and caption provenance.",
+        ),
+        VerificationCheck(
+            check_id="note.no-caption-artifacts",
+            status="fail" if caption_artifacts else "pass",
+            message="Source note does not contain raw caption artefacts.",
+        ),
+        VerificationCheck(
+            check_id="note.no-operational-chatter",
+            status="fail" if _OPERATIONAL_CHATTER_RE.search(note_body) else "pass",
+            message="Source note does not contain operational chatter.",
         ),
     ]
     return _build_report(checks, affected_paths=[affected_path])

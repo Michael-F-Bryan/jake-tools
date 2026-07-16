@@ -1,68 +1,16 @@
 from __future__ import annotations
 
-import math
-import re
-from pathlib import Path
-
 from .models import (
     ChapterPlan,
     PlannedChapter,
-    RunManifest,
-    RunStageStatus,
-    SourceArtifact,
     TranscriptArtifact,
     TranscriptTurn,
 )
 from .transforms import merge_consecutive_turns, normalise_turns
 
-_BOILERPLATE_LINE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^\s*Loading the transcript-polisher skill\.?\s*$", re.IGNORECASE),
-    re.compile(r"^\s*```{3,}.*$", re.IGNORECASE),
-)
-
 
 class TransformPrimitiveError(RuntimeError):
     pass
-
-
-def _resolve_source_text_path(source: SourceArtifact) -> Path:
-    path = source.raw_text_path or source.source_path
-    if path is None:
-        raise TransformPrimitiveError(
-            "SourceArtifact is missing both raw_text_path and source_path."
-        )
-    if not path.exists():
-        raise TransformPrimitiveError(f"Source text path does not exist: {path}")
-    return path
-
-
-def strip_source_boilerplate(
-    source: SourceArtifact, *, source_output_path: Path
-) -> SourceArtifact:
-    source_text_path = _resolve_source_text_path(source)
-    lines = source_text_path.read_text(encoding="utf-8").splitlines()
-    removed_count = 0
-    kept_lines: list[str] = []
-
-    for line in lines:
-        if any(pattern.match(line) for pattern in _BOILERPLATE_LINE_PATTERNS):
-            removed_count += 1
-            continue
-        kept_lines.append(line)
-
-    cleaned_text_path = source_output_path.resolve().with_suffix(".clean.txt")
-    cleaned_text_path.write_text("\n".join(kept_lines).strip() + "\n", encoding="utf-8")
-
-    warnings = list(source.warnings)
-    if removed_count:
-        warnings.append(f"Removed {removed_count} boilerplate line(s).")
-
-    return source.model_copy(
-        update={
-            "raw_text_path": cleaned_text_path,
-            "warnings": warnings,
-        }
-    )
 
 
 def normalise_transcript_artifact(artifact: TranscriptArtifact) -> TranscriptArtifact:
@@ -81,89 +29,6 @@ def merge_adjacent_turns(
             )
         }
     )
-
-
-def split_transcript_manifest(
-    artifact: TranscriptArtifact, *, target_minutes: float
-) -> RunManifest:
-    if target_minutes <= 0:
-        raise TransformPrimitiveError("--target-minutes must be greater than zero.")
-    if not artifact.turns:
-        raise TransformPrimitiveError("TranscriptArtifact has no turns to split.")
-
-    chunk_seconds = target_minutes * 60.0
-    first_start = artifact.turns[0].start
-    last_end = max(turn.end for turn in artifact.turns)
-    chunk_count = max(1, math.ceil(max(0.0, last_end - first_start) / chunk_seconds))
-
-    stages: list[RunStageStatus] = []
-    artefact_paths: dict[str, Path] = {}
-    for index in range(chunk_count):
-        start = first_start + (index * chunk_seconds)
-        end = start + chunk_seconds
-        chunk_turns = [
-            turn for turn in artifact.turns if turn.start < end and turn.end >= start
-        ]
-        if not chunk_turns:
-            continue
-        chunk_key = f"chunk-{index + 1:03d}"
-        chunk_path = Path(f"{chunk_key}.json")
-        artefact_paths[chunk_key] = chunk_path
-        stages.append(
-            RunStageStatus(stage=chunk_key, status="pass", artefacts=[chunk_path])
-        )
-
-    if not stages:
-        raise TransformPrimitiveError(
-            "Unable to create any chunks from transcript turns."
-        )
-
-    return RunManifest(
-        run_id="split-manifest",
-        stages=stages,
-        artefact_paths=artefact_paths,
-    )
-
-
-def split_transcript_chunks(
-    artifact: TranscriptArtifact, manifest: RunManifest, *, target_minutes: float
-) -> dict[Path, TranscriptArtifact]:
-    chunk_seconds = target_minutes * 60.0
-    first_start = artifact.turns[0].start
-    chunks: dict[Path, TranscriptArtifact] = {}
-
-    for stage in manifest.stages:
-        if not stage.artefacts:
-            continue
-        chunk_path = stage.artefacts[0]
-        chunk_index = int(stage.stage.rsplit("-", maxsplit=1)[1]) - 1
-        start = first_start + (chunk_index * chunk_seconds)
-        end = start + chunk_seconds
-        selected = [
-            (turn_index, turn)
-            for turn_index, turn in enumerate(artifact.turns)
-            if turn.start < end and turn.end >= start
-        ]
-        if not selected:
-            continue
-        old_to_new = {
-            old_index: new_index
-            for new_index, (old_index, _turn) in enumerate(selected)
-        }
-        source_refs = [
-            source_ref.model_copy(
-                update={"turn_index": old_to_new[source_ref.turn_index]}
-            )
-            for source_ref in artifact.source_refs
-            if source_ref.turn_index in old_to_new
-        ]
-        chunks[chunk_path] = TranscriptArtifact(
-            turns=[turn for _old_index, turn in selected],
-            source_refs=source_refs,
-            speakers=artifact.speakers,
-            warnings=artifact.warnings,
-        )
-    return chunks
 
 
 def draft_chapter_boundaries(
@@ -190,6 +55,12 @@ def draft_chapter_boundaries(
     if chapter_turns:
         chapters.append(_planned_chapter(chapters, chapter_start, chapter_turns))
 
+    chapters = [
+        chapter.model_copy(update={"end": chapters[index + 1].start})
+        if index + 1 < len(chapters)
+        else chapter
+        for index, chapter in enumerate(chapters)
+    ]
     return ChapterPlan(chapters=chapters, boundary_source="deterministic")
 
 

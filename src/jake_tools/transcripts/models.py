@@ -93,6 +93,11 @@ class MeetingMinutes(BaseModel):
     key_points: list[str] = Field(default_factory=list)
 
 
+class SourceOverview(BaseModel):
+    summary: str = Field(min_length=1)
+    key_points: list[str] = Field(min_length=1)
+
+
 class MergeReport(BaseModel):
     status: str
     transcript_heading_count: int
@@ -145,21 +150,6 @@ class SourceArtifact(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
-class ExternalCommandMetadata(BaseModel):
-    command: str
-    exit_code: int
-    stdout: str = ""
-    stderr: str = ""
-
-
-class AudioArtifact(BaseModel):
-    input_files: list[Path]
-    merged_audio_path: Path | None = None
-    transcript_json_path: Path | None = None
-    commands: list[ExternalCommandMetadata] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-
-
 class TranscriptSourceRef(BaseModel):
     turn_index: int
     source_ref: str
@@ -184,12 +174,9 @@ class ChapterPlan(BaseModel):
     boundary_source: Literal["deterministic", "llm", "manual"]
 
 
-class RenderedNote(BaseModel):
-    rendered_markdown_path: Path
-    destination_path: Path | None = None
-    sections_included: list[str] = Field(default_factory=list)
-    attachments_or_source_links: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
+class SourceNotePlan(BaseModel):
+    overview: SourceOverview
+    chapters: ChapterPlan
 
 
 class VerificationCheck(BaseModel):
@@ -216,79 +203,4 @@ class RunManifest(BaseModel):
     run_id: str
     stages: list[RunStageStatus]
     artefact_paths: dict[str, Path] = Field(default_factory=dict)
-    command_metadata: list[ExternalCommandMetadata] = Field(default_factory=list)
     ai_totals: AITotals | None = None
-
-
-PUBLIC_TRANSCRIPT_ARTIFACT_MODELS: tuple[type[BaseModel], ...] = (
-    SourceArtifact,
-    AudioArtifact,
-    TranscriptArtifact,
-    ChapterPlan,
-    RenderedNote,
-    VerificationReport,
-    RunManifest,
-)
-
-_PUBLIC_TRANSCRIPT_ARTIFACTS_BY_NAME: dict[str, type[BaseModel]] = {
-    model.__name__: model for model in PUBLIC_TRANSCRIPT_ARTIFACT_MODELS
-}
-
-
-def list_public_transcript_artifact_models() -> tuple[type[BaseModel], ...]:
-    return PUBLIC_TRANSCRIPT_ARTIFACT_MODELS
-
-
-def resolve_public_transcript_artifact_model(
-    model_name: str,
-) -> type[BaseModel] | None:
-    return _PUBLIC_TRANSCRIPT_ARTIFACTS_BY_NAME.get(model_name)
-
-
-def example_for_public_transcript_artifact(model_name: str) -> BaseModel | None:
-    if model_name == SourceArtifact.__name__:
-        return SourceArtifact(kind="plain-text")
-    if model_name == AudioArtifact.__name__:
-        return AudioArtifact(input_files=[Path("recording.m4a")])
-    if model_name == TranscriptArtifact.__name__:
-        return TranscriptArtifact(
-            turns=[
-                TranscriptTurn(
-                    start=0.0,
-                    end=3.2,
-                    speaker="Speaker 1",
-                    text="Hello world.",
-                )
-            ]
-        )
-    if model_name == ChapterPlan.__name__:
-        return ChapterPlan(
-            boundary_source="deterministic",
-            chapters=[
-                PlannedChapter(
-                    start=0.0,
-                    end=60.0,
-                    title="Introduction",
-                    summary="Meeting opened and agenda confirmed.",
-                )
-            ],
-        )
-    if model_name == RenderedNote.__name__:
-        return RenderedNote(rendered_markdown_path=Path("meeting.md"))
-    if model_name == VerificationReport.__name__:
-        return VerificationReport(
-            status="pass",
-            checks=[
-                VerificationCheck(
-                    check_id="turn-order",
-                    status="pass",
-                    message="Turns are ordered by start time.",
-                )
-            ],
-        )
-    if model_name == RunManifest.__name__:
-        return RunManifest(
-            run_id="run-001",
-            stages=[RunStageStatus(stage="parse", status="pass")],
-        )
-    return None

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from contextlib import contextmanager
+from difflib import SequenceMatcher
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -24,30 +26,59 @@ from .models import (
     MeetingMinutes,
     RunManifest,
     RunStageStatus,
+    SourceArtifact,
     SpeakerMapping,
     SpeakerMessageCount,
     TranscriptArtifact,
+    TranscriptTurn,
+    VerificationReport,
 )
 from .note_primitives import merge_generated_note, write_note
 from .obsidian import load_source_note
-from .parse_primitives import parse_scribe_transcript, parse_teams_vtt
-from .render_primitives import render_meeting_note_markdown, render_transcript_markdown
-from .source_primitives import source_from_obsidian_note
+from .parse_primitives import (
+    ParsePrimitiveError,
+    parse_scribe_transcript,
+    parse_teams_vtt,
+    parse_youtube_json3,
+)
+from .render_primitives import (
+    RenderPrimitiveError,
+    render_meeting_note_markdown,
+    render_source_note_markdown,
+    render_transcript_markdown,
+)
+from .source_primitives import (
+    SourcePrimitiveError,
+    source_from_obsidian_note,
+    source_from_youtube,
+)
 from .stage_primitives import (
     StagePrimitiveError,
+    StructuredHermes,
     run_map_speakers_stage,
     run_minutes_stage,
     run_polish_stage,
+    run_source_note_plan_stage,
     run_title_chapters_stage,
 )
-from .teams_graph import TeamsGraphError, source_from_teams_meeting
+from .teams_graph import (
+    TeamsGraphError,
+    TeamsMeetingSourceResult,
+    source_from_teams_meeting,
+)
 from .transform_primitives import (
     draft_chapter_boundaries,
     merge_adjacent_turns,
     normalise_transcript_artifact,
 )
 from .verify import VerificationError, verify_note
-from .verify_primitives import verify_note as verify_note_profile
+from .verify_primitives import (
+    verify_chapters,
+    verify_turns,
+)
+from .verify_primitives import (
+    verify_note as verify_note_profile,
+)
 
 DEFAULT_STAGE_MAX_ATTEMPTS = 2
 DEFAULT_MAX_GAP_SECONDS = 3.0
@@ -56,85 +87,6 @@ DUMC_VAULT_DIR = Path("~/Documents/Vault/2 Areas/DUM-C").expanduser()
 
 class RecipePrimitiveError(RuntimeError):
     pass
-
-
-def obsidian_recording_recipe_plan() -> dict[str, Any]:
-    return {
-        "recipe": "obsidian-recording",
-        "description": "Compose Obsidian recording workflow over transcript primitives.",
-        "supports": {
-            "show_plan": True,
-            "json_plan": True,
-            "workdir": True,
-            "manifest": True,
-            "dry_run": True,
-        },
-        "steps": [
-            {"index": 1, "primitive": "source.obsidian-note"},
-            {"index": 2, "primitive": "audio.concat-recordings"},
-            {"index": 3, "primitive": "audio.scribe"},
-            {"index": 4, "primitive": "parse.scribe"},
-            {"index": 5, "primitive": "transform.normalise"},
-            {"index": 6, "primitive": "transform.merge-adjacent"},
-            {"index": 7, "primitive": "stage.map-speakers"},
-            {"index": 8, "primitive": "stage.polish"},
-            {"index": 9, "primitive": "stage.title-chapters"},
-            {"index": 10, "primitive": "stage.minutes"},
-            {"index": 11, "primitive": "render.transcript"},
-            {"index": 12, "primitive": "render.meeting-note"},
-            {"index": 13, "primitive": "note.merge"},
-            {"index": 14, "primitive": "verify.note"},
-            {"index": 15, "primitive": "note.write"},
-        ],
-    }
-
-
-def render_obsidian_recording_recipe_plan() -> str:
-    plan = obsidian_recording_recipe_plan()
-    lines = [f"recipe: {plan['recipe']}", "primitive sequence:"]
-    for step in plan["steps"]:
-        lines.append(f"{step['index']:02d}. {step['primitive']}")
-    return "\n".join(lines)
-
-
-def teams_meeting_recipe_plan() -> dict[str, Any]:
-    return {
-        "recipe": "teams-meeting",
-        "description": "Import Teams transcript VTT into canonical transcript JSON and render a profiled note.",
-        "supports": {
-            "account": True,
-            "event_id": True,
-            "days_back": True,
-            "profile": ["default", "dumc"],
-            "out_dir": True,
-            "vault_note": True,
-            "dry_run": True,
-        },
-        "steps": [
-            {"index": 1, "primitive": "source.teams-meeting"},
-            {"index": 2, "primitive": "parse.teams-vtt"},
-            {"index": 3, "primitive": "transform.normalise"},
-            {"index": 4, "primitive": "transform.merge-adjacent"},
-            {"index": 5, "primitive": "transform.chapter-boundaries"},
-            {"index": 6, "primitive": "render.transcript"},
-            {"index": 7, "primitive": "render.meeting-note"},
-            {"index": 8, "primitive": "verify.note"},
-            {
-                "index": 9,
-                "primitive": "note.write",
-                "when": "--vault-note or --write-vault",
-            },
-        ],
-    }
-
-
-def render_teams_meeting_recipe_plan() -> str:
-    plan = teams_meeting_recipe_plan()
-    lines = [f"recipe: {plan['recipe']}", "primitive sequence:"]
-    for step in plan["steps"]:
-        suffix = f" ({step['when']})" if "when" in step else ""
-        lines.append(f"{step['index']:02d}. {step['primitive']}{suffix}")
-    return "\n".join(lines)
 
 
 @contextmanager
@@ -194,12 +146,13 @@ def _write_json(path: Path, payload: Any) -> None:
 def _write_manifest(
     *,
     manifest_path: Path,
-    stage_names: list[str],
+    run_id: str,
+    stages: list[RunStageStatus],
     artifact_paths: dict[str, Path],
 ) -> None:
     manifest = RunManifest(
-        run_id="obsidian-recording-recipe",
-        stages=[RunStageStatus(stage=stage, status="pass") for stage in stage_names],
+        run_id=run_id,
+        stages=stages,
         artefact_paths=artifact_paths,
     )
     _write_json(manifest_path, manifest.model_dump(mode="json"))
@@ -227,6 +180,233 @@ def _deterministic_minutes(title: str, chapters: ChapterPlan) -> MeetingMinutes:
     )
 
 
+def _youtube_source_context(source: SourceArtifact) -> str:
+    title = source.title or "Untitled YouTube video"
+    channel = str(source.metadata.get("channel") or source.organisation or "Unknown")
+    return "\n".join(
+        [
+            f"Video title: {title}",
+            f"Channel: {channel}",
+            f"Source URL: {source.source_url or ''}",
+            "Caption provenance: "
+            + str(source.metadata.get("subtitle_kind") or "unknown"),
+        ]
+    )
+
+
+def _require_passing_report(report: VerificationReport, *, label: str) -> None:
+    if report.failed_gate_ids:
+        raise RecipePrimitiveError(
+            f"{label} verification failed: " + ", ".join(report.failed_gate_ids)
+        )
+
+
+def _ordered_word_coverage(source: str, candidate: str) -> float:
+    source_words = re.findall(r"[\w']+", source.casefold())
+    if not source_words:
+        return 1.0
+    candidate_words = re.findall(r"[\w']+", candidate.casefold())
+    retained = sum(
+        block.size
+        for block in SequenceMatcher(
+            a=source_words, b=candidate_words, autojunk=False
+        ).get_matching_blocks()
+    )
+    return retained / len(source_words)
+
+
+def _polish_youtube_chunks(
+    hermes: StructuredHermes,
+    transcript: TranscriptArtifact,
+    *,
+    context: str,
+    target_minutes: float = 5.0,
+) -> tuple[TranscriptArtifact, list[tuple[str, Reply]]]:
+    if target_minutes <= 0:
+        raise RecipePrimitiveError("Polish chunk duration must be greater than zero.")
+    if not transcript.turns:
+        raise RecipePrimitiveError("Transcript has no turns to polish.")
+
+    chunk_seconds = target_minutes * 60.0
+    ranges: list[tuple[int, int]] = []
+    chunk_start = 0
+    window_start = transcript.turns[0].start
+    for turn_index, turn in enumerate(transcript.turns):
+        if turn_index > chunk_start and turn.start - window_start >= chunk_seconds:
+            ranges.append((chunk_start, turn_index))
+            chunk_start = turn_index
+            window_start = turn.start
+    ranges.append((chunk_start, len(transcript.turns)))
+
+    polished_turns: list[TranscriptTurn] = []
+    replies: list[tuple[str, Reply]] = []
+    for chunk_number, (start_index, end_index) in enumerate(ranges, start=1):
+        source_turns = transcript.turns[start_index:end_index]
+        chunk = TranscriptArtifact(
+            turns=source_turns,
+            source_refs=[
+                source_ref.model_copy(
+                    update={"turn_index": source_ref.turn_index - start_index}
+                )
+                for source_ref in transcript.source_refs
+                if start_index <= source_ref.turn_index < end_index
+            ],
+            speakers=transcript.speakers,
+            warnings=transcript.warnings,
+        )
+        polished, reply = run_polish_stage(
+            hermes,
+            chunk,
+            context=context,
+            max_attempts=DEFAULT_STAGE_MAX_ATTEMPTS,
+        )
+        for source_turn, polished_turn in zip(
+            source_turns, polished.turns, strict=True
+        ):
+            same_boundary = (
+                source_turn.start == polished_turn.start
+                and source_turn.end == polished_turn.end
+                and source_turn.speaker == polished_turn.speaker
+            )
+            faithful = (
+                len(re.findall(r"[\w']+", source_turn.text)) < 5
+                or _ordered_word_coverage(source_turn.text, polished_turn.text) >= 0.5
+            )
+            if not same_boundary or not faithful:
+                raise RecipePrimitiveError(
+                    f"Polish chunk {chunk_number} failed source fidelity."
+                )
+        polished_turns.extend(polished.turns)
+        replies.append((f"transcript_polish.chunk-{chunk_number:03d}", reply))
+
+    return transcript.model_copy(update={"turns": polished_turns}), replies
+
+
+def run_youtube_source_notes_recipe(
+    hermes: StructuredHermes,
+    url: str,
+    *,
+    out_dir: Path,
+    language: str = "en",
+    vault_note: Path | None = None,
+    dry_run: bool = False,
+    source_fetcher: Callable[..., SourceArtifact] = source_from_youtube,
+) -> dict[str, object]:
+    artefacts: dict[str, Path] = {}
+    replies: list[tuple[str, Reply | None]] = []
+    try:
+        out_dir = out_dir.expanduser().resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        source = source_fetcher(url, out_dir=out_dir, language=language)
+        if source.source_path is not None:
+            artefacts["metadata"] = source.source_path
+        if source.raw_text_path is not None:
+            artefacts["captions"] = source.raw_text_path
+
+        raw_transcript = parse_youtube_json3(source)
+        raw_path = out_dir / "transcript-raw.json"
+        _write_json(raw_path, raw_transcript.model_dump(mode="json"))
+        artefacts["transcript.raw"] = raw_path
+
+        normalised = normalise_transcript_artifact(raw_transcript)
+        context = _youtube_source_context(source)
+        polished, polish_replies = _polish_youtube_chunks(
+            hermes,
+            normalised,
+            context=context,
+        )
+        polished_report = verify_turns(
+            normalised,
+            polished,
+            affected_paths=[raw_path],
+        )
+        _require_passing_report(polished_report, label="Polished transcript")
+        polished_path = out_dir / "transcript-polished.json"
+        _write_json(polished_path, polished.model_dump(mode="json"))
+        replies.extend(polish_replies)
+        artefacts["transcript.polished"] = polished_path
+
+        draft_chapters = draft_chapter_boundaries(polished, window_minutes=5.0)
+        source_note_plan, plan_reply = run_source_note_plan_stage(
+            hermes,
+            source,
+            polished,
+            draft_plan=draft_chapters,
+            max_attempts=DEFAULT_STAGE_MAX_ATTEMPTS,
+        )
+        chapters = source_note_plan.chapters
+        overview = source_note_plan.overview
+        chapter_report = verify_chapters(
+            chapters,
+            transcript=polished,
+            affected_paths=[polished_path],
+        )
+        _require_passing_report(chapter_report, label="Chapter plan")
+        replies.append(("source-note-plan", plan_reply))
+
+        note, _sections = render_source_note_markdown(
+            source, overview, polished, chapters
+        )
+        note_path = out_dir / "source-note.md"
+        note_path.write_text(note, encoding="utf-8")
+        artefacts["note"] = note_path
+
+        note_report = verify_note_profile(
+            note,
+            expected_chapter_count=len(chapters.chapters),
+            affected_path=note_path,
+            profile="source",
+        )
+        _require_passing_report(note_report, label="Source note")
+
+        destination = vault_note.expanduser().resolve() if vault_note else None
+        updated = False
+        stages = [RunStageStatus(stage="source-note", status="pass")]
+        if destination is not None:
+            artefacts["destination"] = destination
+            if dry_run:
+                stages.append(RunStageStatus(stage="vault.write", status="skipped"))
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(note, encoding="utf-8")
+                stages.append(RunStageStatus(stage="vault.write", status="pass"))
+                updated = True
+
+        ai_stage_stats = [
+            stats
+            for stage, reply in replies
+            if (stats := build_ai_stage_stats(stage, reply)) is not None
+        ]
+        manifest = RunManifest(
+            run_id="youtube-source-notes",
+            stages=stages,
+            artefact_paths=artefacts,
+            ai_totals=build_ai_totals(ai_stage_stats),
+        )
+        manifest_path = out_dir / "manifest.json"
+        _write_json(manifest_path, manifest.model_dump(mode="json"))
+        return {
+            "title": source.title,
+            "note": str(destination) if destination is not None else None,
+            "updated": updated,
+            "out_dir": str(out_dir),
+            "rendered_note": str(note_path),
+            "manifest": str(manifest_path),
+            "verification_status": note_report.status,
+            "subtitle_track": source.metadata.get("subtitle_track"),
+            "subtitle_kind": source.metadata.get("subtitle_kind"),
+        }
+    except (
+        ParsePrimitiveError,
+        RenderPrimitiveError,
+        SourcePrimitiveError,
+        StagePrimitiveError,
+        ValueError,
+    ) as exc:
+        raise RecipePrimitiveError(str(exc)) from exc
+
+
 def run_teams_meeting_recipe(
     *,
     account: str,
@@ -239,12 +419,13 @@ def run_teams_meeting_recipe(
     vault_note: Path | None = None,
     write_vault: bool = False,
     dry_run: bool = False,
+    source_fetcher: Callable[..., TeamsMeetingSourceResult] = source_from_teams_meeting,
 ) -> dict[str, object]:
     stage_names: list[str] = []
     artifact_paths: dict[str, Path] = {}
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-        source_result = source_from_teams_meeting(
+        source_result = source_fetcher(
             account=account,
             out_dir=out_dir,
             token_file=token_file,
@@ -326,7 +507,6 @@ def run_teams_meeting_recipe(
             )
         updated = False
         if destination is not None:
-            stage_names.append("note.write")
             destination = destination.expanduser()
             artifact_paths["note.destination"] = destination
             if not dry_run:
@@ -334,10 +514,18 @@ def run_teams_meeting_recipe(
                 destination.write_text(rendered_note, encoding="utf-8")
                 updated = True
 
+        stages = [RunStageStatus(stage=name, status="pass") for name in stage_names]
+        if destination is not None:
+            stages.append(
+                RunStageStatus(
+                    stage="note.write", status="skipped" if dry_run else "pass"
+                )
+            )
         manifest_path = out_dir / "manifest.json"
         _write_manifest(
             manifest_path=manifest_path,
-            stage_names=stage_names,
+            run_id="teams-meeting",
+            stages=stages,
             artifact_paths=artifact_paths,
         )
         return {
@@ -379,7 +567,6 @@ def run_obsidian_recording_recipe(
             transcript_path = workspace / "transcript.artifact.json"
             transcript_markdown_path = workspace / "transcript.md"
             polished_path = workspace / "transcript.polished.json"
-            ledger_path = workspace / "transcript.polish.ledger.json"
             speaker_mapping_path = workspace / "speaker-mapping.json"
             chapters_path = workspace / "chapters.json"
             minutes_path = workspace / "minutes.json"
@@ -420,7 +607,7 @@ def run_obsidian_recording_recipe(
             _write_json(speaker_mapping_path, speaker_mapping.model_dump(mode="json"))
             artifact_paths["speaker-mapping"] = speaker_mapping_path
 
-            polished, ledger, polish_reply = run_polish_stage(
+            polished, polish_reply = run_polish_stage(
                 hermes,
                 transcript,
                 max_attempts=DEFAULT_STAGE_MAX_ATTEMPTS,
@@ -428,9 +615,7 @@ def run_obsidian_recording_recipe(
             stage_replies.append(("transcript_polish", polish_reply))
             stage_names.append("stage.polish")
             _write_json(polished_path, polished.model_dump(mode="json"))
-            _write_json(ledger_path, ledger.model_dump(mode="json"))
             artifact_paths["transcript.polished"] = polished_path
-            artifact_paths["transcript.polish-ledger"] = ledger_path
 
             chapter_plan, chapter_reply = run_title_chapters_stage(
                 hermes,
@@ -483,13 +668,21 @@ def run_obsidian_recording_recipe(
             stage_names.append("verify.note")
 
             updated = write_note(obsidian_note, merged_note, dry_run=dry_run)
-            stage_names.append("note.write")
             artifact_paths["note.output"] = obsidian_note.resolve()
 
             if manifest_path is not None:
+                stages = [
+                    RunStageStatus(stage=name, status="pass") for name in stage_names
+                ]
+                stages.append(
+                    RunStageStatus(
+                        stage="note.write", status="skipped" if dry_run else "pass"
+                    )
+                )
                 _write_manifest(
                     manifest_path=manifest_path,
-                    stage_names=stage_names,
+                    run_id="obsidian-recording",
+                    stages=stages,
                     artifact_paths=artifact_paths,
                 )
 
