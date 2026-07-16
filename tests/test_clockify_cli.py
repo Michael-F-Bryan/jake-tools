@@ -13,7 +13,7 @@ from jake_tools.clockify import (
     ClockifyUser,
     TaskStatus,
 )
-from jake_tools.jira import JiraIssue
+from jake_tools.jira import JiraError, JiraIssue
 
 clockify_cli = importlib.import_module("jake_tools.cli.clockify")
 
@@ -286,3 +286,85 @@ def test_jira_sync_apply_executes_and_reports_changes(monkeypatch) -> None:
     assert payload["mode"] == "apply"
     assert payload["applied"] == 1
     assert client.operations == ["task-1:DONE"]
+
+
+class EmptyAcliJiraClient:
+    def get_active_assigned_issues(self, project_key: str) -> list[JiraIssue]:
+        return []
+
+    def get_issues(self, keys: object) -> list[JiraIssue]:
+        return []
+
+
+class FailingAcliJiraClient:
+    def get_active_assigned_issues(self, project_key: str) -> list[JiraIssue]:
+        raise JiraError("Jira unavailable")
+
+    def get_issues(self, keys: object) -> list[JiraIssue]:
+        raise AssertionError("not expected")
+
+
+class DuplicateTaskClockifyClient(FakeJiraSyncClockifyClient):
+    def get_tasks(
+        self,
+        workspace_id: str,
+        project_id: str,
+        *,
+        active: bool,
+    ) -> list[ClockifyTask]:
+        if not active:
+            return []
+        return [
+            self.task,
+            self.task.model_copy(update={"id": "task-2"}),
+        ]
+
+
+def test_jira_sync_reports_when_no_changes_are_required(monkeypatch) -> None:
+    install_sync_fakes(monkeypatch)
+    monkeypatch.setattr(clockify_cli, "AcliJiraClient", EmptyAcliJiraClient)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        clockify,
+        ["--api-key", "test-key", "jira-sync", "--dry-run"],
+    )
+
+    assert result.exit_code == 0
+    assert result.output == "No Clockify changes required.\n"
+
+
+def test_jira_sync_reports_conflicts_as_json_and_exits_nonzero(monkeypatch) -> None:
+    client = DuplicateTaskClockifyClient(
+        api_key="test-key",
+        base_url="https://clockify.example.test/api/v1",
+    )
+    monkeypatch.setattr(clockify_cli, "ClockifyClient", lambda **_: client)
+    monkeypatch.setattr(clockify_cli, "AcliJiraClient", FakeAcliJiraClient)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        clockify,
+        ["--api-key", "test-key", "jira-sync", "--dry-run", "--json"],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert [(action["kind"], action["jiraKey"]) for action in payload["actions"]] == [
+        ("CONFLICT", "SF-304")
+    ]
+    assert client.operations == []
+
+
+def test_jira_sync_reports_backend_errors_without_polluting_json(monkeypatch) -> None:
+    install_sync_fakes(monkeypatch)
+    monkeypatch.setattr(clockify_cli, "AcliJiraClient", FailingAcliJiraClient)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        clockify,
+        ["--api-key", "test-key", "jira-sync", "--json"],
+    )
+
+    assert result.exit_code == 1
+    assert result.output == "Error: Jira unavailable\n"
