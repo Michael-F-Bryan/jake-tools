@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, TypeVar
 
 import requests
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 CLOCKIFY_API_ROOT = "https://api.clockify.me/api/v1"
 JIRA_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 
 JsonObject = dict[str, object]
+JsonValue = JsonObject | list[object] | str | int | float | bool | None
+TaskStatus = Literal["ACTIVE", "DONE"]
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 class HttpSession(Protocol):
@@ -52,6 +55,36 @@ class ClockifyUser(BaseModel):
     default_workspace: str = Field(default="", alias="defaultWorkspace")
 
 
+class ClockifyClientRecord(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    name: str
+    archived: bool = False
+
+
+class ClockifyProject(BaseModel):
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    id: str
+    name: str
+    note: str = ""
+    archived: bool = False
+    billable: bool = False
+    color: str = "#039BE5"
+    is_public: bool = Field(default=False, alias="public")
+    client_id: str = Field(default="", alias="clientId")
+
+
+class ClockifyTask(BaseModel):
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    id: str
+    name: str
+    project_id: str = Field(alias="projectId")
+    status: TaskStatus
+
+
 class JiraIssueRef(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -86,38 +119,193 @@ class ClockifyClient:
         self._session = session or requests.Session()
 
     def get_user(self) -> ClockifyUser:
-        data = self._request_json("GET", "/user")
-        return ClockifyUser.model_validate(data)
+        return self._validate(ClockifyUser, self._request_json("GET", "/user"), "/user")
+
+    def get_clients(self, workspace_id: str) -> list[ClockifyClientRecord]:
+        path = f"/workspaces/{workspace_id}/clients"
+        data = self._request_json("GET", path, params={"page-size": 5000})
+        return self._validate_list(ClockifyClientRecord, data, path)
+
+    def get_projects(
+        self,
+        workspace_id: str,
+        *,
+        archived: bool,
+    ) -> list[ClockifyProject]:
+        path = f"/workspaces/{workspace_id}/projects"
+        data = self._request_json(
+            "GET",
+            path,
+            params={
+                "archived": str(archived).lower(),
+                "hydrated": "false",
+                "page-size": 5000,
+            },
+        )
+        projects = self._validate_list(ClockifyProject, data, path)
+        return [project for project in projects if project.archived is archived]
+
+    def get_tasks(
+        self,
+        workspace_id: str,
+        project_id: str,
+        *,
+        active: bool,
+    ) -> list[ClockifyTask]:
+        path = f"/workspaces/{workspace_id}/projects/{project_id}/tasks"
+        data = self._request_json(
+            "GET",
+            path,
+            params={
+                "is-active": str(active).lower(),
+                "page-size": 5000,
+            },
+        )
+        return self._validate_list(ClockifyTask, data, path)
+
+    def create_project(
+        self,
+        workspace_id: str,
+        *,
+        name: str,
+        note: str,
+        client_id: str,
+    ) -> ClockifyProject:
+        path = f"/workspaces/{workspace_id}/projects"
+        payload: JsonObject = {
+            "billable": False,
+            "clientId": client_id,
+            "isPublic": True,
+            "name": name,
+            "note": note,
+        }
+        return self._validate(
+            ClockifyProject,
+            self._request_json("POST", path, payload=payload),
+            path,
+        )
+
+    def update_project_name(
+        self,
+        workspace_id: str,
+        project: ClockifyProject,
+        name: str,
+    ) -> ClockifyProject:
+        path = f"/workspaces/{workspace_id}/projects/{project.id}"
+        payload: JsonObject = {
+            "archived": project.archived,
+            "billable": project.billable,
+            "clientId": project.client_id,
+            "color": project.color,
+            "isPublic": project.is_public,
+            "name": name,
+            "note": project.note,
+        }
+        return self._validate(
+            ClockifyProject,
+            self._request_json("PUT", path, payload=payload),
+            path,
+        )
+
+    def create_task(
+        self,
+        workspace_id: str,
+        project_id: str,
+        *,
+        name: str,
+    ) -> ClockifyTask:
+        path = f"/workspaces/{workspace_id}/projects/{project_id}/tasks"
+        return self._validate(
+            ClockifyTask,
+            self._request_json("POST", path, payload={"name": name}),
+            path,
+        )
+
+    def update_task(
+        self,
+        workspace_id: str,
+        task: ClockifyTask,
+        *,
+        name: str | None = None,
+        status: TaskStatus | None = None,
+    ) -> ClockifyTask:
+        path = f"/workspaces/{workspace_id}/projects/{task.project_id}/tasks/{task.id}"
+        payload: JsonObject = {
+            "name": name if name is not None else task.name,
+            "status": status if status is not None else task.status,
+        }
+        return self._validate(
+            ClockifyTask,
+            self._request_json("PUT", path, payload=payload),
+            path,
+        )
 
     def _request_json(
         self,
         method: str,
         path: str,
+        *,
         payload: JsonObject | None = None,
-    ) -> JsonObject:
+        params: dict[str, object] | None = None,
+    ) -> JsonValue:
+        request_kwargs: dict[str, Any] = {
+            "headers": {
+                "Accept": "application/json",
+                "X-Api-Key": self._api_key,
+            },
+            "json": payload,
+            "timeout": 30,
+        }
+        if params is not None:
+            request_kwargs["params"] = params
+
         try:
             response = self._session.request(
                 method,
                 f"{self._base_url}{path}",
-                headers={
-                    "Accept": "application/json",
-                    "X-Api-Key": self._api_key,
-                },
-                json=payload,
-                timeout=30,
+                **request_kwargs,
             )
         except requests.RequestException as exc:
-            raise ClockifyError(f"Clockify request failed: {exc}") from exc
+            raise ClockifyError(
+                f"Clockify request failed for {method} {path}: {exc}"
+            ) from exc
 
         if response.status_code >= 400:
             raise ClockifyError(
-                f"Clockify request failed: {response.status_code} {response.reason}\n{response.text}"
+                f"Clockify request failed for {method} {path}: "
+                f"{response.status_code} {response.reason}\n{response.text}"
             )
 
         if not response.content:
-            return {}
+            return None
 
-        return cast(JsonObject, response.json())
+        return response.json()
+
+    @staticmethod
+    def _validate(
+        model: type[ModelT],
+        data: JsonValue,
+        path: str,
+    ) -> ModelT:
+        try:
+            return model.model_validate(data)
+        except ValidationError as exc:
+            raise ClockifyError(
+                f"Clockify returned invalid data for {path}: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _validate_list(
+        model: type[ModelT],
+        data: JsonValue,
+        path: str,
+    ) -> list[ModelT]:
+        try:
+            return TypeAdapter(list[model]).validate_python(data)
+        except ValidationError as exc:
+            raise ClockifyError(
+                f"Clockify returned invalid data for {path}: {exc}"
+            ) from exc
 
 
 def clockify_api_key_from_env() -> str:
