@@ -10,7 +10,11 @@ from jake_tools.clockify_jira_sync import (
     AcliJiraClient,
     JiraError,
     JiraIssue,
+    SyncAction,
     SyncActionKind,
+    SyncApplyError,
+    SyncPlan,
+    apply_sync_plan,
     plan_jira_sync,
 )
 
@@ -428,3 +432,188 @@ def test_plan_reports_ambiguous_active_task_duplicates_as_conflict() -> None:
     assert len(plan.actions) == 1
     assert plan.actions[0].kind == SyncActionKind.CONFLICT
     assert "multiple active Clockify tasks" in plan.actions[0].message
+
+
+class FakeClockifySyncClient:
+    def __init__(self) -> None:
+        self.operations: list[str] = []
+
+    def create_project(
+        self,
+        workspace_id: str,
+        *,
+        name: str,
+        note: str,
+        client_id: str,
+    ) -> ClockifyProject:
+        self.operations.append(f"create_project:{note}")
+        key = note.removeprefix("Jira: ")
+        return ClockifyProject(
+            id=f"created-{key}",
+            name=name,
+            note=note,
+            archived=False,
+            billable=False,
+            color="#689F38",
+            public=True,
+            clientId=client_id,
+        )
+
+    def update_project_name(
+        self,
+        workspace_id: str,
+        project: ClockifyProject,
+        name: str,
+    ) -> ClockifyProject:
+        self.operations.append(f"rename_project:{project.id}")
+        return project.model_copy(update={"name": name})
+
+    def create_task(
+        self,
+        workspace_id: str,
+        project_id: str,
+        *,
+        name: str,
+    ) -> ClockifyTask:
+        self.operations.append(f"create_task:{project_id}")
+        return ClockifyTask(
+            id=f"created-{name.split()[0]}",
+            name=name,
+            projectId=project_id,
+            status="ACTIVE",
+        )
+
+    def update_task(
+        self,
+        workspace_id: str,
+        task: ClockifyTask,
+        *,
+        name: str | None = None,
+        status: TaskStatus | None = None,
+    ) -> ClockifyTask:
+        self.operations.append(f"update_task:{task.id}:{status or task.status}")
+        return task.model_copy(
+            update={
+                "name": name if name is not None else task.name,
+                "status": status if status is not None else task.status,
+            }
+        )
+
+
+def test_apply_sync_plan_creates_project_before_dependent_task() -> None:
+    client = FakeClockifySyncClient()
+    plan = SyncPlan(
+        actions=(
+            SyncAction(
+                kind=SyncActionKind.CREATE_PROJECT,
+                jira_key="SF-131",
+                project_key="SF-131",
+                desired_name="Production Vehicle",
+            ),
+            SyncAction(
+                kind=SyncActionKind.CREATE_TASK,
+                jira_key="SF-427",
+                project_key="SF-131",
+                desired_name="SF-427 Evaluate PX4 external control methods",
+            ),
+        )
+    )
+
+    result = apply_sync_plan(
+        plan,
+        clockify=client,
+        workspace_id="workspace-1",
+        client_id="client-1",
+        projects=[],
+        tasks=[],
+    )
+
+    assert client.operations == [
+        "create_project:Jira: SF-131",
+        "create_task:created-SF-131",
+    ]
+    assert [applied.action.kind for applied in result.applied] == [
+        SyncActionKind.CREATE_PROJECT,
+        SyncActionKind.CREATE_TASK,
+    ]
+    assert result.applied[-1].task is not None
+    assert result.applied[-1].task.project_id == "created-SF-131"
+
+
+def test_apply_sync_plan_updates_names_and_task_statuses() -> None:
+    client = FakeClockifySyncClient()
+    project = clockify_project("SF-131", "Old project")
+    rename_task = clockify_task("SF-305", "Old summary")
+    reactivate_task = clockify_task("SF-427", "Old summary", status="DONE")
+    complete_task = clockify_task("SF-304", "Bench test PX4")
+    plan = SyncPlan(
+        actions=(
+            SyncAction(
+                kind=SyncActionKind.RENAME_PROJECT,
+                jira_key="SF-131",
+                project_id=project.id,
+                desired_name="Production Vehicle",
+            ),
+            SyncAction(
+                kind=SyncActionKind.REACTIVATE_TASK,
+                jira_key="SF-427",
+                task_id=reactivate_task.id,
+                desired_name="SF-427 Evaluate PX4 external control methods",
+            ),
+            SyncAction(
+                kind=SyncActionKind.RENAME_TASK,
+                jira_key="SF-305",
+                task_id=rename_task.id,
+                desired_name="SF-305 Wet test PX4 using Zoda",
+            ),
+            SyncAction(
+                kind=SyncActionKind.MARK_TASK_DONE,
+                jira_key="SF-304",
+                task_id=complete_task.id,
+                desired_name=complete_task.name,
+            ),
+        )
+    )
+
+    result = apply_sync_plan(
+        plan,
+        clockify=client,
+        workspace_id="workspace-1",
+        client_id="client-1",
+        projects=[project],
+        tasks=[rename_task, reactivate_task, complete_task],
+    )
+
+    assert result.applied[0].project is not None
+    assert result.applied[0].project.name == "Production Vehicle"
+    assert result.applied[1].task is not None
+    assert result.applied[1].task.status == "ACTIVE"
+    assert result.applied[2].task is not None
+    assert result.applied[2].task.name == "SF-305 Wet test PX4 using Zoda"
+    assert result.applied[3].task is not None
+    assert result.applied[3].task.status == "DONE"
+
+
+def test_apply_sync_plan_refuses_conflicts_before_mutating() -> None:
+    client = FakeClockifySyncClient()
+    plan = SyncPlan(
+        actions=(
+            SyncAction(
+                kind=SyncActionKind.CONFLICT,
+                jira_key="SF-427",
+                message="multiple active Clockify tasks reference SF-427",
+            ),
+        )
+    )
+
+    with pytest.raises(SyncApplyError, match="SF-427"):
+        apply_sync_plan(
+            plan,
+            clockify=client,
+            workspace_id="workspace-1",
+            client_id="client-1",
+            projects=[],
+            tasks=[],
+        )
+
+    assert client.operations == []
