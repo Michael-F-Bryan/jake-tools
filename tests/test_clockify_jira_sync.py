@@ -244,11 +244,11 @@ def test_plan_ignores_archived_project_and_creates_usable_replacements() -> None
     ]
 
 
-def test_plan_does_not_deactivate_todo_or_reassigned_tasks() -> None:
+def test_plan_keeps_todo_or_reassigned_tasks_active_while_syncing_names() -> None:
     project = clockify_project("SF-131", "Production Vehicle")
     tasks = [
-        clockify_task("SF-115", "Get Virtual Anchor running in SITL"),
-        clockify_task("SF-353", "Vehicle Control Logic"),
+        clockify_task("SF-115", "Old Virtual Anchor summary"),
+        clockify_task("SF-353", "Old vehicle-control summary"),
     ]
     jira = [
         jira_issue("SF-115", "Get Virtual Anchor running in SITL"),
@@ -268,7 +268,10 @@ def test_plan_does_not_deactivate_todo_or_reassigned_tasks() -> None:
         tasks=tasks,
     )
 
-    assert plan.actions == ()
+    assert [(action.kind, action.jira_key) for action in plan.actions] == [
+        (SyncActionKind.RENAME_TASK, "SF-115"),
+        (SyncActionKind.RENAME_TASK, "SF-353"),
+    ]
 
 
 def test_plan_reports_ambiguous_active_task_duplicates_as_conflict() -> None:

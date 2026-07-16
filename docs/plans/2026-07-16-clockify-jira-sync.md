@@ -86,7 +86,8 @@ Status: completed as commit `ae63e3a`.
    - Jira Done-category issues marking active tasks done;
    - active assigned issues reactivating done tasks;
    - archived projects being absent from the reconciliation input;
-   - To Do or reassigned issues not being deactivated;
+   - To Do or reassigned issues retaining their Clockify task lifecycle status
+     while still accepting Jira summary renames;
    - ambiguous active duplicates producing an explicit conflict rather than a mutation.
 2. Run tests and confirm each fails for the missing behaviour.
 3. Add `SyncActionKind`, `SyncAction`, and `SyncPlan` models plus a pure `plan_jira_sync(...)` function.
