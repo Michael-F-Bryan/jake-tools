@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
@@ -11,9 +12,11 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from .clockify import (
+    ClockifyClientRecord,
     ClockifyError,
     ClockifyProject,
     ClockifyTask,
+    ClockifyUser,
     TaskStatus,
     clockify_task_name_for_jira,
     normalise_jira_key,
@@ -79,6 +82,10 @@ class SyncApplyError(RuntimeError):
     pass
 
 
+class SyncPreparationError(RuntimeError):
+    pass
+
+
 class AppliedSyncAction(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -91,6 +98,18 @@ class SyncApplyResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     applied: tuple[AppliedSyncAction, ...] = ()
+
+
+class SyncSnapshot(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    workspace_id: str
+    client_id: str
+    active_issues: tuple[JiraIssue, ...]
+    jira_issues: tuple[JiraIssue, ...]
+    projects: tuple[ClockifyProject, ...]
+    tasks: tuple[ClockifyTask, ...]
+    plan: SyncPlan
 
 
 class ClockifySyncClient(Protocol):
@@ -128,6 +147,33 @@ class ClockifySyncClient(Protocol):
     ) -> ClockifyTask: ...
 
 
+class ClockifyInventoryClient(ClockifySyncClient, Protocol):
+    def get_user(self) -> ClockifyUser: ...
+
+    def get_clients(self, workspace_id: str) -> list[ClockifyClientRecord]: ...
+
+    def get_projects(
+        self,
+        workspace_id: str,
+        *,
+        archived: bool,
+    ) -> list[ClockifyProject]: ...
+
+    def get_tasks(
+        self,
+        workspace_id: str,
+        project_id: str,
+        *,
+        active: bool,
+    ) -> list[ClockifyTask]: ...
+
+
+class JiraInventoryClient(Protocol):
+    def get_active_assigned_issues(self, project_key: str) -> list[JiraIssue]: ...
+
+    def get_issues(self, keys: Iterable[str]) -> list[JiraIssue]: ...
+
+
 _ACTION_ORDER = {
     SyncActionKind.CONFLICT: 0,
     SyncActionKind.CREATE_PROJECT: 10,
@@ -137,6 +183,74 @@ _ACTION_ORDER = {
     SyncActionKind.RENAME_TASK: 50,
     SyncActionKind.MARK_TASK_DONE: 60,
 }
+
+
+def prepare_jira_sync(
+    *,
+    clockify: ClockifyInventoryClient,
+    jira: JiraInventoryClient,
+    jira_project: str,
+    clockify_client: str,
+) -> SyncSnapshot:
+    user = clockify.get_user()
+    if not user.active_workspace:
+        raise SyncPreparationError("Clockify user has no active workspace")
+    workspace_id = user.active_workspace
+
+    clients = [
+        client
+        for client in clockify.get_clients(workspace_id)
+        if client.name == clockify_client and not client.archived
+    ]
+    if len(clients) != 1:
+        raise SyncPreparationError(
+            f"Expected one active Clockify client named {clockify_client!r}, "
+            f"found {len(clients)}"
+        )
+    client_id = clients[0].id
+
+    projects = clockify.get_projects(workspace_id, archived=False)
+    tasks_by_id: dict[str, ClockifyTask] = {}
+    for project in projects:
+        for active in (True, False):
+            for task in clockify.get_tasks(
+                workspace_id,
+                project.id,
+                active=active,
+            ):
+                tasks_by_id[task.id] = task
+    tasks = list(tasks_by_id.values())
+
+    active_issues = jira.get_active_assigned_issues(jira_project)
+    jira_keys = {issue.key for issue in active_issues}
+    jira_keys.update(
+        issue.parent_key for issue in active_issues if issue.parent_key is not None
+    )
+    for project in projects:
+        match = JIRA_REFERENCE_PATTERN.search(project.note)
+        if match:
+            jira_keys.add(match.group(1))
+    for task in tasks:
+        match = JIRA_REFERENCE_PATTERN.match(task.name)
+        if match:
+            jira_keys.add(match.group(1))
+
+    jira_issues = jira.get_issues(sorted(jira_keys))
+    plan = plan_jira_sync(
+        active_issues=active_issues,
+        jira_issues=jira_issues,
+        projects=projects,
+        tasks=tasks,
+    )
+    return SyncSnapshot(
+        workspace_id=workspace_id,
+        client_id=client_id,
+        active_issues=tuple(active_issues),
+        jira_issues=tuple(jira_issues),
+        projects=tuple(projects),
+        tasks=tuple(tasks),
+        plan=plan,
+    )
 
 
 def plan_jira_sync(
@@ -250,7 +364,7 @@ def plan_jira_sync(
             continue
 
         parent = project_by_key.get(issue.parent_key)
-        if parent and task.project_id != parent.id:
+        if parent is None or task.project_id != parent.id:
             actions.append(
                 SyncAction(
                     kind=SyncActionKind.CONFLICT,
@@ -363,7 +477,11 @@ def apply_sync_plan(
                 note=f"Jira: {action.jira_key}",
                 client_id=client_id,
             )
-            _verify_project(action, project)
+            _verify_project(
+                action,
+                project,
+                expected_note=f"Jira: {action.jira_key}",
+            )
             projects_by_id[project.id] = project
             projects_by_key[action.jira_key] = project
             applied.append(AppliedSyncAction(action=action, project=project))
@@ -376,7 +494,7 @@ def apply_sync_plan(
                 project,
                 action.desired_name,
             )
-            _verify_project(action, updated)
+            _verify_project(action, updated, expected_note=project.note)
             projects_by_id[updated.id] = updated
             projects_by_key[action.jira_key] = updated
             applied.append(AppliedSyncAction(action=action, project=updated))
@@ -448,19 +566,22 @@ def _require_task(
     return tasks_by_id[action.task_id]
 
 
-def _verify_project(action: SyncAction, project: ClockifyProject) -> None:
+def _verify_project(
+    action: SyncAction,
+    project: ClockifyProject,
+    *,
+    expected_note: str,
+) -> None:
     if project.name != action.desired_name:
         raise SyncApplyError(
             f"{action.jira_key}: Clockify returned project name {project.name!r}, "
             f"expected {action.desired_name!r}"
         )
-    if action.kind == SyncActionKind.CREATE_PROJECT:
-        expected_note = f"Jira: {action.jira_key}"
-        if project.note != expected_note:
-            raise SyncApplyError(
-                f"{action.jira_key}: Clockify returned project note {project.note!r}, "
-                f"expected {expected_note!r}"
-            )
+    if project.note != expected_note:
+        raise SyncApplyError(
+            f"{action.jira_key}: Clockify returned project note {project.note!r}, "
+            f"expected {expected_note!r}"
+        )
 
 
 def _verify_task(
@@ -626,19 +747,26 @@ class AcliJiraClient:
             ) from exc
 
     def _run_json(self, command: list[str]) -> object:
+        command_text = shlex.join(command)
         try:
             result = self._runner(command)
         except OSError as exc:
-            raise JiraError(f"Unable to run acli: {exc}") from exc
+            raise JiraError(f"Unable to run {command_text}: {exc}") from exc
 
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
-            raise JiraError(f"acli failed ({result.returncode}): {detail}")
+            raise JiraError(
+                f"acli command failed ({result.returncode}): {command_text}: {detail}"
+            )
 
         try:
             return json.loads(result.stdout)
         except json.JSONDecodeError as exc:
-            raise JiraError(f"acli returned invalid JSON: {exc}") from exc
+            output = result.stdout[:500]
+            raise JiraError(
+                f"acli returned invalid JSON for {command_text}: {exc}; "
+                f"stdout={output!r}"
+            ) from exc
 
     @staticmethod
     def _normalise_key(key: str) -> str:
