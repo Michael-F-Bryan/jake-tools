@@ -105,6 +105,9 @@ class AcliJiraClient:
         )
         return [self._view(issue.key) for issue in candidates]
 
+    def get_issue(self, key: str) -> JiraIssue:
+        return self._view(self._normalise_key(key))
+
     def get_issues(self, keys: Iterable[str]) -> list[JiraIssue]:
         normalised = sorted({self._normalise_key(key) for key in keys})
         if not normalised:

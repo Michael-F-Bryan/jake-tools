@@ -101,6 +101,7 @@ class FakeJiraSyncClockifyClient:
         self.api_key = api_key
         self.base_url = base_url
         self.operations: list[str] = []
+        self.task_status: TaskStatus = "ACTIVE"
 
     @property
     def project(self) -> ClockifyProject:
@@ -121,7 +122,7 @@ class FakeJiraSyncClockifyClient:
             id="task-1",
             name="SF-304 Bench test PX4",
             projectId="project-1",
-            status="ACTIVE",
+            status=self.task_status,
         )
 
     def get_user(self) -> ClockifyUser:
@@ -145,7 +146,7 @@ class FakeJiraSyncClockifyClient:
         *,
         active: bool,
     ) -> list[ClockifyTask]:
-        return [self.task] if active else []
+        return [self.task] if active is (self.task_status == "ACTIVE") else []
 
     def create_project(
         self,
@@ -183,12 +184,25 @@ class FakeJiraSyncClockifyClient:
         status: TaskStatus | None = None,
     ) -> ClockifyTask:
         self.operations.append(f"{task.id}:{status}")
-        return task.model_copy(
+        updated = task.model_copy(
             update={
                 "name": name if name is not None else task.name,
                 "status": status if status is not None else task.status,
             }
         )
+        self.task_status = updated.status
+        return updated
+
+    def get_project(self, workspace_id: str, project_id: str) -> ClockifyProject:
+        return self.project
+
+    def get_task(
+        self,
+        workspace_id: str,
+        project_id: str,
+        task_id: str,
+    ) -> ClockifyTask:
+        return self.task
 
 
 class FakeAcliJiraClient:
@@ -216,6 +230,18 @@ class FakeAcliJiraClient:
             ),
         ]
 
+    def get_issue(self, key: str) -> JiraIssue:
+        return JiraIssue(
+            key="SF-304",
+            summary="Bench test PX4",
+            status="In Progress",
+            statusCategory="In Progress",
+            assignee="David Htet",
+            issueType="Task",
+            parentKey="SF-131",
+            parentSummary="Production Vehicle",
+        )
+
 
 def install_sync_fakes(monkeypatch) -> FakeJiraSyncClockifyClient:
     client = FakeJiraSyncClockifyClient(
@@ -240,6 +266,17 @@ def test_jira_sync_defaults_to_json_dry_run(monkeypatch) -> None:
     payload = json.loads(result.output)
     assert payload["mode"] == "dry-run"
     assert payload["workspaceId"] == "workspace-1"
+    assert payload["scope"] == {
+        "kind": "assigned-active",
+        "jiraProject": "SF",
+        "issueKeys": [],
+    }
+    assert payload["inventory"] == {
+        "activeIssues": 0,
+        "jiraIssues": 2,
+        "projects": 1,
+        "tasks": 1,
+    }
     assert payload["actions"] == [
         {
             "kind": "MARK_TASK_DONE",
@@ -285,7 +322,38 @@ def test_jira_sync_apply_executes_and_reports_changes(monkeypatch) -> None:
     payload = json.loads(result.output)
     assert payload["mode"] == "apply"
     assert payload["applied"] == 1
+    assert payload["verified"] == 1
     assert client.operations == ["task-1:DONE"]
+
+
+def test_jira_sync_can_target_issue_assigned_to_someone_else(monkeypatch) -> None:
+    client = install_sync_fakes(monkeypatch)
+    client.task_status = "DONE"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        clockify,
+        [
+            "--api-key",
+            "test-key",
+            "jira-sync",
+            "--issue",
+            "sf-304",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["scope"] == {
+        "kind": "issues",
+        "jiraProject": "SF",
+        "issueKeys": ["SF-304"],
+    }
+    assert [(action["kind"], action["jiraKey"]) for action in payload["actions"]] == [
+        ("REACTIVATE_TASK", "SF-304")
+    ]
+    assert client.operations == []
 
 
 class EmptyAcliJiraClient:
@@ -295,12 +363,18 @@ class EmptyAcliJiraClient:
     def get_issues(self, keys: object) -> list[JiraIssue]:
         return []
 
+    def get_issue(self, key: str) -> JiraIssue:
+        raise AssertionError("not expected")
+
 
 class FailingAcliJiraClient:
     def get_active_assigned_issues(self, project_key: str) -> list[JiraIssue]:
         raise JiraError("Jira unavailable")
 
     def get_issues(self, keys: object) -> list[JiraIssue]:
+        raise AssertionError("not expected")
+
+    def get_issue(self, key: str) -> JiraIssue:
         raise AssertionError("not expected")
 
 
@@ -331,7 +405,10 @@ def test_jira_sync_reports_when_no_changes_are_required(monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
-    assert result.output == "No Clockify changes required.\n"
+    assert (
+        result.output
+        == "No Clockify changes required for active Jira issues assigned to currentUser().\n"
+    )
 
 
 def test_jira_sync_reports_conflicts_as_json_and_exits_nonzero(monkeypatch) -> None:

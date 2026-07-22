@@ -148,6 +148,14 @@ class ClockifyClient:
         projects = self._validate_list(ClockifyProject, data, path)
         return [project for project in projects if project.archived is archived]
 
+    def get_project(self, workspace_id: str, project_id: str) -> ClockifyProject:
+        path = f"/workspaces/{workspace_id}/projects/{project_id}"
+        return self._validate(
+            ClockifyProject,
+            self._request_json("GET", path),
+            path,
+        )
+
     def get_tasks(
         self,
         workspace_id: str,
@@ -165,6 +173,19 @@ class ClockifyClient:
             },
         )
         return self._validate_list(ClockifyTask, data, path)
+
+    def get_task(
+        self,
+        workspace_id: str,
+        project_id: str,
+        task_id: str,
+    ) -> ClockifyTask:
+        path = f"/workspaces/{workspace_id}/projects/{project_id}/tasks/{task_id}"
+        return self._validate(
+            ClockifyTask,
+            self._request_json("GET", path),
+            path,
+        )
 
     def create_project(
         self,

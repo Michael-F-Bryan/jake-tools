@@ -303,6 +303,9 @@ class FakeClockifySyncClient:
     def __init__(self) -> None:
         self.operations: list[str] = []
         self.project_note_override: str | None = None
+        self._projects_by_id: dict[str, ClockifyProject] = {}
+        self._tasks_by_id: dict[str, ClockifyTask] = {}
+        self.task_read_override: ClockifyTask | None = None
 
     def create_project(
         self,
@@ -314,7 +317,7 @@ class FakeClockifySyncClient:
     ) -> ClockifyProject:
         self.operations.append(f"create_project:{note}")
         key = note.removeprefix("Jira: ")
-        return ClockifyProject(
+        project = ClockifyProject(
             id=f"created-{key}",
             name=name,
             note=note,
@@ -324,6 +327,8 @@ class FakeClockifySyncClient:
             public=True,
             clientId=client_id,
         )
+        self._projects_by_id[project.id] = project
+        return project
 
     def update_project_name(
         self,
@@ -332,12 +337,14 @@ class FakeClockifySyncClient:
         name: str,
     ) -> ClockifyProject:
         self.operations.append(f"rename_project:{project.id}")
-        return project.model_copy(
+        updated = project.model_copy(
             update={
                 "name": name,
                 "note": self.project_note_override or project.note,
             }
         )
+        self._projects_by_id[updated.id] = updated
+        return updated
 
     def create_task(
         self,
@@ -347,12 +354,14 @@ class FakeClockifySyncClient:
         name: str,
     ) -> ClockifyTask:
         self.operations.append(f"create_task:{project_id}")
-        return ClockifyTask(
+        task = ClockifyTask(
             id=f"created-{name.split()[0]}",
             name=name,
             projectId=project_id,
             status="ACTIVE",
         )
+        self._tasks_by_id[task.id] = task
+        return task
 
     def update_task(
         self,
@@ -363,12 +372,25 @@ class FakeClockifySyncClient:
         status: TaskStatus | None = None,
     ) -> ClockifyTask:
         self.operations.append(f"update_task:{task.id}:{status or task.status}")
-        return task.model_copy(
+        updated = task.model_copy(
             update={
                 "name": name if name is not None else task.name,
                 "status": status if status is not None else task.status,
             }
         )
+        self._tasks_by_id[updated.id] = updated
+        return updated
+
+    def get_project(self, workspace_id: str, project_id: str) -> ClockifyProject:
+        return self._projects_by_id[project_id]
+
+    def get_task(
+        self,
+        workspace_id: str,
+        project_id: str,
+        task_id: str,
+    ) -> ClockifyTask:
+        return self.task_read_override or self._tasks_by_id[task_id]
 
 
 def test_apply_sync_plan_creates_project_before_dependent_task() -> None:
@@ -463,6 +485,32 @@ def test_apply_sync_plan_updates_names_and_task_statuses() -> None:
     assert result.applied[2].task.name == "SF-305 Wet test PX4 using Zoda"
     assert result.applied[3].task is not None
     assert result.applied[3].task.status == "DONE"
+
+
+def test_apply_sync_plan_rejects_stale_task_reread() -> None:
+    client = FakeClockifySyncClient()
+    task = clockify_task("SF-304", "Bench test PX4", status="DONE")
+    client.task_read_override = task
+    plan = SyncPlan(
+        actions=(
+            SyncAction(
+                kind=SyncActionKind.REACTIVATE_TASK,
+                jira_key="SF-304",
+                task_id=task.id,
+                desired_name=task.name,
+            ),
+        )
+    )
+
+    with pytest.raises(SyncApplyError, match="expected 'ACTIVE'"):
+        apply_sync_plan(
+            plan,
+            clockify=client,
+            workspace_id="workspace-1",
+            client_id="client-1",
+            projects=[],
+            tasks=[task],
+        )
 
 
 def test_apply_sync_plan_rejects_renamed_project_with_changed_jira_note() -> None:
@@ -567,10 +615,17 @@ class FakeJiraInventoryClient:
         self.active_issues = active_issues
         self.issues = {issue.key: issue for issue in issues}
         self.requested_keys: list[str] = []
+        self.requested_issue: str | None = None
+        self.active_project_requests: list[str] = []
 
     def get_active_assigned_issues(self, project_key: str) -> list[JiraIssue]:
         assert project_key == "SF"
+        self.active_project_requests.append(project_key)
         return self.active_issues
+
+    def get_issue(self, key: str) -> JiraIssue:
+        self.requested_issue = key
+        return self.issues[key]
 
     def get_issues(self, keys: Iterable[str]) -> list[JiraIssue]:
         self.requested_keys = sorted(keys)
@@ -619,6 +674,58 @@ def test_prepare_jira_sync_collects_inventory_and_builds_plan() -> None:
     assert [(action.kind, action.jira_key) for action in snapshot.plan.actions] == [
         (SyncActionKind.REACTIVATE_TASK, "SF-427"),
         (SyncActionKind.MARK_TASK_DONE, "SF-304"),
+    ]
+
+
+def test_prepare_jira_sync_targets_exact_issue_regardless_of_assignee() -> None:
+    project = clockify_project("SF-131", "Production Vehicle")
+    done_task = clockify_task("SF-304", "Bench test PX4", status="DONE")
+    unrelated_tasks = [
+        clockify_task("SF-999", "Unrelated work", task_id="unrelated-1"),
+        clockify_task("SF-999", "Unrelated work", task_id="unrelated-2"),
+    ]
+    issue = jira_issue(
+        "SF-304",
+        "Bench test PX4",
+        status="In Progress",
+        status_category="In Progress",
+        assignee="David Htet",
+    )
+    parent = jira_issue(
+        "SF-131",
+        "Production Vehicle",
+        issue_type="Project / Phase",
+        parent_key=None,
+        parent_summary=None,
+    )
+    unrelated = jira_issue("SF-999", "Unrelated work")
+    clockify = FakeClockifyInventoryClient(
+        clients=[ClockifyClientRecord(id="client-1", name="Sunfish Robotics")],
+        projects=[project],
+        active_tasks=unrelated_tasks,
+        done_tasks=[done_task],
+    )
+    jira = FakeJiraInventoryClient(
+        active_issues=[],
+        issues=[issue, parent, unrelated],
+    )
+
+    snapshot = prepare_jira_sync(
+        clockify=clockify,
+        jira=jira,
+        jira_project="SF",
+        clockify_client="Sunfish Robotics",
+        issue_keys=["sf-304"],
+    )
+
+    assert snapshot.scope == "issues"
+    assert snapshot.requested_issue_keys == ("SF-304",)
+    assert snapshot.active_issues == (issue,)
+    assert jira.requested_issue == "SF-304"
+    assert jira.requested_keys == ["SF-131", "SF-304"]
+    assert jira.active_project_requests == []
+    assert [(action.kind, action.jira_key) for action in snapshot.plan.actions] == [
+        (SyncActionKind.REACTIVATE_TASK, "SF-304")
     ]
 
 
