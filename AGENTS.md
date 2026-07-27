@@ -149,6 +149,20 @@ Output sections: `## Meeting Notes`, `## Chapters`, `## Transcript`.
 Both subcommands accept `--default-model` and `--provider` via the `@hermes`
 decorator.
 
+### `clockify`
+
+```bash
+jake-tools clockify jira-sync --dry-run --json
+jake-tools clockify jira-sync --issue SF-304 --dry-run --json
+jake-tools clockify jira-sync --issue SF-304 --apply --json
+```
+
+`jira-sync` defaults to active Jira work assigned to `currentUser()`. Repeat
+`--issue KEY` to reconcile exact work items regardless of assignee. Dry-run is
+the default; `--apply` creates, renames, reactivates, or completes records and
+then re-fetches every changed Clockify object for verification. The command
+never deletes records.
+
 ### `newsletter`
 
 ```bash

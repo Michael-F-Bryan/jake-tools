@@ -252,6 +252,46 @@ def test_clockify_lists_active_and_done_tasks() -> None:
     }
 
 
+def test_clockify_gets_project_and_task_by_id() -> None:
+    session = FakeSession(
+        FakeResponse(
+            200,
+            {
+                "id": "project-1",
+                "name": "Production Vehicle",
+                "note": "Jira: SF-131",
+                "archived": False,
+                "billable": False,
+                "color": "#689F38",
+                "public": True,
+                "clientId": "client-1",
+            },
+        ),
+        FakeResponse(
+            200,
+            {
+                "id": "task-1",
+                "name": "SF-304 Bench test PX4",
+                "projectId": "project-1",
+                "status": "ACTIVE",
+            },
+        ),
+    )
+    client = ClockifyClient(api_key="secret-key", session=session)
+
+    project = client.get_project("workspace-1", "project-1")
+    task = client.get_task("workspace-1", "project-1", "task-1")
+
+    assert project.id == "project-1"
+    assert task.status == "ACTIVE"
+    assert session.requests[0]["url"].endswith(
+        "/workspaces/workspace-1/projects/project-1"
+    )
+    assert session.requests[1]["url"].endswith(
+        "/workspaces/workspace-1/projects/project-1/tasks/task-1"
+    )
+
+
 def test_clockify_creates_jira_project_and_task() -> None:
     session = FakeSession(
         FakeResponse(

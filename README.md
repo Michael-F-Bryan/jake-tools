@@ -90,17 +90,25 @@ starting a local audio transcription.
 jake-tools clockify jira-sync --dry-run
 jake-tools clockify jira-sync --dry-run --json
 jake-tools clockify jira-sync --apply
+jake-tools clockify jira-sync --issue SF-304 --dry-run --json
+jake-tools clockify jira-sync --issue SF-304 --apply --json
 ```
 
 The command reconciles Jira project `SF` with the active Clockify projects for
 the `Sunfish Robotics` client. These defaults can be overridden with
 `--jira-project` and `--clockify-client`.
 
-Dry-run is the default. The plan can create projects and tasks, rename records,
-reactivate tasks assigned to the current Jira user in an active status, and
-mark tasks done when Jira's status category is Done. It ignores archived
-Clockify projects and never deletes projects, tasks, or time entries. Ambiguous
-active duplicates are reported as conflicts and block `--apply`.
+Dry-run is the default. Without `--issue`, the command reconciles active Jira
+work assigned to `currentUser()`. Repeat `--issue KEY` to reconcile exact work
+items regardless of assignee. The plan can create projects and tasks, rename
+records, reactivate non-Done Jira tasks, and mark tasks done when Jira's status
+category is Done. It ignores archived Clockify projects and never deletes
+projects, tasks, or time entries. Ambiguous active duplicates are reported as
+conflicts and block `--apply`.
+
+JSON output identifies the selection scope and inventory counts. Applied writes
+are verified by fetching the changed Clockify object again; the command fails
+if the re-read does not match the planned name, status, or Jira project note.
 
 The command requires:
 

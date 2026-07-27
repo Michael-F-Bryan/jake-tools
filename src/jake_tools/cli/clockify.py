@@ -18,6 +18,7 @@ from ..clockify_jira_sync import (
     SyncActionKind,
     SyncApplyError,
     SyncPreparationError,
+    SyncSnapshot,
     apply_sync_plan,
     prepare_jira_sync,
 )
@@ -101,6 +102,15 @@ def jira_name(key: str, summary: str, kind: str, as_json: bool) -> None:
     show_default=True,
     help="Exact active Clockify client name for newly created projects.",
 )
+@click.option(
+    "--issue",
+    "issue_keys",
+    multiple=True,
+    help=(
+        "Reconcile an exact Jira issue regardless of assignee. Repeat for multiple "
+        "issues; otherwise sync active work assigned to currentUser()."
+    ),
+)
 @click.pass_context
 def jira_sync(
     ctx: click.Context,
@@ -108,11 +118,14 @@ def jira_sync(
     as_json: bool,
     jira_project: str,
     clockify_client: str,
+    issue_keys: tuple[str, ...],
 ) -> None:
-    """Reconcile assigned active Jira work with Clockify.
+    """Reconcile Jira work with Clockify.
 
     Dry runs are read-only. Use --apply to create, rename, reactivate, or complete
-    Clockify records from the emitted plan. The command never deletes records.
+    Clockify records from the emitted plan. By default, only active Jira work
+    assigned to currentUser() is selected. --issue selects exact work items
+    regardless of assignee. The command never deletes records.
     """
     try:
         clockify_api = _client_from_context(ctx)
@@ -121,6 +134,7 @@ def jira_sync(
             jira=AcliJiraClient(),
             jira_project=jira_project,
             clockify_client=clockify_client,
+            issue_keys=issue_keys,
         )
         result = None
         if apply_changes:
@@ -141,13 +155,16 @@ def jira_sync(
             "workspaceId": snapshot.workspace_id,
             "jiraProject": jira_project,
             "clockifyClient": clockify_client,
+            "scope": _scope_payload(snapshot, jira_project=jira_project),
+            "inventory": _inventory_payload(snapshot),
             "actions": [_action_payload(action) for action in snapshot.plan.actions],
         }
         if result is not None:
             payload["applied"] = len(result.applied)
+            payload["verified"] = len(result.applied)
         click.echo(json.dumps(payload, indent=2))
     else:
-        _emit_sync_plan(snapshot.plan.actions, applied=apply_changes)
+        _emit_sync_plan(snapshot, applied=apply_changes)
 
     if snapshot.plan.has_conflicts:
         ctx.exit(1)
@@ -181,9 +198,27 @@ def _action_payload(action: SyncAction) -> dict[str, object]:
     }
 
 
-def _emit_sync_plan(actions: tuple[SyncAction, ...], *, applied: bool) -> None:
+def _scope_payload(snapshot: SyncSnapshot, *, jira_project: str) -> dict[str, object]:
+    return {
+        "kind": snapshot.scope.value,
+        "jiraProject": jira_project,
+        "issueKeys": list(snapshot.requested_issue_keys),
+    }
+
+
+def _inventory_payload(snapshot: SyncSnapshot) -> dict[str, int]:
+    return {
+        "activeIssues": len(snapshot.active_issues),
+        "jiraIssues": len(snapshot.jira_issues),
+        "projects": len(snapshot.projects),
+        "tasks": len(snapshot.tasks),
+    }
+
+
+def _emit_sync_plan(snapshot: SyncSnapshot, *, applied: bool) -> None:
+    actions = snapshot.plan.actions
     if not actions:
-        click.echo("No Clockify changes required.")
+        click.echo(f"No Clockify changes required for {_scope_description(snapshot)}.")
         return
 
     label = "Applied" if applied else "Dry run"
@@ -191,6 +226,12 @@ def _emit_sync_plan(actions: tuple[SyncAction, ...], *, applied: bool) -> None:
     click.echo(f"{label}: {len(actions)} {suffix}")
     for action in actions:
         click.echo(_describe_action(action))
+
+
+def _scope_description(snapshot: SyncSnapshot) -> str:
+    if snapshot.requested_issue_keys:
+        return ", ".join(snapshot.requested_issue_keys)
+    return "active Jira issues assigned to currentUser()"
 
 
 def _describe_action(action: SyncAction) -> str:

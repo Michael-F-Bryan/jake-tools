@@ -15,6 +15,7 @@ from .clockify import (
     ClockifyUser,
     TaskStatus,
     clockify_task_name_for_jira,
+    normalise_jira_key,
 )
 from .jira import JiraIssue
 
@@ -29,6 +30,11 @@ class SyncActionKind(StrEnum):
     REACTIVATE_TASK = "REACTIVATE_TASK"
     RENAME_TASK = "RENAME_TASK"
     MARK_TASK_DONE = "MARK_TASK_DONE"
+
+
+class SyncScope(StrEnum):
+    ASSIGNED_ACTIVE = "assigned-active"
+    ISSUES = "issues"
 
 
 class SyncAction(BaseModel):
@@ -82,6 +88,8 @@ class SyncSnapshot(BaseModel):
 
     workspace_id: str
     client_id: str
+    scope: SyncScope
+    requested_issue_keys: tuple[str, ...] = ()
     active_issues: tuple[JiraIssue, ...]
     jira_issues: tuple[JiraIssue, ...]
     projects: tuple[ClockifyProject, ...]
@@ -90,6 +98,15 @@ class SyncSnapshot(BaseModel):
 
 
 class ClockifySyncClient(Protocol):
+    def get_project(self, workspace_id: str, project_id: str) -> ClockifyProject: ...
+
+    def get_task(
+        self,
+        workspace_id: str,
+        project_id: str,
+        task_id: str,
+    ) -> ClockifyTask: ...
+
     def create_project(
         self,
         workspace_id: str,
@@ -148,6 +165,8 @@ class ClockifyInventoryClient(ClockifySyncClient, Protocol):
 class JiraInventoryClient(Protocol):
     def get_active_assigned_issues(self, project_key: str) -> list[JiraIssue]: ...
 
+    def get_issue(self, key: str) -> JiraIssue: ...
+
     def get_issues(self, keys: Iterable[str]) -> list[JiraIssue]: ...
 
 
@@ -168,6 +187,7 @@ def prepare_jira_sync(
     jira: JiraInventoryClient,
     jira_project: str,
     clockify_client: str,
+    issue_keys: Sequence[str] = (),
 ) -> SyncSnapshot:
     user = clockify.get_user()
     if not user.active_workspace:
@@ -198,30 +218,52 @@ def prepare_jira_sync(
                 tasks_by_id[task.id] = task
     tasks = list(tasks_by_id.values())
 
-    active_issues = jira.get_active_assigned_issues(jira_project)
-    jira_keys = {issue.key for issue in active_issues}
-    jira_keys.update(
-        issue.parent_key for issue in active_issues if issue.parent_key is not None
+    requested_issue_keys = tuple(
+        sorted({normalise_jira_key(key) for key in issue_keys})
     )
-    for project in projects:
-        match = JIRA_REFERENCE_PATTERN.search(project.note)
-        if match:
-            jira_keys.add(match.group(1))
-    for task in tasks:
-        match = JIRA_REFERENCE_PATTERN.match(task.name)
-        if match:
-            jira_keys.add(match.group(1))
+    if requested_issue_keys:
+        selected_issues = [jira.get_issue(key) for key in requested_issue_keys]
+        active_issues = [
+            issue for issue in selected_issues if issue.status_category != "Done"
+        ]
+        scope = SyncScope.ISSUES
+    else:
+        selected_issues = []
+        active_issues = jira.get_active_assigned_issues(jira_project)
+        scope = SyncScope.ASSIGNED_ACTIVE
 
-    jira_issues = jira.get_issues(sorted(jira_keys))
+    jira_keys = {issue.key for issue in active_issues}
+    jira_keys.update(issue.key for issue in selected_issues)
+    jira_keys.update(
+        issue.parent_key
+        for issue in [*active_issues, *selected_issues]
+        if issue.parent_key is not None
+    )
+    if scope == SyncScope.ASSIGNED_ACTIVE:
+        for project in projects:
+            match = JIRA_REFERENCE_PATTERN.search(project.note)
+            if match:
+                jira_keys.add(match.group(1))
+        for task in tasks:
+            match = JIRA_REFERENCE_PATTERN.match(task.name)
+            if match:
+                jira_keys.add(match.group(1))
+
+    jira_by_key = {issue.key: issue for issue in jira.get_issues(sorted(jira_keys))}
+    jira_by_key.update({issue.key: issue for issue in selected_issues})
+    jira_issues = [jira_by_key[key] for key in sorted(jira_by_key)]
     plan = plan_jira_sync(
         active_issues=active_issues,
         jira_issues=jira_issues,
         projects=projects,
         tasks=tasks,
+        managed_keys=jira_keys if scope == SyncScope.ISSUES else None,
     )
     return SyncSnapshot(
         workspace_id=workspace_id,
         client_id=client_id,
+        scope=scope,
+        requested_issue_keys=requested_issue_keys,
         active_issues=tuple(active_issues),
         jira_issues=tuple(jira_issues),
         projects=tuple(projects),
@@ -236,6 +278,7 @@ def plan_jira_sync(
     jira_issues: Sequence[JiraIssue],
     projects: Sequence[ClockifyProject],
     tasks: Sequence[ClockifyTask],
+    managed_keys: set[str] | None = None,
 ) -> SyncPlan:
     jira_by_key = {issue.key: issue for issue in jira_issues}
     active_by_key = {issue.key: issue for issue in active_issues}
@@ -247,10 +290,14 @@ def plan_jira_sync(
     project_groups = _projects_by_jira_key(active_projects)
     task_groups = _tasks_by_jira_key(usable_tasks)
     conflict_project_keys = {
-        key for key, matches in project_groups.items() if len(matches) > 1
+        key
+        for key, matches in project_groups.items()
+        if (managed_keys is None or key in managed_keys) and len(matches) > 1
     }
     conflict_task_keys = {
-        key for key, matches in task_groups.items() if len(matches) > 1
+        key
+        for key, matches in task_groups.items()
+        if (managed_keys is None or key in managed_keys) and len(matches) > 1
     }
 
     for key in sorted(conflict_project_keys):
@@ -459,6 +506,12 @@ def apply_sync_plan(
                 project,
                 expected_note=f"Jira: {action.jira_key}",
             )
+            project = clockify.get_project(workspace_id, project.id)
+            _verify_project(
+                action,
+                project,
+                expected_note=f"Jira: {action.jira_key}",
+            )
             projects_by_id[project.id] = project
             projects_by_key[action.jira_key] = project
             applied.append(AppliedSyncAction(action=action, project=project))
@@ -471,6 +524,8 @@ def apply_sync_plan(
                 project,
                 action.desired_name,
             )
+            _verify_project(action, updated, expected_note=project.note)
+            updated = clockify.get_project(workspace_id, updated.id)
             _verify_project(action, updated, expected_note=project.note)
             projects_by_id[updated.id] = updated
             projects_by_key[action.jira_key] = updated
@@ -493,6 +548,8 @@ def apply_sync_plan(
                 name=action.desired_name,
             )
             _verify_task(action, task, expected_status="ACTIVE")
+            task = clockify.get_task(workspace_id, task.project_id, task.id)
+            _verify_task(action, task, expected_status="ACTIVE")
             tasks_by_id[task.id] = task
             applied.append(AppliedSyncAction(action=action, task=task))
             continue
@@ -513,6 +570,12 @@ def apply_sync_plan(
             task,
             name=action.desired_name,
             status=expected_status,
+        )
+        _verify_task(action, updated, expected_status=expected_status)
+        updated = clockify.get_task(
+            workspace_id,
+            updated.project_id,
+            updated.id,
         )
         _verify_task(action, updated, expected_status=expected_status)
         tasks_by_id[updated.id] = updated

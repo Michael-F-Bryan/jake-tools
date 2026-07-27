@@ -104,6 +104,57 @@ def test_acli_jira_client_hydrates_active_assigned_issues() -> None:
     ]
 
 
+def test_acli_jira_client_gets_one_detailed_issue() -> None:
+    runner = FakeCommandRunner(
+        completed(
+            {
+                "key": "SF-304",
+                "fields": {
+                    "summary": "Bench test PX4",
+                    "status": {
+                        "name": "In Progress",
+                        "statusCategory": {"name": "In Progress"},
+                    },
+                    "issuetype": {"name": "Task"},
+                    "assignee": {"displayName": "David Htet"},
+                    "parent": {
+                        "key": "SF-131",
+                        "fields": {
+                            "summary": "Production Vehicle - Investigations and Overhead"
+                        },
+                    },
+                },
+            }
+        )
+    )
+    client = AcliJiraClient(runner=runner)
+
+    issue = client.get_issue("sf-304")
+
+    assert issue == JiraIssue(
+        key="SF-304",
+        summary="Bench test PX4",
+        status="In Progress",
+        statusCategory="In Progress",
+        assignee="David Htet",
+        issueType="Task",
+        parentKey="SF-131",
+        parentSummary="Production Vehicle - Investigations and Overhead",
+    )
+    assert runner.commands == [
+        [
+            "acli",
+            "jira",
+            "workitem",
+            "view",
+            "SF-304",
+            "--fields",
+            "*all",
+            "--json",
+        ]
+    ]
+
+
 def test_acli_jira_client_batches_issue_lookup_by_key() -> None:
     runner = FakeCommandRunner(
         completed(
