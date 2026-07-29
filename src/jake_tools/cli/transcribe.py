@@ -1,81 +1,20 @@
-import json
-from pathlib import Path
-
 import click
 
-from ..claude import ClaudeAgent
-from ..transcripts.errors import TranscriptError
-from ..transcripts.models import CoordinatorResult
-from ..transcripts.obsidian_recipe import run_obsidian_recording_recipe
-from ..transcripts.polish import polish_transcript
-from .options import agent, coro
+from .transcript import obsidian_recording, polish
+
+DEPRECATION_NOTE = (
+    "Deprecated: use `jake-tools transcript obsidian-recording` / "
+    "`jake-tools transcript polish` instead. This group forwards to the same "
+    "commands and will be removed in a future release."
+)
 
 
-@click.group
-def transcribe():
-    """
-    Tools for transcribing audio files.
-    """
+@click.group(hidden=True, help=DEPRECATION_NOTE)
+def transcribe() -> None:
     pass
 
 
-@transcribe.command
-@agent
-@click.argument("transcript", required=True, type=click.File("r", encoding="utf-8"))
-@coro
-async def polish(agent: ClaudeAgent, transcript):
-    """
-    Polish a transcript.
-    """
-    raw = transcript.read()
-    polished = await polish_transcript(agent, raw)
-    click.echo(polished)
-
-
-def _emit_obsidian_recording_result(
-    result: CoordinatorResult, *, as_json: bool
-) -> None:
-    if as_json:
-        click.echo(json.dumps(result.json_summary(), indent=2))
-        return
-
-    click.echo(f"note: {result.note_path}")
-    click.echo(f"updated: {result.updated}")
-
-
-@transcribe.command()
-@agent
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Run the pipeline without writing the updated note back to disk.",
-)
-@click.option(
-    "--json",
-    "as_json",
-    is_flag=True,
-    help="Emit a machine-readable JSON summary.",
-)
-@click.argument(
-    "obsidian_note",
-    type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
-)
-@coro
-async def obsidian_recording(
-    agent: ClaudeAgent,
-    dry_run: bool,
-    as_json: bool,
-    obsidian_note: Path,
-):
-    """
-    Process an Obsidian recording into a polished, chapterised note.
-    """
-    try:
-        result = await run_obsidian_recording_recipe(
-            agent,
-            obsidian_note,
-            dry_run=dry_run,
-        )
-    except TranscriptError as exc:
-        raise click.ClickException(str(exc)) from exc
-    _emit_obsidian_recording_result(result, as_json=as_json)
+# Re-registering the same Command objects `transcript` uses, rather than
+# wrapping them, so this alias can never drift from the real implementation.
+transcribe.add_command(obsidian_recording, name="obsidian-recording")
+transcribe.add_command(polish, name="polish")

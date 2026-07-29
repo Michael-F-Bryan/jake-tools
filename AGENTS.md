@@ -12,7 +12,7 @@ When in doubt, run `jake-tools <command> --help` for current flags.
 src/jake_tools/
   cli/           # Click commands (keep thin)
   ai_watch/      # collect→fetch→scout→curate→obsidian→digest→deliver
-  transcripts/   # Obsidian recording pipeline
+  transcripts/   # obsidian-recording / youtube / teams-meeting recipes
   claude.py      # Claude Agent SDK wrapper — the only LLM seam
   prompting.py   # typed Jinja prompts bound to a response model
   newsletters.py # SharePoint Graph client
@@ -69,7 +69,7 @@ uv run pytest -q
 | `uv`                | dependency management and script runner                |
 | `claude-agent-sdk`  | LLM calls; drives the local `claude` CLI               |
 | `hermes-agent`      | `ai-watch` `web_search`/`web_extract` tool calls only  |
-| `ffmpeg`, `scribe`  | `transcribe obsidian-recording` audio pipeline         |
+| `ffmpeg`, `scribe`  | `transcript obsidian-recording` audio pipeline         |
 | `yt-dlp`            | YouTube caption and metadata source adapter            |
 | `az` (Azure CLI)    | `newsletter` commands (Microsoft Graph token)          |
 
@@ -114,19 +114,41 @@ and `delivery-payload.txt`.
 For checkpoint gates, calibration replay, artefact layout, and audit-driven
 tuning, see [.agents/skills/ai-watch/SKILL.md](.agents/skills/ai-watch/SKILL.md).
 
-### `transcribe`
+### `transcript`
 
 ```bash
-jake-tools transcribe obsidian-recording NOTE.md
-jake-tools transcribe obsidian-recording --dry-run --json NOTE.md
-jake-tools transcribe polish TRANSCRIPT.txt
+jake-tools transcript obsidian-recording NOTE.md
+jake-tools transcript obsidian-recording --dry-run --json NOTE.md
+jake-tools transcript obsidian-recording --work-dir _working/obsidian/NOTE NOTE.md
+jake-tools transcript polish TRANSCRIPT.txt
+jake-tools transcript youtube 'https://www.youtube.com/watch?v=VIDEO_ID' --out-dir _working/youtube/VIDEO_ID
+jake-tools transcript teams-meeting --out-dir _working/teams/EVENT --event-id EVENT_ID
 ```
 
-`obsidian-recording` rewrites the Obsidian note in place unless `--dry-run`.
-Output sections: `## Meeting Notes`, `## Chapters`, `## Transcript`.
-`polish` writes polished text to stdout only.
+Four subcommands, one operator-shaped group (organised by task, not by
+implementation detail):
 
-Both subcommands accept `--model` and `--effort` via the `@agent` decorator.
+- `obsidian-recording` requires local `ffmpeg` and `scribe` executables.
+  Rewrites the Obsidian note in place only after note verification passes;
+  `--dry-run` runs the full pipeline (transcription, speaker mapping,
+  polish, chaptering, minutes) without that final write. Output sections:
+  `## Meeting Notes`, `## Chapters`, `## Transcript`. Without `--work-dir`,
+  intermediate artefacts live in a temp dir that is gone by the time the
+  command returns.
+- `polish` writes polished text to stdout only.
+- `youtube` and `teams-meeting` require `--out-dir` and always write every
+  intermediate artefact plus a `manifest.json` there. A vault note is
+  written only after note verification passes (`--vault-note`, or
+  `--write-vault` for the default DUM-C destination on `teams-meeting`);
+  `--dry-run` skips that write.
+
+`obsidian-recording`, `polish`, and `youtube` accept `--model` and `--effort`
+via the `@agent` decorator. `teams-meeting` does not call an LLM.
+
+`jake-tools transcribe ...` is a hidden, deprecated alias forwarding to
+`transcript obsidian-recording` / `transcript polish` — the same Click
+command objects, so it cannot drift from `transcript`. Prefer `transcript`
+in new scripts.
 
 ### `clockify`
 
@@ -160,6 +182,6 @@ Requires `az login` to the CSU tenant for a Graph access token.
 ## Boundaries
 
 - Do not commit secrets, tokens, or credentials.
-- `ai-watch`, `transcribe`, and `transcript` write to Obsidian notes, and
-  `newsletter` writes to SharePoint, by design. `--dry-run` suppresses those
-  writes where the command offers it.
+- `ai-watch` and `transcript` write to Obsidian notes, and `newsletter`
+  writes to SharePoint, by design. `--dry-run` suppresses those writes where
+  the command offers it.

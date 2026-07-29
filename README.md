@@ -32,14 +32,15 @@ Calls go through the Claude Agent SDK, which drives the local `claude` CLI, so
 the same credentials and quota apply as when you run Claude Code by hand.
 
 ```bash
-jake-tools transcribe polish --model claude-opus-4-8 --effort high TRANSCRIPT.txt
+jake-tools transcript polish --model claude-opus-4-8 --effort high TRANSCRIPT.txt
 ```
 
 ## Transcribing Obsidian recordings
 
 ```bash
-jake-tools transcribe obsidian-recording NOTE.md
-jake-tools transcribe obsidian-recording --dry-run --json NOTE.md
+jake-tools transcript obsidian-recording NOTE.md
+jake-tools transcript obsidian-recording --dry-run --json NOTE.md
+jake-tools transcript obsidian-recording --work-dir _working/obsidian/NOTE NOTE.md
 ```
 
 The Obsidian recording pipeline always writes the same shape:
@@ -49,6 +50,16 @@ The Obsidian recording pipeline always writes the same shape:
 - `## Transcript` with polished transcript text grouped by chapter
 
 This command expects local `ffmpeg` and `scribe` executables to be available.
+It rewrites `NOTE.md` in place only after note verification passes; `--dry-run`
+runs the full pipeline (transcription, speaker mapping, polish, chaptering,
+minutes) without that final write. Without `--work-dir`, intermediate
+artefacts (audio, transcripts, chapters, a manifest) live in a temporary
+directory that is gone once the command returns; pass `--work-dir` to keep
+them for inspection, matching the youtube/teams-meeting `--out-dir` convention.
+
+`jake-tools transcribe ...` still works as a hidden, deprecated alias for
+`jake-tools transcript obsidian-recording` / `jake-tools transcript polish` —
+switch existing scripts to `transcript` when convenient.
 
 ## Creating source notes from YouTube
 

@@ -17,6 +17,8 @@ def test_transcript_help_exposes_only_operator_tasks() -> None:
     assert result.exit_code == 0
     assert "teams-meeting" in result.output
     assert "youtube" in result.output
+    assert "obsidian-recording" in result.output
+    assert "polish" in result.output
     for internal_group in (
         "schema",
         "source",
@@ -29,6 +31,35 @@ def test_transcript_help_exposes_only_operator_tasks() -> None:
         "recipe",
     ):
         assert f"\n  {internal_group}" not in result.output
+
+
+def test_transcript_obsidian_recording_help_states_the_invariants() -> None:
+    result = _invoke("transcript", "obsidian-recording", "--help")
+
+    assert result.exit_code == 0
+    for option in ("--work-dir", "--dry-run", "--json", "--model", "--effort"):
+        assert option in result.output
+    assert "ffmpeg" in result.output
+    assert "scribe" in result.output
+    assert "verification passes" in result.output
+
+
+def test_main_help_does_not_list_the_deprecated_transcribe_alias() -> None:
+    result = _invoke("--help")
+
+    assert result.exit_code == 0
+    assert "transcript" in result.output
+    assert "\n  transcribe" not in result.output
+
+
+def test_transcribe_alias_group_is_still_invokable_and_marked_deprecated() -> None:
+    result = _invoke("transcribe", "--help")
+
+    assert result.exit_code == 0
+    assert "Deprecated" in result.output
+    assert "transcript obsidian-recording" in result.output
+    assert "obsidian-recording" in result.output
+    assert "polish" in result.output
 
 
 def test_transcript_youtube_help_is_task_shaped() -> None:
