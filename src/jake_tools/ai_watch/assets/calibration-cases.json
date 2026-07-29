@@ -1,0 +1,29 @@
+[
+  {
+    "id": "harness-design",
+    "url": "https://www.anthropic.com/engineering/harness-design-long-running-apps",
+    "title_hint": "Harness design for long-running application development",
+    "expected_tags": ["agent-harnesses", "qa-agents"],
+    "min_fit_score": 4,
+    "expected_curator_decision": "surface",
+    "expected_lane": "main_digest"
+  },
+  {
+    "id": "claude-code-html",
+    "url": "https://claude.com/blog/using-claude-code-the-unreasonable-effectiveness-of-html",
+    "title_hint": "Using Claude Code - The unreasonable effectiveness of HTML",
+    "expected_tags": ["generative-ui", "agent-artefacts"],
+    "min_fit_score": 4,
+    "expected_curator_decision": "surface",
+    "expected_lane": "main_digest"
+  },
+  {
+    "id": "generative-ui",
+    "url": "https://www.youtube.com/watch?v=f32W5BEzWN0",
+    "title_hint": "The Weird Future Of User Interfaces",
+    "expected_tags": ["generative-ui", "interfaces-after-chat"],
+    "min_fit_score": 4,
+    "expected_curator_decision": "speculative_watch",
+    "expected_lane": "speculative_watch"
+  }
+]

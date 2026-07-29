@@ -3,9 +3,12 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from jake_tools.ai_watch.audit_models import ScoutEvaluationRecord
 from jake_tools.ai_watch.calibration import (
     DEFAULT_CALIBRATION_CASES_PATH,
+    CalibrationCasesNotFoundError,
     load_calibration_cases,
     load_calibration_fixture,
     resolve_calibration_extract,
@@ -86,8 +89,14 @@ def test_curator_prompt_includes_calibration_replay_instruction() -> None:
     assert "Do NOT return duplicate" in rendered
 
 
+def test_load_calibration_cases_raises_when_file_is_missing(tmp_path: Path) -> None:
+    missing_path = tmp_path / "does-not-exist.json"
+    with pytest.raises(CalibrationCasesNotFoundError):
+        load_calibration_cases(missing_path)
+
+
 def test_resolve_calibration_extract_uses_fixture_when_live_extract_fails() -> None:
-    cases = load_calibration_cases()
+    cases = load_calibration_cases(DEFAULT_CALIBRATION_CASES_PATH)
     generative_case = next(case for case in cases if case.id == "generative-ui")
     fixture = load_calibration_fixture(generative_case)
     assert fixture is not None

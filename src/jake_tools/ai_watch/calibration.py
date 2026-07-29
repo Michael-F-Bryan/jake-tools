@@ -6,12 +6,26 @@ from pathlib import Path
 from .audit_models import CalibrationCase
 from .models import ExtractResult
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_CALIBRATION_CASES_PATH = (
-    _REPO_ROOT / "_working/ai-watch-brainstorm/fixtures/calibration-cases.json"
+_PACKAGE_DIR = Path(__file__).resolve().parent
+DEFAULT_CALIBRATION_CASES_PATH = _PACKAGE_DIR / "assets" / "calibration-cases.json"
+# Calibration replay transcripts are large fixture content that lives with the
+# test suite (this repo checkout) rather than shipping as installed package data.
+CALIBRATION_FIXTURES_DIR = (
+    _PACKAGE_DIR.parents[2] / "tests" / "fixtures" / "ai_watch" / "calibration"
 )
-CALIBRATION_FIXTURES_DIR = _REPO_ROOT / "tests/fixtures/ai_watch/calibration"
 MIN_CALIBRATION_CONTENT_CHARS = 500
+
+
+class CalibrationCasesNotFoundError(FileNotFoundError):
+    """Raised when the requested calibration cases file does not exist."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(
+            f"Calibration cases file not found: {path}. "
+            "--calibration-only requires a real cases file; it cannot run "
+            "silently against an empty case list."
+        )
+        self.path = path
 
 
 def load_calibration_cases(
@@ -19,7 +33,7 @@ def load_calibration_cases(
 ) -> list[CalibrationCase]:
     path = fixtures_path or DEFAULT_CALIBRATION_CASES_PATH
     if not path.exists():
-        return []
+        raise CalibrationCasesNotFoundError(path)
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, list):
         return []
