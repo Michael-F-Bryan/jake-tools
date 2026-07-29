@@ -4,9 +4,8 @@ from collections.abc import Callable, Coroutine
 from typing import Any, cast
 
 import click
-from claude_agent_sdk import EffortLevel
 
-from ..claude import DEFAULT_MODEL, AgentSpec, ClaudeAgent
+from ..claude import DEFAULT_MODEL, AgentSpec, ClaudeAgent, EffortLevel
 
 
 def coro[**P, R](func: Callable[P, Coroutine[Any, Any, R]]) -> Callable[P, R]:
