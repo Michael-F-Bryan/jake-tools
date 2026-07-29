@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 import pytest
+from pydantic import ValidationError
 
 from jake_tools.clockify import (
     ClockifyClientRecord,
@@ -12,7 +13,14 @@ from jake_tools.clockify import (
     TaskStatus,
 )
 from jake_tools.clockify_jira_sync import (
-    SyncAction,
+    ClockifyIndex,
+    CompleteTaskAction,
+    ConflictAction,
+    CreateProjectAction,
+    CreateTaskAction,
+    ReactivateTaskAction,
+    RenameProjectAction,
+    RenameTaskAction,
     SyncActionKind,
     SyncApplyError,
     SyncPlan,
@@ -21,7 +29,7 @@ from jake_tools.clockify_jira_sync import (
     plan_jira_sync,
     prepare_jira_sync,
 )
-from jake_tools.jira import JiraIssue
+from jake_tools.jira import JiraIssue, JiraStatusCategory
 
 
 def jira_issue(
@@ -29,7 +37,7 @@ def jira_issue(
     summary: str,
     *,
     status: str = "To Do",
-    status_category: str = "To Do",
+    status_category: JiraStatusCategory = "To Do",
     assignee: str | None = "Michael Bryan",
     issue_type: str = "Task",
     parent_key: str | None = "SF-131",
@@ -82,6 +90,13 @@ def clockify_task(
     )
 
 
+def build_index(
+    projects: list[ClockifyProject],
+    tasks: list[ClockifyTask],
+) -> ClockifyIndex:
+    return ClockifyIndex.build(projects, tasks)
+
+
 def test_plan_creates_missing_projects_and_task_for_active_issues() -> None:
     phase = jira_issue(
         "SF-1",
@@ -111,8 +126,7 @@ def test_plan_creates_missing_projects_and_task_for_active_issues() -> None:
     plan = plan_jira_sync(
         active_issues=[phase, task],
         jira_issues=[phase, task, parent],
-        projects=[],
-        tasks=[],
+        index=build_index([], []),
     )
 
     assert [(action.kind, action.jira_key) for action in plan.actions] == [
@@ -146,8 +160,7 @@ def test_plan_renames_drift_and_completes_done_jira_tasks() -> None:
     plan = plan_jira_sync(
         active_issues=[],
         jira_issues=jira,
-        projects=[project],
-        tasks=tasks,
+        index=build_index([project], tasks),
     )
 
     assert [(action.kind, action.jira_key) for action in plan.actions] == [
@@ -155,6 +168,29 @@ def test_plan_renames_drift_and_completes_done_jira_tasks() -> None:
         (SyncActionKind.RENAME_TASK, "SF-305"),
         (SyncActionKind.MARK_TASK_DONE, "SF-304"),
     ]
+
+
+def test_plan_does_not_rename_project_for_whitespace_only_summary_drift() -> None:
+    # A Jira summary that only differs from the Clockify project name by
+    # leading/trailing whitespace should not be treated as a rename: both
+    # the create and rename paths route through clockify_project_name_for_jira,
+    # which strips the summary before naming or comparing.
+    project = clockify_project("SF-131", "Production Vehicle")
+    jira = [
+        jira_issue(
+            "SF-131",
+            "  Production Vehicle  ",
+            issue_type="Project / Phase",
+        )
+    ]
+
+    plan = plan_jira_sync(
+        active_issues=[],
+        jira_issues=jira,
+        index=build_index([project], []),
+    )
+
+    assert plan.actions == ()
 
 
 def test_plan_reactivates_done_task_when_it_is_active_and_assigned() -> None:
@@ -174,8 +210,7 @@ def test_plan_reactivates_done_task_when_it_is_active_and_assigned() -> None:
     plan = plan_jira_sync(
         active_issues=[issue],
         jira_issues=[issue],
-        projects=[project],
-        tasks=[task],
+        index=build_index([project], [task]),
     )
 
     assert len(plan.actions) == 1
@@ -201,8 +236,7 @@ def test_plan_conflicts_when_existing_task_cannot_belong_to_missing_parent() -> 
     plan = plan_jira_sync(
         active_issues=[issue],
         jira_issues=[issue],
-        projects=[wrong_project],
-        tasks=[task],
+        index=build_index([wrong_project], [task]),
     )
 
     assert [(action.kind, action.jira_key) for action in plan.actions] == [
@@ -234,8 +268,7 @@ def test_plan_ignores_archived_project_and_creates_usable_replacements() -> None
     plan = plan_jira_sync(
         active_issues=[issue],
         jira_issues=[issue],
-        projects=[archived],
-        tasks=[archived_task],
+        index=build_index([archived], [archived_task]),
     )
 
     assert [(action.kind, action.jira_key) for action in plan.actions] == [
@@ -264,8 +297,7 @@ def test_plan_keeps_todo_or_reassigned_tasks_active_while_syncing_names() -> Non
     plan = plan_jira_sync(
         active_issues=[],
         jira_issues=jira,
-        projects=[project],
-        tasks=tasks,
+        index=build_index([project], tasks),
     )
 
     assert [(action.kind, action.jira_key) for action in plan.actions] == [
@@ -290,13 +322,53 @@ def test_plan_reports_ambiguous_active_task_duplicates_as_conflict() -> None:
     plan = plan_jira_sync(
         active_issues=[issue],
         jira_issues=[issue],
-        projects=[project],
-        tasks=tasks,
+        index=build_index([project], tasks),
     )
 
     assert len(plan.actions) == 1
     assert plan.actions[0].kind == SyncActionKind.CONFLICT
     assert "multiple active Clockify tasks" in plan.actions[0].message
+
+
+def test_plan_and_apply_agree_on_duplicate_task_handling_through_shared_index() -> None:
+    # Build ONE index and feed it to both plan_jira_sync and apply_sync_plan,
+    # proving they see the same duplicate-task grouping instead of each
+    # recomputing "group by Jira key, keep unique matches" independently and
+    # possibly drifting apart.
+    project = clockify_project("SF-131", "Production Vehicle")
+    tasks = [
+        clockify_task("SF-427", "Evaluate PX4", task_id="task-1"),
+        clockify_task("SF-427", "Evaluate PX4", task_id="task-2"),
+    ]
+    issue = jira_issue(
+        "SF-427",
+        "Evaluate PX4",
+        status="In Progress",
+        status_category="In Progress",
+    )
+    index = build_index([project], tasks)
+
+    plan = plan_jira_sync(active_issues=[issue], jira_issues=[issue], index=index)
+
+    assert plan.has_conflicts
+    client = FakeClockifySyncClient()
+    with pytest.raises(SyncApplyError, match="multiple active Clockify tasks"):
+        apply_sync_plan(
+            plan,
+            clockify=client,
+            workspace_id="workspace-1",
+            client_id="client-1",
+            index=index,
+        )
+    assert client.operations == []
+
+
+def test_create_task_action_without_project_key_is_unrepresentable() -> None:
+    with pytest.raises(ValidationError):
+        CreateTaskAction(  # pyright: ignore[reportCallIssue]
+            jira_key="SF-427",
+            desired_name="SF-427 Evaluate PX4 external control methods",
+        )
 
 
 class FakeClockifySyncClient:
@@ -397,14 +469,12 @@ def test_apply_sync_plan_creates_project_before_dependent_task() -> None:
     client = FakeClockifySyncClient()
     plan = SyncPlan(
         actions=(
-            SyncAction(
-                kind=SyncActionKind.CREATE_PROJECT,
+            CreateProjectAction(
                 jira_key="SF-131",
                 project_key="SF-131",
                 desired_name="Production Vehicle",
             ),
-            SyncAction(
-                kind=SyncActionKind.CREATE_TASK,
+            CreateTaskAction(
                 jira_key="SF-427",
                 project_key="SF-131",
                 desired_name="SF-427 Evaluate PX4 external control methods",
@@ -417,8 +487,7 @@ def test_apply_sync_plan_creates_project_before_dependent_task() -> None:
         clockify=client,
         workspace_id="workspace-1",
         client_id="client-1",
-        projects=[],
-        tasks=[],
+        index=build_index([], []),
     )
 
     assert client.operations == [
@@ -441,29 +510,26 @@ def test_apply_sync_plan_updates_names_and_task_statuses() -> None:
     complete_task = clockify_task("SF-304", "Bench test PX4")
     plan = SyncPlan(
         actions=(
-            SyncAction(
-                kind=SyncActionKind.RENAME_PROJECT,
+            RenameProjectAction(
                 jira_key="SF-131",
                 project_id=project.id,
                 desired_name="Production Vehicle",
             ),
-            SyncAction(
-                kind=SyncActionKind.REACTIVATE_TASK,
+            ReactivateTaskAction(
                 jira_key="SF-427",
                 task_id=reactivate_task.id,
                 desired_name="SF-427 Evaluate PX4 external control methods",
             ),
-            SyncAction(
-                kind=SyncActionKind.RENAME_TASK,
+            RenameTaskAction(
                 jira_key="SF-305",
                 task_id=rename_task.id,
                 desired_name="SF-305 Wet test PX4 using Zoda",
             ),
-            SyncAction(
-                kind=SyncActionKind.MARK_TASK_DONE,
+            CompleteTaskAction(
                 jira_key="SF-304",
                 task_id=complete_task.id,
                 desired_name=complete_task.name,
+                jira_status="Done",
             ),
         )
     )
@@ -473,8 +539,7 @@ def test_apply_sync_plan_updates_names_and_task_statuses() -> None:
         clockify=client,
         workspace_id="workspace-1",
         client_id="client-1",
-        projects=[project],
-        tasks=[rename_task, reactivate_task, complete_task],
+        index=build_index([project], [rename_task, reactivate_task, complete_task]),
     )
 
     assert result.applied[0].project is not None
@@ -493,8 +558,7 @@ def test_apply_sync_plan_rejects_stale_task_reread() -> None:
     client.task_read_override = task
     plan = SyncPlan(
         actions=(
-            SyncAction(
-                kind=SyncActionKind.REACTIVATE_TASK,
+            ReactivateTaskAction(
                 jira_key="SF-304",
                 task_id=task.id,
                 desired_name=task.name,
@@ -508,8 +572,7 @@ def test_apply_sync_plan_rejects_stale_task_reread() -> None:
             clockify=client,
             workspace_id="workspace-1",
             client_id="client-1",
-            projects=[],
-            tasks=[task],
+            index=build_index([], [task]),
         )
 
 
@@ -519,8 +582,7 @@ def test_apply_sync_plan_rejects_renamed_project_with_changed_jira_note() -> Non
     project = clockify_project("SF-131", "Old project")
     plan = SyncPlan(
         actions=(
-            SyncAction(
-                kind=SyncActionKind.RENAME_PROJECT,
+            RenameProjectAction(
                 jira_key="SF-131",
                 project_id=project.id,
                 desired_name="Production Vehicle",
@@ -534,8 +596,7 @@ def test_apply_sync_plan_rejects_renamed_project_with_changed_jira_note() -> Non
             clockify=client,
             workspace_id="workspace-1",
             client_id="client-1",
-            projects=[project],
-            tasks=[],
+            index=build_index([project], []),
         )
 
 
@@ -543,8 +604,7 @@ def test_apply_sync_plan_refuses_conflicts_before_mutating() -> None:
     client = FakeClockifySyncClient()
     plan = SyncPlan(
         actions=(
-            SyncAction(
-                kind=SyncActionKind.CONFLICT,
+            ConflictAction(
                 jira_key="SF-427",
                 message="multiple active Clockify tasks reference SF-427",
             ),
@@ -557,8 +617,7 @@ def test_apply_sync_plan_refuses_conflicts_before_mutating() -> None:
             clockify=client,
             workspace_id="workspace-1",
             client_id="client-1",
-            projects=[],
-            tasks=[],
+            index=build_index([], []),
         )
 
     assert client.operations == []
@@ -675,6 +734,7 @@ def test_prepare_jira_sync_collects_inventory_and_builds_plan() -> None:
         (SyncActionKind.REACTIVATE_TASK, "SF-427"),
         (SyncActionKind.MARK_TASK_DONE, "SF-304"),
     ]
+    assert snapshot.index.projects_by_jira_key["SF-131"] == project
 
 
 def test_prepare_jira_sync_targets_exact_issue_regardless_of_assignee() -> None:

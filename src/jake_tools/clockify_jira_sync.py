@@ -4,9 +4,9 @@ import re
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from enum import StrEnum
-from typing import Protocol
+from typing import Annotated, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .clockify import (
     ClockifyClientRecord,
@@ -14,12 +14,17 @@ from .clockify import (
     ClockifyTask,
     ClockifyUser,
     TaskStatus,
+    clockify_project_name_for_jira,
     clockify_task_name_for_jira,
-    normalise_jira_key,
+    project_note_for,
 )
-from .jira import JiraIssue
+from .jira import JiraIssue, normalise_jira_key
 
 JIRA_REFERENCE_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
+
+# Sunfish's Jira convention: a "Project / Phase" issue becomes a Clockify
+# project; every other issue type becomes a task under its parent.
+PROJECT_PHASE_ISSUE_TYPE = "Project / Phase"
 
 
 class SyncActionKind(StrEnum):
@@ -37,18 +42,112 @@ class SyncScope(StrEnum):
     ISSUES = "issues"
 
 
-class SyncAction(BaseModel):
+class SyncActionBase(BaseModel):
+    """The one field every sync action kind always has.
+
+    Concrete subclasses each declare their own required fields (so an
+    illegal action, such as a create-task with no parent project key,
+    cannot be constructed at all) plus optional context fields with "" /
+    None defaults for whatever their kind doesn't need. Those context
+    fields are intentionally *not* inherited from a shared default here:
+    pydantic (and pyright's dataclass-style checking of it) does not allow
+    a subclass to turn an inherited defaulted field into a required one, so
+    each subclass declares its own full field set instead of overriding.
+    This base only carries jira_key, which every kind requires identically.
+    """
+
     model_config = ConfigDict(frozen=True)
 
-    kind: SyncActionKind
     jira_key: str
+
+
+class ConflictAction(SyncActionBase):
+    kind: Literal[SyncActionKind.CONFLICT] = SyncActionKind.CONFLICT
+    message: str
     desired_name: str = ""
     current_name: str = ""
     project_key: str | None = None
     project_id: str | None = None
     task_id: str | None = None
     jira_status: str = ""
+
+
+class CreateProjectAction(SyncActionBase):
+    kind: Literal[SyncActionKind.CREATE_PROJECT] = SyncActionKind.CREATE_PROJECT
+    project_key: str
+    desired_name: str
+    current_name: str = ""
+    project_id: str | None = None
+    task_id: str | None = None
+    jira_status: str = ""
     message: str = ""
+
+
+class RenameProjectAction(SyncActionBase):
+    kind: Literal[SyncActionKind.RENAME_PROJECT] = SyncActionKind.RENAME_PROJECT
+    project_id: str
+    desired_name: str
+    current_name: str = ""
+    project_key: str | None = None
+    task_id: str | None = None
+    jira_status: str = ""
+    message: str = ""
+
+
+class CreateTaskAction(SyncActionBase):
+    kind: Literal[SyncActionKind.CREATE_TASK] = SyncActionKind.CREATE_TASK
+    project_key: str
+    desired_name: str
+    current_name: str = ""
+    project_id: str | None = None
+    task_id: str | None = None
+    jira_status: str = ""
+    message: str = ""
+
+
+class ReactivateTaskAction(SyncActionBase):
+    kind: Literal[SyncActionKind.REACTIVATE_TASK] = SyncActionKind.REACTIVATE_TASK
+    task_id: str
+    desired_name: str
+    current_name: str = ""
+    project_key: str | None = None
+    project_id: str | None = None
+    jira_status: str = ""
+    message: str = ""
+
+
+class RenameTaskAction(SyncActionBase):
+    kind: Literal[SyncActionKind.RENAME_TASK] = SyncActionKind.RENAME_TASK
+    task_id: str
+    desired_name: str
+    current_name: str = ""
+    project_key: str | None = None
+    project_id: str | None = None
+    jira_status: str = ""
+    message: str = ""
+
+
+class CompleteTaskAction(SyncActionBase):
+    kind: Literal[SyncActionKind.MARK_TASK_DONE] = SyncActionKind.MARK_TASK_DONE
+    task_id: str
+    desired_name: str
+    jira_status: str
+    current_name: str = ""
+    project_key: str | None = None
+    project_id: str | None = None
+    message: str = ""
+
+
+SyncAction = Annotated[
+    ConflictAction
+    | CreateProjectAction
+    | RenameProjectAction
+    | CreateTaskAction
+    | ReactivateTaskAction
+    | RenameTaskAction
+    | CompleteTaskAction,
+    Field(discriminator="kind"),
+]
 
 
 class SyncPlan(BaseModel):
@@ -58,7 +157,7 @@ class SyncPlan(BaseModel):
 
     @property
     def has_conflicts(self) -> bool:
-        return any(action.kind == SyncActionKind.CONFLICT for action in self.actions)
+        return any(isinstance(action, ConflictAction) for action in self.actions)
 
 
 class SyncApplyError(RuntimeError):
@@ -83,6 +182,59 @@ class SyncApplyResult(BaseModel):
     applied: tuple[AppliedSyncAction, ...] = ()
 
 
+class ClockifyIndex(BaseModel):
+    """Clockify projects and tasks, indexed once and shared by plan and apply.
+
+    "By Jira key" lookups only include keys with exactly one active match;
+    keys referenced by more than one active project or task are conflicts,
+    surfaced separately so plan and apply agree on which keys are ambiguous
+    instead of each recomputing the grouping independently.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    projects_by_id: dict[str, ClockifyProject]
+    tasks_by_id: dict[str, ClockifyTask]
+    projects_by_jira_key: dict[str, ClockifyProject]
+    tasks_by_jira_key: dict[str, ClockifyTask]
+    conflicted_project_keys: frozenset[str]
+    conflicted_task_keys: frozenset[str]
+
+    @classmethod
+    def build(
+        cls,
+        projects: Sequence[ClockifyProject],
+        tasks: Sequence[ClockifyTask],
+    ) -> ClockifyIndex:
+        active_projects = [project for project in projects if not project.archived]
+        active_project_ids = {project.id for project in active_projects}
+        usable_tasks = [task for task in tasks if task.project_id in active_project_ids]
+
+        project_groups = _projects_by_jira_key(active_projects)
+        task_groups = _tasks_by_jira_key(usable_tasks)
+
+        return cls(
+            projects_by_id={project.id: project for project in projects},
+            tasks_by_id={task.id: task for task in tasks},
+            projects_by_jira_key={
+                key: matches[0]
+                for key, matches in project_groups.items()
+                if len(matches) == 1
+            },
+            tasks_by_jira_key={
+                key: matches[0]
+                for key, matches in task_groups.items()
+                if len(matches) == 1
+            },
+            conflicted_project_keys=frozenset(
+                key for key, matches in project_groups.items() if len(matches) > 1
+            ),
+            conflicted_task_keys=frozenset(
+                key for key, matches in task_groups.items() if len(matches) > 1
+            ),
+        )
+
+
 class SyncSnapshot(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -94,6 +246,7 @@ class SyncSnapshot(BaseModel):
     jira_issues: tuple[JiraIssue, ...]
     projects: tuple[ClockifyProject, ...]
     tasks: tuple[ClockifyTask, ...]
+    index: ClockifyIndex
     plan: SyncPlan
 
 
@@ -217,6 +370,7 @@ def prepare_jira_sync(
             ):
                 tasks_by_id[task.id] = task
     tasks = list(tasks_by_id.values())
+    index = ClockifyIndex.build(projects, tasks)
 
     requested_issue_keys = tuple(
         sorted({normalise_jira_key(key) for key in issue_keys})
@@ -240,14 +394,13 @@ def prepare_jira_sync(
         if issue.parent_key is not None
     )
     if scope == SyncScope.ASSIGNED_ACTIVE:
-        for project in projects:
-            match = JIRA_REFERENCE_PATTERN.search(project.note)
-            if match:
-                jira_keys.add(match.group(1))
-        for task in tasks:
-            match = JIRA_REFERENCE_PATTERN.match(task.name)
-            if match:
-                jira_keys.add(match.group(1))
+        # Every Jira key already referenced by an active Clockify project or
+        # task, unique match or ambiguous conflict alike, so drift/conflict
+        # detection can see them even if they are not otherwise active.
+        jira_keys.update(index.projects_by_jira_key)
+        jira_keys.update(index.conflicted_project_keys)
+        jira_keys.update(index.tasks_by_jira_key)
+        jira_keys.update(index.conflicted_task_keys)
 
     jira_by_key = {issue.key: issue for issue in jira.get_issues(sorted(jira_keys))}
     jira_by_key.update({issue.key: issue for issue in selected_issues})
@@ -255,8 +408,7 @@ def prepare_jira_sync(
     plan = plan_jira_sync(
         active_issues=active_issues,
         jira_issues=jira_issues,
-        projects=projects,
-        tasks=tasks,
+        index=index,
         managed_keys=jira_keys if scope == SyncScope.ISSUES else None,
     )
     return SyncSnapshot(
@@ -268,6 +420,7 @@ def prepare_jira_sync(
         jira_issues=tuple(jira_issues),
         projects=tuple(projects),
         tasks=tuple(tasks),
+        index=index,
         plan=plan,
     )
 
@@ -276,53 +429,41 @@ def plan_jira_sync(
     *,
     active_issues: Sequence[JiraIssue],
     jira_issues: Sequence[JiraIssue],
-    projects: Sequence[ClockifyProject],
-    tasks: Sequence[ClockifyTask],
+    index: ClockifyIndex,
     managed_keys: set[str] | None = None,
 ) -> SyncPlan:
     jira_by_key = {issue.key: issue for issue in jira_issues}
     active_by_key = {issue.key: issue for issue in active_issues}
-    active_projects = [project for project in projects if not project.archived]
-    active_project_ids = {project.id for project in active_projects}
-    usable_tasks = [task for task in tasks if task.project_id in active_project_ids]
 
     actions: list[SyncAction] = []
-    project_groups = _projects_by_jira_key(active_projects)
-    task_groups = _tasks_by_jira_key(usable_tasks)
-    conflict_project_keys = {
-        key
-        for key, matches in project_groups.items()
-        if (managed_keys is None or key in managed_keys) and len(matches) > 1
-    }
-    conflict_task_keys = {
-        key
-        for key, matches in task_groups.items()
-        if (managed_keys is None or key in managed_keys) and len(matches) > 1
-    }
+    conflict_project_keys = (
+        index.conflicted_project_keys
+        if managed_keys is None
+        else index.conflicted_project_keys & managed_keys
+    )
+    conflict_task_keys = (
+        index.conflicted_task_keys
+        if managed_keys is None
+        else index.conflicted_task_keys & managed_keys
+    )
 
     for key in sorted(conflict_project_keys):
         actions.append(
-            SyncAction(
-                kind=SyncActionKind.CONFLICT,
+            ConflictAction(
                 jira_key=key,
                 message=f"multiple active Clockify projects reference {key}",
             )
         )
     for key in sorted(conflict_task_keys):
         actions.append(
-            SyncAction(
-                kind=SyncActionKind.CONFLICT,
+            ConflictAction(
                 jira_key=key,
                 message=f"multiple active Clockify tasks reference {key}",
             )
         )
 
-    project_by_key = {
-        key: matches[0] for key, matches in project_groups.items() if len(matches) == 1
-    }
-    task_by_key = {
-        key: matches[0] for key, matches in task_groups.items() if len(matches) == 1
-    }
+    project_by_key = index.projects_by_jira_key
+    task_by_key = index.tasks_by_jira_key
     planned_project_keys: set[str] = set()
 
     def plan_project(key: str, summary: str) -> None:
@@ -330,38 +471,38 @@ def plan_jira_sync(
             return
         planned_project_keys.add(key)
         actions.append(
-            SyncAction(
-                kind=SyncActionKind.CREATE_PROJECT,
+            CreateProjectAction(
                 jira_key=key,
-                desired_name=summary,
+                desired_name=clockify_project_name_for_jira(summary),
                 project_key=key,
             )
         )
 
     for key, project in sorted(project_by_key.items()):
         issue = jira_by_key.get(key)
-        if issue and issue.summary != project.name:
+        if issue is None:
+            continue
+        desired_name = clockify_project_name_for_jira(issue.summary)
+        if desired_name != project.name:
             actions.append(
-                SyncAction(
-                    kind=SyncActionKind.RENAME_PROJECT,
+                RenameProjectAction(
                     jira_key=key,
                     current_name=project.name,
-                    desired_name=issue.summary,
+                    desired_name=desired_name,
                     project_key=key,
                     project_id=project.id,
                 )
             )
 
     for issue in sorted(active_issues, key=lambda item: item.key):
-        if issue.issue_type == "Project / Phase":
+        if issue.issue_type == PROJECT_PHASE_ISSUE_TYPE:
             if issue.key not in conflict_project_keys:
                 plan_project(issue.key, issue.summary)
             continue
 
         if not issue.parent_key or not issue.parent_summary:
             actions.append(
-                SyncAction(
-                    kind=SyncActionKind.CONFLICT,
+                ConflictAction(
                     jira_key=issue.key,
                     message="active Jira task has no parent Project / Phase",
                 )
@@ -378,8 +519,7 @@ def plan_jira_sync(
         task = task_by_key.get(issue.key)
         if task is None:
             actions.append(
-                SyncAction(
-                    kind=SyncActionKind.CREATE_TASK,
+                CreateTaskAction(
                     jira_key=issue.key,
                     desired_name=desired_name,
                     project_key=issue.parent_key,
@@ -390,8 +530,7 @@ def plan_jira_sync(
         parent = project_by_key.get(issue.parent_key)
         if parent is None or task.project_id != parent.id:
             actions.append(
-                SyncAction(
-                    kind=SyncActionKind.CONFLICT,
+                ConflictAction(
                     jira_key=issue.key,
                     project_key=issue.parent_key,
                     task_id=task.id,
@@ -404,8 +543,7 @@ def plan_jira_sync(
 
         if task.status == "DONE":
             actions.append(
-                SyncAction(
-                    kind=SyncActionKind.REACTIVATE_TASK,
+                ReactivateTaskAction(
                     jira_key=issue.key,
                     current_name=task.name,
                     desired_name=desired_name,
@@ -416,8 +554,7 @@ def plan_jira_sync(
             )
         elif task.name != desired_name:
             actions.append(
-                SyncAction(
-                    kind=SyncActionKind.RENAME_TASK,
+                RenameTaskAction(
                     jira_key=issue.key,
                     current_name=task.name,
                     desired_name=desired_name,
@@ -436,8 +573,7 @@ def plan_jira_sync(
         desired_name = clockify_task_name_for_jira(issue.key, issue.summary)
         if issue.status_category == "Done" and task.status == "ACTIVE":
             actions.append(
-                SyncAction(
-                    kind=SyncActionKind.MARK_TASK_DONE,
+                CompleteTaskAction(
                     jira_key=key,
                     current_name=task.name,
                     desired_name=desired_name,
@@ -448,8 +584,7 @@ def plan_jira_sync(
             )
         elif task.name != desired_name:
             actions.append(
-                SyncAction(
-                    kind=SyncActionKind.RENAME_TASK,
+                RenameTaskAction(
                     jira_key=key,
                     current_name=task.name,
                     desired_name=desired_name,
@@ -471,11 +606,10 @@ def apply_sync_plan(
     clockify: ClockifySyncClient,
     workspace_id: str,
     client_id: str,
-    projects: Sequence[ClockifyProject],
-    tasks: Sequence[ClockifyTask],
+    index: ClockifyIndex,
 ) -> SyncApplyResult:
     conflicts = [
-        action for action in plan.actions if action.kind == SyncActionKind.CONFLICT
+        action for action in plan.actions if isinstance(action, ConflictAction)
     ]
     if conflicts:
         details = "; ".join(
@@ -483,127 +617,155 @@ def apply_sync_plan(
         )
         raise SyncApplyError(f"Refusing to apply a plan with conflicts: {details}")
 
-    projects_by_id = {project.id: project for project in projects}
-    project_groups = _projects_by_jira_key(
-        [project for project in projects if not project.archived]
-    )
-    projects_by_key = {
-        key: matches[0] for key, matches in project_groups.items() if len(matches) == 1
-    }
-    tasks_by_id = {task.id: task for task in tasks}
+    projects_by_id = dict(index.projects_by_id)
+    projects_by_key = dict(index.projects_by_jira_key)
+    tasks_by_id = dict(index.tasks_by_id)
     applied: list[AppliedSyncAction] = []
 
     for action in plan.actions:
-        if action.kind == SyncActionKind.CREATE_PROJECT:
-            project = clockify.create_project(
+        if isinstance(action, CreateProjectAction):
+            note = project_note_for(action.jira_key)
+            written_project = clockify.create_project(
                 workspace_id,
                 name=action.desired_name,
-                note=f"Jira: {action.jira_key}",
+                note=note,
                 client_id=client_id,
             )
-            _verify_project(
+            project = _write_and_verify_project(
                 action,
-                project,
-                expected_note=f"Jira: {action.jira_key}",
-            )
-            project = clockify.get_project(workspace_id, project.id)
-            _verify_project(
-                action,
-                project,
-                expected_note=f"Jira: {action.jira_key}",
+                written_project,
+                clockify=clockify,
+                workspace_id=workspace_id,
+                expected_note=note,
             )
             projects_by_id[project.id] = project
             projects_by_key[action.jira_key] = project
             applied.append(AppliedSyncAction(action=action, project=project))
             continue
 
-        if action.kind == SyncActionKind.RENAME_PROJECT:
-            project = _require_project(action, projects_by_id)
-            updated = clockify.update_project_name(
-                workspace_id,
-                project,
-                action.desired_name,
+        if isinstance(action, RenameProjectAction):
+            current_project = projects_by_id.get(action.project_id)
+            if current_project is None:
+                raise SyncApplyError(
+                    f"{action.jira_key}: Clockify project {action.project_id!r} is unavailable"
+                )
+            written_project = clockify.update_project_name(
+                workspace_id, current_project, action.desired_name
             )
-            _verify_project(action, updated, expected_note=project.note)
-            updated = clockify.get_project(workspace_id, updated.id)
-            _verify_project(action, updated, expected_note=project.note)
-            projects_by_id[updated.id] = updated
-            projects_by_key[action.jira_key] = updated
-            applied.append(AppliedSyncAction(action=action, project=updated))
+            updated_project = _write_and_verify_project(
+                action,
+                written_project,
+                clockify=clockify,
+                workspace_id=workspace_id,
+                expected_note=current_project.note,
+            )
+            projects_by_id[updated_project.id] = updated_project
+            projects_by_key[action.jira_key] = updated_project
+            applied.append(AppliedSyncAction(action=action, project=updated_project))
             continue
 
-        if action.kind == SyncActionKind.CREATE_TASK:
-            if not action.project_key:
-                raise SyncApplyError(
-                    f"{action.jira_key}: create-task action has no parent project key"
-                )
-            project = projects_by_key.get(action.project_key)
-            if project is None:
+        if isinstance(action, CreateTaskAction):
+            parent_project = projects_by_key.get(action.project_key)
+            if parent_project is None:
                 raise SyncApplyError(
                     f"{action.jira_key}: parent Clockify project {action.project_key} is unavailable"
                 )
-            task = clockify.create_task(
-                workspace_id,
-                project.id,
-                name=action.desired_name,
+            written_task = clockify.create_task(
+                workspace_id, parent_project.id, name=action.desired_name
             )
-            _verify_task(action, task, expected_status="ACTIVE")
-            task = clockify.get_task(workspace_id, task.project_id, task.id)
-            _verify_task(action, task, expected_status="ACTIVE")
-            tasks_by_id[task.id] = task
-            applied.append(AppliedSyncAction(action=action, task=task))
+            created_task = _write_and_verify_task(
+                action,
+                written_task,
+                clockify=clockify,
+                workspace_id=workspace_id,
+                expected_status="ACTIVE",
+            )
+            tasks_by_id[created_task.id] = created_task
+            applied.append(AppliedSyncAction(action=action, task=created_task))
             continue
 
-        task = _require_task(action, tasks_by_id)
-        expected_status: TaskStatus
-        if action.kind == SyncActionKind.REACTIVATE_TASK:
-            expected_status = "ACTIVE"
-        elif action.kind == SyncActionKind.MARK_TASK_DONE:
-            expected_status = "DONE"
-        elif action.kind == SyncActionKind.RENAME_TASK:
-            expected_status = task.status
-        else:
-            raise SyncApplyError(f"Unsupported sync action: {action.kind}")
-
-        updated = clockify.update_task(
+        # The remaining kinds (RenameTaskAction, ReactivateTaskAction,
+        # CompleteTaskAction) all mutate an existing task in place. Conflicts
+        # were already rejected above, so this is never a ConflictAction;
+        # the assert only exists to narrow the type for the type checker.
+        assert isinstance(
+            action, RenameTaskAction | ReactivateTaskAction | CompleteTaskAction
+        )
+        current_task = tasks_by_id.get(action.task_id)
+        if current_task is None:
+            raise SyncApplyError(
+                f"{action.jira_key}: Clockify task {action.task_id!r} is unavailable"
+            )
+        expected_status = _expected_task_status(action, current_task)
+        written_task = clockify.update_task(
             workspace_id,
-            task,
+            current_task,
             name=action.desired_name,
             status=expected_status,
         )
-        _verify_task(action, updated, expected_status=expected_status)
-        updated = clockify.get_task(
-            workspace_id,
-            updated.project_id,
-            updated.id,
+        updated_task = _write_and_verify_task(
+            action,
+            written_task,
+            clockify=clockify,
+            workspace_id=workspace_id,
+            expected_status=expected_status,
         )
-        _verify_task(action, updated, expected_status=expected_status)
-        tasks_by_id[updated.id] = updated
-        applied.append(AppliedSyncAction(action=action, task=updated))
+        tasks_by_id[updated_task.id] = updated_task
+        applied.append(AppliedSyncAction(action=action, task=updated_task))
 
     return SyncApplyResult(applied=tuple(applied))
 
 
-def _require_project(
-    action: SyncAction,
-    projects_by_id: dict[str, ClockifyProject],
+def _expected_task_status(
+    action: RenameTaskAction | ReactivateTaskAction | CompleteTaskAction,
+    current: ClockifyTask,
+) -> TaskStatus:
+    if isinstance(action, ReactivateTaskAction):
+        return "ACTIVE"
+    if isinstance(action, CompleteTaskAction):
+        return "DONE"
+    return current.status
+
+
+def _write_and_verify_project(
+    action: CreateProjectAction | RenameProjectAction,
+    written: ClockifyProject,
+    *,
+    clockify: ClockifySyncClient,
+    workspace_id: str,
+    expected_note: str,
 ) -> ClockifyProject:
-    if not action.project_id or action.project_id not in projects_by_id:
-        raise SyncApplyError(
-            f"{action.jira_key}: Clockify project {action.project_id!r} is unavailable"
-        )
-    return projects_by_id[action.project_id]
+    """Verify a just-written project, then re-fetch and verify again.
+
+    The second verification confirms Clockify actually persisted what it
+    echoed back in the write response.
+    """
+    _verify_project(action, written, expected_note=expected_note)
+    refetched = clockify.get_project(workspace_id, written.id)
+    _verify_project(action, refetched, expected_note=expected_note)
+    return refetched
 
 
-def _require_task(
-    action: SyncAction,
-    tasks_by_id: dict[str, ClockifyTask],
+def _write_and_verify_task(
+    action: CreateTaskAction
+    | RenameTaskAction
+    | ReactivateTaskAction
+    | CompleteTaskAction,
+    written: ClockifyTask,
+    *,
+    clockify: ClockifySyncClient,
+    workspace_id: str,
+    expected_status: TaskStatus,
 ) -> ClockifyTask:
-    if not action.task_id or action.task_id not in tasks_by_id:
-        raise SyncApplyError(
-            f"{action.jira_key}: Clockify task {action.task_id!r} is unavailable"
-        )
-    return tasks_by_id[action.task_id]
+    """Verify a just-written task, then re-fetch and verify again.
+
+    The second verification confirms Clockify actually persisted what it
+    echoed back in the write response.
+    """
+    _verify_task(action, written, expected_status=expected_status)
+    refetched = clockify.get_task(workspace_id, written.project_id, written.id)
+    _verify_task(action, refetched, expected_status=expected_status)
+    return refetched
 
 
 def _verify_project(

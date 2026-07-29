@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import os
-import re
 from typing import Any, Literal, Protocol, TypeVar
 
 import requests
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
+from .jira import normalise_jira_key
+
 CLOCKIFY_API_ROOT = "https://api.clockify.me/api/v1"
-JIRA_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 
 JsonObject = dict[str, object]
 JsonValue = JsonObject | list[object] | str | int | float | bool | None
@@ -24,13 +24,6 @@ class ClockifyError(RuntimeError):
     pass
 
 
-def normalise_jira_key(key: str) -> str:
-    normalised = key.strip().upper()
-    if not JIRA_KEY_PATTERN.fullmatch(normalised):
-        raise ClockifyError(f"Invalid Jira issue key: {key!r}")
-    return normalised
-
-
 def clockify_project_name_for_jira(summary: str) -> str:
     project_name = summary.strip()
     if not project_name:
@@ -43,6 +36,11 @@ def clockify_task_name_for_jira(key: str, summary: str) -> str:
     if not task_summary:
         raise ClockifyError("Jira summary is required for a Clockify task name")
     return f"{normalise_jira_key(key)} {task_summary}"
+
+
+def project_note_for(key: str) -> str:
+    """The Clockify project note convention used to track a Jira key."""
+    return f"Jira: {normalise_jira_key(key)}"
 
 
 class ClockifyUser(BaseModel):
@@ -101,7 +99,7 @@ class JiraIssueRef(BaseModel):
 
     @property
     def project_note(self) -> str:
-        return f"Jira: {normalise_jira_key(self.key)}"
+        return project_note_for(self.key)
 
 
 class ClockifyClient:

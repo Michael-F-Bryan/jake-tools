@@ -5,7 +5,16 @@ import subprocess
 
 import pytest
 
-from jake_tools.jira import AcliJiraClient, JiraError, JiraIssue
+from jake_tools.jira import AcliJiraClient, JiraError, JiraIssue, normalise_jira_key
+
+
+def test_normalise_jira_key_upcases_and_strips() -> None:
+    assert normalise_jira_key(" sf-353 ") == "SF-353"
+
+
+def test_normalise_jira_key_rejects_malformed_keys() -> None:
+    with pytest.raises(JiraError, match="Invalid Jira issue key"):
+        normalise_jira_key("not a key")
 
 
 class FakeCommandRunner:

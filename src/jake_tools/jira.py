@@ -5,17 +5,32 @@ import re
 import shlex
 import subprocess
 from collections.abc import Callable, Iterable
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from .clockify import ClockifyError, normalise_jira_key
-
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+JIRA_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 JIRA_PROJECT_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+$")
+
+# Jira's three built-in status categories. Every workflow status maps onto
+# exactly one of these regardless of how many custom statuses a project has.
+JiraStatusCategory = Literal["To Do", "In Progress", "Done"]
+
+# The Jira statuses treated as "currently being worked" for the default
+# assigned-active sync scope.
+ACTIVE_ISSUE_STATUSES: tuple[str, ...] = ("In Progress", "Blocked", "In Review")
 
 
 class JiraError(RuntimeError):
     pass
+
+
+def normalise_jira_key(key: str) -> str:
+    normalised = key.strip().upper()
+    if not JIRA_KEY_PATTERN.fullmatch(normalised):
+        raise JiraError(f"Invalid Jira issue key: {key!r}")
+    return normalised
 
 
 class JiraIssue(BaseModel):
@@ -24,7 +39,7 @@ class JiraIssue(BaseModel):
     key: str
     summary: str
     status: str
-    status_category: str = Field(alias="statusCategory")
+    status_category: JiraStatusCategory = Field(alias="statusCategory")
     assignee: str | None = None
     issue_type: str = Field(default="", alias="issueType")
     parent_key: str | None = Field(default=None, alias="parentKey")
@@ -32,7 +47,7 @@ class JiraIssue(BaseModel):
 
 
 class _AcliStatusCategory(BaseModel):
-    name: str
+    name: JiraStatusCategory
 
 
 class _AcliStatus(BaseModel):
@@ -95,9 +110,10 @@ class AcliJiraClient:
 
     def get_active_assigned_issues(self, project_key: str) -> list[JiraIssue]:
         project = self._normalise_project_key(project_key)
+        statuses = ", ".join(f'"{status}"' for status in ACTIVE_ISSUE_STATUSES)
         jql = (
             f"project = {project} AND assignee = currentUser() "
-            'AND status in ("In Progress", "Blocked", "In Review") ORDER BY key'
+            f"AND status in ({statuses}) ORDER BY key"
         )
         candidates = self._search(
             jql,
@@ -181,10 +197,7 @@ class AcliJiraClient:
 
     @staticmethod
     def _normalise_key(key: str) -> str:
-        try:
-            return normalise_jira_key(key)
-        except ClockifyError as exc:
-            raise JiraError(str(exc)) from exc
+        return normalise_jira_key(key)
 
     @staticmethod
     def _normalise_project_key(key: str) -> str:

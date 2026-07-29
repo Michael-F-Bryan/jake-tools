@@ -70,7 +70,7 @@ def jira_name(key: str, summary: str, kind: str, as_json: bool) -> None:
             "task": issue.task_name,
             "note": issue.project_note,
         }
-    except ClockifyError as exc:
+    except (ClockifyError, JiraError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     selected = values if kind == "all" else {kind: values[kind]}
@@ -143,8 +143,7 @@ def jira_sync(
                 clockify=clockify_api,
                 workspace_id=snapshot.workspace_id,
                 client_id=snapshot.client_id,
-                projects=snapshot.projects,
-                tasks=snapshot.tasks,
+                index=snapshot.index,
             )
     except (ClockifyError, JiraError, SyncPreparationError, SyncApplyError) as exc:
         raise click.ClickException(str(exc)) from exc

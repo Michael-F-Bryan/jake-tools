@@ -16,8 +16,8 @@ from jake_tools.clockify import (
     clockify_base_url_from_env,
     clockify_project_name_for_jira,
     clockify_task_name_for_jira,
-    normalise_jira_key,
 )
+from jake_tools.jira import JiraError
 
 
 class FakeResponse:
@@ -143,8 +143,11 @@ def test_jira_issue_ref_keeps_project_note_separate_from_project_name() -> None:
 
 
 def test_clockify_jira_names_reject_invalid_ticket_keys() -> None:
-    with pytest.raises(ClockifyError, match="Invalid Jira issue key"):
-        normalise_jira_key("not a key")
+    # normalise_jira_key lives in jira.py and raises JiraError natively; see
+    # test_jira.py for that behaviour. Here we only check that a naming
+    # helper built on top of it surfaces the same rejection.
+    with pytest.raises(JiraError, match="Invalid Jira issue key"):
+        clockify_task_name_for_jira("not a key", "Some summary")
 
 
 def test_clockify_lists_active_clients_and_projects() -> None:
