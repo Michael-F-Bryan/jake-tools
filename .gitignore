@@ -9,5 +9,8 @@ wheels/
 # Virtual environments
 .venv
 
-docs/superpowers/plans/
 _working/
+.pytest_cache/
+.ruff_cache/
+.worktrees/
+.superpowers/
