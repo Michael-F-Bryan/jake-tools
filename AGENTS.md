@@ -55,12 +55,23 @@ uv run pytest -q
   `claude_agent_sdk` directly.
 - Commands that call the LLM use the `@agent` decorator in `cli/options.py`
   (adds `--model` and `--effort`) and `@coro`, applied closest to the callback,
-  which runs the async callback with `asyncio.run`.
+  which runs the async callback with `asyncio.run`. `@agent` resolves the
+  agent through the typed `AppContext` on `ctx.obj` (`cli/context.py`): it
+  always builds an `AgentSpec` from `--model`/`--effort` and hands it to
+  `AppContext.agent_factory`, so an injected factory still sees the flags
+  instead of silently ignoring them. `--effort`'s choices come from
+  `typing.get_args(EffortLevel)`, imported from `claude.py` (never
+  `claude_agent_sdk` directly).
 - `AgentSpec.tools` defaults to an empty tuple, which is genuinely tool-less.
   Never pass `tools=None` to `ClaudeAgentOptions`: the SDK then omits `--tools`
   and the agent inherits Claude Code's full default toolset.
 - Tests inject a fake at the `run_query` seam (`tests/agent_fakes.py`), so
   prompt rendering, schema injection, and usage accounting stay real.
+- `cli/context.py`'s `AppContext` carries factories for every client a CLI
+  command builds (`agent_factory`, `clockify_client_factory`,
+  `jira_client_factory`, `newsletter_client_factory`). CLI tests inject fakes
+  via `CliRunner(...).invoke(cmd, args, obj=AppContext(...))`, not by
+  monkeypatching the client class on the CLI module.
 
 ## External dependencies
 

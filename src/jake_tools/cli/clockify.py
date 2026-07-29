@@ -6,14 +6,12 @@ import click
 
 from ..clockify import (
     CLOCKIFY_API_ROOT,
-    ClockifyClient,
     ClockifyError,
     ClockifyUser,
     JiraIssueRef,
-    clockify_api_key_from_env,
-    clockify_base_url_from_env,
 )
 from ..clockify_jira_sync import (
+    ClockifyInventoryClient,
     SyncAction,
     SyncActionKind,
     SyncApplyError,
@@ -22,27 +20,29 @@ from ..clockify_jira_sync import (
     apply_sync_plan,
     prepare_jira_sync,
 )
-from ..jira import AcliJiraClient, JiraError
+from ..jira import JiraError
+from .context import ClockifyConfig, app_context
 
 
 @click.group()
 @click.option(
     "--api-key",
     envvar="CLOCKIFY_API_KEY",
+    default=None,
     help="Clockify API key. Defaults to CLOCKIFY_API_KEY.",
 )
 @click.option(
     "--api-base-url",
-    default=None,
-    help=f"Clockify API base URL. Defaults to CLOCKIFY_API_BASE_URL or {CLOCKIFY_API_ROOT}.",
+    envvar="CLOCKIFY_API_BASE_URL",
+    default=CLOCKIFY_API_ROOT,
+    show_default=True,
+    help="Clockify API base URL. Defaults to CLOCKIFY_API_BASE_URL.",
 )
 @click.pass_context
-def clockify(ctx: click.Context, api_key: str | None, api_base_url: str | None) -> None:
+def clockify(ctx: click.Context, api_key: str | None, api_base_url: str) -> None:
     """Work with Clockify time-tracking data."""
-    ctx.obj = {
-        "api_key": api_key,
-        "api_base_url": api_base_url,
-    }
+    config = ClockifyConfig(api_key=api_key, api_base_url=api_base_url)
+    ctx.obj = app_context(ctx).with_clockify_config(config)
 
 
 @clockify.command("jira-name")
@@ -128,10 +128,11 @@ def jira_sync(
     regardless of assignee. The command never deletes records.
     """
     try:
+        app = app_context(ctx)
         clockify_api = _client_from_context(ctx)
         snapshot = prepare_jira_sync(
             clockify=clockify_api,
-            jira=AcliJiraClient(),
+            jira=app.jira_client_factory(),
             jira_project=jira_project,
             clockify_client=clockify_client,
             issue_keys=issue_keys,
@@ -253,11 +254,10 @@ def _describe_action(action: SyncAction) -> str:
     return prefix
 
 
-def _client_from_context(ctx: click.Context) -> ClockifyClient:
-    config = ctx.obj or {}
-    api_key = config.get("api_key") or clockify_api_key_from_env()
-    base_url = config.get("api_base_url") or clockify_base_url_from_env()
-    return ClockifyClient(api_key=api_key, base_url=base_url)
+def _client_from_context(ctx: click.Context) -> ClockifyInventoryClient:
+    app = app_context(ctx)
+    config = app.clockify_config or ClockifyConfig(api_key=None)
+    return app.clockify_client_factory(config)
 
 
 def _emit_user(user: ClockifyUser, *, as_json: bool) -> None:

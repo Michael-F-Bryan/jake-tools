@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import importlib
+import dataclasses
 import json
 
 from click.testing import CliRunner
 
 from jake_tools.cli.clockify import clockify
+from jake_tools.cli.context import AppContext, ClockifyConfig
 from jake_tools.clockify import (
+    CLOCKIFY_API_ROOT,
     ClockifyClientRecord,
     ClockifyProject,
     ClockifyTask,
@@ -15,11 +17,13 @@ from jake_tools.clockify import (
 )
 from jake_tools.jira import JiraError, JiraIssue
 
-clockify_cli = importlib.import_module("jake_tools.cli.clockify")
-
 
 class FakeClockifyClient:
-    def __init__(self, *, api_key: str, base_url: str) -> None:
+    """A minimal ``ClockifyInventoryClient``: only ``get_user`` is exercised
+    by the ``whoami`` tests below, so every other method just documents
+    that it is unused."""
+
+    def __init__(self, *, api_key: str = "test-key", base_url: str = "") -> None:
         self.api_key = api_key
         self.base_url = base_url
 
@@ -32,14 +36,62 @@ class FakeClockifyClient:
             defaultWorkspace="workspace-2",
         )
 
+    def get_clients(self, workspace_id: str) -> list[ClockifyClientRecord]:
+        raise AssertionError("not expected")
 
-def test_whoami_prints_current_clockify_user(monkeypatch) -> None:
-    monkeypatch.setattr(clockify_cli, "ClockifyClient", FakeClockifyClient)
+    def get_projects(
+        self, workspace_id: str, *, archived: bool
+    ) -> list[ClockifyProject]:
+        raise AssertionError("not expected")
+
+    def get_tasks(
+        self, workspace_id: str, project_id: str, *, active: bool
+    ) -> list[ClockifyTask]:
+        raise AssertionError("not expected")
+
+    def get_project(self, workspace_id: str, project_id: str) -> ClockifyProject:
+        raise AssertionError("not expected")
+
+    def get_task(
+        self, workspace_id: str, project_id: str, task_id: str
+    ) -> ClockifyTask:
+        raise AssertionError("not expected")
+
+    def create_project(
+        self, workspace_id: str, *, name: str, note: str, client_id: str
+    ) -> ClockifyProject:
+        raise AssertionError("not expected")
+
+    def update_project_name(
+        self, workspace_id: str, project: ClockifyProject, name: str
+    ) -> ClockifyProject:
+        raise AssertionError("not expected")
+
+    def create_task(
+        self, workspace_id: str, project_id: str, *, name: str
+    ) -> ClockifyTask:
+        raise AssertionError("not expected")
+
+    def update_task(
+        self,
+        workspace_id: str,
+        task: ClockifyTask,
+        *,
+        name: str | None = None,
+        status: TaskStatus | None = None,
+    ) -> ClockifyTask:
+        raise AssertionError("not expected")
+
+
+def test_whoami_prints_current_clockify_user() -> None:
+    client = FakeClockifyClient()
+    app = AppContext(clockify_client_factory=lambda _config: client)
     runner = CliRunner()
 
     result = runner.invoke(
         clockify,
         ["--api-key", "test-key", "whoami"],
+        obj=app,
     )
 
     assert result.exit_code == 0
@@ -58,6 +110,46 @@ def test_whoami_requires_api_key(monkeypatch) -> None:
 
     assert result.exit_code != 0
     assert "CLOCKIFY_API_KEY" in result.output
+
+
+def test_api_base_url_resolves_from_env_when_the_flag_is_omitted(monkeypatch) -> None:
+    monkeypatch.setenv("CLOCKIFY_API_BASE_URL", "https://clockify.example.test/api/v1")
+    captured: list[ClockifyConfig] = []
+
+    def factory(config: ClockifyConfig) -> FakeClockifyClient:
+        captured.append(config)
+        return FakeClockifyClient()
+
+    app = AppContext(clockify_client_factory=factory)
+    runner = CliRunner()
+
+    result = runner.invoke(clockify, ["--api-key", "test-key", "whoami"], obj=app)
+
+    assert result.exit_code == 0
+    assert captured == [
+        ClockifyConfig(
+            api_key="test-key", api_base_url="https://clockify.example.test/api/v1"
+        )
+    ]
+
+
+def test_api_base_url_falls_back_to_the_default_root(monkeypatch) -> None:
+    monkeypatch.delenv("CLOCKIFY_API_BASE_URL", raising=False)
+    captured: list[ClockifyConfig] = []
+
+    def factory(config: ClockifyConfig) -> FakeClockifyClient:
+        captured.append(config)
+        return FakeClockifyClient()
+
+    app = AppContext(clockify_client_factory=factory)
+    runner = CliRunner()
+
+    result = runner.invoke(clockify, ["--api-key", "test-key", "whoami"], obj=app)
+
+    assert result.exit_code == 0
+    assert captured == [
+        ClockifyConfig(api_key="test-key", api_base_url=CLOCKIFY_API_ROOT)
+    ]
 
 
 def test_jira_name_renders_project_without_key_and_task_with_key() -> None:
@@ -243,23 +335,26 @@ class FakeAcliJiraClient:
         )
 
 
-def install_sync_fakes(monkeypatch) -> FakeJiraSyncClockifyClient:
+def install_sync_fakes() -> tuple[FakeJiraSyncClockifyClient, AppContext]:
     client = FakeJiraSyncClockifyClient(
         api_key="test-key",
         base_url="https://clockify.example.test/api/v1",
     )
-    monkeypatch.setattr(clockify_cli, "ClockifyClient", lambda **_: client)
-    monkeypatch.setattr(clockify_cli, "AcliJiraClient", FakeAcliJiraClient)
-    return client
+    app = AppContext(
+        clockify_client_factory=lambda _config: client,
+        jira_client_factory=FakeAcliJiraClient,
+    )
+    return client, app
 
 
-def test_jira_sync_defaults_to_json_dry_run(monkeypatch) -> None:
-    client = install_sync_fakes(monkeypatch)
+def test_jira_sync_defaults_to_json_dry_run() -> None:
+    client, app = install_sync_fakes()
     runner = CliRunner()
 
     result = runner.invoke(
         clockify,
         ["--api-key", "test-key", "jira-sync", "--json"],
+        obj=app,
     )
 
     assert result.exit_code == 0
@@ -293,13 +388,14 @@ def test_jira_sync_defaults_to_json_dry_run(monkeypatch) -> None:
     assert client.operations == []
 
 
-def test_jira_sync_human_dry_run_is_concise(monkeypatch) -> None:
-    install_sync_fakes(monkeypatch)
+def test_jira_sync_human_dry_run_is_concise() -> None:
+    _client, app = install_sync_fakes()
     runner = CliRunner()
 
     result = runner.invoke(
         clockify,
         ["--api-key", "test-key", "jira-sync", "--dry-run"],
+        obj=app,
     )
 
     assert result.exit_code == 0
@@ -309,13 +405,14 @@ def test_jira_sync_human_dry_run_is_concise(monkeypatch) -> None:
     )
 
 
-def test_jira_sync_apply_executes_and_reports_changes(monkeypatch) -> None:
-    client = install_sync_fakes(monkeypatch)
+def test_jira_sync_apply_executes_and_reports_changes() -> None:
+    client, app = install_sync_fakes()
     runner = CliRunner()
 
     result = runner.invoke(
         clockify,
         ["--api-key", "test-key", "jira-sync", "--apply", "--json"],
+        obj=app,
     )
 
     assert result.exit_code == 0
@@ -326,8 +423,8 @@ def test_jira_sync_apply_executes_and_reports_changes(monkeypatch) -> None:
     assert client.operations == ["task-1:DONE"]
 
 
-def test_jira_sync_can_target_issue_assigned_to_someone_else(monkeypatch) -> None:
-    client = install_sync_fakes(monkeypatch)
+def test_jira_sync_can_target_issue_assigned_to_someone_else() -> None:
+    client, app = install_sync_fakes()
     client.task_status = "DONE"
     runner = CliRunner()
 
@@ -341,6 +438,7 @@ def test_jira_sync_can_target_issue_assigned_to_someone_else(monkeypatch) -> Non
             "sf-304",
             "--json",
         ],
+        obj=app,
     )
 
     assert result.exit_code == 0
@@ -394,14 +492,15 @@ class DuplicateTaskClockifyClient(FakeJiraSyncClockifyClient):
         ]
 
 
-def test_jira_sync_reports_when_no_changes_are_required(monkeypatch) -> None:
-    install_sync_fakes(monkeypatch)
-    monkeypatch.setattr(clockify_cli, "AcliJiraClient", EmptyAcliJiraClient)
+def test_jira_sync_reports_when_no_changes_are_required() -> None:
+    _client, app = install_sync_fakes()
+    app = dataclasses.replace(app, jira_client_factory=EmptyAcliJiraClient)
     runner = CliRunner()
 
     result = runner.invoke(
         clockify,
         ["--api-key", "test-key", "jira-sync", "--dry-run"],
+        obj=app,
     )
 
     assert result.exit_code == 0
@@ -411,18 +510,21 @@ def test_jira_sync_reports_when_no_changes_are_required(monkeypatch) -> None:
     )
 
 
-def test_jira_sync_reports_conflicts_as_json_and_exits_nonzero(monkeypatch) -> None:
+def test_jira_sync_reports_conflicts_as_json_and_exits_nonzero() -> None:
     client = DuplicateTaskClockifyClient(
         api_key="test-key",
         base_url="https://clockify.example.test/api/v1",
     )
-    monkeypatch.setattr(clockify_cli, "ClockifyClient", lambda **_: client)
-    monkeypatch.setattr(clockify_cli, "AcliJiraClient", FakeAcliJiraClient)
+    app = AppContext(
+        clockify_client_factory=lambda _config: client,
+        jira_client_factory=FakeAcliJiraClient,
+    )
     runner = CliRunner()
 
     result = runner.invoke(
         clockify,
         ["--api-key", "test-key", "jira-sync", "--dry-run", "--json"],
+        obj=app,
     )
 
     assert result.exit_code == 1
@@ -433,14 +535,15 @@ def test_jira_sync_reports_conflicts_as_json_and_exits_nonzero(monkeypatch) -> N
     assert client.operations == []
 
 
-def test_jira_sync_reports_backend_errors_without_polluting_json(monkeypatch) -> None:
-    install_sync_fakes(monkeypatch)
-    monkeypatch.setattr(clockify_cli, "AcliJiraClient", FailingAcliJiraClient)
+def test_jira_sync_reports_backend_errors_without_polluting_json() -> None:
+    _client, app = install_sync_fakes()
+    app = dataclasses.replace(app, jira_client_factory=FailingAcliJiraClient)
     runner = CliRunner()
 
     result = runner.invoke(
         clockify,
         ["--api-key", "test-key", "jira-sync", "--json"],
+        obj=app,
     )
 
     assert result.exit_code == 1
