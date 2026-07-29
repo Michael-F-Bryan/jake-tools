@@ -90,7 +90,6 @@ async def test_run_returns_concatenated_assistant_text() -> None:
     reply = await agent.run("say something")
 
     assert reply.text == "first\nsecond"
-    assert reply.error is None
     assert fake.calls[0][0] == "say something"
 
 
@@ -115,7 +114,7 @@ async def test_run_structured_parses_structured_output() -> None:
     )
 
     assert minutes == Minutes(summary="we shipped", actions=["ship more"])
-    assert reply.error is None
+    assert reply.usage.api_calls == 1
 
 
 async def test_run_structured_sends_the_response_model_schema() -> None:
@@ -133,7 +132,13 @@ async def test_run_structured_sends_the_response_model_schema() -> None:
 async def test_run_structured_without_structured_output_raises_with_context() -> None:
     fake = RecordingQuery(
         _assistant("sorry, no"),
-        _result(subtype="error_during_execution", is_error=True, errors=["boom"]),
+        _result(
+            subtype="error_during_execution",
+            is_error=True,
+            errors=["boom"],
+            num_turns=2,
+            total_cost_usd=0.5,
+        ),
     )
     agent = ClaudeAgent(run_query=fake)
 
@@ -144,6 +149,10 @@ async def test_run_structured_without_structured_output_raises_with_context() ->
     assert "Minutes" in message
     assert "error_during_execution" in message
     assert "boom" in message
+    # The tokens already spent on this failed attempt must still be
+    # chargeable, so they ride along on the exception.
+    assert excinfo.value.usage.api_calls == 2
+    assert excinfo.value.usage.estimated_cost_usd == 0.5
 
 
 async def test_stream_without_a_result_message_raises() -> None:
@@ -193,12 +202,36 @@ async def test_mcp_tools_are_approved_but_not_granted_as_builtins() -> None:
     assert options.allowed_tools == ["Read", "mcp__sessions__search"]
 
 
-async def test_error_reply_reports_the_subtype_when_no_errors_listed() -> None:
+async def test_run_raises_on_an_error_result() -> None:
+    fake = RecordingQuery(
+        _result(
+            is_error=True,
+            subtype="error_during_execution",
+            errors=["boom"],
+            num_turns=2,
+            total_cost_usd=0.5,
+            usage={"input_tokens": 10, "output_tokens": 5},
+        )
+    )
+
+    with pytest.raises(ClaudeAgentError) as excinfo:
+        await ClaudeAgent(run_query=fake).run("go")
+
+    message = str(excinfo.value)
+    assert "error_during_execution" in message
+    assert "boom" in message
+    # Tokens already spent before the failure must not be lost off the
+    # exception, so a caller that accounts cost can still charge them.
+    assert excinfo.value.usage.api_calls == 2
+    assert excinfo.value.usage.input_tokens == 10
+    assert excinfo.value.usage.estimated_cost_usd == 0.5
+
+
+async def test_run_raise_reports_the_subtype_when_no_errors_listed() -> None:
     fake = RecordingQuery(_result(is_error=True, subtype="error_max_turns"))
 
-    reply = await ClaudeAgent(run_query=fake).run("go")
-
-    assert reply.error == "error_max_turns"
+    with pytest.raises(ClaudeAgentError, match="error_max_turns"):
+        await ClaudeAgent(run_query=fake).run("go")
 
 
 async def test_usage_is_taken_from_the_result_message() -> None:

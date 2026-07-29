@@ -30,19 +30,26 @@ DEFAULT_MODEL = "claude-sonnet-5"
 
 
 class ClaudeAgentError(RuntimeError):
-    """An agent call did not produce a usable reply."""
+    """An agent call did not produce a usable reply.
+
+    ``usage`` carries whatever the run accrued before it failed, so a caller
+    that accounts cost can still charge it even though the call raised.
+    """
+
+    def __init__(self, message: str, *, usage: Usage | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage if usage is not None else Usage()
 
 
 class Reply(BaseModel):
     """What one agent call returned, and what it cost."""
 
     text: str | None = None
-    error: str | None = None
     usage: Usage = Field(default_factory=Usage)
 
     @classmethod
     def from_result(cls, result: ResultMessage, text: str | None) -> Reply:
-        return cls(text=text, error=_error_of(result), usage=_usage_of(result))
+        return cls(text=text, usage=_usage_of(result))
 
 
 class AgentSpec(BaseModel):
@@ -123,6 +130,13 @@ class ClaudeAgent:
         rendered = prompt if isinstance(prompt, str) else prompt.render()
         options = self.defaults.merge(spec).to_options()
         text, result = await self._collect(rendered, options)
+        if result.is_error:
+            raise ClaudeAgentError(
+                f"agent call to model {options.model!r} failed "
+                f"(subtype={result.subtype!r}, stop_reason={result.stop_reason!r}, "
+                f"errors={_error_of(result)!r})",
+                usage=_usage_of(result),
+            )
         return Reply.from_result(result, text)
 
     async def run_structured[TModel: BaseModel](
@@ -168,7 +182,8 @@ def _parse_structured[TModel: BaseModel](
         raise ClaudeAgentError(
             f"expected {model_type.__name__} JSON from the agent but got none "
             f"(subtype={result.subtype!r}, stop_reason={result.stop_reason!r}, "
-            f"error={_error_of(result)!r})"
+            f"error={_error_of(result)!r})",
+            usage=_usage_of(result),
         )
     return model_type.model_validate(payload)
 
