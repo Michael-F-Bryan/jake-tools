@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from jake_tools.newsletters import NewsletterClient, NewsletterError
+from jake_tools.newsletters import (
+    NewsletterAttachment,
+    NewsletterClient,
+    NewsletterError,
+)
 
 
 class FakeResponse:
@@ -109,3 +114,138 @@ def test_newsletter_client_rejects_non_mapping_json_payload() -> None:
 
     with pytest.raises(NewsletterError, match="unexpected payload"):
         client.get_item("295")
+
+
+def test_newsletter_client_truncates_error_response_body_to_500_chars() -> None:
+    long_message = "x" * 1000
+    session = FakeSession(FakeResponse(404, {"error": long_message}))
+    client = NewsletterClient(
+        token_provider=lambda resource: "token",
+        session=session,
+    )
+
+    with pytest.raises(NewsletterError) as raised:
+        client.get_item("295")
+
+    message = str(raised.value)
+    assert "404" in message
+    assert "GET" in message
+    assert long_message not in message
+    assert "x" * 100 in message
+
+
+def test_newsletter_client_create_item_creates_then_fetches() -> None:
+    # create_item POSTs the new item, then re-fetches it by id (so the
+    # returned NewsletterItem reflects what Graph actually persisted,
+    # including any server-assigned fields) rather than trusting the create
+    # response alone.
+    session = FakeSession(
+        FakeResponse(201, {"id": "296"}),
+        FakeResponse(
+            200,
+            {
+                "id": "296",
+                "webUrl": "https://example.test/296",
+                "fields": {
+                    "Title": "New item",
+                    "Body": "<p>Body text.</p>",
+                    "Created": "2026-06-21T01:00:00Z",
+                    "Modified": "2026-06-21T01:00:00Z",
+                },
+            },
+        ),
+    )
+    client = NewsletterClient(token_provider=lambda resource: "token", session=session)
+
+    item = client.create_item(title="New item", body="Body text.")
+
+    assert item.id == "296"
+    assert item.title == "New item"
+    assert item.body == "Body text."
+    assert len(session.requests) == 2
+    assert session.requests[0]["method"] == "POST"
+    assert session.requests[0]["url"].endswith("/items")
+    assert session.requests[0]["json"] == {
+        "fields": {"Title": "New item", "Body": "<p>Body text.</p>"}
+    }
+    assert session.requests[1]["method"] == "GET"
+    assert session.requests[1]["url"].endswith("/items/296?$expand=fields")
+
+
+def test_newsletter_client_update_item_skips_patch_when_no_fields_change() -> None:
+    # No title/body change and no attachments means there is nothing to
+    # PATCH; update_item should only re-fetch the item, not send an empty
+    # (or accidentally destructive) PATCH request.
+    session = FakeSession(
+        FakeResponse(
+            200,
+            {
+                "id": "295",
+                "webUrl": "https://example.test/295",
+                "fields": {
+                    "Title": "Existing title",
+                    "Body": "",
+                    "Created": "2026-06-20T10:52:41Z",
+                    "Modified": "2026-06-20T10:52:41Z",
+                },
+            },
+        ),
+    )
+    client = NewsletterClient(token_provider=lambda resource: "token", session=session)
+
+    item = client.update_item("295", title=None, body=None)
+
+    assert item.title == "Existing title"
+    assert len(session.requests) == 1
+    assert session.requests[0]["method"] == "GET"
+
+
+def test_newsletter_client_update_item_patches_only_the_given_fields() -> None:
+    session = FakeSession(
+        FakeResponse(200, {}),
+        FakeResponse(
+            200,
+            {
+                "id": "295",
+                "webUrl": "https://example.test/295",
+                "fields": {"Title": "Updated title"},
+            },
+        ),
+    )
+    client = NewsletterClient(token_provider=lambda resource: "token", session=session)
+
+    item = client.update_item("295", title="Updated title", body=None)
+
+    assert item.title == "Updated title"
+    assert len(session.requests) == 2
+    assert session.requests[0]["method"] == "PATCH"
+    assert session.requests[0]["json"] == {"Title": "Updated title"}
+    assert session.requests[1]["method"] == "GET"
+
+
+def test_newsletter_client_add_attachment_escapes_apostrophe_in_filename(
+    tmp_path: Path,
+) -> None:
+    # Document the current escaping: OData doubles an embedded single quote
+    # ("'" -> "''") before percent-encoding the whole filename, so a literal
+    # apostrophe ends up as %27%27 in the request URL.
+    attachment_path = tmp_path / "Mum's Notes.pdf"
+    attachment_path.write_bytes(b"fake pdf bytes")
+    session = FakeSession(FakeResponse(200, {}))
+    client = NewsletterClient(
+        token_provider=lambda resource: "token",
+        sharepoint_root="https://sharepoint.example.test/_api",
+        list_id="list-id",
+        session=session,
+    )
+
+    client.add_attachment("295", NewsletterAttachment(attachment_path))
+
+    assert len(session.requests) == 1
+    request = session.requests[0]
+    assert request["method"] == "POST"
+    assert request["url"] == (
+        "https://sharepoint.example.test/_api/web/lists(guid'list-id')/items(295)"
+        "/AttachmentFiles/add(FileName='Mum%27%27s%20Notes.pdf')"
+    )
+    assert request["data"] == b"fake pdf bytes"

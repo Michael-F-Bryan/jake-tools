@@ -172,6 +172,27 @@ def test_edit_requires_at_least_one_change() -> None:
     assert "nothing to update" in result.output
 
 
+def test_edit_rejects_non_numeric_item_id_before_any_client_call(
+    monkeypatch,
+) -> None:
+    # item_id is interpolated directly into Graph/SharePoint URLs, so a
+    # malformed id must fail at argument parsing, before NewsletterClient
+    # is ever constructed or called.
+    def fail_if_constructed() -> None:
+        raise AssertionError("NewsletterClient must not be constructed")
+
+    monkeypatch.setattr(newsletter_cli, "NewsletterClient", fail_if_constructed)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        newsletter,
+        ["edit", "not-an-id", "--title", "x"],
+    )
+
+    assert result.exit_code != 0
+    assert "not a valid newsletter item id" in result.output
+
+
 def test_edit_title_only_succeeds_with_no_stdin_body(monkeypatch) -> None:
     client = FakeNewsletterClient()
     monkeypatch.setattr(newsletter_cli, "NewsletterClient", lambda: client)

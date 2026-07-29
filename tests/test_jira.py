@@ -36,7 +36,9 @@ def completed(payload: object) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_acli_jira_client_hydrates_active_assigned_issues() -> None:
+def test_acli_jira_client_fetches_active_assigned_issues_in_one_search() -> None:
+    # A single search call carries issuetype/parent directly instead of a
+    # search followed by a per-result "workitem view" subprocess.
     runner = FakeCommandRunner(
         completed(
             [
@@ -48,29 +50,27 @@ def test_acli_jira_client_hydrates_active_assigned_issues() -> None:
                             "name": "In Progress",
                             "statusCategory": {"name": "In Progress"},
                         },
-                    },
-                }
-            ]
-        ),
-        completed(
-            {
-                "key": "SF-427",
-                "fields": {
-                    "summary": "Evaluate PX4 external control methods",
-                    "status": {
-                        "name": "In Progress",
-                        "statusCategory": {"name": "In Progress"},
-                    },
-                    "issuetype": {"name": "Task"},
-                    "assignee": {"displayName": "Michael Bryan"},
-                    "parent": {
-                        "key": "SF-131",
-                        "fields": {
-                            "summary": "Production Vehicle - Investigations and Overhead"
+                        "issuetype": {"name": "Task"},
+                        "parent": {
+                            "key": "SF-131",
+                            "fields": {
+                                "summary": "Production Vehicle - Investigations and Overhead"
+                            },
                         },
                     },
                 },
-            }
+                {
+                    "key": "SF-1",
+                    "fields": {
+                        "summary": "Simulator work",
+                        "status": {
+                            "name": "In Progress",
+                            "statusCategory": {"name": "In Progress"},
+                        },
+                        "issuetype": {"name": "Project / Phase"},
+                    },
+                },
+            ]
         ),
     )
     client = AcliJiraClient(runner=runner)
@@ -83,12 +83,19 @@ def test_acli_jira_client_hydrates_active_assigned_issues() -> None:
             summary="Evaluate PX4 external control methods",
             status="In Progress",
             statusCategory="In Progress",
-            assignee="Michael Bryan",
             issueType="Task",
             parentKey="SF-131",
             parentSummary="Production Vehicle - Investigations and Overhead",
-        )
+        ),
+        JiraIssue(
+            key="SF-1",
+            summary="Simulator work",
+            status="In Progress",
+            statusCategory="In Progress",
+            issueType="Project / Phase",
+        ),
     ]
+    assert len(runner.commands) == 1
     assert runner.commands[0] == [
         "acli",
         "jira",
@@ -97,19 +104,9 @@ def test_acli_jira_client_hydrates_active_assigned_issues() -> None:
         "--jql",
         'project = SF AND assignee = currentUser() AND status in ("In Progress", "Blocked", "In Review") ORDER BY key',
         "--fields",
-        "key,summary,status,priority",
+        "key,summary,status,issuetype,parent",
         "--json",
         "--paginate",
-    ]
-    assert runner.commands[1] == [
-        "acli",
-        "jira",
-        "workitem",
-        "view",
-        "SF-427",
-        "--fields",
-        "*all",
-        "--json",
     ]
 
 
@@ -177,6 +174,11 @@ def test_acli_jira_client_batches_issue_lookup_by_key() -> None:
                             "statusCategory": {"name": "Done"},
                         },
                         "assignee": {"displayName": "Michael Bryan"},
+                        "issuetype": {"name": "Task"},
+                        "parent": {
+                            "key": "SF-131",
+                            "fields": {"summary": "Production Vehicle"},
+                        },
                     },
                 },
                 {
@@ -199,8 +201,11 @@ def test_acli_jira_client_batches_issue_lookup_by_key() -> None:
 
     assert [issue.key for issue in issues] == ["SF-304", "SF-438"]
     assert issues[0].status_category == "Done"
+    assert issues[0].issue_type == "Task"
+    assert issues[0].parent_key == "SF-131"
     assert issues[1].assignee is None
     assert runner.commands[0][5] == "key in (SF-304,SF-438) ORDER BY key"
+    assert runner.commands[0][7] == "key,summary,status,assignee,issuetype,parent"
     assert runner.commands[0][-1] == "--paginate"
 
 

@@ -7,10 +7,12 @@ import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import cast
 
 import requests
 from pydantic import BaseModel, ConfigDict, Field
+
+from .http import HttpSession
 
 CSU_TENANT_ID = "0a3a5574-cfda-4314-952e-c0b3e1dcac6d"
 CSU_SITE_HOST = "csuses.sharepoint.com"
@@ -23,10 +25,6 @@ GRAPH_RESOURCE = "https://graph.microsoft.com"
 SHAREPOINT_RESOURCE = f"https://{CSU_SITE_HOST}"
 
 JsonObject = dict[str, object]
-
-
-class HttpSession(Protocol):
-    def request(self, method: str, url: str, **kwargs: Any) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -94,7 +92,27 @@ class GraphCreatedListItem(BaseModel):
 
 
 class AzureCliTokenProvider:
+    """Fetches a Microsoft Graph access token via the Azure CLI.
+
+    `az account get-access-token` spawns a subprocess (~1s). A single HTTP
+    call site can request the same resource's token repeatedly within one
+    process run (e.g. create_item with attachments calls _graph and
+    _sharepoint several times), so cache each resource's token for the
+    process lifetime instead of re-shelling out every call.
+    """
+
+    def __init__(self) -> None:
+        self._cache: dict[str, str] = {}
+
     def __call__(self, resource: str = GRAPH_RESOURCE) -> str:
+        cached = self._cache.get(resource)
+        if cached is not None:
+            return cached
+        token = self._fetch(resource)
+        self._cache[resource] = token
+        return token
+
+    def _fetch(self, resource: str) -> str:
         try:
             return subprocess.check_output(
                 [
@@ -257,8 +275,10 @@ class NewsletterClient:
             raise NewsletterError(f"newsletter request failed: {exc}") from exc
 
         if response.status_code >= 400:
+            error_body = str(response.text)[:500]
             raise NewsletterError(
-                f"newsletter request failed: {response.status_code} {response.reason}\n{response.text}"
+                f"newsletter request failed for {method} {url}: "
+                f"{response.status_code} {response.reason}\n{error_body}"
             )
 
         if response.status_code == 204 or not response.content:

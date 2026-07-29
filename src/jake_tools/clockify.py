@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Literal, Protocol, TypeVar
+from typing import Any, Literal, TypeVar
 
 import requests
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
+from .http import HttpSession
 from .jira import normalise_jira_key
 
 CLOCKIFY_API_ROOT = "https://api.clockify.me/api/v1"
@@ -14,10 +15,6 @@ JsonObject = dict[str, object]
 JsonValue = JsonObject | list[object] | str | int | float | bool | None
 TaskStatus = Literal["ACTIVE", "DONE"]
 ModelT = TypeVar("ModelT", bound=BaseModel)
-
-
-class HttpSession(Protocol):
-    def request(self, method: str, url: str, **kwargs: Any) -> Any: ...
 
 
 class ClockifyError(RuntimeError):
@@ -103,6 +100,12 @@ class JiraIssueRef(BaseModel):
 
 
 class ClockifyClient:
+    # Clockify caps each list response at this many records; a page shorter
+    # than this is the last one. A private class attribute (rather than a
+    # bare literal at each call site) so tests can shrink it to exercise the
+    # continuation logic without building a 5000-record fixture.
+    _PAGE_SIZE: int = 5000
+
     def __init__(
         self,
         *,
@@ -124,8 +127,7 @@ class ClockifyClient:
 
     def get_clients(self, workspace_id: str) -> list[ClockifyClientRecord]:
         path = f"/workspaces/{workspace_id}/clients"
-        data = self._request_json("GET", path, params={"page-size": 5000})
-        return self._validate_list(ClockifyClientRecord, data, path)
+        return self._get_paginated_list(ClockifyClientRecord, path, params={})
 
     def get_projects(
         self,
@@ -134,16 +136,14 @@ class ClockifyClient:
         archived: bool,
     ) -> list[ClockifyProject]:
         path = f"/workspaces/{workspace_id}/projects"
-        data = self._request_json(
-            "GET",
+        projects = self._get_paginated_list(
+            ClockifyProject,
             path,
             params={
                 "archived": str(archived).lower(),
                 "hydrated": "false",
-                "page-size": 5000,
             },
         )
-        projects = self._validate_list(ClockifyProject, data, path)
         return [project for project in projects if project.archived is archived]
 
     def get_project(self, workspace_id: str, project_id: str) -> ClockifyProject:
@@ -162,15 +162,11 @@ class ClockifyClient:
         active: bool,
     ) -> list[ClockifyTask]:
         path = f"/workspaces/{workspace_id}/projects/{project_id}/tasks"
-        data = self._request_json(
-            "GET",
+        return self._get_paginated_list(
+            ClockifyTask,
             path,
-            params={
-                "is-active": str(active).lower(),
-                "page-size": 5000,
-            },
+            params={"is-active": str(active).lower()},
         )
-        return self._validate_list(ClockifyTask, data, path)
 
     def get_task(
         self,
@@ -251,6 +247,24 @@ class ClockifyClient:
         name: str | None = None,
         status: TaskStatus | None = None,
     ) -> ClockifyTask:
+        """Rename and/or change the status of a task.
+
+        Any field not being changed is carried forward from `task` (the
+        caller's snapshot of the record, typically taken when a sync plan
+        was built). Since that snapshot can be stale by the time this runs,
+        re-fetch the task first and refuse to write if it has drifted from
+        the snapshot: otherwise a rename-only call would silently PUT back
+        the snapshot's stale status, clobbering a status change that
+        happened remotely in between.
+        """
+        current = self.get_task(workspace_id, task.project_id, task.id)
+        if current.name != task.name or current.status != task.status:
+            raise ClockifyError(
+                f"Clockify task {task.id} has drifted since the sync plan was built: "
+                f"expected name={task.name!r} status={task.status!r}, "
+                f"found name={current.name!r} status={current.status!r}"
+            )
+
         path = f"/workspaces/{workspace_id}/projects/{task.project_id}/tasks/{task.id}"
         payload: JsonObject = {
             "name": name if name is not None else task.name,
@@ -261,6 +275,24 @@ class ClockifyClient:
             self._request_json("PUT", path, payload=payload),
             path,
         )
+
+    def _get_paginated_list(
+        self,
+        model: type[ModelT],
+        path: str,
+        *,
+        params: dict[str, object],
+    ) -> list[ModelT]:
+        results: list[ModelT] = []
+        page = 1
+        while True:
+            page_params = {**params, "page-size": self._PAGE_SIZE, "page": page}
+            data = self._request_json("GET", path, params=page_params)
+            items = self._validate_list(model, data, path)
+            results.extend(items)
+            if len(items) < self._PAGE_SIZE:
+                return results
+            page += 1
 
     def _request_json(
         self,
@@ -293,9 +325,10 @@ class ClockifyClient:
             ) from exc
 
         if response.status_code >= 400:
+            body = str(response.text)[:500]
             raise ClockifyError(
                 f"Clockify request failed for {method} {path}: "
-                f"{response.status_code} {response.reason}\n{response.text}"
+                f"{response.status_code} {response.reason}\n{body}"
             )
 
         if not response.content:

@@ -196,12 +196,45 @@ def test_clockify_lists_active_clients_and_projects() -> None:
             clientId="client-1",
         )
     ]
-    assert session.requests[0]["params"] == {"page-size": 5000}
+    assert session.requests[0]["params"] == {"page-size": 5000, "page": 1}
     assert session.requests[1]["params"] == {
         "archived": "false",
         "hydrated": "false",
         "page-size": 5000,
+        "page": 1,
     }
+
+
+def test_clockify_get_projects_paginates_until_a_short_page() -> None:
+    def project_payload(index: int) -> dict[str, object]:
+        return {
+            "id": f"project-{index}",
+            "name": f"Project {index}",
+            "note": "",
+            "archived": False,
+            "billable": False,
+            "color": "#689F38",
+            "public": True,
+            "clientId": "client-1",
+        }
+
+    session = FakeSession(
+        FakeResponse(200, [project_payload(1), project_payload(2)]),
+        FakeResponse(200, [project_payload(3)]),
+    )
+    client = ClockifyClient(api_key="secret-key", session=session)
+    client._PAGE_SIZE = 2  # shrink the page so a 2-page fixture is enough
+
+    projects = client.get_projects("workspace-1", archived=False)
+
+    assert [project.id for project in projects] == [
+        "project-1",
+        "project-2",
+        "project-3",
+    ]
+    assert len(session.requests) == 2
+    assert session.requests[0]["params"]["page"] == 1
+    assert session.requests[1]["params"]["page"] == 2
 
 
 def test_clockify_lists_active_and_done_tasks() -> None:
@@ -244,10 +277,12 @@ def test_clockify_lists_active_and_done_tasks() -> None:
     assert session.requests[0]["params"] == {
         "is-active": "true",
         "page-size": 5000,
+        "page": 1,
     }
     assert session.requests[1]["params"] == {
         "is-active": "false",
         "page-size": 5000,
+        "page": 1,
     }
 
 
@@ -387,7 +422,27 @@ def test_clockify_updates_project_name_without_losing_metadata() -> None:
 
 
 def test_clockify_renames_and_completes_task() -> None:
+    # Each update_task call re-fetches the task first to check for drift
+    # (GET), then writes (PUT): four requests for two update_task calls.
     session = FakeSession(
+        FakeResponse(
+            200,
+            {
+                "id": "task-1",
+                "name": "SF-305 Wet test PX4 using Tom's thesis bot",
+                "projectId": "project-1",
+                "status": "ACTIVE",
+            },
+        ),
+        FakeResponse(
+            200,
+            {
+                "id": "task-1",
+                "name": "SF-305 Wet test PX4 using Zoda",
+                "projectId": "project-1",
+                "status": "ACTIVE",
+            },
+        ),
         FakeResponse(
             200,
             {
@@ -427,11 +482,47 @@ def test_clockify_renames_and_completes_task() -> None:
     )
 
     assert completed.status == "DONE"
-    assert session.requests[0]["json"] == {
+    assert session.requests[0]["method"] == "GET"
+    assert session.requests[1]["json"] == {
         "name": "SF-305 Wet test PX4 using Zoda",
         "status": "ACTIVE",
     }
-    assert session.requests[1]["json"] == {
+    assert session.requests[2]["method"] == "GET"
+    assert session.requests[3]["json"] == {
         "name": "SF-305 Wet test PX4 using Zoda",
         "status": "DONE",
     }
+
+
+def test_clockify_update_task_aborts_when_remote_record_has_drifted() -> None:
+    # The plan was built when the task was ACTIVE, but the pre-write re-fetch
+    # finds it DONE (e.g. someone completed it in the Clockify UI meanwhile).
+    # update_task must refuse to write instead of silently reverting it.
+    session = FakeSession(
+        FakeResponse(
+            200,
+            {
+                "id": "task-1",
+                "name": "SF-305 Wet test PX4 using Zoda",
+                "projectId": "project-1",
+                "status": "DONE",
+            },
+        ),
+    )
+    client = ClockifyClient(api_key="secret-key", session=session)
+    stale_snapshot = ClockifyTask(
+        id="task-1",
+        name="SF-305 Wet test PX4 using Zoda",
+        projectId="project-1",
+        status="ACTIVE",
+    )
+
+    with pytest.raises(ClockifyError, match="drifted"):
+        client.update_task(
+            "workspace-1",
+            stale_snapshot,
+            name="SF-305 Wet test PX4 using Zoda v2",
+        )
+
+    # No write was attempted once drift was detected.
+    assert len(session.requests) == 1

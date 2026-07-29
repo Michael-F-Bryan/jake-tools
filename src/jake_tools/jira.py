@@ -115,11 +115,11 @@ class AcliJiraClient:
             f"project = {project} AND assignee = currentUser() "
             f"AND status in ({statuses}) ORDER BY key"
         )
-        candidates = self._search(
-            jql,
-            fields="key,summary,status,priority",
-        )
-        return [self._view(issue.key) for issue in candidates]
+        # One search call fetches everything the planner needs (issue type
+        # and parent), instead of a search followed by a per-result
+        # "workitem view" subprocess just to hydrate those two fields.
+        # assignee is omitted: the JQL already scopes to currentUser().
+        return self._search(jql, fields="key,summary,status,issuetype,parent")
 
     def get_issue(self, key: str) -> JiraIssue:
         return self._view(self._normalise_key(key))
@@ -130,7 +130,10 @@ class AcliJiraClient:
             return []
 
         jql = f"key in ({','.join(normalised)}) ORDER BY key"
-        return self._search(jql, fields="key,summary,status,assignee")
+        # Fetch every field JiraIssue declares so issue_type/parent_key
+        # aren't silent "not fetched" sentinels for planner logic that
+        # branches on them (e.g. Project / Phase detection).
+        return self._search(jql, fields="key,summary,status,assignee,issuetype,parent")
 
     def _search(self, jql: str, *, fields: str) -> list[JiraIssue]:
         payload = self._run_json(

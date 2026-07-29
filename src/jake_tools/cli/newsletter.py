@@ -14,6 +14,36 @@ from ..newsletters import (
 )
 
 
+class _NumericItemId(click.ParamType):
+    """A SharePoint list item id: digits only.
+
+    item_id is interpolated directly into Graph/SharePoint URL templates
+    (get_item, update_item, add_attachment), so a malformed id should fail
+    fast at the CLI boundary with a clear message instead of becoming part
+    of a request URL and failing deep inside an HTTP client.
+    """
+
+    name = "item_id"
+
+    def convert(
+        self,
+        value: str,
+        param: click.Parameter | None,
+        ctx: click.Context | None,
+    ) -> str:
+        if not value.isdigit():
+            self.fail(
+                f"{value!r} is not a valid newsletter item id "
+                "(expected a numeric SharePoint list item id)",
+                param,
+                ctx,
+            )
+        return value
+
+
+NUMERIC_ITEM_ID = _NumericItemId()
+
+
 @click.group()
 def newsletter():
     """
@@ -73,7 +103,7 @@ def add(title: str, attachments: tuple[Path, ...], as_json: bool):
 
 
 @newsletter.command()
-@click.argument("item_id")
+@click.argument("item_id", type=NUMERIC_ITEM_ID)
 @click.option("--title", help="Replace the newsletter item title.")
 @click.option(
     "--attach",
