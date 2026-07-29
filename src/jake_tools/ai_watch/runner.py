@@ -70,7 +70,7 @@ async def run_ai_watch_command(
     # stage spends money, not after every stage (including delivery) has
     # already run. Scout and curate are the only two paid stages, so this is
     # the one gate the cap needs.
-    cost_so_far = build_ai_totals(stage_stats).estimated_cost_usd
+    cost_so_far = build_ai_totals(stage_stats).usage.estimated_cost_usd
     cost_cap_exceeded = (
         options.cost_cap_usd is not None and cost_so_far > options.cost_cap_usd
     )

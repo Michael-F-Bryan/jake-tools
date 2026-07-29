@@ -7,9 +7,15 @@ translates an SDK result into a :class:`Usage`, and everything downstream
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    computed_field,
+    model_serializer,
+)
 
 if TYPE_CHECKING:
     from .claude import Reply
@@ -37,7 +43,9 @@ class Usage(BaseModel):
 
     def __add__(self, other: Usage) -> Usage:
         return Usage(
-            model=other.model if other.model is not None else self.model,
+            # A mixed-model total has no single model to report; only
+            # collapse to one name when both sides actually agree.
+            model=self.model if self.model == other.model else None,
             api_calls=self.api_calls + other.api_calls,
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
@@ -47,91 +55,40 @@ class Usage(BaseModel):
         )
 
 
+def _flatten_usage(
+    dumped: dict[str, Any], *, exclude: frozenset[str] = frozenset()
+) -> dict[str, Any]:
+    """Duplicate ``usage``'s scalar fields at the top level alongside it.
+
+    `summary.json` consumers grep the flat keys, while
+    :func:`jake_tools.ai_watch.tuning.run_tune` rehydrates the model from
+    that same file via ``model_validate_json`` — so the nested ``usage``
+    object has to survive untouched for the round trip to work.
+    """
+    extra = {key: value for key, value in dumped["usage"].items() if key not in exclude}
+    return {**dumped, **extra}
+
+
 class AIStageStats(BaseModel):
     """Per-stage usage, flattened so `summary.json` stays greppable."""
 
     stage: str
     usage: Usage = Field(default_factory=Usage)
 
-    @computed_field
-    @property
-    def model(self) -> str | None:
-        return self.usage.model
-
-    @computed_field
-    @property
-    def api_calls(self) -> int:
-        return self.usage.api_calls
-
-    @computed_field
-    @property
-    def input_tokens(self) -> int:
-        return self.usage.input_tokens
-
-    @computed_field
-    @property
-    def output_tokens(self) -> int:
-        return self.usage.output_tokens
-
-    @computed_field
-    @property
-    def cache_read_tokens(self) -> int:
-        return self.usage.cache_read_tokens
-
-    @computed_field
-    @property
-    def cache_write_tokens(self) -> int:
-        return self.usage.cache_write_tokens
-
-    @computed_field
-    @property
-    def total_tokens(self) -> int:
-        return self.usage.total_tokens
-
-    @computed_field
-    @property
-    def estimated_cost_usd(self) -> float:
-        return self.usage.estimated_cost_usd
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        return _flatten_usage(handler(self))
 
 
 class AITotals(BaseModel):
     stage_count: int = 0
     usage: Usage = Field(default_factory=Usage)
 
-    @computed_field
-    @property
-    def api_calls(self) -> int:
-        return self.usage.api_calls
-
-    @computed_field
-    @property
-    def input_tokens(self) -> int:
-        return self.usage.input_tokens
-
-    @computed_field
-    @property
-    def output_tokens(self) -> int:
-        return self.usage.output_tokens
-
-    @computed_field
-    @property
-    def cache_read_tokens(self) -> int:
-        return self.usage.cache_read_tokens
-
-    @computed_field
-    @property
-    def cache_write_tokens(self) -> int:
-        return self.usage.cache_write_tokens
-
-    @computed_field
-    @property
-    def total_tokens(self) -> int:
-        return self.usage.total_tokens
-
-    @computed_field
-    @property
-    def estimated_cost_usd(self) -> float:
-        return self.usage.estimated_cost_usd
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # Unlike AIStageStats, totals never carried a top-level `model` — a
+        # sum across stages has no single model to flatten.
+        return _flatten_usage(handler(self), exclude=frozenset({"model"}))
 
 
 def build_ai_stage_stats(stage: str, reply: Reply | None) -> AIStageStats | None:
