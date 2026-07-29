@@ -80,6 +80,7 @@ uv run pytest -q
 | `uv`                | dependency management and script runner                |
 | `claude-agent-sdk`  | LLM calls; drives the local `claude` CLI               |
 | `hermes-agent`      | `ai-watch` `web_search`/`web_extract` tool calls only  |
+| `hermes` (CLI)      | `ai-watch deliver` live send (`hermes send --to ...`)  |
 | `ffmpeg`, `scribe`  | `transcript obsidian-recording` audio pipeline         |
 | `yt-dlp`            | YouTube caption and metadata source adapter            |
 | `az` (Azure CLI)    | `newsletter` commands (Microsoft Graph token)          |

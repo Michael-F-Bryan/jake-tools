@@ -128,7 +128,7 @@ jake-tools ai-watch run --date today --dry-run --max-candidates 10
 ### CP4 — Delivery dry-run (after docs/integration tests land)
 
 ```bash
-jake-tools ai-watch deliver --date today --target discord --dry-run
+jake-tools ai-watch deliver --date today --discord-target discord --dry-run
 ```
 
 **Pass:** `delivery-payload.txt` readable and under Discord limits; empty digest → `status: skipped` in `delivery.jsonl`, no send; surfaced items include Obsidian paths in payload.
