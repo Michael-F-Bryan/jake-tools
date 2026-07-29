@@ -6,14 +6,19 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
-from .audit import read_models, truncate_records
+from ..ai_usage import AITotals
+from .audit import load_model, read_models, truncate_records
 from .audit_models import (
     CuratorDecisionRecord,
     CuratorDecisionType,
     ObsidianSyncRecord,
+    RunManifest,
     ScoutEvaluationRecord,
 )
-from .models import AiWatchCommandOptions, DigestLane
+from .delivery import build_discord_payload
+from .digest import run_digest
+from .manifest import write_manifest
+from .models import AiWatchCommandOptions, DigestLane, RunStatus
 from .paths import AiWatchPaths
 
 
@@ -24,6 +29,13 @@ class SurfacePolicyResult:
     demoted_count: int
     removed_note_count: int = 0
     skipped_note_paths: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TuneResult:
+    surface_policy: SurfacePolicyResult
+    surfaced: int
+    speculative: int
 
 
 MONTHS = {
@@ -235,10 +247,18 @@ def apply_surface_policy(
         record.candidate_id: record
         for record in read_models(paths.scout_evaluations, ScoutEvaluationRecord)
     }
+    # Hard-demoted items never compete for a surface slot: including them here
+    # would let a condemned top-ranked article consume a limit slot instead of
+    # an eligible one, shipping the digest under the configured limit.
+    eligible_records = [
+        record
+        for record in surface_records
+        if record.candidate_id not in hard_demotions
+    ]
     keep_ids = {
         record.candidate_id
         for record in sorted(
-            surface_records,
+            eligible_records,
             key=lambda record: _surface_rank(record, scouts),
             reverse=True,
         )[:surface_limit]
@@ -289,8 +309,53 @@ def apply_surface_policy(
 
     return SurfacePolicyResult(
         before_surface_count=before_surface_count,
-        after_surface_count=len(keep_ids - set(hard_demotions)),
+        after_surface_count=len(keep_ids),
         demoted_count=len(demoted_originals),
         removed_note_count=removed_note_count,
         skipped_note_paths=skipped_note_paths,
+    )
+
+
+def run_tune(
+    *,
+    options: AiWatchCommandOptions,
+    paths: AiWatchPaths,
+    remove_notes: bool = False,
+) -> TuneResult:
+    """Re-apply the surface policy, re-render the digest, and refresh counts.
+
+    Tuning only revises which items surface; it never re-runs the paid
+    stages, so it must not silently turn a FAILED run into an OK one. The
+    prior manifest's status and failed_stages are preserved verbatim.
+    """
+    surface_policy = apply_surface_policy(
+        options=options, paths=paths, remove_notes=remove_notes
+    )
+    surfaced, speculative = run_digest(options=options, paths=paths)
+    digest_text = paths.digest.read_text(encoding="utf-8")
+    (paths.root / "delivery-payload.txt").write_text(
+        build_discord_payload(digest_text) if surfaced else digest_text,
+        encoding="utf-8",
+    )
+    summary = (
+        AITotals.model_validate_json(paths.summary.read_text(encoding="utf-8"))
+        if paths.summary.exists()
+        else AITotals()
+    )
+    previous_manifest = (
+        load_model(paths.manifest, RunManifest) if paths.manifest.exists() else None
+    )
+    status = previous_manifest.status if previous_manifest else RunStatus.OK
+    failed_stages = previous_manifest.failed_stages if previous_manifest else []
+    write_manifest(
+        paths=paths,
+        options=options,
+        status=status,
+        surfaced_count=surfaced,
+        speculative_count=speculative,
+        failed_stages=failed_stages,
+        summary=summary,
+    )
+    return TuneResult(
+        surface_policy=surface_policy, surfaced=surfaced, speculative=speculative
     )

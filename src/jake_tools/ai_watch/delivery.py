@@ -208,16 +208,22 @@ def run_delivery(
     digest_text = (
         paths.digest.read_text(encoding="utf-8") if paths.digest.exists() else ""
     )
-    if digest_text.startswith("_No items"):
-        surfaced_count = 0
-    else:
-        surfaced_count = sum(
-            1 for line in digest_text.splitlines() if line.startswith("## ")
-        )
+    curator_decisions = read_models(paths.curator_decisions, CuratorDecisionRecord)
+    # Counts come from the typed curator decisions, not from sniffing the
+    # rendered digest markdown: an item summary containing a literal "## "
+    # line would otherwise inflate the surfaced count. The digest file is
+    # rendering output only.
+    surfaced_count = len(
+        [
+            record
+            for record in curator_decisions
+            if record.decision == CuratorDecisionType.SURFACE
+        ]
+    )
     speculative_count = len(
         [
             record
-            for record in read_models(paths.curator_decisions, CuratorDecisionRecord)
+            for record in curator_decisions
             if record.decision == CuratorDecisionType.SPECULATIVE_WATCH
         ]
     )

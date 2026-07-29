@@ -13,7 +13,7 @@ def test_seen_index_round_trip(tmp_path: Path) -> None:
         title="Post",
         source="test",
     )
-    seen = state.check_seen(url="https://example.com/post", title="Post")
+    seen = state.check_seen(url="https://example.com/post")
     assert seen is not None
     assert seen.candidate_id == "sha256:abc"
 
@@ -26,6 +26,6 @@ def test_check_seen_skips_duplicate_url(tmp_path: Path) -> None:
         title="Post",
         source="test",
     )
-    seen = state.check_seen(url="https://example.com/post", title="Post")
+    seen = state.check_seen(url="https://example.com/post")
     assert seen is not None
     assert seen.candidate_id == "sha256:first"

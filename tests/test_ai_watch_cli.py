@@ -104,6 +104,7 @@ def test_ai_watch_fetch_exits_nonzero_on_runtime_error(
     )
 
     assert result.exit_code == 1
+    assert "error: fetch validation failed" in result.output
 
 
 def test_ai_watch_scout_exits_nonzero_on_runtime_error(
@@ -121,3 +122,23 @@ def test_ai_watch_scout_exits_nonzero_on_runtime_error(
     )
 
     assert result.exit_code == 1
+    assert "error: scout validation failed" in result.output
+
+
+def test_ai_watch_deliver_rejects_removed_target_flag(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        main,
+        [
+            "ai-watch",
+            "deliver",
+            "--date",
+            "2026-07-02",
+            "--base-dir",
+            str(tmp_path),
+            "--target",
+            "discord",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "no such option" in result.output.lower()

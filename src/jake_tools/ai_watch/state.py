@@ -24,8 +24,8 @@ class SeenIndex:
             records[row.candidate_id] = row
         return records
 
-    def check_seen(self, *, url: str, title: str = "") -> SeenCandidateRecord | None:
-        candidate_id = candidate_id_for(url=url, title=title)
+    def check_seen(self, *, url: str) -> SeenCandidateRecord | None:
+        candidate_id = candidate_id_for(url=url)
         canonical = url.strip().rstrip("/").lower()
         if candidate_id in self._records:
             return self._records[candidate_id]

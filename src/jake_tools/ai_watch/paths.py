@@ -13,7 +13,6 @@ class AiWatchPaths(BaseModel):
     root: Path
     state_root: Path
     articles: Path
-    raw: Path
     prompts: Path
     evidence: Path
     manifest: Path
@@ -24,6 +23,7 @@ class AiWatchPaths(BaseModel):
     candidates: Path
     fetch_results: Path
     scout_evaluations: Path
+    scout_failures: Path
     curator_decisions: Path
     obsidian_sync: Path
     delivery: Path
@@ -37,7 +37,6 @@ class AiWatchPaths(BaseModel):
             root=root,
             state_root=state_root,
             articles=root / "articles",
-            raw=root / "raw",
             prompts=root / "prompts",
             evidence=root / "evidence",
             manifest=root / "manifest.json",
@@ -48,6 +47,7 @@ class AiWatchPaths(BaseModel):
             candidates=root / "candidates.jsonl",
             fetch_results=root / "fetch-results.jsonl",
             scout_evaluations=root / "scout-evaluations.jsonl",
+            scout_failures=root / "scout-failures.jsonl",
             curator_decisions=root / "curator-decisions.jsonl",
             obsidian_sync=root / "obsidian-sync.jsonl",
             delivery=root / "delivery.jsonl",
@@ -57,7 +57,6 @@ class AiWatchPaths(BaseModel):
         for directory in [
             self.root,
             self.articles,
-            self.raw,
             self.prompts,
             self.evidence,
             self.state_root,
@@ -70,6 +69,3 @@ class AiWatchPaths(BaseModel):
 
     def article_metadata(self, candidate_id: str) -> Path:
         return self.articles / f"{candidate_id}.metadata.json"
-
-    def raw_html(self, candidate_id: str) -> Path:
-        return self.raw / f"{candidate_id}.html"

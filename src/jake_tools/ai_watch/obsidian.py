@@ -14,8 +14,10 @@ from .audit_models import (
     ScoutEvaluationRecord,
 )
 from .cleanup import strip_page_chrome
-from .models import AiWatchCommandOptions
+from .models import AiWatchCommandOptions, resolve_vault_path
 from .paths import AiWatchPaths
+
+_FALLBACK_TITLE_MAX_CHARS = 150
 
 
 @dataclass
@@ -31,6 +33,17 @@ def _placement_fallback(tags: list[str], title: str) -> str:
     if any(token in joined for token in ("ui", "interface", "design")):
         return "3 Resources/Software Design & Architecture"
     return "3 Resources/AI"
+
+
+def _sanitize_fallback_title(title: str) -> str:
+    """Strip path separators and cap length before using a title as a filename.
+
+    Curator-provided titles are free text; without this a `/` creates
+    unintended subdirectories and an unbounded title can blow past filesystem
+    filename limits.
+    """
+    cleaned = title.replace("/", "-").replace("\\", "-").strip()
+    return (cleaned or "untitled")[:_FALLBACK_TITLE_MAX_CHARS].rstrip()
 
 
 def render_obsidian_note(
@@ -101,11 +114,14 @@ def run_obsidian_sync(
         )
         scout_record = scout_by_id.get(candidate_id)
         if not rel_path:
-            rel_path = (
-                f"{_placement_fallback(scout_record.tags if scout_record else [], metadata.title if metadata else candidate_id)}/"
-                f"{metadata.title if metadata else candidate_id}.md"
+            fallback_title = _sanitize_fallback_title(
+                metadata.title if metadata else candidate_id
             )
-        note_path = vault / rel_path
+            rel_path = (
+                f"{_placement_fallback(scout_record.tags if scout_record else [], fallback_title)}/"
+                f"{fallback_title}.md"
+            )
+        note_path = resolve_vault_path(vault=vault, rel_path=rel_path)
         raw_body = (
             markdown_path.read_text(encoding="utf-8") if markdown_path.exists() else ""
         )

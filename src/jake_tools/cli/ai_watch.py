@@ -6,22 +6,20 @@ from pathlib import Path
 
 import click
 
-from ..ai_usage import AITotals
 from ..ai_watch.collect import run_collect
 from ..ai_watch.config import resolve_discord_target
 from ..ai_watch.curate import run_curate
-from ..ai_watch.delivery import build_discord_payload, run_delivery
+from ..ai_watch.delivery import run_delivery
 from ..ai_watch.digest import run_digest
 from ..ai_watch.fetch import run_fetch
-from ..ai_watch.manifest import write_manifest
-from ..ai_watch.models import AiWatchCommandOptions, RunStatus
+from ..ai_watch.models import AiWatchCommandOptions, AiWatchStageError, RunStatus
 from ..ai_watch.obsidian import run_obsidian_sync
 from ..ai_watch.paths import AiWatchPaths
 from ..ai_watch.runner import run_ai_watch_command
 from ..ai_watch.scout import run_scout
 from ..ai_watch.stages import ClaudeAiWatchStages
 from ..ai_watch.state import SeenIndex
-from ..ai_watch.tuning import apply_surface_policy
+from ..ai_watch.tuning import run_tune
 from ..ai_watch.web_tools import HermesWebTools
 from ..claude import ClaudeAgent
 from .options import coro
@@ -153,7 +151,7 @@ async def scout(
         scout_model=scout_model,
     )
     await _run_agent_stage(
-        run_scout(
+        lambda: run_scout(
             options=options,
             paths=paths,
             stages=ClaudeAiWatchStages(ClaudeAgent()),
@@ -188,7 +186,7 @@ async def curate(
         force_candidate=force_candidate,
     )
     await _run_agent_stage(
-        run_curate(
+        lambda: run_curate(
             options=options,
             paths=paths,
             stages=ClaudeAiWatchStages(ClaudeAgent()),
@@ -251,7 +249,6 @@ def digest(
 
 @ai_watch.command()
 @_common_options
-@click.option("--target", "delivery_target", default="discord", show_default=True)
 @click.option("--discord-target", default="")
 def deliver(
     target_date: date,
@@ -260,7 +257,6 @@ def deliver(
     max_candidates: int,
     calibration_only: bool,
     as_json: bool,
-    delivery_target: str,
     discord_target: str,
 ) -> None:
     paths = AiWatchPaths.for_date(base_dir, target_date)
@@ -273,7 +269,7 @@ def deliver(
         discord_target=resolve_discord_target(discord_target),
     )
     result = run_delivery(options=options, paths=paths)
-    _emit_stage({**result.__dict__, "target": delivery_target}, as_json=as_json)
+    _emit_stage(result.__dict__, as_json=as_json)
 
 
 @ai_watch.command("tune")
@@ -312,36 +308,16 @@ def tune(
         max_article_age_days=max_article_age_days,
         vault_path=vault_path,
     )
-    result = apply_surface_policy(
+    result = run_tune(
         options=options,
         paths=paths,
         remove_notes=remove_unsurfaced_notes and not dry_run,
     )
-    surfaced, speculative = run_digest(options=options, paths=paths)
-    digest_text = paths.digest.read_text(encoding="utf-8")
-    (paths.root / "delivery-payload.txt").write_text(
-        build_discord_payload(digest_text) if surfaced else digest_text,
-        encoding="utf-8",
-    )
-    summary = (
-        AITotals.model_validate_json(paths.summary.read_text(encoding="utf-8"))
-        if paths.summary.exists()
-        else AITotals()
-    )
-    write_manifest(
-        paths=paths,
-        options=options,
-        status=RunStatus.OK,
-        surfaced_count=surfaced,
-        speculative_count=speculative,
-        failed_stages=[],
-        summary=summary,
-    )
     _emit_stage(
         {
-            **result.__dict__,
-            "digest_surfaced": surfaced,
-            "digest_speculative": speculative,
+            **result.surface_policy.__dict__,
+            "digest_surfaced": result.surfaced,
+            "digest_speculative": result.speculative,
         },
         as_json=as_json,
     )
@@ -411,8 +387,8 @@ async def run(
         click.echo(f"digest: {result.digest_path}")
         if result.failed_stages:
             click.echo("failed stages:")
-            for stage in result.failed_stages:
-                click.echo(f"- {stage}")
+            for failure in result.failed_stages:
+                click.echo(f"- {failure.stage}: {failure.error}")
     if result.status == RunStatus.FAIL:
         raise click.exceptions.Exit(1)
 
@@ -455,17 +431,25 @@ def _run_stage(stage_fn, *, as_json: bool):
     """Render a deterministic stage's result, exiting non-zero on failure."""
     try:
         result = stage_fn()
-    except RuntimeError as error:
+    except (RuntimeError, AiWatchStageError) as error:
+        click.echo(f"error: {error}", err=True)
         raise click.exceptions.Exit(1) from error
     _emit_stage(result.__dict__, as_json=as_json)
     return result
 
 
-async def _run_agent_stage(stage, *, as_json: bool):
-    """Same, for a stage that awaits the agent."""
+async def _run_agent_stage(stage_fn, *, as_json: bool):
+    """Same as _run_stage, for a stage that awaits the agent.
+
+    Takes a zero-arg callable (not an already-created coroutine) so the call
+    itself happens inside the try block, same as _run_stage's lambda - a
+    stage that raises synchronously before returning a coroutine is still
+    caught and reported here.
+    """
     try:
-        result = await stage
-    except RuntimeError as error:
+        result = await stage_fn()
+    except (RuntimeError, AiWatchStageError) as error:
+        click.echo(f"error: {error}", err=True)
         raise click.exceptions.Exit(1) from error
     _emit_stage(result.__dict__, as_json=as_json)
     return result

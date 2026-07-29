@@ -129,6 +129,43 @@ def test_fetch_archives_metadata_with_content_hash(tmp_path: Path) -> None:
     assert metadata["content_hash"].startswith("sha256:")
 
 
+class _EmptyExtractWebTools:
+    """A web tools double whose extractor returns no results at all, as the
+    real extractor does when Hermes hands back a malformed payload."""
+
+    def search(self, query: str, *, limit: int = 5):
+        del query, limit
+        return []
+
+    def extract(self, urls: list[str], *, char_limit: int = 15000):
+        del urls, char_limit
+        return []
+
+
+def test_fetch_handles_extractor_returning_no_result(tmp_path: Path) -> None:
+    """web_tools.extract() can return [] for a malformed payload; fetch must
+    record a FAIL instead of raising IndexError on the empty list."""
+    paths = AiWatchPaths.for_date(tmp_path, date(2026, 7, 2)).create()
+    state = SeenIndex(paths.state_root)
+    append_model(
+        paths.candidates,
+        _discovered_record("sha256:empty", "https://example.com/empty"),
+    )
+    options = AiWatchCommandOptions(target_date=date(2026, 7, 2), base_dir=tmp_path)
+
+    result = run_fetch(
+        options=options, paths=paths, state=state, web_tools=_EmptyExtractWebTools()
+    )
+
+    assert result.failed == 1
+    assert result.fetched == 0
+    record = FetchRecord.model_validate_json(
+        paths.fetch_results.read_text(encoding="utf-8").strip()
+    )
+    assert record.status == FetchStatus.FAIL
+    assert record.error == "extractor returned no result"
+
+
 def test_fetch_records_truncated_extract_full_text_path(tmp_path: Path) -> None:
     paths = AiWatchPaths.for_date(tmp_path, date(2026, 7, 2)).create()
     state = SeenIndex(paths.state_root)

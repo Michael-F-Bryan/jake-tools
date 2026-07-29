@@ -43,7 +43,9 @@ class RunStatus(StrEnum):
     FAIL = "fail"
 
 
-def candidate_id_for(*, url: str, title: str = "") -> str:
+def candidate_id_for(*, url: str) -> str:
+    # Identity is canonical-URL-only by design: titles are mutable editorial
+    # copy and must never affect which candidate a URL maps to.
     canonical = url.strip().rstrip("/").lower()
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
@@ -52,6 +54,37 @@ def candidate_id_for(*, url: str, title: str = "") -> str:
 def content_hash_for(text: str) -> str:
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
+
+
+class AiWatchStageError(Exception):
+    """Raised when a pipeline stage finishes with invalid records.
+
+    Carries the stage name and the full list of per-record validation errors
+    so callers (CLI, runner) can report specifics instead of a flattened,
+    unattributed string.
+    """
+
+    def __init__(self, *, stage: str, errors: list[str]) -> None:
+        super().__init__(f"{stage}: " + "; ".join(errors))
+        self.stage = stage
+        self.errors = errors
+
+
+class VaultPathEscapeError(ValueError):
+    """Raised when a vault-relative path resolves outside the vault root."""
+
+    def __init__(self, *, vault: Path, resolved: Path) -> None:
+        super().__init__(f"note path {resolved} escapes vault root {vault}")
+        self.vault = vault
+        self.resolved = resolved
+
+
+def resolve_vault_path(*, vault: Path, rel_path: str) -> Path:
+    """Resolve `rel_path` against `vault`, rejecting absolute or `..` escapes."""
+    candidate = (vault / rel_path).resolve()
+    if not candidate.is_relative_to(vault.resolve()):
+        raise VaultPathEscapeError(vault=vault, resolved=candidate)
+    return candidate
 
 
 class SearchResult(BaseModel):
@@ -99,10 +132,16 @@ class CuratorDecision(BaseModel):
     )
 
 
-class StageResult(BaseModel):
-    status: RunStatus
-    message: str = ""
-    count: int = 0
+class StageFailure(BaseModel):
+    """A single pipeline stage's failure, with its own name and cause.
+
+    Replaces flattening every stage failure into an unattributed
+    `f"{stage}: {error}"` string, which loses the ability to tell stages
+    apart programmatically (e.g. in JSON output).
+    """
+
+    stage: str
+    error: str
 
 
 class AiWatchCommandResult(BaseModel):
@@ -113,7 +152,7 @@ class AiWatchCommandResult(BaseModel):
     summary_path: Path | None = None
     surfaced_count: int = 0
     speculative_count: int = 0
-    failed_stages: list[str] = Field(default_factory=list)
+    failed_stages: list[StageFailure] = Field(default_factory=list)
 
 
 class AiWatchCommandOptions(BaseModel):
@@ -129,5 +168,4 @@ class AiWatchCommandOptions(BaseModel):
     max_article_age_days: int = 90
     cost_cap_usd: float | None = None
     calibration_only: bool = False
-    save_raw: bool = False
     force_candidate: str | None = None

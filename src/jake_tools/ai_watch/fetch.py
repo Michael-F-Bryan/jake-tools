@@ -12,7 +12,7 @@ from .audit import (
 )
 from .audit_models import FetchRecord, FetchStatus
 from .calibration import load_calibration_cases, resolve_calibration_extract
-from .models import AiWatchCommandOptions
+from .models import AiWatchCommandOptions, AiWatchStageError
 from .paths import AiWatchPaths
 from .state import SeenIndex
 from .validation import validate_fetched
@@ -49,7 +49,7 @@ def run_fetch(
         if fetched + failed >= options.max_candidates:
             break
 
-        seen = state.check_seen(url=candidate.url, title=candidate.title)
+        seen = state.check_seen(url=candidate.url)
         if seen and seen.latest_content_path and not options.calibration_only:
             skipped += 1
             append_model(
@@ -65,7 +65,21 @@ def run_fetch(
             )
             continue
 
-        extracted = web_tools.extract([candidate.url])[0]
+        extracted_results = web_tools.extract([candidate.url])
+        if not extracted_results:
+            failed += 1
+            append_model(
+                paths.fetch_results,
+                FetchRecord(
+                    run_id=run_id,
+                    candidate_id=candidate.candidate_id,
+                    timestamp=utc_now_iso(),
+                    status=FetchStatus.FAIL,
+                    error="extractor returned no result",
+                ),
+            )
+            continue
+        extracted = extracted_results[0]
         if calibration_cases:
             extracted = resolve_calibration_extract(
                 url=candidate.url,
@@ -89,11 +103,9 @@ def run_fetch(
 
         markdown_path, metadata_path, content_hash = archive_extract(
             paths_articles=paths.articles,
-            paths_raw=paths.raw,
             candidate_id=candidate.candidate_id,
             extracted=extracted,
             source=candidate.source,
-            save_raw=options.save_raw,
         )
         state.record_content_hash(extracted.content, candidate.candidate_id)
         state.record_seen(
@@ -120,5 +132,5 @@ def run_fetch(
 
     errors = validate_fetched(read_models(paths.fetch_results, FetchRecord))
     if errors:
-        raise RuntimeError("; ".join(errors))
+        raise AiWatchStageError(stage="fetch", errors=errors)
     return FetchResult(fetched=fetched, failed=failed, skipped=skipped)

@@ -84,7 +84,7 @@ preflight checks or skip them silently.
 jake-tools ai-watch run --date YYYY-MM-DD
 jake-tools ai-watch run --date today --dry-run --max-candidates 10
 jake-tools ai-watch collect --date today
-jake-tools ai-watch deliver --date today --target discord --dry-run
+jake-tools ai-watch deliver --date today --dry-run
 jake-tools ai-watch audit --since 7d
 ```
 

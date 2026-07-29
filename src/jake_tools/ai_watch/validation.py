@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from pathlib import Path
 
 from .audit_models import (
     CuratorDecisionRecord,
@@ -10,7 +11,7 @@ from .audit_models import (
     FetchStatus,
     ScoutEvaluationRecord,
 )
-from .models import AuditStage
+from .models import AuditStage, VaultPathEscapeError, resolve_vault_path
 
 _QUOTE_CHAR_REPLACEMENTS = {
     "\u2018": "'",
@@ -184,7 +185,7 @@ def validate_scouted(
 
 
 def validate_curated(
-    records: list[CuratorDecisionRecord], *, vault_root: str
+    records: list[CuratorDecisionRecord], *, vault_root: Path
 ) -> list[str]:
     errors: list[str] = []
     generic_reasons = {"interesting article", "looks useful", "good read"}
@@ -200,15 +201,13 @@ def validate_curated(
                     f"surface without obsidian note for {record.candidate_id}"
                 )
             path = record.obsidian_recommendation.path
-            if (
-                path
-                and vault_root
-                and vault_root not in path
-                and not path.startswith("3 Resources/")
-            ):
-                errors.append(
-                    f"curator placement outside vault for {record.candidate_id}"
-                )
+            if path:
+                try:
+                    resolve_vault_path(vault=vault_root, rel_path=path)
+                except VaultPathEscapeError:
+                    errors.append(
+                        f"curator placement outside vault for {record.candidate_id}"
+                    )
         if (
             record.decision == CuratorDecisionType.SURFACE
             and len(record.digest_summary) > 500

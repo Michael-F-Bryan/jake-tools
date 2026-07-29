@@ -123,22 +123,12 @@ async def test_integration_dry_run_full_pipeline(tmp_path: Path) -> None:
     sender = FakeSender()
     paths = AiWatchPaths.for_date(tmp_path, target_date)
 
-    from jake_tools.ai_watch import runner as runner_module
-
-    original_delivery = runner_module.run_delivery
-
-    def delivery_with_sender(**kwargs):
-        kwargs["sender"] = sender
-        return original_delivery(**kwargs)
-
-    runner_module.run_delivery = delivery_with_sender
-    try:
-        result = await run_ai_watch_command(
-            options=options,
-            deps=RunnerDeps(web_tools=fake_web, stages=IntegrationFakeStages()),
-        )
-    finally:
-        runner_module.run_delivery = original_delivery
+    result = await run_ai_watch_command(
+        options=options,
+        deps=RunnerDeps(
+            web_tools=fake_web, stages=IntegrationFakeStages(), sender=sender
+        ),
+    )
 
     assert result.status == RunStatus.OK
     assert result.surfaced_count == 1

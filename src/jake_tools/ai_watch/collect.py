@@ -64,8 +64,8 @@ def run_collect(
         if canonical in seen_urls:
             continue
         seen_urls.add(canonical)
-        candidate_id = candidate_id_for(url=result.url, title=result.title)
-        seen = state.check_seen(url=result.url, title=result.title)
+        candidate_id = candidate_id_for(url=result.url)
+        seen = state.check_seen(url=result.url)
         if seen is not None and not options.calibration_only:
             skipped_seen += 1
             append_model(

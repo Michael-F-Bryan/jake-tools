@@ -6,7 +6,12 @@ from ..ai_usage import Usage
 from .archive import load_article_metadata
 from .audit import append_model, read_models, truncate_records, utc_now_iso
 from .audit_models import CuratorDecisionRecord, ScoutEvaluationRecord
-from .models import AiWatchCommandOptions, CuratorDecisionType, ScoutRecommendation
+from .models import (
+    AiWatchCommandOptions,
+    AiWatchStageError,
+    CuratorDecisionType,
+    ScoutRecommendation,
+)
 from .paths import AiWatchPaths
 from .stages import AiWatchStages, load_interest_profile
 from .tuning import apply_surface_policy
@@ -102,9 +107,9 @@ async def run_curate(
         ]
     )
 
-    errors = validate_curated(final_records, vault_root=str(options.vault_path))
+    errors = validate_curated(final_records, vault_root=options.vault_path)
     if errors:
-        raise RuntimeError("; ".join(errors))
+        raise AiWatchStageError(stage="curate", errors=errors)
     return CurateRunResult(
         evaluated=evaluated, surfaced=surfaced, speculative=speculative, usage=usage
     )

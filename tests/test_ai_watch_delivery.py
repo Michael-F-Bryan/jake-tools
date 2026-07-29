@@ -3,14 +3,20 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from jake_tools.ai_watch.audit_models import DeliveryStatus
+from jake_tools.ai_watch.audit import append_model
+from jake_tools.ai_watch.audit_models import CuratorDecisionRecord, DeliveryStatus
 from jake_tools.ai_watch.delivery import (
     DISCORD_PAYLOAD_MAX_CHARS,
     FakeSender,
     build_discord_payload,
     run_delivery,
 )
-from jake_tools.ai_watch.models import AiWatchCommandOptions
+from jake_tools.ai_watch.models import (
+    AiWatchCommandOptions,
+    CuratorDecisionType,
+    DigestLane,
+    ObsidianRecommendation,
+)
 from jake_tools.ai_watch.paths import AiWatchPaths
 
 
@@ -47,6 +53,27 @@ def test_delivery_skips_empty_digest(tmp_path: Path) -> None:
     assert sender.calls == []
 
 
+def _append_surfaced_decision(paths: AiWatchPaths, candidate_id: str) -> None:
+    append_model(
+        paths.curator_decisions,
+        CuratorDecisionRecord(
+            run_id="2026-07-02",
+            candidate_id=candidate_id,
+            timestamp="2026-07-02T00:00:00+00:00",
+            model="gpt-5.5",
+            decision=CuratorDecisionType.SURFACE,
+            lane=DigestLane.MAIN_DIGEST,
+            reason="Transferable harness evaluator pattern.",
+            digest_summary="Harness write-up.",
+            obsidian_recommendation=ObsidianRecommendation(
+                should_create_note=True,
+                path=f"3 Resources/AI/{candidate_id}.md",
+                placement_reason="AI engineering",
+            ),
+        ),
+    )
+
+
 def test_delivery_payload_under_discord_limit(tmp_path: Path) -> None:
     paths = AiWatchPaths.for_date(tmp_path, date(2026, 7, 2)).create()
     digest = "\n\n".join(
@@ -75,6 +102,8 @@ def test_delivery_payload_under_discord_limit(tmp_path: Path) -> None:
     )
     assert len(digest) > 2000
     paths.digest.write_text(digest, encoding="utf-8")
+    for candidate_id in ("sha256:one", "sha256:two", "sha256:three", "sha256:four"):
+        _append_surfaced_decision(paths, candidate_id)
     options = AiWatchCommandOptions(
         target_date=date(2026, 7, 2),
         base_dir=tmp_path,
@@ -91,6 +120,48 @@ def test_delivery_payload_under_discord_limit(tmp_path: Path) -> None:
         "Obsidian: 3 Resources/AI/How Claude Code works in large codebases.md"
         in payload
     )
+
+
+def test_delivery_surfaced_count_ignores_literal_heading_in_summary(
+    tmp_path: Path,
+) -> None:
+    """A curator summary containing a literal '## ' line must not inflate the
+    surfaced count derived from the rendered digest markdown."""
+    paths = AiWatchPaths.for_date(tmp_path, date(2026, 7, 2)).create()
+    digest_summary_with_fake_heading = (
+        "Intro text.\n## Fake heading inside summary\nMore text."
+    )
+    paths.digest.write_text(
+        f"## Real item\n\n{digest_summary_with_fake_heading}\n\n"
+        "Why it matters: reasons\n\nURL: https://example.com/real\n",
+        encoding="utf-8",
+    )
+    append_model(
+        paths.curator_decisions,
+        CuratorDecisionRecord(
+            run_id="2026-07-02",
+            candidate_id="sha256:real",
+            timestamp="2026-07-02T00:00:00+00:00",
+            model="gpt-5.5",
+            decision=CuratorDecisionType.SURFACE,
+            lane=DigestLane.MAIN_DIGEST,
+            reason="Transferable harness evaluator pattern.",
+            digest_summary=digest_summary_with_fake_heading,
+            obsidian_recommendation=ObsidianRecommendation(
+                should_create_note=True,
+                path="3 Resources/AI/Real item.md",
+                placement_reason="AI engineering",
+            ),
+        ),
+    )
+    options = AiWatchCommandOptions(
+        target_date=date(2026, 7, 2),
+        base_dir=tmp_path,
+        dry_run=True,
+        discord_target="discord:user",
+    )
+    result = run_delivery(options=options, paths=paths)
+    assert result.surfaced_count == 1
 
 
 def test_build_discord_payload_keeps_priority_fields() -> None:

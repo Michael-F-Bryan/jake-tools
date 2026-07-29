@@ -14,6 +14,7 @@ from .models import (
     RunStatus,
     ScoutOutput,
     ScoutRecommendation,
+    StageFailure,
 )
 
 
@@ -131,6 +132,13 @@ class ScoutEvaluationRecord(BaseModel):
         )
 
 
+class ScoutFailureRecord(BaseModel):
+    run_id: str
+    candidate_id: str
+    timestamp: str
+    errors: list[str]
+
+
 class CuratorDecisionRecord(BaseModel):
     run_id: str
     candidate_id: str
@@ -208,7 +216,7 @@ class RunManifest(BaseModel):
     status: RunStatus
     paths: RunManifestPaths
     counts: RunManifestCounts
-    failed_stages: list[str] = Field(default_factory=list)
+    failed_stages: list[StageFailure] = Field(default_factory=list)
     dry_run: bool = False
 
 

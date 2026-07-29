@@ -4,22 +4,27 @@ import json
 from datetime import date
 from pathlib import Path
 
-from jake_tools.ai_watch.audit import append_model
+from jake_tools.ai_usage import AITotals
+from jake_tools.ai_watch.audit import append_model, load_model
 from jake_tools.ai_watch.audit_models import (
     CuratorDecisionRecord,
     DiscoveredRecord,
+    RunManifest,
     ScoutEvaluationRecord,
 )
 from jake_tools.ai_watch.digest import run_digest
+from jake_tools.ai_watch.manifest import write_manifest
 from jake_tools.ai_watch.models import (
     AiWatchCommandOptions,
     CuratorDecisionType,
     DigestLane,
     ObsidianRecommendation,
+    RunStatus,
     ScoutRecommendation,
+    StageFailure,
 )
 from jake_tools.ai_watch.paths import AiWatchPaths
-from jake_tools.ai_watch.tuning import apply_surface_policy
+from jake_tools.ai_watch.tuning import apply_surface_policy, run_tune
 
 
 def _append_candidate_run(
@@ -289,3 +294,95 @@ def test_surface_policy_demotes_xcode_only_articles(tmp_path: Path) -> None:
     )
     assert decision.decision == CuratorDecisionType.SPECULATIVE_WATCH
     assert "Xcode-specific" in decision.reason
+
+
+def test_surface_policy_excludes_hard_demoted_items_from_ranking(
+    tmp_path: Path,
+) -> None:
+    """A condemned top-ranked article must not consume a limit slot that an
+    eligible article needs; both eligible items should surface."""
+    paths = AiWatchPaths.for_date(tmp_path, date(2026, 7, 7)).create()
+    _append_candidate_run(
+        paths,
+        candidate_id="sha256:xcode-top",
+        title="Xcode agent tips",
+        fit=5,
+        practicality=5,
+        novelty=5,
+        noise=1,
+    )
+    _append_candidate_run(
+        paths,
+        candidate_id="sha256:eligible-a",
+        title="Eligible A",
+        fit=4,
+        practicality=4,
+        novelty=3,
+        noise=2,
+    )
+    _append_candidate_run(
+        paths,
+        candidate_id="sha256:eligible-b",
+        title="Eligible B",
+        fit=3,
+        practicality=3,
+        novelty=3,
+        noise=2,
+    )
+    options = AiWatchCommandOptions(
+        target_date=date(2026, 7, 7),
+        base_dir=tmp_path,
+        surface_limit=2,
+    )
+
+    result = apply_surface_policy(options=options, paths=paths)
+
+    assert result.before_surface_count == 3
+    assert result.after_surface_count == 2
+    assert result.demoted_count == 1
+
+    rows = [
+        CuratorDecisionRecord.model_validate_json(line)
+        for line in paths.curator_decisions.read_text(encoding="utf-8").splitlines()
+    ]
+    decisions = {row.candidate_id: row for row in rows}
+    assert (
+        decisions["sha256:xcode-top"].decision == CuratorDecisionType.SPECULATIVE_WATCH
+    )
+    assert decisions["sha256:eligible-a"].decision == CuratorDecisionType.SURFACE
+    assert decisions["sha256:eligible-b"].decision == CuratorDecisionType.SURFACE
+
+
+def test_run_tune_preserves_failed_manifest_status(tmp_path: Path) -> None:
+    paths = AiWatchPaths.for_date(tmp_path, date(2026, 7, 7)).create()
+    _append_candidate_run(
+        paths,
+        candidate_id="sha256:best",
+        title="Best signal",
+        fit=5,
+        practicality=5,
+        novelty=4,
+        noise=1,
+    )
+    options = AiWatchCommandOptions(
+        target_date=date(2026, 7, 7),
+        base_dir=tmp_path,
+        surface_limit=2,
+    )
+    write_manifest(
+        paths=paths,
+        options=options,
+        status=RunStatus.FAIL,
+        surfaced_count=0,
+        speculative_count=0,
+        failed_stages=[StageFailure(stage="scout", error="boom")],
+        summary=AITotals(),
+    )
+
+    result = run_tune(options=options, paths=paths)
+
+    assert result.surfaced == 1
+    manifest = load_model(paths.manifest, RunManifest)
+    assert manifest.status == RunStatus.FAIL
+    assert manifest.failed_stages == [StageFailure(stage="scout", error="boom")]
+    assert manifest.counts.surfaced == 1

@@ -11,7 +11,7 @@ from .audit_models import (
     RunManifestPaths,
     ScoutEvaluationRecord,
 )
-from .models import AiWatchCommandOptions, RunStatus
+from .models import AiWatchCommandOptions, RunStatus, StageFailure
 from .paths import AiWatchPaths
 
 
@@ -22,7 +22,7 @@ def build_manifest(
     status: RunStatus,
     surfaced_count: int,
     speculative_count: int,
-    failed_stages: list[str],
+    failed_stages: list[StageFailure],
 ) -> RunManifest:
     return RunManifest(
         run_id=options.target_date.isoformat(),
@@ -58,7 +58,7 @@ def write_manifest(
     status: RunStatus,
     surfaced_count: int,
     speculative_count: int,
-    failed_stages: list[str],
+    failed_stages: list[StageFailure],
     summary: AITotals,
 ) -> None:
     manifest = build_manifest(

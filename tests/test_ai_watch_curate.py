@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from jake_tools.ai_watch.audit_models import CuratorDecisionRecord
 from jake_tools.ai_watch.models import (
     CuratorDecision,
@@ -8,6 +10,8 @@ from jake_tools.ai_watch.models import (
     ObsidianRecommendation,
 )
 from jake_tools.ai_watch.validation import sanitize_digest_summary, validate_curated
+
+VAULT_ROOT = Path("/Users/work/Documents/Vault")
 
 
 def test_validate_curated_rejects_generic_reason() -> None:
@@ -20,7 +24,7 @@ def test_validate_curated_rejects_generic_reason() -> None:
         reason="interesting article",
         digest_summary="",
     )
-    errors = validate_curated([record], vault_root="/Users/work/Documents/Vault")
+    errors = validate_curated([record], vault_root=VAULT_ROOT)
     assert any("generic reason" in error for error in errors)
 
 
@@ -40,7 +44,27 @@ def test_validate_curated_requires_vault_relative_placement() -> None:
             placement_reason="bad",
         ),
     )
-    errors = validate_curated([record], vault_root="/Users/work/Documents/Vault")
+    errors = validate_curated([record], vault_root=VAULT_ROOT)
+    assert any("outside vault" in error for error in errors)
+
+
+def test_validate_curated_rejects_dot_dot_traversal_placement() -> None:
+    record = CuratorDecisionRecord(
+        run_id="2026-07-02",
+        candidate_id="sha256:traversal",
+        timestamp="2026-07-02T00:00:00+00:00",
+        model="gpt-5.5",
+        decision=CuratorDecisionType.SURFACE,
+        lane=DigestLane.MAIN_DIGEST,
+        reason="Transferable harness evaluator pattern for long-running agents.",
+        digest_summary="Harness write-up.",
+        obsidian_recommendation=ObsidianRecommendation(
+            should_create_note=True,
+            path="3 Resources/../../../etc/x",
+            placement_reason="bad",
+        ),
+    )
+    errors = validate_curated([record], vault_root=VAULT_ROOT)
     assert any("outside vault" in error for error in errors)
 
 
@@ -69,7 +93,7 @@ def test_validate_curated_accepts_sanitized_digest_summary() -> None:
             placement_reason="Concrete harness pattern.",
         ),
     )
-    errors = validate_curated([record], vault_root="/Users/work/Documents/Vault")
+    errors = validate_curated([record], vault_root=VAULT_ROOT)
     assert errors == []
 
 
@@ -88,5 +112,5 @@ def test_curator_decision_surface_requires_obsidian_note() -> None:
         model="gpt-5.5",
         decision=decision,
     )
-    errors = validate_curated([record], vault_root="/Users/work/Documents/Vault")
+    errors = validate_curated([record], vault_root=VAULT_ROOT)
     assert any("without obsidian note" in error for error in errors)
