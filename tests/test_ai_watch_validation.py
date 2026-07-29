@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from jake_tools.ai_watch.audit_models import ScoutEvaluationRecord
 from jake_tools.ai_watch.models import AuditStage, ScoutRecommendation
 from jake_tools.ai_watch.validation import (
@@ -53,7 +55,7 @@ def test_validate_scouted_passes_with_normalized_quotes() -> None:
     record = ScoutEvaluationRecord(
         run_id="2026-07-02",
         candidate_id="sha256:test",
-        timestamp="2026-07-02T00:00:00+00:00",
+        timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
         model="test",
         fit_score=5,
         novelty_score=4,
@@ -74,7 +76,7 @@ def test_validate_scouted_rejects_paraphrased_quote() -> None:
     record = ScoutEvaluationRecord(
         run_id="2026-07-02",
         candidate_id="sha256:test",
-        timestamp="2026-07-02T00:00:00+00:00",
+        timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
         model="test",
         fit_score=5,
         novelty_score=4,

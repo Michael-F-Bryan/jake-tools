@@ -73,6 +73,38 @@ def test_collect_discovers_new_candidates(tmp_path: Path) -> None:
     assert paths.candidates.exists()
 
 
+def test_collect_flushes_seen_index_to_disk(tmp_path: Path) -> None:
+    """A standalone `collect` CLI invocation is a separate process from the
+    next `fetch` invocation, so newly-seen URLs must be durable on disk by
+    the time run_collect returns, not just held in memory."""
+    paths = AiWatchPaths.for_date(tmp_path, date(2026, 7, 2)).create()
+    state = SeenIndex(paths.state_root)
+    options = AiWatchCommandOptions(target_date=date(2026, 7, 2), base_dir=tmp_path)
+    fake = FakeWebTools(
+        search_results={
+            _QUERY.query: [
+                SearchResult(
+                    url="https://example.com/new-article",
+                    title="New article",
+                    description="fresh",
+                    source="test",
+                )
+            ]
+        }
+    )
+    run_collect(
+        options=options,
+        paths=paths,
+        state=state,
+        web_tools=fake,
+        source_queries=(_QUERY,),
+    )
+
+    assert state.url_index_path.exists()
+    reloaded = SeenIndex(paths.state_root)
+    assert reloaded.check_seen(url="https://example.com/new-article") is not None
+
+
 def test_default_queries_cover_anthropic_sdk_and_builder_sources() -> None:
     queries = {query.source_id: query.query for query in DEFAULT_SOURCE_QUERIES}
     all_queries = "\n".join(query.query for query in DEFAULT_SOURCE_QUERIES)

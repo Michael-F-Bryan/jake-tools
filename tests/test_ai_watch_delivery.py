@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from jake_tools.ai_watch.audit import append_model
@@ -59,7 +59,7 @@ def _append_surfaced_decision(paths: AiWatchPaths, candidate_id: str) -> None:
         CuratorDecisionRecord(
             run_id="2026-07-02",
             candidate_id=candidate_id,
-            timestamp="2026-07-02T00:00:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
             model="gpt-5.5",
             decision=CuratorDecisionType.SURFACE,
             lane=DigestLane.MAIN_DIGEST,
@@ -141,7 +141,7 @@ def test_delivery_surfaced_count_ignores_literal_heading_in_summary(
         CuratorDecisionRecord(
             run_id="2026-07-02",
             candidate_id="sha256:real",
-            timestamp="2026-07-02T00:00:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
             model="gpt-5.5",
             decision=CuratorDecisionType.SURFACE,
             lane=DigestLane.MAIN_DIGEST,

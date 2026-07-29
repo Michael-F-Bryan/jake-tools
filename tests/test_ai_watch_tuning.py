@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from jake_tools.ai_usage import AITotals
@@ -42,7 +42,7 @@ def _append_candidate_run(
         DiscoveredRecord(
             run_id="2026-07-07",
             candidate_id=candidate_id,
-            timestamp="2026-07-07T00:00:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-07T00:00:00+00:00"),
             source="test",
             url=f"https://example.com/{candidate_id}",
             title=title,
@@ -53,7 +53,7 @@ def _append_candidate_run(
         ScoutEvaluationRecord(
             run_id="2026-07-07",
             candidate_id=candidate_id,
-            timestamp="2026-07-07T00:00:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-07T00:00:00+00:00"),
             model="fake-scout",
             tags=["agent-harnesses"],
             fit_score=fit,
@@ -71,7 +71,7 @@ def _append_candidate_run(
         CuratorDecisionRecord(
             run_id="2026-07-07",
             candidate_id=candidate_id,
-            timestamp="2026-07-07T00:00:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-07T00:00:00+00:00"),
             model="fake-curator",
             decision=CuratorDecisionType.SURFACE,
             lane=DigestLane.MAIN_DIGEST,

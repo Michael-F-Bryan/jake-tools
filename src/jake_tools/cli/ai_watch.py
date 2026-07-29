@@ -7,12 +7,16 @@ from pathlib import Path
 import click
 
 from ..ai_watch.collect import run_collect
-from ..ai_watch.config import resolve_discord_target
 from ..ai_watch.curate import run_curate
 from ..ai_watch.delivery import run_delivery
 from ..ai_watch.digest import run_digest
 from ..ai_watch.fetch import run_fetch
-from ..ai_watch.models import AiWatchCommandOptions, AiWatchStageError, RunStatus
+from ..ai_watch.models import (
+    AiWatchCommandOptions,
+    AiWatchStageError,
+    RunStatus,
+    resolve_discord_target,
+)
 from ..ai_watch.obsidian import run_obsidian_sync
 from ..ai_watch.paths import AiWatchPaths
 from ..ai_watch.runner import run_ai_watch_command
@@ -25,6 +29,18 @@ from ..claude import ClaudeAgent
 from .options import coro
 
 
+def _option_default(field_name: str):
+    """A Click option default sourced from AiWatchCommandOptions.
+
+    AiWatchCommandOptions is the single authority for these values; Click
+    options read from it instead of duplicating the literal (and, for
+    factory-backed fields such as base_dir, this stays lazy - it is not
+    evaluated until the command actually runs).
+    """
+    field = AiWatchCommandOptions.model_fields[field_name]
+    return field.default_factory if field.default_factory is not None else field.default
+
+
 def _parse_date(_ctx: click.Context, _param: click.Parameter, value: str) -> date:
     if value == "today":
         return date.today()
@@ -34,7 +50,8 @@ def _parse_date(_ctx: click.Context, _param: click.Parameter, value: str) -> dat
         raise click.BadParameter("must be YYYY-MM-DD or today") from error
 
 
-def _common_options(func):
+def _date_options(func):
+    """--date/--base-dir/--json: every ai-watch subcommand needs these."""
     options = [
         click.option(
             "--date",
@@ -47,20 +64,43 @@ def _common_options(func):
         click.option(
             "--base-dir",
             type=click.Path(path_type=Path, file_okay=False),
-            default=Path.cwd() / "_working",
+            default=_option_default("base_dir"),
             show_default=True,
             help="Working directory root.",
         ),
-        click.option(
-            "--dry-run", is_flag=True, help="Avoid vault writes and live delivery."
-        ),
-        click.option("--max-candidates", default=80, show_default=True, type=int),
-        click.option("--calibration-only", is_flag=True),
         click.option("--json", "as_json", is_flag=True),
     ]
     for option in reversed(options):
         func = option(func)
     return func
+
+
+def _dry_run_option(func):
+    return click.option(
+        "--dry-run", is_flag=True, help="Avoid vault writes and live delivery."
+    )(func)
+
+
+def _max_candidates_option(func):
+    return click.option(
+        "--max-candidates",
+        default=_option_default("max_candidates"),
+        show_default=True,
+        type=int,
+    )(func)
+
+
+def _calibration_only_option(func):
+    return click.option("--calibration-only", is_flag=True)(func)
+
+
+def _vault_path_option(func):
+    return click.option(
+        "--vault-path",
+        type=click.Path(path_type=Path, file_okay=False),
+        default=_option_default("vault_path"),
+        show_default=True,
+    )(func)
 
 
 @click.group("ai-watch")
@@ -69,14 +109,17 @@ def ai_watch() -> None:
 
 
 @ai_watch.command()
-@_common_options
+@_date_options
+@_dry_run_option
+@_max_candidates_option
+@_calibration_only_option
 def collect(
     target_date: date,
     base_dir: Path,
+    as_json: bool,
     dry_run: bool,
     max_candidates: int,
     calibration_only: bool,
-    as_json: bool,
 ) -> None:
     paths = AiWatchPaths.for_date(base_dir, target_date)
     state = SeenIndex(paths.state_root)
@@ -99,14 +142,17 @@ def collect(
 
 
 @ai_watch.command()
-@_common_options
+@_date_options
+@_dry_run_option
+@_max_candidates_option
+@_calibration_only_option
 def fetch(
     target_date: date,
     base_dir: Path,
+    as_json: bool,
     dry_run: bool,
     max_candidates: int,
     calibration_only: bool,
-    as_json: bool,
 ) -> None:
     paths = AiWatchPaths.for_date(base_dir, target_date)
     state = SeenIndex(paths.state_root)
@@ -129,16 +175,19 @@ def fetch(
 
 
 @ai_watch.command()
-@_common_options
-@click.option("--scout-model", default="claude-haiku-4-5", show_default=True)
+@_date_options
+@_dry_run_option
+@_max_candidates_option
+@click.option(
+    "--scout-model", default=_option_default("scout_model"), show_default=True
+)
 @coro
 async def scout(
     target_date: date,
     base_dir: Path,
+    as_json: bool,
     dry_run: bool,
     max_candidates: int,
-    calibration_only: bool,
-    as_json: bool,
     scout_model: str,
 ) -> None:
     paths = AiWatchPaths.for_date(base_dir, target_date)
@@ -147,7 +196,6 @@ async def scout(
         base_dir=base_dir,
         dry_run=dry_run,
         max_candidates=max_candidates,
-        calibration_only=calibration_only,
         scout_model=scout_model,
     )
     await _run_agent_stage(
@@ -161,17 +209,24 @@ async def scout(
 
 
 @ai_watch.command()
-@_common_options
-@click.option("--curator-model", default="claude-sonnet-5", show_default=True)
+@_date_options
+@_dry_run_option
+@_max_candidates_option
+@_calibration_only_option
+@_vault_path_option
+@click.option(
+    "--curator-model", default=_option_default("curator_model"), show_default=True
+)
 @click.option("--force-candidate", default=None)
 @coro
 async def curate(
     target_date: date,
     base_dir: Path,
+    as_json: bool,
     dry_run: bool,
     max_candidates: int,
     calibration_only: bool,
-    as_json: bool,
+    vault_path: Path,
     curator_model: str,
     force_candidate: str | None,
 ) -> None:
@@ -182,6 +237,7 @@ async def curate(
         dry_run=dry_run,
         max_candidates=max_candidates,
         calibration_only=calibration_only,
+        vault_path=vault_path,
         curator_model=curator_model,
         force_candidate=force_candidate,
     )
@@ -196,20 +252,14 @@ async def curate(
 
 
 @ai_watch.command("obsidian-sync")
-@_common_options
-@click.option(
-    "--vault-path",
-    type=click.Path(path_type=Path, exists=False, file_okay=False),
-    default=Path("/Users/work/Documents/Vault"),
-    show_default=True,
-)
+@_date_options
+@_dry_run_option
+@_vault_path_option
 def obsidian_sync(
     target_date: date,
     base_dir: Path,
-    dry_run: bool,
-    max_candidates: int,
-    calibration_only: bool,
     as_json: bool,
+    dry_run: bool,
     vault_path: Path,
 ) -> None:
     paths = AiWatchPaths.for_date(base_dir, target_date)
@@ -217,8 +267,6 @@ def obsidian_sync(
         target_date=target_date,
         base_dir=base_dir,
         dry_run=dry_run,
-        max_candidates=max_candidates,
-        calibration_only=calibration_only,
         vault_path=vault_path,
     )
     result = run_obsidian_sync(options=options, paths=paths)
@@ -226,37 +274,33 @@ def obsidian_sync(
 
 
 @ai_watch.command()
-@_common_options
+@_date_options
+@_dry_run_option
 def digest(
     target_date: date,
     base_dir: Path,
-    dry_run: bool,
-    max_candidates: int,
-    calibration_only: bool,
     as_json: bool,
+    dry_run: bool,
 ) -> None:
     paths = AiWatchPaths.for_date(base_dir, target_date)
     options = AiWatchCommandOptions(
         target_date=target_date,
         base_dir=base_dir,
         dry_run=dry_run,
-        max_candidates=max_candidates,
-        calibration_only=calibration_only,
     )
     surfaced, speculative = run_digest(options=options, paths=paths)
     _emit_stage({"surfaced": surfaced, "speculative": speculative}, as_json=as_json)
 
 
 @ai_watch.command()
-@_common_options
+@_date_options
+@_dry_run_option
 @click.option("--discord-target", default="")
 def deliver(
     target_date: date,
     base_dir: Path,
-    dry_run: bool,
-    max_candidates: int,
-    calibration_only: bool,
     as_json: bool,
+    dry_run: bool,
     discord_target: str,
 ) -> None:
     paths = AiWatchPaths.for_date(base_dir, target_date)
@@ -264,8 +308,6 @@ def deliver(
         target_date=target_date,
         base_dir=base_dir,
         dry_run=dry_run,
-        max_candidates=max_candidates,
-        calibration_only=calibration_only,
         discord_target=resolve_discord_target(discord_target),
     )
     result = run_delivery(options=options, paths=paths)
@@ -273,13 +315,20 @@ def deliver(
 
 
 @ai_watch.command("tune")
-@_common_options
-@click.option("--surface-limit", default=2, show_default=True, type=int)
-@click.option("--max-article-age-days", default=90, show_default=True, type=int)
+@_date_options
+@_dry_run_option
+@_vault_path_option
 @click.option(
-    "--vault-path",
-    type=click.Path(path_type=Path),
-    default=Path("/Users/work/Documents/Vault"),
+    "--surface-limit",
+    default=_option_default("surface_limit"),
+    show_default=True,
+    type=int,
+)
+@click.option(
+    "--max-article-age-days",
+    default=_option_default("max_article_age_days"),
+    show_default=True,
+    type=int,
 )
 @click.option(
     "--remove-unsurfaced-notes",
@@ -289,16 +338,13 @@ def deliver(
 def tune(
     target_date: date,
     base_dir: Path,
-    dry_run: bool,
-    max_candidates: int,
-    calibration_only: bool,
     as_json: bool,
+    dry_run: bool,
+    vault_path: Path,
     surface_limit: int,
     max_article_age_days: int,
-    vault_path: Path,
     remove_unsurfaced_notes: bool,
 ) -> None:
-    del max_candidates, calibration_only
     paths = AiWatchPaths.for_date(base_dir, target_date)
     options = AiWatchCommandOptions(
         target_date=target_date,
@@ -324,25 +370,28 @@ def tune(
 
 
 @ai_watch.command()
-@_common_options
-@click.option("--scout-model", default="claude-haiku-4-5", show_default=True)
-@click.option("--curator-model", default="claude-sonnet-5", show_default=True)
-@click.option("--discord-target", default="")
+@_date_options
+@_dry_run_option
+@_max_candidates_option
+@_calibration_only_option
+@_vault_path_option
 @click.option(
-    "--vault-path",
-    type=click.Path(path_type=Path),
-    default=Path("/Users/work/Documents/Vault"),
+    "--scout-model", default=_option_default("scout_model"), show_default=True
 )
 @click.option(
+    "--curator-model", default=_option_default("curator_model"), show_default=True
+)
+@click.option("--discord-target", default="")
+@click.option(
     "--surface-limit",
-    default=2,
+    default=_option_default("surface_limit"),
     show_default=True,
     type=int,
     help="Maximum main-digest items per run. Extra surfaced items become speculative.",
 )
 @click.option(
     "--max-article-age-days",
-    default=90,
+    default=_option_default("max_article_age_days"),
     show_default=True,
     type=int,
     help="Demote surfaced articles older than this many days.",
@@ -352,14 +401,14 @@ def tune(
 async def run(
     target_date: date,
     base_dir: Path,
+    as_json: bool,
     dry_run: bool,
     max_candidates: int,
     calibration_only: bool,
-    as_json: bool,
+    vault_path: Path,
     scout_model: str,
     curator_model: str,
     discord_target: str,
-    vault_path: Path,
     surface_limit: int,
     max_article_age_days: int,
     cost_cap_usd: float | None,
@@ -396,7 +445,10 @@ async def run(
 @ai_watch.command()
 @click.option("--since", default="7d", show_default=True)
 @click.option(
-    "--base-dir", type=click.Path(path_type=Path), default=Path.cwd() / "_working"
+    "--base-dir",
+    type=click.Path(path_type=Path),
+    default=_option_default("base_dir"),
+    show_default=True,
 )
 def audit(since: str, base_dir: Path) -> None:
     days = int(since.removesuffix("d"))

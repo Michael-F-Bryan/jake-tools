@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
@@ -52,9 +53,9 @@ class SeenCandidateRecord(BaseModel):
     url: str
     title: str
     sources: list[str] = Field(default_factory=list)
-    first_seen_at: str
-    last_seen_at: str
-    latest_decision: str | None = None
+    first_seen_at: datetime
+    last_seen_at: datetime
+    latest_decision: CuratorDecisionType | None = None
     content_hash: str | None = None
     latest_content_path: str | None = None
     obsidian_note_path: str | None = None
@@ -65,7 +66,7 @@ class DiscoveredRecord(BaseModel):
     run_id: str
     candidate_id: str
     stage: Literal[AuditStage.DISCOVERED] = AuditStage.DISCOVERED
-    timestamp: str
+    timestamp: datetime
     source: str
     url: str
     title: str
@@ -76,11 +77,11 @@ class SeenCheckRecord(BaseModel):
     run_id: str
     candidate_id: str
     stage: Literal[AuditStage.SEEN_CHECK] = AuditStage.SEEN_CHECK
-    timestamp: str
+    timestamp: datetime
     status: Literal["already_seen"] = "already_seen"
     matched_on: str = "canonical_url"
-    first_seen_at: str | None = None
-    latest_decision: str | None = None
+    first_seen_at: datetime | None = None
+    latest_decision: CuratorDecisionType | None = None
     action: Literal["skip_fetch"] = "skip_fetch"
 
 
@@ -88,7 +89,7 @@ class FetchRecord(BaseModel):
     run_id: str
     candidate_id: str
     stage: Literal[AuditStage.FETCHED] = AuditStage.FETCHED
-    timestamp: str
+    timestamp: datetime
     status: FetchStatus
     content_path: str | None = None
     metadata_path: str | None = None
@@ -101,7 +102,7 @@ class ScoutEvaluationRecord(BaseModel):
     run_id: str
     candidate_id: str
     stage: Literal[AuditStage.SCOUTED] = AuditStage.SCOUTED
-    timestamp: str
+    timestamp: datetime
     model: str
     tags: list[str] = Field(default_factory=list)
     fit_score: int
@@ -119,7 +120,7 @@ class ScoutEvaluationRecord(BaseModel):
         *,
         run_id: str,
         candidate_id: str,
-        timestamp: str,
+        timestamp: datetime,
         model: str,
         output: ScoutOutput,
     ) -> ScoutEvaluationRecord:
@@ -135,7 +136,7 @@ class ScoutEvaluationRecord(BaseModel):
 class ScoutFailureRecord(BaseModel):
     run_id: str
     candidate_id: str
-    timestamp: str
+    timestamp: datetime
     errors: list[str]
 
 
@@ -143,7 +144,7 @@ class CuratorDecisionRecord(BaseModel):
     run_id: str
     candidate_id: str
     stage: Literal[AuditStage.CURATED] = AuditStage.CURATED
-    timestamp: str
+    timestamp: datetime
     model: str
     decision: CuratorDecisionType
     lane: DigestLane | None = None
@@ -160,7 +161,7 @@ class CuratorDecisionRecord(BaseModel):
         *,
         run_id: str,
         candidate_id: str,
-        timestamp: str,
+        timestamp: datetime,
         model: str,
         decision: CuratorDecision,
     ) -> CuratorDecisionRecord:
@@ -177,7 +178,7 @@ class ObsidianSyncRecord(BaseModel):
     run_id: str
     candidate_id: str
     stage: Literal[AuditStage.OBSIDIAN_SYNCED] = AuditStage.OBSIDIAN_SYNCED
-    timestamp: str
+    timestamp: datetime
     status: ObsidianSyncStatus
     note_path: str
     placement_reason: str | None = None
@@ -186,7 +187,7 @@ class ObsidianSyncRecord(BaseModel):
 class DeliveryRecord(BaseModel):
     run_id: str
     stage: Literal[AuditStage.DELIVERED] = AuditStage.DELIVERED
-    timestamp: str
+    timestamp: datetime
     target: str
     status: DeliveryStatus
     digest_path: str | None = None

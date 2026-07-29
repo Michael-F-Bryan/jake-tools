@@ -87,7 +87,9 @@ async def run_ai_watch_command(
         )
     else:
         try:
-            curate_result = await run_curate(options=options, paths=paths, stages=stages)
+            curate_result = await run_curate(
+                options=options, paths=paths, stages=stages
+            )
             stage_stats.append(AIStageStats(stage="curate", usage=curate_result.usage))
             surfaced = curate_result.surfaced
             speculative = curate_result.speculative

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from ..ai_usage import Usage
 from .archive import load_article_metadata
-from .audit import append_model, read_models, truncate_records, utc_now_iso
+from .audit import append_model, read_models, truncate_records, utc_now
 from .audit_models import CuratorDecisionRecord, ScoutEvaluationRecord
 from .models import (
     AiWatchCommandOptions,
@@ -77,7 +77,7 @@ async def run_curate(
             CuratorDecisionRecord.from_decision(
                 run_id=run_id,
                 candidate_id=scout_record.candidate_id,
-                timestamp=utc_now_iso(),
+                timestamp=utc_now(),
                 model=options.curator_model,
                 decision=decision,
             ),

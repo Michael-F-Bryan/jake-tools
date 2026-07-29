@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from jake_tools.ai_usage import Usage
@@ -66,7 +66,7 @@ async def test_runner_dry_pipeline(tmp_path: Path) -> None:
         DiscoveredRecord(
             run_id="2026-07-02",
             candidate_id="sha256:test",
-            timestamp="2026-07-02T00:00:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
             source="test",
             url="https://example.com/harness",
             title="Harness",
@@ -124,7 +124,7 @@ def _seeded_paths(tmp_path: Path) -> AiWatchPaths:
         DiscoveredRecord(
             run_id="2026-07-02",
             candidate_id="sha256:test",
-            timestamp="2026-07-02T00:00:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
             source="test",
             url="https://example.com/harness",
             title="Harness",

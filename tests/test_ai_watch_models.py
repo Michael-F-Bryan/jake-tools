@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from jake_tools.ai_watch.config import resolve_discord_target
+from jake_tools.ai_watch.models import resolve_discord_target
 
 
 def test_resolve_discord_target_prefers_cli_value(monkeypatch) -> None:

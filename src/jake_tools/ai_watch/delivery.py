@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .audit import append_model, read_models, utc_now_iso
+from .audit import append_model, read_models, utc_now
 from .audit_models import (
     CuratorDecisionRecord,
     CuratorDecisionType,
@@ -237,7 +237,7 @@ def run_delivery(
             paths.delivery,
             DeliveryRecord(
                 run_id=run_id,
-                timestamp=utc_now_iso(),
+                timestamp=utc_now(),
                 target="discord",
                 status=DeliveryStatus.SKIPPED,
                 reason="empty_digest",
@@ -257,7 +257,7 @@ def run_delivery(
             paths.delivery,
             DeliveryRecord(
                 run_id=run_id,
-                timestamp=utc_now_iso(),
+                timestamp=utc_now(),
                 target="discord",
                 status=DeliveryStatus.DRY_RUN,
                 digest_path=str(paths.digest),
@@ -278,7 +278,7 @@ def run_delivery(
         paths.delivery,
         DeliveryRecord(
             run_id=run_id,
-            timestamp=utc_now_iso(),
+            timestamp=utc_now(),
             target="discord",
             status=DeliveryStatus.SENT,
             digest_path=str(paths.digest),

@@ -9,7 +9,7 @@ from .audit import (
     read_discovered_candidates,
     read_models,
     truncate_records,
-    utc_now_iso,
+    utc_now,
 )
 from .audit_models import (
     FetchRecord,
@@ -88,7 +88,7 @@ async def run_scout(
                 ScoutFailureRecord(
                     run_id=run_id,
                     candidate_id=candidate.candidate_id,
-                    timestamp=utc_now_iso(),
+                    timestamp=utc_now(),
                     errors=[f"scout call failed: {error}"],
                 ),
             )
@@ -108,7 +108,7 @@ async def run_scout(
         record = ScoutEvaluationRecord.from_output(
             run_id=run_id,
             candidate_id=candidate.candidate_id,
-            timestamp=utc_now_iso(),
+            timestamp=utc_now(),
             model=options.scout_model,
             output=output,
         )
@@ -125,7 +125,7 @@ async def run_scout(
                 ScoutFailureRecord(
                     run_id=run_id,
                     candidate_id=candidate.candidate_id,
-                    timestamp=utc_now_iso(),
+                    timestamp=utc_now(),
                     errors=record_errors,
                 ),
             )

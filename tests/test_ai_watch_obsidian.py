@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -41,7 +41,7 @@ def _surfaced_decision(candidate_id: str, *, path: str) -> CuratorDecisionRecord
     return CuratorDecisionRecord(
         run_id="2026-07-02",
         candidate_id=candidate_id,
-        timestamp="2026-07-02T00:00:00+00:00",
+        timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
         model="gpt-5.5",
         decision=CuratorDecisionType.SURFACE,
         lane=DigestLane.MAIN_DIGEST,

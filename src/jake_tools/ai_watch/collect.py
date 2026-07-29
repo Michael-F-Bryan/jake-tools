@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .audit import append_model, truncate_records, utc_now_iso
+from .audit import append_model, truncate_records, utc_now
 from .audit_models import DiscoveredRecord, SeenCheckRecord
 from .calibration import DEFAULT_CALIBRATION_CASES_PATH, load_calibration_cases
 from .models import AiWatchCommandOptions, SearchResult, candidate_id_for
@@ -73,7 +73,7 @@ def run_collect(
                 SeenCheckRecord(
                     run_id=run_id,
                     candidate_id=candidate_id,
-                    timestamp=utc_now_iso(),
+                    timestamp=utc_now(),
                     first_seen_at=seen.first_seen_at,
                     latest_decision=seen.latest_decision,
                 ),
@@ -85,7 +85,7 @@ def run_collect(
             DiscoveredRecord(
                 run_id=run_id,
                 candidate_id=candidate_id,
-                timestamp=utc_now_iso(),
+                timestamp=utc_now(),
                 source=result.source,
                 url=result.url,
                 title=result.title,
@@ -102,4 +102,5 @@ def run_collect(
         if discovered >= options.max_candidates:
             break
 
+    state.flush()
     return CollectResult(discovered=discovered, skipped_seen=skipped_seen)

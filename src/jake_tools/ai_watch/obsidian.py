@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from .archive import load_article_metadata
-from .audit import append_model, read_models, utc_now_iso, write_model
+from .audit import append_model, read_models, utc_now, write_model
 from .audit_models import (
     CuratorDecisionRecord,
     CuratorDecisionType,
@@ -148,7 +148,7 @@ def run_obsidian_sync(
                 ObsidianSyncRecord(
                     run_id=run_id,
                     candidate_id=candidate_id,
-                    timestamp=utc_now_iso(),
+                    timestamp=utc_now(),
                     status=ObsidianSyncStatus.DRY_RUN,
                     note_path=str(note_path),
                 ),
@@ -162,7 +162,7 @@ def run_obsidian_sync(
             ObsidianSyncRecord(
                 run_id=run_id,
                 candidate_id=candidate_id,
-                timestamp=utc_now_iso(),
+                timestamp=utc_now(),
                 status=ObsidianSyncStatus.CREATED,
                 note_path=str(note_path),
                 placement_reason=decision.obsidian_recommendation.placement_reason,

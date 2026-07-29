@@ -8,7 +8,7 @@ from .audit import (
     read_discovered_candidates,
     read_models,
     truncate_records,
-    utc_now_iso,
+    utc_now,
 )
 from .audit_models import FetchRecord, FetchStatus
 from .calibration import load_calibration_cases, resolve_calibration_extract
@@ -57,7 +57,7 @@ def run_fetch(
                 FetchRecord(
                     run_id=run_id,
                     candidate_id=candidate.candidate_id,
-                    timestamp=utc_now_iso(),
+                    timestamp=utc_now(),
                     status=FetchStatus.SKIPPED,
                     reason="already_archived",
                     content_path=seen.latest_content_path,
@@ -73,7 +73,7 @@ def run_fetch(
                 FetchRecord(
                     run_id=run_id,
                     candidate_id=candidate.candidate_id,
-                    timestamp=utc_now_iso(),
+                    timestamp=utc_now(),
                     status=FetchStatus.FAIL,
                     error="extractor returned no result",
                 ),
@@ -94,7 +94,7 @@ def run_fetch(
                 FetchRecord(
                     run_id=run_id,
                     candidate_id=candidate.candidate_id,
-                    timestamp=utc_now_iso(),
+                    timestamp=utc_now(),
                     status=FetchStatus.FAIL,
                     error=extracted.error or "empty content",
                 ),
@@ -121,7 +121,7 @@ def run_fetch(
             FetchRecord(
                 run_id=run_id,
                 candidate_id=candidate.candidate_id,
-                timestamp=utc_now_iso(),
+                timestamp=utc_now(),
                 status=FetchStatus.OK,
                 content_path=str(markdown_path.relative_to(paths.root)),
                 metadata_path=str(metadata_path.relative_to(paths.root)),
@@ -130,6 +130,7 @@ def run_fetch(
         )
         fetched += 1
 
+    state.flush()
     errors = validate_fetched(read_models(paths.fetch_results, FetchRecord))
     if errors:
         raise AiWatchStageError(stage="fetch", errors=errors)

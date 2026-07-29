@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import tempfile
 from pathlib import Path
 
-from .audit import append_model, read_models, utc_now_iso
+from .audit import append_model, read_models, utc_now
 from .audit_models import SeenCandidateRecord
-from .models import candidate_id_for, content_hash_for
+from .models import CuratorDecisionType, candidate_id_for, content_hash_for
 
 
 class SeenIndex:
@@ -17,6 +20,12 @@ class SeenIndex:
         self.hash_index_path = state_root / "content-hash-index.json"
         self.surfaced_index_path = state_root / "surfaced-index.json"
         self._records = self._load_seen()
+        # Indexes are loaded once and mutated in memory; flush() is the only
+        # thing that touches disk for them, so a run that updates the same
+        # index many times does one write instead of one per record.
+        self._url_index = self._read_index(self.url_index_path)
+        self._hash_index = self._read_index(self.hash_index_path)
+        self._surfaced_index = self._read_index(self.surfaced_index_path)
 
     def _load_seen(self) -> dict[str, SeenCandidateRecord]:
         records: dict[str, SeenCandidateRecord] = {}
@@ -29,9 +38,8 @@ class SeenIndex:
         canonical = url.strip().rstrip("/").lower()
         if candidate_id in self._records:
             return self._records[candidate_id]
-        url_index = self._read_index(self.url_index_path)
-        if canonical in url_index:
-            other_id = url_index[canonical]
+        if canonical in self._url_index:
+            other_id = self._url_index[canonical]
             return self._records.get(other_id)
         return None
 
@@ -42,13 +50,13 @@ class SeenIndex:
         url: str,
         title: str,
         source: str,
-        decision: str | None = None,
+        decision: CuratorDecisionType | None = None,
         content_hash: str | None = None,
         content_path: str | None = None,
         obsidian_path: str | None = None,
         duplicate_of: str | None = None,
     ) -> None:
-        now = utc_now_iso()
+        now = utc_now()
         existing = self._records.get(candidate_id)
         record = SeenCandidateRecord(
             candidate_id=candidate_id,
@@ -69,21 +77,39 @@ class SeenIndex:
         )
         self._records[candidate_id] = record
         append_model(self.seen_path, record)
-        self._update_index(self.url_index_path, record.canonical_url, candidate_id)
+        self._url_index[record.canonical_url] = candidate_id
         if content_hash:
-            self._update_index(self.hash_index_path, content_hash, candidate_id)
+            self._hash_index[content_hash] = candidate_id
         if obsidian_path:
-            self._update_index(self.surfaced_index_path, candidate_id, obsidian_path)
+            self._surfaced_index[candidate_id] = obsidian_path
 
     def record_content_hash(self, text: str, candidate_id: str) -> str:
         digest = content_hash_for(text)
-        self._update_index(self.hash_index_path, digest, candidate_id)
+        self._hash_index[digest] = candidate_id
         return digest
 
-    def _update_index(self, path: Path, key: str, value: str) -> None:
-        index = self._read_index(path)
-        index[key] = value
-        path.write_text(json.dumps(index, indent=2, sort_keys=True), encoding="utf-8")
+    def flush(self) -> None:
+        """Persist the in-memory indexes to disk, each in one atomic write."""
+        self._write_index(self.url_index_path, self._url_index)
+        self._write_index(self.hash_index_path, self._hash_index)
+        self._write_index(self.surfaced_index_path, self._surfaced_index)
+
+    def _write_index(self, path: Path, index: dict[str, str]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(index, indent=2, sort_keys=True)
+        descriptor, tmp_path = tempfile.mkstemp(
+            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp_path)
+            raise
 
     def _read_index(self, path: Path) -> dict[str, str]:
         if not path.exists():

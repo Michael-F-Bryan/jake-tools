@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+
+def resolve_discord_target(discord_target: str) -> str:
+    return discord_target or os.environ.get("AI_WATCH_DISCORD_TARGET", "")
 
 
 class AuditStage(StrEnum):

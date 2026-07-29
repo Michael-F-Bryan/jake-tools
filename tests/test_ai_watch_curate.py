@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from jake_tools.ai_watch.audit_models import CuratorDecisionRecord
@@ -18,7 +19,7 @@ def test_validate_curated_rejects_generic_reason() -> None:
     record = CuratorDecisionRecord(
         run_id="2026-07-02",
         candidate_id="sha256:generic",
-        timestamp="2026-07-02T00:00:00+00:00",
+        timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
         model="gpt-5.5",
         decision=CuratorDecisionType.REJECT,
         reason="interesting article",
@@ -32,7 +33,7 @@ def test_validate_curated_requires_vault_relative_placement() -> None:
     record = CuratorDecisionRecord(
         run_id="2026-07-02",
         candidate_id="sha256:bad-path",
-        timestamp="2026-07-02T00:00:00+00:00",
+        timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
         model="gpt-5.5",
         decision=CuratorDecisionType.SURFACE,
         lane=DigestLane.MAIN_DIGEST,
@@ -52,7 +53,7 @@ def test_validate_curated_rejects_dot_dot_traversal_placement() -> None:
     record = CuratorDecisionRecord(
         run_id="2026-07-02",
         candidate_id="sha256:traversal",
-        timestamp="2026-07-02T00:00:00+00:00",
+        timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
         model="gpt-5.5",
         decision=CuratorDecisionType.SURFACE,
         lane=DigestLane.MAIN_DIGEST,
@@ -81,7 +82,7 @@ def test_validate_curated_accepts_sanitized_digest_summary() -> None:
     record = CuratorDecisionRecord(
         run_id="2026-07-02",
         candidate_id="sha256:long-summary",
-        timestamp="2026-07-02T00:00:00+00:00",
+        timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
         model="gpt-5.5",
         decision=CuratorDecisionType.SURFACE,
         lane=DigestLane.MAIN_DIGEST,
@@ -108,7 +109,7 @@ def test_curator_decision_surface_requires_obsidian_note() -> None:
     record = CuratorDecisionRecord.from_decision(
         run_id="2026-07-02",
         candidate_id="sha256:test",
-        timestamp="2026-07-02T00:00:00+00:00",
+        timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
         model="gpt-5.5",
         decision=decision,
     )

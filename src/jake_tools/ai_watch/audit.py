@@ -11,8 +11,8 @@ from .audit_models import DiscoveredRecord
 from .models import AuditStage
 
 
-def utc_now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+def utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def append_model(path: Path, record: BaseModel) -> None:

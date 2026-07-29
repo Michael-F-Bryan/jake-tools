@@ -5,6 +5,8 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
+from jake_tools.ai_usage import Usage
+from jake_tools.ai_watch.curate import CurateRunResult
 from jake_tools.cli import main
 
 ai_watch_cli = importlib.import_module("jake_tools.cli.ai_watch")
@@ -123,6 +125,45 @@ def test_ai_watch_scout_exits_nonzero_on_runtime_error(
 
     assert result.exit_code == 1
     assert "error: scout validation failed" in result.output
+
+
+def test_ai_watch_curate_accepts_vault_path(monkeypatch, tmp_path: Path) -> None:
+    """run_curate validates the surface path against options.vault_path, so
+    the CLI must let an operator set it (previously curate had no such flag
+    and silently used the model default)."""
+    captured: list[Path] = []
+
+    async def fake_run_curate(*, options, paths, stages):
+        del paths, stages
+        captured.append(options.vault_path)
+        return CurateRunResult(evaluated=0, surfaced=0, speculative=0, usage=Usage())
+
+    monkeypatch.setattr(ai_watch_cli, "run_curate", fake_run_curate)
+    custom_vault = tmp_path / "custom-vault"
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ai-watch",
+            "curate",
+            "--date",
+            "2026-07-02",
+            "--base-dir",
+            str(tmp_path),
+            "--vault-path",
+            str(custom_vault),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured == [custom_vault]
+
+
+def test_ai_watch_tune_help_does_not_advertise_dead_flags() -> None:
+    result = CliRunner().invoke(main, ["ai-watch", "tune", "--help"])
+    assert result.exit_code == 0
+    assert "--max-candidates" not in result.output
+    assert "--calibration-only" not in result.output
 
 
 def test_ai_watch_deliver_rejects_removed_target_flag(tmp_path: Path) -> None:

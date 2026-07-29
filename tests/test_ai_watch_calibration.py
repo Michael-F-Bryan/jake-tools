@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -67,7 +67,7 @@ def test_curator_prompt_includes_calibration_replay_instruction() -> None:
     scout_record = ScoutEvaluationRecord(
         run_id="2026-07-02",
         candidate_id="sha256:test",
-        timestamp="2026-07-02T00:00:00+00:00",
+        timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
         model="gpt-5.5",
         fit_score=4,
         novelty_score=4,

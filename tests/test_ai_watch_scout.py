@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -61,7 +61,7 @@ def _seed_fetched_candidate(
         DiscoveredRecord(
             run_id="2026-07-02",
             candidate_id=candidate_id,
-            timestamp="2026-07-02T00:00:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
             source="test",
             url=f"https://example.com/{candidate_id}",
             title=candidate_id,
@@ -72,7 +72,7 @@ def _seed_fetched_candidate(
         FetchRecord(
             run_id="2026-07-02",
             candidate_id=candidate_id,
-            timestamp="2026-07-02T00:00:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
             status=FetchStatus.OK,
             content_path=f"articles/{candidate_id}.md",
             content_hash="sha256:abc",
@@ -105,7 +105,7 @@ async def test_run_scout_sanitizes_hallucinated_quotes(tmp_path: Path) -> None:
         DiscoveredRecord(
             run_id="2026-07-02",
             candidate_id=candidate_id,
-            timestamp="2026-07-02T00:00:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
             source="test",
             url="https://example.com/harness",
             title="Harness",
@@ -116,7 +116,7 @@ async def test_run_scout_sanitizes_hallucinated_quotes(tmp_path: Path) -> None:
         FetchRecord(
             run_id="2026-07-02",
             candidate_id=candidate_id,
-            timestamp="2026-07-02T00:00:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
             status=FetchStatus.OK,
             content_path=f"articles/{candidate_id}.md",
             content_hash="sha256:abc",
@@ -155,7 +155,7 @@ async def test_run_scout_rejects_all_hallucinated_quotes(tmp_path: Path) -> None
         DiscoveredRecord(
             run_id="2026-07-02",
             candidate_id=candidate_id,
-            timestamp="2026-07-02T00:00:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
             source="test",
             url="https://example.com/harness",
             title="Harness",
@@ -166,7 +166,7 @@ async def test_run_scout_rejects_all_hallucinated_quotes(tmp_path: Path) -> None
         FetchRecord(
             run_id="2026-07-02",
             candidate_id=candidate_id,
-            timestamp="2026-07-02T00:00:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
             status=FetchStatus.OK,
             content_path=f"articles/{candidate_id}.md",
             content_hash="sha256:abc",

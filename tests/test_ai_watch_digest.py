@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from jake_tools.ai_watch.audit import append_model
@@ -25,7 +25,7 @@ def test_digest_renders_surfaced_items(tmp_path: Path) -> None:
         DiscoveredRecord(
             run_id="2026-07-02",
             candidate_id="sha256:test",
-            timestamp="2026-07-02T00:00:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
             source="test",
             url="https://example.com/harness",
             title="Harness design",
@@ -36,7 +36,7 @@ def test_digest_renders_surfaced_items(tmp_path: Path) -> None:
         CuratorDecisionRecord(
             run_id="2026-07-02",
             candidate_id="sha256:test",
-            timestamp="2026-07-02T00:00:00+00:00",
+            timestamp=datetime.fromisoformat("2026-07-02T00:00:00+00:00"),
             model="gpt-5.5",
             decision=CuratorDecisionType.SURFACE,
             lane=DigestLane.MAIN_DIGEST,
