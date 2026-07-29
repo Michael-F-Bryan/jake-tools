@@ -12,9 +12,9 @@ Two guards keep a prompt's fields in sync with its Jinja template:
 * at render time ``StrictUndefined`` turns any missing (e.g. mistyped nested)
   variable into an error rather than silently emitting nothing.
 
-The output side stays in sync automatically: ``Hermes`` injects the response
-model's JSON schema, so the type is the single source of truth and prompts do
-not hand-write a schema.
+The output side stays in sync automatically: ``ClaudeAgent`` injects the
+response model's JSON schema, so the type is the single source of truth and
+prompts do not hand-write a schema.
 """
 
 from __future__ import annotations
@@ -83,8 +83,9 @@ class StructuredPrompt[TResponse: BaseModel](Prompt):
     """
     A prompt whose reply parses into ``response_model``.
 
-    Concrete prompts declare ``response_model`` explicitly. Hermes uses that
-    model's schema for the request and its validator for the reply.
+    Concrete prompts declare ``response_model`` explicitly. ``ClaudeAgent``
+    (the Claude Agent SDK wrapper) uses that model's schema for the request
+    and its validator for the reply.
     """
 
     response_model: ClassVar[type[BaseModel]]

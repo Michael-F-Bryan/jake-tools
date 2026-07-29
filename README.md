@@ -5,7 +5,7 @@ Internal tools used by Jake.
 ## Installation
 
 ```bash
-uv tool add -e .
+uv tool install -e .
 ```
 
 ## Development
