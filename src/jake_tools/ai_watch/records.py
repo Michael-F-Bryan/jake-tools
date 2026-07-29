@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,6 +15,30 @@ from .models import AuditStage
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` via a temp file + ``os.replace``.
+
+    Readers (``tune``, ``audit``) never observe a partially written file:
+    either the old content is still there, or the new content is there
+    complete. A crash mid-write leaves only a stray ``.tmp`` file behind,
+    never a corrupt target.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, tmp_path = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp_path)
+        raise
 
 
 def append_model(path: Path, record: BaseModel) -> None:
@@ -41,10 +67,9 @@ def read_models[TModel: BaseModel](path: Path, model: type[TModel]) -> list[TMod
 
 
 def write_model(path: Path, payload: BaseModel) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    atomic_write_text(
+        path,
         json.dumps(payload.model_dump(mode="json"), indent=2, sort_keys=True),
-        encoding="utf-8",
     )
 
 

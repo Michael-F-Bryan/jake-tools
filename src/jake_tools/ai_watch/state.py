@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import contextlib
 import json
-import os
-import tempfile
 from pathlib import Path
 
 from .audit_models import SeenCandidateRecord
 from .models import CuratorDecisionType, candidate_id_for, content_hash_for
-from .records import append_model, read_models, utc_now
+from .records import append_model, atomic_write_text, read_models, utc_now
 
 
 class SeenIndex:
@@ -95,21 +92,7 @@ class SeenIndex:
         self._write_index(self.surfaced_index_path, self._surfaced_index)
 
     def _write_index(self, path: Path, index: dict[str, str]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(index, indent=2, sort_keys=True)
-        descriptor, tmp_path = tempfile.mkstemp(
-            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
-        )
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp_path, path)
-        except BaseException:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(tmp_path)
-            raise
+        atomic_write_text(path, json.dumps(index, indent=2, sort_keys=True))
 
     def _read_index(self, path: Path) -> dict[str, str]:
         if not path.exists():
