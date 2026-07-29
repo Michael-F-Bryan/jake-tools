@@ -13,7 +13,6 @@ from jake_tools.clockify import (
     ClockifyTask,
     ClockifyUser,
     JiraIssueRef,
-    clockify_base_url_from_env,
     clockify_project_name_for_jira,
     clockify_task_name_for_jira,
 )
@@ -107,12 +106,6 @@ def test_clockify_wraps_invalid_json_responses_with_request_context() -> None:
 def test_clockify_rejects_blank_base_url() -> None:
     with pytest.raises(ClockifyError, match="base URL is required"):
         ClockifyClient(api_key="secret-key", base_url="  ")
-
-
-def test_clockify_blank_base_url_env_uses_default(monkeypatch) -> None:
-    monkeypatch.setenv("CLOCKIFY_API_BASE_URL", "  ")
-
-    assert clockify_base_url_from_env() == "https://api.clockify.me/api/v1"
 
 
 def test_clockify_jira_project_names_do_not_start_with_ticket_key() -> None:

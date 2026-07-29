@@ -112,6 +112,25 @@ def test_whoami_requires_api_key(monkeypatch) -> None:
     assert "CLOCKIFY_API_KEY" in result.output
 
 
+def test_api_key_resolves_from_env_when_the_flag_is_omitted(monkeypatch) -> None:
+    monkeypatch.setenv("CLOCKIFY_API_KEY", "env-key")
+    captured: list[ClockifyConfig] = []
+
+    def factory(config: ClockifyConfig) -> FakeClockifyClient:
+        captured.append(config)
+        return FakeClockifyClient()
+
+    app = AppContext(clockify_client_factory=factory)
+    runner = CliRunner()
+
+    result = runner.invoke(clockify, ["whoami"], obj=app)
+
+    assert result.exit_code == 0
+    assert captured == [
+        ClockifyConfig(api_key="env-key", api_base_url=CLOCKIFY_API_ROOT)
+    ]
+
+
 def test_api_base_url_resolves_from_env_when_the_flag_is_omitted(monkeypatch) -> None:
     monkeypatch.setenv("CLOCKIFY_API_BASE_URL", "https://clockify.example.test/api/v1")
     captured: list[ClockifyConfig] = []

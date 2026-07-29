@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from typing import Any, Literal, TypeVar
 
 import requests
@@ -368,17 +367,3 @@ class ClockifyClient:
             raise ClockifyError(
                 f"Clockify returned invalid data for {path}: {exc}"
             ) from exc
-
-
-def clockify_api_key_from_env() -> str:
-    api_key = os.environ.get("CLOCKIFY_API_KEY", "").strip()
-    if not api_key:
-        raise ClockifyError(
-            "Clockify API key is required. Set CLOCKIFY_API_KEY or pass --api-key."
-        )
-    return api_key
-
-
-def clockify_base_url_from_env() -> str:
-    base_url = os.environ.get("CLOCKIFY_API_BASE_URL", "").strip()
-    return base_url or CLOCKIFY_API_ROOT
