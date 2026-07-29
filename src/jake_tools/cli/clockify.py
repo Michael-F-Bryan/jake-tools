@@ -161,7 +161,10 @@ def jira_sync(
         }
         if result is not None:
             payload["applied"] = len(result.applied)
-            payload["verified"] = len(result.applied)
+            # Every applied action re-fetches and verifies the Clockify record;
+            # apply_sync_plan raises before returning if verification fails, so
+            # reaching this point means everything applied was verified.
+            payload["verified"] = True
         click.echo(json.dumps(payload, indent=2))
     else:
         _emit_sync_plan(snapshot, applied=apply_changes)

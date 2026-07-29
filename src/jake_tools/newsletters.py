@@ -264,7 +264,20 @@ class NewsletterClient:
         if response.status_code == 204 or not response.content:
             return {}
 
-        return cast(JsonObject, response.json())
+        try:
+            data = response.json()
+        except ValueError as exc:
+            body_text = str(response.text)[:500]
+            raise NewsletterError(
+                f"newsletter returned invalid JSON for {method} {url}: {exc}; "
+                f"body={body_text!r}"
+            ) from exc
+
+        if not isinstance(data, Mapping):
+            raise NewsletterError(
+                f"newsletter returned unexpected payload for {method} {url}: {data!r}"
+            )
+        return cast(JsonObject, data)
 
 
 def body_to_html(body: str) -> str:

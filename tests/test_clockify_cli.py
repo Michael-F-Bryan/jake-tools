@@ -322,7 +322,7 @@ def test_jira_sync_apply_executes_and_reports_changes(monkeypatch) -> None:
     payload = json.loads(result.output)
     assert payload["mode"] == "apply"
     assert payload["applied"] == 1
-    assert payload["verified"] == 1
+    assert payload["verified"] is True
     assert client.operations == ["task-1:DONE"]
 
 

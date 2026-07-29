@@ -143,12 +143,8 @@ def test_jira_issue_ref_keeps_project_note_separate_from_project_name() -> None:
 
 
 def test_clockify_jira_names_reject_invalid_ticket_keys() -> None:
-    try:
+    with pytest.raises(ClockifyError, match="Invalid Jira issue key"):
         normalise_jira_key("not a key")
-    except ClockifyError as exc:
-        assert "Invalid Jira issue key" in str(exc)
-    else:
-        raise AssertionError("invalid Jira key was accepted")
 
 
 def test_clockify_lists_active_clients_and_projects() -> None:

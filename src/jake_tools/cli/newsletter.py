@@ -57,9 +57,7 @@ def add(title: str, attachments: tuple[Path, ...], as_json: bool):
 
         jake-tools newsletter add "Training night update" < /tmp/newsletter-item.txt
     """
-    body = _read_stdin_body(required=True)
-    if body is None:
-        raise click.UsageError("newsletter body is required on stdin")
+    body = _require_stdin_body()
 
     client = NewsletterClient()
     try:
@@ -97,7 +95,7 @@ def edit(
     The new body is read from stdin when provided. Use --title to update the title,
     and --attach to add attachments without replacing existing attachments.
     """
-    body = _read_stdin_body(required=False)
+    body = _optional_stdin_body()
     if title is None and body is None and not attachments:
         raise click.UsageError(
             "nothing to update: provide --title, stdin body, or --attach"
@@ -121,13 +119,28 @@ def _attachments(paths: tuple[Path, ...]) -> list[NewsletterAttachment]:
     return [NewsletterAttachment(path) for path in paths]
 
 
-def _read_stdin_body(*, required: bool) -> str | None:
-    body = sys.stdin.read()
-    if body.strip():
-        return body
-    if required:
+def _require_stdin_body() -> str:
+    body = _read_stdin_body()
+    if body is None:
         raise click.UsageError("newsletter body is required on stdin")
-    return None
+    return body
+
+
+def _optional_stdin_body() -> str | None:
+    return _read_stdin_body()
+
+
+def _read_stdin_body() -> str | None:
+    """Read the newsletter body from stdin, treating a tty as no body.
+
+    An interactive terminal has no EOF to signal the end of input, so
+    ``sys.stdin.read()`` would block forever waiting for one. Skip the read
+    entirely when stdin is a tty instead of hanging.
+    """
+    if sys.stdin.isatty():
+        return None
+    body = sys.stdin.read()
+    return body if body.strip() else None
 
 
 def _emit_items(

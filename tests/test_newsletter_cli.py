@@ -1,6 +1,8 @@
 import importlib
 from pathlib import Path
 
+import click
+import pytest
 from click.testing import CliRunner
 
 from jake_tools.cli.newsletter import newsletter
@@ -12,6 +14,21 @@ from jake_tools.newsletters import (
 )
 
 newsletter_cli = importlib.import_module("jake_tools.cli.newsletter")
+
+
+class TtyStdin:
+    """A stdin stand-in that reports as an interactive terminal.
+
+    Reading from it raises, so any test that reaches ``read()`` on this
+    object demonstrates the bug this fixture guards against: blocking
+    forever waiting for EOF on a real terminal.
+    """
+
+    def isatty(self) -> bool:
+        return True
+
+    def read(self) -> str:
+        raise AssertionError("must not read from stdin when it is a tty")
 
 
 class FakeNewsletterClient:
@@ -153,6 +170,44 @@ def test_edit_requires_at_least_one_change() -> None:
 
     assert result.exit_code != 0
     assert "nothing to update" in result.output
+
+
+def test_edit_title_only_succeeds_with_no_stdin_body(monkeypatch) -> None:
+    client = FakeNewsletterClient()
+    monkeypatch.setattr(newsletter_cli, "NewsletterClient", lambda: client)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        newsletter,
+        ["edit", "295", "--title", "Updated title"],
+        input="",
+    )
+
+    assert result.exit_code == 0
+    assert client.updated == [
+        {
+            "item_id": "295",
+            "title": "Updated title",
+            "body": None,
+            "attachments": [],
+        }
+    ]
+
+
+def test_optional_stdin_body_skips_read_on_a_tty(monkeypatch) -> None:
+    monkeypatch.setattr(newsletter_cli.sys, "stdin", TtyStdin())
+
+    assert newsletter_cli._optional_stdin_body() is None
+
+
+def test_require_stdin_body_errors_without_reading_on_a_tty(monkeypatch) -> None:
+    # `newsletter add ID` on a real terminal used to call sys.stdin.read()
+    # unconditionally and hang forever waiting for EOF. TtyStdin.read() raises
+    # instead of blocking, so reaching it would fail this test loudly.
+    monkeypatch.setattr(newsletter_cli.sys, "stdin", TtyStdin())
+
+    with pytest.raises(click.UsageError, match="required on stdin"):
+        newsletter_cli._require_stdin_body()
 
 
 def test_body_html_round_trip_preserves_paragraphs() -> None:
