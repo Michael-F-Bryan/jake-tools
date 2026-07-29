@@ -1,11 +1,12 @@
 import asyncio
 import functools
 from collections.abc import Callable, Coroutine
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 import click
 
-from ..claude import DEFAULT_MODEL, AgentSpec, ClaudeAgent, EffortLevel
+from ..claude import DEFAULT_MODEL, AgentSpec, EffortLevel
+from .context import app_context
 
 
 def coro[**P, R](func: Callable[P, Coroutine[Any, Any, R]]) -> Callable[P, R]:
@@ -24,7 +25,13 @@ def coro[**P, R](func: Callable[P, Coroutine[Any, Any, R]]) -> Callable[P, R]:
 
 
 def agent[F: Callable[..., Any]](func: F) -> F:
-    """Inject a :class:`ClaudeAgent` as the decorated command's first argument."""
+    """Inject a :class:`ClaudeAgent` as the decorated command's first argument.
+
+    The agent comes from the typed :class:`~.context.AppContext` carried on
+    ``ctx.obj`` (an :class:`~.context.AgentFactory`), so a test-injected agent
+    factory still sees ``--model``/``--effort`` — it just decides what to do
+    with them, rather than having the flags silently ignored.
+    """
 
     @click.option(
         "--model",
@@ -34,7 +41,7 @@ def agent[F: Callable[..., Any]](func: F) -> F:
     )
     @click.option(
         "--effort",
-        type=click.Choice(["low", "medium", "high", "xhigh", "max"]),
+        type=click.Choice(get_args(EffortLevel)),
         default=None,
         help="Reasoning effort. Higher costs more and takes longer.",
     )
@@ -47,10 +54,8 @@ def agent[F: Callable[..., Any]](func: F) -> F:
         *args: Any,
         **kwargs: Any,
     ) -> Any:
-        injected = ctx.obj.get("agent") if isinstance(ctx.obj, dict) else None
-        instance = injected or ClaudeAgent(
-            defaults=AgentSpec(model=model, effort=cast(EffortLevel | None, effort))
-        )
+        spec = AgentSpec(model=model, effort=cast(EffortLevel | None, effort))
+        instance = app_context(ctx).agent_factory(spec)
         return ctx.invoke(func, instance, *args, **kwargs)
 
     return cast(F, wrapper)
