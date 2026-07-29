@@ -42,7 +42,7 @@ def _fetched_candidates(paths: AiWatchPaths):
     ]
 
 
-def run_scout(
+async def run_scout(
     *,
     options: AiWatchCommandOptions,
     paths: AiWatchPaths,
@@ -66,7 +66,7 @@ def run_scout(
             load_article_metadata(metadata_path) if metadata_path.exists() else None
         )
 
-        output, reply = stages.run_scout(
+        output, reply = await stages.run_scout(
             article_text=article_text,
             metadata=metadata,
             options=options,

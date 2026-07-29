@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..ai_usage import AIStageStats, build_ai_totals
-from ..hermes import Hermes
+from ..claude import ClaudeAgent
 from .collect import run_collect
 from .curate import run_curate
 from .delivery import run_delivery
@@ -14,18 +14,21 @@ from .models import AiWatchCommandOptions, AiWatchCommandResult, RunStatus
 from .obsidian import run_obsidian_sync
 from .paths import AiWatchPaths
 from .scout import run_scout
-from .stages import HermesAiWatchStages
+from .stages import AiWatchStages, ClaudeAiWatchStages
 from .state import SeenIndex
 from .web_tools import HermesWebTools, WebTools
 
 
 @dataclass
 class RunnerDeps:
+    """Everything the run reaches the outside world through."""
+
     web_tools: WebTools = field(default_factory=HermesWebTools)
-    hermes: Hermes | None = None
+    agent: ClaudeAgent | None = None
+    stages: AiWatchStages | None = None
 
 
-def run_ai_watch_command(
+async def run_ai_watch_command(
     *,
     options: AiWatchCommandOptions,
     deps: RunnerDeps | None = None,
@@ -39,7 +42,7 @@ def run_ai_watch_command(
     surfaced = 0
     speculative = 0
 
-    stages = HermesAiWatchStages(resolved.hermes or Hermes())
+    stages = resolved.stages or ClaudeAiWatchStages(resolved.agent or ClaudeAgent())
 
     try:
         run_collect(
@@ -56,13 +59,13 @@ def run_ai_watch_command(
         failed_stages.append(f"fetch: {error}")
 
     try:
-        scout_result = run_scout(options=options, paths=paths, stages=stages)
+        scout_result = await run_scout(options=options, paths=paths, stages=stages)
         stage_stats.append(AIStageStats(stage="scout", usage=scout_result.usage))
     except Exception as error:  # noqa: BLE001
         failed_stages.append(f"scout: {error}")
 
     try:
-        curate_result = run_curate(options=options, paths=paths, stages=stages)
+        curate_result = await run_curate(options=options, paths=paths, stages=stages)
         stage_stats.append(AIStageStats(stage="curate", usage=curate_result.usage))
         surfaced = curate_result.surfaced
         speculative = curate_result.speculative

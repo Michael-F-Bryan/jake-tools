@@ -33,7 +33,7 @@ def test_ai_watch_run_resolves_discord_target_from_env(
 ) -> None:
     captured: list[str] = []
 
-    def fake_run_ai_watch_command(*, options):
+    async def fake_run_ai_watch_command(*, options):
         captured.append(options.discord_target)
         from jake_tools.ai_watch.models import AiWatchCommandResult, RunStatus
 

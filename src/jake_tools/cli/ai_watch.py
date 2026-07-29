@@ -19,11 +19,12 @@ from ..ai_watch.obsidian import run_obsidian_sync
 from ..ai_watch.paths import AiWatchPaths
 from ..ai_watch.runner import run_ai_watch_command
 from ..ai_watch.scout import run_scout
-from ..ai_watch.stages import HermesAiWatchStages
+from ..ai_watch.stages import ClaudeAiWatchStages
 from ..ai_watch.state import SeenIndex
 from ..ai_watch.tuning import apply_surface_policy
 from ..ai_watch.web_tools import HermesWebTools
-from ..hermes import Hermes
+from ..claude import ClaudeAgent
+from .options import coro
 
 
 def _parse_date(_ctx: click.Context, _param: click.Parameter, value: str) -> date:
@@ -131,9 +132,9 @@ def fetch(
 
 @ai_watch.command()
 @_common_options
-@click.option("--scout-model", default="gpt-5.4-mini", show_default=True)
-@click.option("--scout-provider", default="openai-codex", show_default=True)
-def scout(
+@click.option("--scout-model", default="claude-haiku-4-5", show_default=True)
+@coro
+async def scout(
     target_date: date,
     base_dir: Path,
     dry_run: bool,
@@ -141,7 +142,6 @@ def scout(
     calibration_only: bool,
     as_json: bool,
     scout_model: str,
-    scout_provider: str,
 ) -> None:
     paths = AiWatchPaths.for_date(base_dir, target_date)
     options = AiWatchCommandOptions(
@@ -151,13 +151,12 @@ def scout(
         max_candidates=max_candidates,
         calibration_only=calibration_only,
         scout_model=scout_model,
-        scout_provider=scout_provider,
     )
-    _run_stage(
-        lambda: run_scout(
+    await _run_agent_stage(
+        run_scout(
             options=options,
             paths=paths,
-            stages=HermesAiWatchStages(Hermes()),
+            stages=ClaudeAiWatchStages(ClaudeAgent()),
         ),
         as_json=as_json,
     )
@@ -165,10 +164,10 @@ def scout(
 
 @ai_watch.command()
 @_common_options
-@click.option("--curator-model", default="gpt-5.5", show_default=True)
-@click.option("--curator-provider", default="openai-codex", show_default=True)
+@click.option("--curator-model", default="claude-sonnet-5", show_default=True)
 @click.option("--force-candidate", default=None)
-def curate(
+@coro
+async def curate(
     target_date: date,
     base_dir: Path,
     dry_run: bool,
@@ -176,7 +175,6 @@ def curate(
     calibration_only: bool,
     as_json: bool,
     curator_model: str,
-    curator_provider: str,
     force_candidate: str | None,
 ) -> None:
     paths = AiWatchPaths.for_date(base_dir, target_date)
@@ -187,14 +185,13 @@ def curate(
         max_candidates=max_candidates,
         calibration_only=calibration_only,
         curator_model=curator_model,
-        curator_provider=curator_provider,
         force_candidate=force_candidate,
     )
-    _run_stage(
-        lambda: run_curate(
+    await _run_agent_stage(
+        run_curate(
             options=options,
             paths=paths,
-            stages=HermesAiWatchStages(Hermes()),
+            stages=ClaudeAiWatchStages(ClaudeAgent()),
         ),
         as_json=as_json,
     )
@@ -352,10 +349,8 @@ def tune(
 
 @ai_watch.command()
 @_common_options
-@click.option("--scout-model", default="gpt-5.4-mini", show_default=True)
-@click.option("--scout-provider", default="openai-codex", show_default=True)
-@click.option("--curator-model", default="gpt-5.5", show_default=True)
-@click.option("--curator-provider", default="openai-codex", show_default=True)
+@click.option("--scout-model", default="claude-haiku-4-5", show_default=True)
+@click.option("--curator-model", default="claude-sonnet-5", show_default=True)
 @click.option("--discord-target", default="")
 @click.option(
     "--vault-path",
@@ -377,7 +372,8 @@ def tune(
     help="Demote surfaced articles older than this many days.",
 )
 @click.option("--cost-cap-usd", type=float, default=None)
-def run(
+@coro
+async def run(
     target_date: date,
     base_dir: Path,
     dry_run: bool,
@@ -385,9 +381,7 @@ def run(
     calibration_only: bool,
     as_json: bool,
     scout_model: str,
-    scout_provider: str,
     curator_model: str,
-    curator_provider: str,
     discord_target: str,
     vault_path: Path,
     surface_limit: int,
@@ -401,16 +395,14 @@ def run(
         max_candidates=max_candidates,
         calibration_only=calibration_only,
         scout_model=scout_model,
-        scout_provider=scout_provider,
         curator_model=curator_model,
-        curator_provider=curator_provider,
         discord_target=resolve_discord_target(discord_target),
         vault_path=vault_path,
         surface_limit=surface_limit,
         max_article_age_days=max_article_age_days,
         cost_cap_usd=cost_cap_usd,
     )
-    result = run_ai_watch_command(options=options)
+    result = await run_ai_watch_command(options=options)
     if as_json:
         click.echo(json.dumps(result.model_dump(mode="json"), sort_keys=True))
     else:
@@ -460,8 +452,19 @@ def _emit_stage(payload: dict, *, as_json: bool) -> None:
 
 
 def _run_stage(stage_fn, *, as_json: bool):
+    """Render a deterministic stage's result, exiting non-zero on failure."""
     try:
         result = stage_fn()
+    except RuntimeError as error:
+        raise click.exceptions.Exit(1) from error
+    _emit_stage(result.__dict__, as_json=as_json)
+    return result
+
+
+async def _run_agent_stage(stage, *, as_json: bool):
+    """Same, for a stage that awaits the agent."""
+    try:
+        result = await stage
     except RuntimeError as error:
         raise click.exceptions.Exit(1) from error
     _emit_stage(result.__dict__, as_json=as_json)

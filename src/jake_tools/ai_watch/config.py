@@ -13,10 +13,8 @@ def resolve_discord_target(discord_target: str) -> str:
 
 
 class AiWatchConfig(BaseModel):
-    scout_model: str = "gpt-5.4-mini"
-    scout_provider: str = "openai-codex"
-    curator_model: str = "gpt-5.5"
-    curator_provider: str = "openai-codex"
+    scout_model: str = "claude-haiku-4-5"
+    curator_model: str = "claude-sonnet-5"
     vault_path: Path = Path("/Users/work/Documents/Vault")
     discord_target: str = ""
     promote_to_curator_score: float = 3.5
@@ -28,9 +26,7 @@ class AiWatchConfig(BaseModel):
         discord_target = resolve_discord_target(options.discord_target)
         return cls(
             scout_model=options.scout_model,
-            scout_provider=options.scout_provider,
             curator_model=options.curator_model,
-            curator_provider=options.curator_provider,
             vault_path=options.vault_path,
             discord_target=discord_target,
             max_candidates_per_run=options.max_candidates,

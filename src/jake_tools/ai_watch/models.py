@@ -119,10 +119,8 @@ class AiWatchCommandResult(BaseModel):
 class AiWatchCommandOptions(BaseModel):
     target_date: date
     base_dir: Path = Field(default_factory=lambda: Path.cwd() / "_working")
-    scout_model: str = "gpt-5.4-mini"
-    scout_provider: str = "openai-codex"
-    curator_model: str = "gpt-5.5"
-    curator_provider: str = "openai-codex"
+    scout_model: str = "claude-haiku-4-5"
+    curator_model: str = "claude-sonnet-5"
     vault_path: Path = Path("/Users/work/Documents/Vault")
     discord_target: str = ""
     dry_run: bool = False

@@ -27,7 +27,7 @@ from jake_tools.ai_watch.paths import AiWatchPaths
 from jake_tools.ai_watch.runner import RunnerDeps, run_ai_watch_command
 from jake_tools.ai_watch.sources import DEFAULT_SOURCE_QUERIES
 from jake_tools.ai_watch.web_tools import FakeWebTools
-from jake_tools.hermes import Reply
+from jake_tools.claude import Reply
 
 HARNESS_URL = "https://www.anthropic.com/engineering/harness-design-long-running-apps"
 HARNESS_QUERY = DEFAULT_SOURCE_QUERIES[0].query
@@ -37,7 +37,7 @@ ARTICLE_TEXT = (
 
 
 class IntegrationFakeStages:
-    def run_scout(
+    async def run_scout(
         self,
         *,
         article_text: str,
@@ -61,7 +61,7 @@ class IntegrationFakeStages:
             Reply(usage=Usage(api_calls=1, model="fake-scout")),
         )
 
-    def run_curate(
+    async def run_curate(
         self,
         *,
         scout_record,
@@ -90,7 +90,7 @@ class IntegrationFakeStages:
         )
 
 
-def test_integration_dry_run_full_pipeline(tmp_path: Path) -> None:
+async def test_integration_dry_run_full_pipeline(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     target_date = date(2026, 7, 2)
     options = AiWatchCommandOptions(
@@ -125,22 +125,19 @@ def test_integration_dry_run_full_pipeline(tmp_path: Path) -> None:
 
     from jake_tools.ai_watch import runner as runner_module
 
-    original_stages = runner_module.HermesAiWatchStages
     original_delivery = runner_module.run_delivery
 
     def delivery_with_sender(**kwargs):
         kwargs["sender"] = sender
         return original_delivery(**kwargs)
 
-    runner_module.HermesAiWatchStages = lambda _hermes: IntegrationFakeStages()  # type: ignore[misc]
     runner_module.run_delivery = delivery_with_sender
     try:
-        result = run_ai_watch_command(
+        result = await run_ai_watch_command(
             options=options,
-            deps=RunnerDeps(web_tools=fake_web),
+            deps=RunnerDeps(web_tools=fake_web, stages=IntegrationFakeStages()),
         )
     finally:
-        runner_module.HermesAiWatchStages = original_stages
         runner_module.run_delivery = original_delivery
 
     assert result.status == RunStatus.OK

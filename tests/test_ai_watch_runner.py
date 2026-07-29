@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from unittest.mock import MagicMock
 
 from jake_tools.ai_usage import Usage
 from jake_tools.ai_watch.audit import append_model
@@ -21,11 +20,11 @@ from jake_tools.ai_watch.models import (
 from jake_tools.ai_watch.paths import AiWatchPaths
 from jake_tools.ai_watch.runner import RunnerDeps, run_ai_watch_command
 from jake_tools.ai_watch.web_tools import FakeWebTools
-from jake_tools.hermes import Reply
+from jake_tools.claude import Reply
 
 
 class FakeStages:
-    def run_scout(self, **kwargs):
+    async def run_scout(self, **kwargs):
         return (
             ScoutOutput(
                 tags=["agent-harnesses"],
@@ -41,7 +40,7 @@ class FakeStages:
             Reply(usage=Usage(api_calls=1)),
         )
 
-    def run_curate(self, **kwargs):
+    async def run_curate(self, **kwargs):
         return (
             CuratorDecision(
                 decision=CuratorDecisionType.SURFACE,
@@ -58,7 +57,7 @@ class FakeStages:
         )
 
 
-def test_runner_dry_pipeline(tmp_path: Path) -> None:
+async def test_runner_dry_pipeline(tmp_path: Path) -> None:
     paths = AiWatchPaths.for_date(tmp_path, date(2026, 7, 2)).create()
     append_model(
         paths.candidates,
@@ -87,16 +86,7 @@ def test_runner_dry_pipeline(tmp_path: Path) -> None:
         dry_run=True,
         max_candidates=5,
     )
-    hermes = MagicMock()
-    deps = RunnerDeps(web_tools=fake_web, hermes=hermes)
-    # monkeypatch stages via custom runner - use FakeStages by patching HermesAiWatchStages
-    from jake_tools.ai_watch import runner as runner_module
-
-    original = runner_module.HermesAiWatchStages
-    runner_module.HermesAiWatchStages = lambda _hermes: FakeStages()  # type: ignore[misc]
-    try:
-        result = run_ai_watch_command(options=options, deps=deps)
-    finally:
-        runner_module.HermesAiWatchStages = original
+    deps = RunnerDeps(web_tools=fake_web, stages=FakeStages())
+    result = await run_ai_watch_command(options=options, deps=deps)
     assert result.status == RunStatus.OK
     assert paths.digest.exists()

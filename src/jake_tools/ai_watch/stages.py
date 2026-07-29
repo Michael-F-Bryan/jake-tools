@@ -5,14 +5,14 @@ from typing import ClassVar, Protocol
 
 from pydantic import BaseModel
 
-from ..hermes import AgentSpec, Reply
+from ..claude import AgentSpec, ClaudeAgent, Reply
 from ..prompting import StructuredPrompt
 from .audit_models import ArticleMetadata, ScoutEvaluationRecord
 from .models import AiWatchCommandOptions, CuratorDecision, ScoutOutput
 
 
 class AiWatchStages(Protocol):
-    def run_scout(
+    async def run_scout(
         self,
         *,
         article_text: str,
@@ -21,7 +21,7 @@ class AiWatchStages(Protocol):
         interest_profile: str,
     ) -> tuple[ScoutOutput, Reply]: ...
 
-    def run_curate(
+    async def run_curate(
         self,
         *,
         scout_record: ScoutEvaluationRecord,
@@ -100,11 +100,11 @@ Calibration replay mode: evaluate decision quality as if this article were new. 
     calibration_replay: bool = False
 
 
-class HermesAiWatchStages:
-    def __init__(self, hermes) -> None:
-        self.hermes = hermes
+class ClaudeAiWatchStages:
+    def __init__(self, agent: ClaudeAgent) -> None:
+        self.agent = agent
 
-    def run_scout(
+    async def run_scout(
         self,
         *,
         article_text: str,
@@ -117,10 +117,11 @@ class HermesAiWatchStages:
             metadata=metadata,
             article_text=article_text[:12000],
         )
-        spec = AgentSpec(model=options.scout_model, provider=options.scout_provider)
-        return self.hermes.run_structured(prompt, spec)
+        return await self.agent.run_structured(
+            prompt, AgentSpec(model=options.scout_model)
+        )
 
-    def run_curate(
+    async def run_curate(
         self,
         *,
         scout_record: ScoutEvaluationRecord,
@@ -136,8 +137,9 @@ class HermesAiWatchStages:
             article_text=article_text[:16000],
             calibration_replay=options.calibration_only,
         )
-        spec = AgentSpec(model=options.curator_model, provider=options.curator_provider)
-        return self.hermes.run_structured(prompt, spec)
+        return await self.agent.run_structured(
+            prompt, AgentSpec(model=options.curator_model)
+        )
 
 
 def load_interest_profile() -> str:

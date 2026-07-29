@@ -21,7 +21,7 @@ class CurateRunResult:
     usage: Usage
 
 
-def run_curate(
+async def run_curate(
     *,
     options: AiWatchCommandOptions,
     paths: AiWatchPaths,
@@ -56,7 +56,7 @@ def run_curate(
             load_article_metadata(metadata_path) if metadata_path.exists() else None
         )
 
-        decision, reply = stages.run_curate(
+        decision, reply = await stages.run_curate(
             scout_record=scout_record,
             article_text=article_text,
             metadata=metadata,
