@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "claude-agent-sdk>=0.2.128",
     "click>=8.4.1",
     "hermes-agent",
     "jinja2>=3.1.6",
@@ -28,6 +29,7 @@ dev = [
     "pre-commit>=4.6.0",
     "pyright>=1.1.410",
     "pytest>=8.4.0",
+    "pytest-asyncio>=1.4.0",
     "ruff>=0.15.18",
 ]
 
@@ -52,6 +54,7 @@ select = [
 ignore = ["E501"]
 
 [tool.pytest.ini_options]
+asyncio_mode = "auto"
 markers = [
     "live: marks tests that hit real external services",
 ]

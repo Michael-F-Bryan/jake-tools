@@ -1,4 +1,10 @@
 {
     "venvPath": ".",
-    "venv": ".venv"
+    "venv": ".venv",
+    "exclude": [
+        "**/__pycache__",
+        ".venv",
+        ".worktrees",
+        "_working"
+    ]
 }
