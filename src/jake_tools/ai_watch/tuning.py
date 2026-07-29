@@ -17,7 +17,13 @@ from .audit_models import (
 from .delivery import build_discord_payload
 from .digest import run_digest
 from .manifest import write_manifest
-from .models import AiWatchCommandOptions, DigestLane, RunStatus
+from .models import (
+    AiWatchCommandOptions,
+    DigestLane,
+    RunStatus,
+    VaultPathEscapeError,
+    resolve_vault_path,
+)
 from .paths import AiWatchPaths
 from .records import load_model, read_models
 
@@ -183,12 +189,17 @@ def _remove_safe_note(
     synced_note_path: str | None = None,
 ) -> tuple[bool, str | None]:
     rel_path = record.obsidian_recommendation.path.strip()
-    if rel_path:
-        note_path = vault_path / rel_path
-    elif synced_note_path:
-        note_path = Path(synced_note_path)
-    else:
-        return False, None
+    try:
+        if rel_path:
+            note_path = resolve_vault_path(vault=vault_path, rel_path=rel_path)
+        elif synced_note_path:
+            note_path = resolve_vault_path(vault=vault_path, rel_path=synced_note_path)
+        else:
+            return False, None
+    except VaultPathEscapeError:
+        return False, json.dumps(
+            {"path": rel_path or synced_note_path, "reason": "vault_escape"}
+        )
     if not note_path.exists():
         return False, None
     try:

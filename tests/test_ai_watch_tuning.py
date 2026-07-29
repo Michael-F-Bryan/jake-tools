@@ -36,6 +36,7 @@ def _append_candidate_run(
     practicality: int,
     novelty: int,
     noise: int,
+    obsidian_path: str | None = None,
 ) -> None:
     append_model(
         paths.candidates,
@@ -79,7 +80,7 @@ def _append_candidate_run(
             digest_summary=f"{title} digest summary",
             obsidian_recommendation=ObsidianRecommendation(
                 should_create_note=True,
-                path=f"3 Resources/AI/{title}.md",
+                path=obsidian_path or f"3 Resources/AI/{title}.md",
                 placement_reason="Agent workflow evidence.",
             ),
         ),
@@ -231,6 +232,52 @@ def test_surface_policy_does_not_remove_unmarked_notes(tmp_path: Path) -> None:
     assert note.exists()
     skipped = json.loads(result.skipped_note_paths[0])
     assert skipped["reason"] == "marker_mismatch"
+
+
+def test_surface_policy_refuses_to_delete_notes_outside_the_vault(
+    tmp_path: Path,
+) -> None:
+    paths = AiWatchPaths.for_date(tmp_path, date(2026, 7, 7)).create()
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    escaped_note = tmp_path / "outside-vault.md"
+    escaped_note.write_text(
+        "# Escaped\n\nCandidate ID: sha256:escape\nRun ID: 2026-07-07\n",
+        encoding="utf-8",
+    )
+    _append_candidate_run(
+        paths,
+        candidate_id="sha256:escape",
+        title="Escaped",
+        fit=4,
+        practicality=4,
+        novelty=3,
+        noise=2,
+        obsidian_path="../outside-vault.md",
+    )
+    _append_candidate_run(
+        paths,
+        candidate_id="sha256:best",
+        title="Best signal",
+        fit=5,
+        practicality=5,
+        novelty=4,
+        noise=1,
+    )
+    options = AiWatchCommandOptions(
+        target_date=date(2026, 7, 7),
+        base_dir=tmp_path,
+        vault_path=vault,
+        surface_limit=1,
+    )
+
+    result = apply_surface_policy(options=options, paths=paths, remove_notes=True)
+
+    assert result.demoted_count == 1
+    assert result.removed_note_count == 0
+    assert escaped_note.exists()
+    skipped = json.loads(result.skipped_note_paths[0])
+    assert skipped["reason"] == "vault_escape"
 
 
 def test_surface_policy_demotes_stale_articles_even_under_limit(tmp_path: Path) -> None:
