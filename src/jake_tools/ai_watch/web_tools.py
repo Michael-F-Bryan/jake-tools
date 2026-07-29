@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from run_agent import handle_function_call
 
@@ -112,7 +112,7 @@ def _parse_extract_results(raw: str) -> list[ExtractResult]:
         url = str(row.get("url", "")).strip()
         content = str(row.get("content", ""))
         error = row.get("error")
-        status = "ok" if content and not error else "fail"
+        status: Literal["ok", "fail"] = "ok" if content and not error else "fail"
         parsed.append(
             ExtractResult(
                 url=url,
@@ -121,7 +121,7 @@ def _parse_extract_results(raw: str) -> list[ExtractResult]:
                 full_text_path=(
                     str(row["full_text_path"]) if row.get("full_text_path") else None
                 ),
-                status=status,  # type: ignore[arg-type]
+                status=status,
                 error=str(error) if error else None,
             )
         )
