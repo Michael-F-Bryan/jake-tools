@@ -1,46 +1,29 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
-from pydantic import BaseModel
+from agent_fakes import fake_agent, scripted_query_of, structured
 
-from jake_tools.claude import Reply
-from jake_tools.prompting import StructuredPrompt
 from jake_tools.transcripts.models import (
+    Chapter,
     ChapterPlan,
-    PlannedChapter,
     SourceArtifact,
     SourceNotePlan,
     SourceOverview,
     TranscriptArtifact,
     TranscriptTurn,
 )
-from jake_tools.transcripts.render_primitives import (
+from jake_tools.transcripts.render import (
     _source_chapter_paragraphs,
     render_source_note_markdown,
 )
-from jake_tools.transcripts.stage_primitives import (
+from jake_tools.transcripts.stages import (
     StagePrimitiveError,
     run_source_note_plan_stage,
 )
-from jake_tools.transcripts.verify_primitives import verify_note
-
-
-class FakeAgent:
-    def __init__(self, response: dict[str, Any]) -> None:
-        self.response = response
-        self.prompt: Any | None = None
-
-    async def run_structured[TModel: BaseModel](
-        self, prompt: StructuredPrompt[TModel]
-    ) -> tuple[TModel, Reply]:
-        self.prompt = prompt
-        result = prompt.response_model.model_validate(self.response)
-        return cast(TModel, result), Reply(text=json.dumps(self.response))
+from jake_tools.transcripts.verify import verify_note
 
 
 def _source(tmp_path: Path) -> SourceArtifact:
@@ -87,13 +70,13 @@ def _chapters() -> ChapterPlan:
     return ChapterPlan(
         boundary_source="deterministic",
         chapters=[
-            PlannedChapter(
+            Chapter(
                 start=0.0,
                 end=300.0,
                 title="Why MAVLink tooling matters",
                 summary="The talk frames common integration and observability problems.",
             ),
-            PlannedChapter(
+            Chapter(
                 start=310.0,
                 end=330.0,
                 title="Browser-based inspection",
@@ -106,17 +89,19 @@ def _chapters() -> ChapterPlan:
 async def test_source_note_plan_stage_returns_faithful_structured_notes(
     tmp_path: Path,
 ) -> None:
-    agent = FakeAgent(
-        {
-            "overview": {
-                "summary": "Patrick Pereira presents MAVLink tools for vehicle integration and browser-based inspection.",
-                "key_points": [
-                    "The tools reduce custom integration work.",
-                    "Browser inspection exposes live MAVLink messages.",
-                ],
-            },
-            "chapters": _chapters().model_dump(mode="json"),
-        }
+    agent = fake_agent(
+        structured(
+            {
+                "overview": {
+                    "summary": "Patrick Pereira presents MAVLink tools for vehicle integration and browser-based inspection.",
+                    "key_points": [
+                        "The tools reduce custom integration work.",
+                        "Browser inspection exposes live MAVLink messages.",
+                    ],
+                },
+                "chapters": _chapters().model_dump(mode="json"),
+            }
+        )
     )
 
     plan, _reply = await run_source_note_plan_stage(
@@ -133,9 +118,9 @@ async def test_source_note_plan_stage_returns_faithful_structured_notes(
         "Browser inspection exposes live MAVLink messages.",
     ]
     assert plan.chapters == _chapters()
-    assert agent.prompt is not None
-    assert agent.prompt.source["title"].startswith("MAVLink tools")
-    assert len(agent.prompt.turns) == 2
+    rendered_prompt = scripted_query_of(agent).prompts[0]
+    assert "MAVLink tools" in rendered_prompt
+    assert "The inspector exposes messages in a browser." in rendered_prompt
 
 
 async def test_source_note_plan_rejects_changed_chapter_boundaries(
@@ -143,11 +128,13 @@ async def test_source_note_plan_rejects_changed_chapter_boundaries(
 ) -> None:
     chapters = _chapters().model_dump(mode="json")
     chapters["chapters"][0]["start"] = 1.0
-    agent = FakeAgent(
-        {
-            "overview": {"summary": "Summary.", "key_points": ["Point."]},
-            "chapters": chapters,
-        }
+    agent = fake_agent(
+        structured(
+            {
+                "overview": {"summary": "Summary.", "key_points": ["Point."]},
+                "chapters": chapters,
+            }
+        )
     )
 
     with pytest.raises(StagePrimitiveError, match="chapter boundaries"):

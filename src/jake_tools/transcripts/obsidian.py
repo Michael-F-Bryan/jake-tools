@@ -4,6 +4,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .errors import TranscriptError
 from .models import RecordingRef, SourceNote
 
 EMBED_RE = re.compile(r"!\[\[([^\]]+)\]\]")
@@ -11,7 +12,7 @@ MARKDOWN_LINK_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".mp4", ".webm", ".ogg", ".flac"}
 
 
-class RecordingResolutionError(FileNotFoundError):
+class RecordingResolutionError(FileNotFoundError, TranscriptError):
     pass
 
 

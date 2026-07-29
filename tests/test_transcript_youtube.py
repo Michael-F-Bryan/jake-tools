@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from jake_tools.transcripts.models import SourceArtifact
-from jake_tools.transcripts.parse_primitives import parse_youtube_json3
-from jake_tools.transcripts.source_primitives import (
+from jake_tools.transcripts.parse import parse_youtube_json3
+from jake_tools.transcripts.sources import (
     SourcePrimitiveError,
     source_from_youtube,
 )

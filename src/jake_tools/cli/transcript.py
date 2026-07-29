@@ -2,16 +2,41 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import click
 
 from ..claude import ClaudeAgent
-from ..transcripts.recipe_primitives import (
-    RecipePrimitiveError,
-    run_teams_meeting_recipe,
-    run_youtube_source_notes_recipe,
-)
+from ..transcripts.errors import TranscriptError
+from ..transcripts.render import MeetingNoteProfile
+from ..transcripts.teams_recipe import run_teams_meeting_recipe
+from ..transcripts.youtube_recipe import run_youtube_source_notes_recipe
 from .options import agent, coro
+
+# Personal policy for the CSU/DUM-C Teams account: which token file backs it,
+# and what provenance to stamp onto the resulting SourceArtifact. The library
+# layer (teams_graph.py, teams_recipe.py) takes these as plain parameters; this
+# is the one place that knows what "csu-teams" means.
+_TEAMS_ACCOUNT_TOKEN_FILES: dict[str, Path] = {
+    "csu-teams": Path("~/.hermes/csu-teams-graph-token.json").expanduser(),
+}
+_TEAMS_ACCOUNT_PROVENANCE: dict[str, tuple[str, str]] = {
+    "csu-teams": ("CSU", "DUM-C"),
+}
+_DEFAULT_DUMC_VAULT_DIR = Path("~/Documents/Vault/2 Areas/DUM-C").expanduser()
+
+
+def _resolve_teams_account(
+    account: str, token_file: Path | None
+) -> tuple[Path, str | None, str | None]:
+    default_token_file = _TEAMS_ACCOUNT_TOKEN_FILES.get(account)
+    if token_file is None and default_token_file is None:
+        raise click.UsageError(
+            f"unknown --account {account!r}; pass --token-file explicitly or use "
+            f"one of: {', '.join(sorted(_TEAMS_ACCOUNT_TOKEN_FILES))}"
+        )
+    organisation, project = _TEAMS_ACCOUNT_PROVENANCE.get(account, (None, None))
+    return token_file or cast(Path, default_token_file), organisation, project
 
 
 @click.group(help="Turn recorded sources into verified notes.")
@@ -87,28 +112,35 @@ def teams_meeting(
     if write_vault and profile != "dumc":
         raise click.UsageError("--write-vault requires --profile dumc.")
 
+    resolved_token_file, organisation, project = _resolve_teams_account(
+        account, token_file
+    )
+
     try:
         result = run_teams_meeting_recipe(
             account=account,
-            profile=profile,
+            profile=cast(MeetingNoteProfile, profile),
             out_dir=out_dir,
-            token_file=token_file,
+            token_file=resolved_token_file,
             event_id=event_id,
             days_back=days_back,
             query=query,
+            organisation=organisation,
+            project=project,
             vault_note=vault_note,
             write_vault=write_vault,
+            dumc_vault_dir=_DEFAULT_DUMC_VAULT_DIR,
             dry_run=dry_run,
         )
-    except RecipePrimitiveError as exc:
+    except TranscriptError as exc:
         raise click.ClickException(str(exc)) from exc
 
     if as_json:
-        click.echo(json.dumps(result, sort_keys=True))
+        click.echo(json.dumps(result.model_dump(mode="json"), sort_keys=True))
         return
-    click.echo(f"rendered_note: {result['rendered_note']}")
-    click.echo(f"note: {result['note']}")
-    click.echo(f"updated: {result['updated']}")
+    click.echo(f"rendered_note: {result.rendered_note}")
+    click.echo(f"note: {result.note}")
+    click.echo(f"updated: {result.updated}")
 
 
 @transcript.command("youtube")
@@ -153,13 +185,13 @@ async def youtube(
             vault_note=vault_note,
             dry_run=dry_run,
         )
-    except RecipePrimitiveError as exc:
+    except TranscriptError as exc:
         raise click.ClickException(str(exc)) from exc
 
     if as_json:
-        click.echo(json.dumps(result, sort_keys=True))
+        click.echo(json.dumps(result.model_dump(mode="json"), sort_keys=True))
         return
-    click.echo(f"rendered_note: {result['rendered_note']}")
-    click.echo(f"subtitle: {result['subtitle_track']} ({result['subtitle_kind']})")
-    click.echo(f"note: {result['note']}")
-    click.echo(f"updated: {result['updated']}")
+    click.echo(f"rendered_note: {result.rendered_note}")
+    click.echo(f"subtitle: {result.subtitle_track} ({result.subtitle_kind})")
+    click.echo(f"note: {result.note}")
+    click.echo(f"updated: {result.updated}")

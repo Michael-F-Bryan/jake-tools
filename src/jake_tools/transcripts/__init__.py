@@ -1,6 +1,3 @@
-from pathlib import Path
+from .obsidian_recipe import run_obsidian_recording_recipe
 
-from ..claude import ClaudeAgent
-from .coordinator import process_obsidian_recording
-
-__all__ = ["process_obsidian_recording", "ClaudeAgent", "Path"]
+__all__ = ["run_obsidian_recording_recipe"]

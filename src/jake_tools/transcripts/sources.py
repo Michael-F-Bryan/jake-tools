@@ -6,14 +6,16 @@ import json
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
-from .models import SourceArtifact
+from .errors import TranscriptError
+from .models import SourceArtifact, YoutubeCaptureMetadata
 from .obsidian import load_source_note
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
 
-class SourcePrimitiveError(RuntimeError):
+class SourcePrimitiveError(TranscriptError):
     pass
 
 
@@ -55,7 +57,7 @@ def _pick_caption_language(
 
 def _select_youtube_caption(
     info: dict[str, object], *, language: str
-) -> tuple[str, str]:
+) -> tuple[str, Literal["manual", "automatic"]]:
     manual = _caption_tracks(info.get("subtitles"))
     selected = _pick_caption_language(manual, language=language, prefer_original=False)
     if selected is not None:
@@ -205,6 +207,16 @@ def source_from_youtube(
         if subtitle_kind == "automatic"
         else []
     )
+    capture_metadata = YoutubeCaptureMetadata(
+        video_id=video_id,
+        channel=channel,
+        channel_id=str(info.get("channel_id") or ""),
+        duration_seconds=duration_seconds,
+        language=str(info.get("language") or language),
+        subtitle_track=subtitle_track,
+        subtitle_kind=subtitle_kind,
+        capture_method="yt-dlp",
+    )
     return SourceArtifact(
         kind="youtube",
         source_path=info_path,
@@ -214,15 +226,6 @@ def source_from_youtube(
         date=published,
         organisation=channel or None,
         raw_text_path=caption_path,
-        metadata={
-            "video_id": video_id,
-            "channel": channel,
-            "channel_id": str(info.get("channel_id") or ""),
-            "duration_seconds": duration_seconds,
-            "language": str(info.get("language") or language),
-            "subtitle_track": subtitle_track,
-            "subtitle_kind": subtitle_kind,
-            "capture_method": "yt-dlp",
-        },
+        metadata=capture_metadata.model_dump(mode="json"),
         warnings=warnings,
     )

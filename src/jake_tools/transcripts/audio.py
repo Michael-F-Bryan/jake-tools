@@ -5,10 +5,11 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
+from .errors import TranscriptError
 from .models import ConcatPlan, RecordingRef, ScribeRunReport
 
 
-class AudioPipelineError(RuntimeError):
+class AudioPipelineError(TranscriptError):
     pass
 
 

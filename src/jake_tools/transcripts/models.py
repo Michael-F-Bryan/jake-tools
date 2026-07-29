@@ -98,14 +98,6 @@ class SourceOverview(BaseModel):
     key_points: list[str] = Field(min_length=1)
 
 
-class MergeReport(BaseModel):
-    status: str
-    transcript_heading_count: int
-    chapter_count: int
-    original_content_preserved: bool
-    recording_embed_preserved: bool
-
-
 class SpeakerMessageCount(BaseModel):
     speaker: str
     messages: int
@@ -118,6 +110,7 @@ class CoordinatorResult(BaseModel):
     ai_stage_stats: list[AIStageStats] = Field(default_factory=list)
     ai_totals: AITotals = Field(default_factory=AITotals)
     speaker_message_counts: list[SpeakerMessageCount] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
     def json_summary(self) -> dict[str, object]:
         return {
@@ -131,11 +124,15 @@ class CoordinatorResult(BaseModel):
             "speaker_message_counts": [
                 count.model_dump(mode="json") for count in self.speaker_message_counts
             ],
+            "warnings": list(self.warnings),
         }
 
 
+SourceKind = Literal["obsidian-note", "youtube", "msgraph-teams"]
+
+
 class SourceArtifact(BaseModel):
-    kind: str
+    kind: SourceKind
     source_path: Path | None = None
     source_url: str | None = None
     message_id: str | None = None
@@ -146,8 +143,26 @@ class SourceArtifact(BaseModel):
     project: str | None = None
     attachments: list[Path] = Field(default_factory=list)
     raw_text_path: Path | None = None
+    # Kind-specific capture details (e.g. YoutubeCaptureMetadata for
+    # kind="youtube") live here as a plain dict because different source
+    # kinds populate genuinely different shapes. Callers that know the kind
+    # should parse this via the matching typed model instead of indexing it
+    # directly.
     metadata: dict[str, object] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+
+
+class YoutubeCaptureMetadata(BaseModel):
+    """Typed view of ``SourceArtifact.metadata`` for ``kind="youtube"``."""
+
+    video_id: str
+    channel: str
+    channel_id: str = ""
+    duration_seconds: int = 0
+    language: str = ""
+    subtitle_track: str
+    subtitle_kind: Literal["manual", "automatic"]
+    capture_method: str = "yt-dlp"
 
 
 class TranscriptSourceRef(BaseModel):
@@ -162,15 +177,8 @@ class TranscriptArtifact(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
-class PlannedChapter(BaseModel):
-    start: float
-    end: float
-    title: str
-    summary: str
-
-
 class ChapterPlan(BaseModel):
-    chapters: list[PlannedChapter]
+    chapters: list[Chapter]
     boundary_source: Literal["deterministic", "llm", "manual"]
 
 
@@ -204,3 +212,25 @@ class RunManifest(BaseModel):
     stages: list[RunStageStatus]
     artefact_paths: dict[str, Path] = Field(default_factory=dict)
     ai_totals: AITotals | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class YoutubeSourceNoteResult(BaseModel):
+    title: str | None = None
+    note: Path | None = None
+    updated: bool
+    out_dir: Path
+    rendered_note: Path
+    manifest: Path
+    verification_status: str
+    subtitle_track: str | None = None
+    subtitle_kind: str | None = None
+
+
+class TeamsMeetingResult(BaseModel):
+    note: Path | None = None
+    updated: bool
+    out_dir: Path
+    rendered_note: Path
+    raw_vtt: Path
+    manifest: Path

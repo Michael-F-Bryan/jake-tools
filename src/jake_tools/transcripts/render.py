@@ -4,6 +4,7 @@ import json
 import re
 from typing import Literal
 
+from .errors import TranscriptError
 from .merge import (
     format_timestamp,
     render_chaptered_transcript,
@@ -12,7 +13,6 @@ from .merge import (
     render_transcript,
 )
 from .models import (
-    Chapter,
     ChapterPlan,
     MeetingMinutes,
     SourceArtifact,
@@ -20,26 +20,15 @@ from .models import (
     SpeakerMapping,
     TranscriptArtifact,
     TranscriptTurn,
+    YoutubeCaptureMetadata,
 )
 
 
-class RenderPrimitiveError(RuntimeError):
+class RenderPrimitiveError(TranscriptError):
     pass
 
 
 MeetingNoteProfile = Literal["default", "dumc"]
-
-
-def _plan_to_chapters(plan: ChapterPlan) -> list[Chapter]:
-    return [
-        Chapter(
-            title=chapter.title,
-            start=chapter.start,
-            end=chapter.end,
-            summary=chapter.summary,
-        )
-        for chapter in plan.chapters
-    ]
 
 
 def render_transcript_markdown(
@@ -53,7 +42,7 @@ def render_transcript_markdown(
     if chapters is not None and chapters.chapters:
         return render_chaptered_transcript(
             transcript.turns,
-            _plan_to_chapters(chapters),
+            chapters.chapters,
             speaker_mapping,
         )
     return render_transcript(transcript.turns, speaker_mapping)
@@ -62,7 +51,7 @@ def render_transcript_markdown(
 def render_chapters_markdown(chapters: ChapterPlan) -> str:
     if not chapters.chapters:
         raise RenderPrimitiveError("ChapterPlan has no chapters to render.")
-    return render_chapters_index(_plan_to_chapters(chapters))
+    return render_chapters_index(chapters.chapters)
 
 
 def render_meeting_note_markdown(
@@ -157,13 +146,14 @@ def _yaml_string(value: object) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
-def _source_timestamp_url(source: SourceArtifact, start: float) -> str:
+def _source_timestamp_url(
+    capture: YoutubeCaptureMetadata, source_url: str, start: float
+) -> str:
     seconds = max(0, int(start))
-    video_id = str(source.metadata.get("video_id") or "").strip()
-    if video_id:
-        return f"https://www.youtube.com/watch?v={video_id}&t={seconds}s"
-    separator = "&" if source.source_url and "?" in source.source_url else "?"
-    return f"{source.source_url or ''}{separator}t={seconds}s"
+    if capture.video_id:
+        return f"https://www.youtube.com/watch?v={capture.video_id}&t={seconds}s"
+    separator = "&" if "?" in source_url else "?"
+    return f"{source_url}{separator}t={seconds}s"
 
 
 def _source_chapter_paragraphs(
@@ -207,32 +197,26 @@ def render_source_note_markdown(
     if not transcript.turns:
         raise RenderPrimitiveError("Source note rendering requires transcript turns.")
 
+    capture = YoutubeCaptureMetadata.model_validate(source.metadata)
+    source_url = source.source_url
+
     title = source.title or "YouTube source note"
-    metadata = source.metadata
     frontmatter = [
         "---",
         f"title: {_yaml_string(title)}",
-        f"source: {_yaml_string(source.source_url)}",
+        f"source: {_yaml_string(source_url)}",
+        f"channel: {_yaml_string(capture.channel)}",
     ]
-    channel = metadata.get("channel") or source.organisation
-    if channel:
-        frontmatter.append(f"channel: {_yaml_string(channel)}")
     if source.date is not None:
         frontmatter.append(f"published: {source.date.isoformat()}")
     if source.message_id:
         frontmatter.append(f"message-id: {_yaml_string(source.message_id)}")
-    duration = metadata.get("duration_seconds")
-    if isinstance(duration, int | float):
-        frontmatter.append(f"duration: {int(duration)}")
-    for yaml_key, metadata_key in (
-        ("video-id", "video_id"),
-        ("subtitle-track", "subtitle_track"),
-        ("subtitle-kind", "subtitle_kind"),
-        ("capture-method", "capture_method"),
-    ):
-        value = metadata.get(metadata_key)
-        if value:
-            frontmatter.append(f"{yaml_key}: {_yaml_string(value)}")
+    if capture.duration_seconds:
+        frontmatter.append(f"duration: {capture.duration_seconds}")
+    frontmatter.append(f"video-id: {_yaml_string(capture.video_id)}")
+    frontmatter.append(f"subtitle-track: {_yaml_string(capture.subtitle_track)}")
+    frontmatter.append(f"subtitle-kind: {_yaml_string(capture.subtitle_kind)}")
+    frontmatter.append(f"capture-method: {_yaml_string(capture.capture_method)}")
     frontmatter.extend(["tags:", "  - source-note", "  - youtube", "---"])
 
     summary = " ".join(overview.summary.split())
@@ -243,7 +227,7 @@ def render_source_note_markdown(
     lines.extend(["", "## Chapters", ""])
     for chapter in chapters.chapters:
         timestamp = format_timestamp(chapter.start)
-        link = _source_timestamp_url(source, chapter.start)
+        link = _source_timestamp_url(capture, source_url, chapter.start)
         lines.append(f"- [{timestamp} — {chapter.title}]({link})")
         if chapter.summary.strip():
             lines.append(f"  - {chapter.summary.strip()}")
@@ -262,7 +246,7 @@ def render_source_note_markdown(
             and (next_start is None or turn.start < next_start)
         ]
         timestamp = format_timestamp(chapter.start)
-        link = _source_timestamp_url(source, chapter.start)
+        link = _source_timestamp_url(capture, source_url, chapter.start)
         lines.extend(
             [
                 f"### [{timestamp} — {chapter.title}]({link})",

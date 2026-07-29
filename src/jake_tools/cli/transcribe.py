@@ -4,12 +4,10 @@ from pathlib import Path
 import click
 
 from ..claude import ClaudeAgent
+from ..transcripts.errors import TranscriptError
 from ..transcripts.models import CoordinatorResult
+from ..transcripts.obsidian_recipe import run_obsidian_recording_recipe
 from ..transcripts.polish import polish_transcript
-from ..transcripts.recipe_primitives import (
-    RecipePrimitiveError,
-    run_obsidian_recording_recipe,
-)
 from .options import agent, coro
 
 
@@ -78,6 +76,6 @@ async def obsidian_recording(
             obsidian_note,
             dry_run=dry_run,
         )
-    except RecipePrimitiveError as exc:
+    except TranscriptError as exc:
         raise click.ClickException(str(exc)) from exc
     _emit_obsidian_recording_result(result, as_json=as_json)

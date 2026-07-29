@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import re
 
-from .models import Chapter, MeetingMinutes, MergeReport, SpeakerMapping, TranscriptTurn
+from .models import Chapter, MeetingMinutes, SpeakerMapping, TranscriptTurn
 
 GENERATED_HEADINGS = ("## Meeting Notes", "## Chapters", "## Transcript")
 RECORDING_EMBED_RE = re.compile(
     r"!\[\[[^\]]+\.(?:mp3|m4a|wav|mp4|webm|ogg|flac)(?:\|[^\]]+)?\]\]", re.IGNORECASE
+)
+# Shared between the polish stage gate and note verification: an agent
+# occasionally leaks a line naming the skill it just loaded (e.g. "Loading
+# the transcript-polisher skill.") into otherwise-structured output.
+OPERATIONAL_CHATTER_RE = re.compile(
+    r"^\s*Loading the .* skill\.?\s*$", re.IGNORECASE | re.MULTILINE
 )
 
 
@@ -106,28 +112,4 @@ def merge_note(
     sections.append("## Transcript\n\n" + transcript_body)
     return (
         "\n\n".join(section.strip() for section in sections if section.strip()) + "\n"
-    )
-
-
-def build_merge_report(
-    original_body: str,
-    merged_body: str,
-    chapter_count: int,
-) -> MergeReport:
-    transcript_heading_count = merged_body.count("### ")
-    original_content_preserved = (
-        _strip_existing_generated_sections(original_body) in merged_body
-    )
-
-    original_embeds = set(RECORDING_EMBED_RE.findall(original_body))
-    recording_embed_preserved = all(embed in merged_body for embed in original_embeds)
-
-    return MergeReport(
-        status="pass"
-        if original_content_preserved and recording_embed_preserved
-        else "fail",
-        transcript_heading_count=transcript_heading_count,
-        chapter_count=chapter_count,
-        original_content_preserved=original_content_preserved,
-        recording_embed_preserved=recording_embed_preserved,
     )

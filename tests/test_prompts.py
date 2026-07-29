@@ -6,18 +6,18 @@ from jinja2 import UndefinedError
 
 from jake_tools.prompting import Prompt
 from jake_tools.transcripts.models import (
-    Chapter,
-    ChaptersPayload,
+    ChapterPlan,
     MeetingMinutes,
+    SourceNotePlan,
     SpeakerMapping,
     TranscriptTurn,
-    TranscriptTurnsPayload,
 )
 from jake_tools.transcripts.stages import (
-    ChapteringPrompt,
-    MeetingMinutesPrompt,
-    SpeakerMappingPrompt,
-    TranscriptPolishPrompt,
+    ChapterTitlePrompt,
+    MinutesPrompt,
+    PolishStagePrompt,
+    SourceNotePlanPrompt,
+    SpeakerMapPrompt,
 )
 
 
@@ -51,35 +51,35 @@ def test_strict_undefined_catches_mistyped_nested_access_at_render() -> None:
         Risky(person={"name": "Ada"}).render()
 
 
-def test_speaker_mapping_prompt_embeds_typed_inputs() -> None:
-    rendered = SpeakerMappingPrompt(
-        title="Vet West call",
+def test_speaker_map_prompt_embeds_typed_inputs() -> None:
+    rendered = SpeakerMapPrompt(
         attendees=["Michael Bryan", "Vet West"],
         turns=_turns(),
     ).render()
 
-    assert "Vet West call" in rendered
     assert "Michael Bryan" in rendered
     assert "Hello team" in rendered
 
 
-def test_meeting_minutes_prompt_omits_chapter_block_when_absent() -> None:
-    without = MeetingMinutesPrompt(turns=_turns()).render()
-    assert "Chapter plan:" not in without
+def test_prompt_with_correction_field_surfaces_the_previous_error() -> None:
+    without = SpeakerMapPrompt(attendees=["Michael Bryan"], turns=_turns()).render()
+    assert "Your previous response was invalid" not in without
 
-    with_chapters = MeetingMinutesPrompt(
+    with_correction = SpeakerMapPrompt(
+        attendees=["Michael Bryan"],
         turns=_turns(),
-        chapters=[Chapter(title="Kickoff", start=0, end=30, summary="Start")],
+        correction="'mapping' is a required property",
     ).render()
-    assert "Chapter plan:" in with_chapters
-    assert "Kickoff" in with_chapters
+    assert "Your previous response was invalid" in with_correction
+    assert "'mapping' is a required property" in with_correction
 
 
 def test_every_structured_prompt_binds_a_response_model() -> None:
-    assert SpeakerMappingPrompt.__dict__["response_model"] is SpeakerMapping
-    assert ChapteringPrompt.__dict__["response_model"] is ChaptersPayload
-    assert MeetingMinutesPrompt.__dict__["response_model"] is MeetingMinutes
-    assert TranscriptPolishPrompt.__dict__["response_model"] is TranscriptTurnsPayload
+    assert SpeakerMapPrompt.__dict__["response_model"] is SpeakerMapping
+    assert ChapterTitlePrompt.__dict__["response_model"] is ChapterPlan
+    assert MinutesPrompt.__dict__["response_model"] is MeetingMinutes
+    assert PolishStagePrompt.__dict__["response_model"].__name__ == "PolishStagePayload"
+    assert SourceNotePlanPrompt.__dict__["response_model"] is SourceNotePlan
 
 
 async def test_run_structured_renders_prompt_and_parses_response_model() -> None:
@@ -87,7 +87,9 @@ async def test_run_structured_renders_prompt_and_parses_response_model() -> None
         structured({"summary": "Quick sync", "key_points": ["Shipped it"]})
     )
 
-    minutes, result = await agent.run_structured(MeetingMinutesPrompt(turns=_turns()))
+    minutes, result = await agent.run_structured(
+        MinutesPrompt(turns=_turns(), chapters=[])
+    )
 
     assert minutes == MeetingMinutes(summary="Quick sync", key_points=["Shipped it"])
     assert "Hello team" in scripted_query_of(agent).prompts[0]
@@ -99,9 +101,9 @@ async def test_run_structured_response_model_is_reflected_in_the_request_schema(
 ):
     agent = fake_agent(structured({"summary": "s", "key_points": []}))
 
-    await agent.run_structured(MeetingMinutesPrompt(turns=_turns()))
+    await agent.run_structured(MinutesPrompt(turns=_turns(), chapters=[]))
 
-    # The schema now travels in output_format rather than inside the prompt.
+    # The schema travels in output_format rather than inside the prompt.
     schema = scripted_query_of(agent).options[0].output_format
     assert schema is not None
     assert "key_points" in schema["schema"]["properties"]

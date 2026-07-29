@@ -95,13 +95,18 @@ def test_source_from_teams_meeting_records_raw_vtt_as_run_artifact(
     result = source_from_teams_meeting(
         account="csu-teams",
         out_dir=tmp_path,
+        token_file=tmp_path / "token.json",
         event_id="event-123",
+        organisation="CSU",
+        project="DUM-C",
         client_factory=client_factory,
     )
 
     assert result.source.kind == "msgraph-teams"
     assert result.source.message_id == "msgraph-teams:meeting-123:transcript-abc"
     assert result.source.raw_text_path == (tmp_path / "transcript.vtt").resolve()
+    assert result.source.organisation == "CSU"
+    assert result.source.project == "DUM-C"
     assert (tmp_path / "calendar-event.json").exists()
     assert (tmp_path / "online-meeting.json").exists()
     assert (tmp_path / "transcripts.json").exists()

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .errors import TranscriptError
 from .merge import GENERATED_HEADINGS, _strip_existing_generated_sections
 
 
-class NotePrimitiveError(RuntimeError):
+class NotePrimitiveError(TranscriptError):
     pass
 
 

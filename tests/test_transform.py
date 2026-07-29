@@ -1,3 +1,5 @@
+import pytest
+
 from jake_tools.transcripts.merge import render_transcript
 from jake_tools.transcripts.models import (
     SpeakerIdentity,
@@ -5,8 +7,13 @@ from jake_tools.transcripts.models import (
     TranscriptArtifact,
     TranscriptTurn,
 )
-from jake_tools.transcripts.transform_primitives import draft_chapter_boundaries
-from jake_tools.transcripts.transforms import merge_consecutive_turns, normalise_turns
+from jake_tools.transcripts.transform import (
+    TransformPrimitiveError,
+    draft_chapter_boundaries,
+    merge_adjacent_turns,
+    merge_consecutive_turns,
+    normalise_turns,
+)
 
 
 def test_normalise_turns_collapses_duplicate_words_and_whitespace() -> None:
@@ -96,3 +103,20 @@ def test_chapter_boundaries_close_at_next_turn_start() -> None:
     plan = draft_chapter_boundaries(transcript, window_minutes=0.1)
 
     assert plan.chapters[0].end == plan.chapters[1].start == 6.0
+
+
+def test_merge_adjacent_turns_rejects_negative_gap_in_parameter_terms() -> None:
+    with pytest.raises(TransformPrimitiveError, match="max_gap_seconds"):
+        merge_adjacent_turns(TranscriptArtifact(turns=[]), max_gap_seconds=-1.0)
+
+
+def test_draft_chapter_boundaries_rejects_non_positive_window_in_parameter_terms() -> (
+    None
+):
+    with pytest.raises(TransformPrimitiveError, match="window_minutes"):
+        draft_chapter_boundaries(
+            TranscriptArtifact(
+                turns=[TranscriptTurn(start=0, end=1, speaker="Speaker", text="Hello")]
+            ),
+            window_minutes=0,
+        )

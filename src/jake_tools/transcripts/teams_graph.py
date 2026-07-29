@@ -11,10 +11,10 @@ from zoneinfo import ZoneInfo
 import requests
 from pydantic import BaseModel, Field
 
+from .errors import TranscriptError
 from .models import SourceArtifact
 
 GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
-CSU_TEAMS_TOKEN_FILE = Path("~/.hermes/csu-teams-graph-token.json").expanduser()
 REQUIRED_SCOPES = frozenset(
     {
         "Calendars.Read",
@@ -31,7 +31,7 @@ class HttpSession(Protocol):
     def request(self, method: str, url: str, **kwargs: Any) -> Any: ...
 
 
-class TeamsGraphError(RuntimeError):
+class TeamsGraphError(TranscriptError):
     pass
 
 
@@ -145,7 +145,7 @@ class TeamsGraphClient:
         now: dt.datetime | None = None,
     ) -> GraphCalendarEvent:
         if days_back < 1:
-            raise TeamsGraphError("--days-back must be at least 1.")
+            raise TeamsGraphError("days_back must be at least 1.")
         now = now or dt.datetime.now(PERTH_TZ)
         start = now - dt.timedelta(days=days_back)
         data = self._graph_json(
@@ -252,26 +252,26 @@ class TeamsGraphClient:
         return response
 
 
-def default_token_file_for_account(account: str) -> Path:
-    if account == "csu-teams":
-        return CSU_TEAMS_TOKEN_FILE
-    raise TeamsGraphError(
-        f"unknown Teams account {account!r}; supported account: csu-teams"
-    )
-
-
 def source_from_teams_meeting(
     *,
     account: str,
     out_dir: Path,
-    token_file: Path | None = None,
+    token_file: Path,
     event_id: str | None = None,
     days_back: int = 14,
     query: str | None = None,
+    organisation: str | None = None,
+    project: str | None = None,
     client_factory: Callable[[TokenProvider], TeamsGraphClient] | None = None,
 ) -> TeamsMeetingSourceResult:
-    resolved_token_file = token_file or default_token_file_for_account(account)
-    provider = TokenFileProvider(resolved_token_file)
+    """Fetch a Teams meeting transcript over Microsoft Graph.
+
+    `token_file`, `organisation`, and `project` are policy the CLI layer
+    decides (which account maps to which token file, org, and project); this
+    function only needs a resolved token file path and, optionally, the
+    provenance strings to stamp onto the resulting SourceArtifact.
+    """
+    provider = TokenFileProvider(token_file)
     client = (
         client_factory(provider)
         if client_factory
@@ -323,8 +323,8 @@ def source_from_teams_meeting(
         message_id=f"msgraph-teams:{online_meeting.id}:{transcript.id}",
         title=event.subject or online_meeting.subject or "Teams meeting",
         date=event.start.as_perth_date() if event.start else None,
-        organisation="CSU",
-        project="DUM-C" if account == "csu-teams" else None,
+        organisation=organisation,
+        project=project,
         raw_text_path=raw_vtt_path.resolve(),
         metadata={
             "account": account,

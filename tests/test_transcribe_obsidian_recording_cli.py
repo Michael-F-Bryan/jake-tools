@@ -1,41 +1,35 @@
 import importlib
+import json
 from pathlib import Path
 
 from click.testing import CliRunner
 
 from jake_tools.cli.transcribe import transcribe
+from jake_tools.transcripts.models import (
+    ChapterSummary,
+    CoordinatorResult,
+    SpeakerMessageCount,
+)
+
+
+def _result() -> CoordinatorResult:
+    return CoordinatorResult(
+        note_path=Path("/tmp/Meeting.md"),
+        updated=False,
+        chapter_summaries=[
+            ChapterSummary(
+                title="Kickoff", start_timestamp="00:00", end_timestamp="00:30"
+            )
+        ],
+        speaker_message_counts=[SpeakerMessageCount(speaker="Vet West", messages=3)],
+    )
+
 
 transcribe_cli = importlib.import_module("jake_tools.cli.transcribe")
 
 
-class DummyResult:
-    def __init__(self) -> None:
-        self.note_path = Path("/tmp/Meeting.md")
-        self.updated = False
-
-    def json_summary(self) -> dict:
-        return {
-            "chapter_summaries": [
-                {
-                    "title": "Kickoff",
-                    "start_timestamp": "00:00",
-                    "end_timestamp": "00:30",
-                }
-            ],
-            "ai_stage_stats": [
-                {"stage": "chaptering", "total_tokens": 42, "estimated_cost_usd": 0.01}
-            ],
-            "ai_totals": {
-                "stage_count": 1,
-                "total_tokens": 42,
-                "estimated_cost_usd": 0.01,
-            },
-            "speaker_message_counts": [{"speaker": "Vet West", "messages": 3}],
-        }
-
-
-async def fake_process_obsidian_recording(agent, obsidian_note, dry_run):
-    return DummyResult()
+async def fake_run_obsidian_recording_recipe(agent, obsidian_note, dry_run):
+    return _result()
 
 
 def test_obsidian_recording_cli_human_output(tmp_path, monkeypatch) -> None:
@@ -44,7 +38,7 @@ def test_obsidian_recording_cli_human_output(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         transcribe_cli,
         "run_obsidian_recording_recipe",
-        fake_process_obsidian_recording,
+        fake_run_obsidian_recording_recipe,
     )
 
     runner = CliRunner()
@@ -64,7 +58,7 @@ def test_obsidian_recording_cli_json_output(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         transcribe_cli,
         "run_obsidian_recording_recipe",
-        fake_process_obsidian_recording,
+        fake_run_obsidian_recording_recipe,
     )
 
     runner = CliRunner()
@@ -74,7 +68,7 @@ def test_obsidian_recording_cli_json_output(tmp_path, monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
-    assert '"chapter_summaries"' in result.output
-    assert '"speaker_message_counts"' in result.output
-    assert '"note_path"' not in result.output
-    assert '"updated"' not in result.output
+    payload = json.loads(result.output)
+    assert payload == _result().json_summary()
+    assert "note_path" not in payload
+    assert "updated" not in payload

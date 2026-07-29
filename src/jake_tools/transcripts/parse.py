@@ -4,6 +4,7 @@ import json
 import re
 from pathlib import Path
 
+from .errors import TranscriptError
 from .models import (
     SourceArtifact,
     TranscriptArtifact,
@@ -21,8 +22,10 @@ _VTT_VOICE_RE = re.compile(
 _VTT_TAG_RE = re.compile(r"<[^>]+>")
 _NON_SPEECH_RE = re.compile(r"^(?:\[[^\]]+\]|\([^)]+\))$", re.IGNORECASE)
 
+UNKNOWN_SPEAKER = "Unknown speaker"
 
-class ParsePrimitiveError(ValueError):
+
+class ParsePrimitiveError(TranscriptError):
     pass
 
 
@@ -50,7 +53,7 @@ def _parse_vtt_voice_text(lines: list[str]) -> tuple[str, str]:
     body = "\n".join(lines).strip()
     voice_match = _VTT_VOICE_RE.search(body)
     if voice_match is None:
-        return "Unknown speaker", _strip_vtt_tags(body)
+        return UNKNOWN_SPEAKER, _strip_vtt_tags(body)
     return (
         voice_match.group("speaker").strip(),
         _strip_vtt_tags(voice_match.group("text")),
@@ -138,7 +141,9 @@ def parse_youtube_json3(source: SourceArtifact) -> TranscriptArtifact:
     turns: list[TranscriptTurn] = []
     source_refs: list[TranscriptSourceRef] = []
     malformed_events = 0
-    speaker = str(source.metadata.get("speaker") or "Speaker")
+    # YouTube JSON3 captions do not distinguish speakers; every turn from a
+    # single caption track is attributed to this placeholder label.
+    speaker = "Speaker"
     for event_index, event in enumerate(events):
         if not isinstance(event, dict):
             malformed_events += 1
@@ -194,7 +199,12 @@ def parse_youtube_json3(source: SourceArtifact) -> TranscriptArtifact:
 
 
 def parse_scribe_transcript(scribe_json_path: Path) -> TranscriptArtifact:
-    payload = json.loads(scribe_json_path.read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(scribe_json_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ParsePrimitiveError(
+            f"Scribe transcript is not valid JSON: {scribe_json_path}"
+        ) from exc
     segments = payload.get("segments") if isinstance(payload, dict) else None
     if not isinstance(segments, list):
         raise ParsePrimitiveError("Transcript JSON does not contain a segments list")
@@ -211,7 +221,7 @@ def parse_scribe_transcript(scribe_json_path: Path) -> TranscriptArtifact:
             segment.get("speaker")
             or segment.get("speaker_label")
             or segment.get("speaker_name")
-            or f"Speaker {segment_index}"
+            or UNKNOWN_SPEAKER
         )
         turns.append(
             TranscriptTurn(
@@ -228,4 +238,8 @@ def parse_scribe_transcript(scribe_json_path: Path) -> TranscriptArtifact:
             )
         )
 
+    if not turns:
+        raise ParsePrimitiveError(
+            f"No spoken transcript turns found in {scribe_json_path}"
+        )
     return TranscriptArtifact(turns=turns, source_refs=source_refs)

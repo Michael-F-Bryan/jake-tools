@@ -3,48 +3,35 @@ from __future__ import annotations
 import datetime as dt
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from agent_fakes import fake_agent, structured
 
-from jake_tools.claude import Reply
-from jake_tools.prompting import StructuredPrompt
 from jake_tools.transcripts.models import (
     SourceArtifact,
     TranscriptArtifact,
     TranscriptSourceRef,
     TranscriptTurn,
 )
-from jake_tools.transcripts.recipe_primitives import (
-    RecipePrimitiveError,
-    _polish_youtube_chunks,
-    run_teams_meeting_recipe,
-    run_youtube_source_notes_recipe,
-)
+from jake_tools.transcripts.stages import StagePrimitiveError, run_youtube_polish_stage
 from jake_tools.transcripts.teams_graph import (
     GraphCalendarEvent,
     GraphCallTranscript,
     GraphOnlineMeeting,
     TeamsMeetingSourceResult,
 )
+from jake_tools.transcripts.teams_recipe import (
+    RecipePrimitiveError as TeamsRecipeError,
+)
+from jake_tools.transcripts.teams_recipe import run_teams_meeting_recipe
+from jake_tools.transcripts.youtube_recipe import (
+    RecipePrimitiveError as YoutubeRecipeError,
+)
+from jake_tools.transcripts.youtube_recipe import run_youtube_source_notes_recipe
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "transcript"
 FIXTURE = FIXTURES_DIR / "youtube-sample.json3"
-
-
-class FakeAgent:
-    def __init__(self, responses: list[dict[str, Any]]) -> None:
-        self.responses = list(responses)
-        self.prompts: list[Any] = []
-
-    async def run_structured[TModel: BaseModel](
-        self, prompt: StructuredPrompt[TModel]
-    ) -> tuple[TModel, Reply]:
-        self.prompts.append(prompt)
-        payload = self.responses.pop(0)
-        result = prompt.response_model.model_validate(payload)
-        return cast(TModel, result), Reply(text=json.dumps(payload))
 
 
 def _source_fetcher(url: str, *, out_dir: Path, language: str) -> SourceArtifact:
@@ -145,21 +132,16 @@ async def test_youtube_chunk_polish_preserves_turns_without_writing_chunk_files(
             TranscriptSourceRef(turn_index=1, source_ref="captions:events[2]"),
         ],
     )
-    agent = FakeAgent(
-        [
-            {
-                "turns": [transcript.turns[0].model_dump(mode="json")],
-            },
-            {
-                "turns": [transcript.turns[1].model_dump(mode="json")],
-            },
-        ]
+    agent = fake_agent(
+        structured({"turns": [transcript.turns[0].model_dump(mode="json")]}),
+        structured({"turns": [transcript.turns[1].model_dump(mode="json")]}),
     )
 
-    polished, replies = await _polish_youtube_chunks(
+    polished, replies = await run_youtube_polish_stage(
         agent,
         transcript,
         context="Video title: test",
+        max_attempts=1,
     )
 
     assert polished.turns == transcript.turns
@@ -179,8 +161,8 @@ async def test_youtube_chunk_polish_rejects_unfaithful_rewrite() -> None:
             )
         ]
     )
-    agent = FakeAgent(
-        [
+    agent = fake_agent(
+        structured(
             {
                 "turns": [
                     {
@@ -191,17 +173,19 @@ async def test_youtube_chunk_polish_rejects_unfaithful_rewrite() -> None:
                     }
                 ],
             }
-        ]
+        )
     )
 
-    with pytest.raises(RecipePrimitiveError, match="source fidelity"):
-        await _polish_youtube_chunks(agent, transcript, context="Video title: test")
+    with pytest.raises(StagePrimitiveError, match="source fidelity"):
+        await run_youtube_polish_stage(
+            agent, transcript, context="Video title: test", max_attempts=1
+        )
 
 
 async def test_run_youtube_source_notes_recipe_writes_only_useful_artefacts(
     tmp_path: Path,
 ) -> None:
-    agent = FakeAgent(_recipe_responses())
+    agent = fake_agent(*(structured(payload) for payload in _recipe_responses()))
     out_dir = tmp_path / "run"
     vault_note = tmp_path / "Vault" / "MAVLink tools.md"
 
@@ -215,7 +199,7 @@ async def test_run_youtube_source_notes_recipe_writes_only_useful_artefacts(
         source_fetcher=_source_fetcher,
     )
 
-    assert result["updated"] is True
+    assert result.updated is True
     assert vault_note.exists()
     note = vault_note.read_text(encoding="utf-8")
     assert "> [!summary]" in note
@@ -232,13 +216,20 @@ async def test_run_youtube_source_notes_recipe_writes_only_useful_artefacts(
     }
     manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
     assert [(stage["stage"], stage["status"]) for stage in manifest["stages"]] == [
-        ("source-note", "pass"),
-        ("vault.write", "pass"),
+        ("source.youtube", "pass"),
+        ("parse.youtube-captions", "pass"),
+        ("transform.normalise", "pass"),
+        ("stage.polish", "pass"),
+        ("transform.chapter-boundaries", "pass"),
+        ("stage.source-note-plan", "pass"),
+        ("render.source-note", "pass"),
+        ("verify.note", "pass"),
+        ("note.write", "pass"),
     ]
 
 
 async def test_youtube_recipe_marks_dry_run_write_as_skipped(tmp_path: Path) -> None:
-    agent = FakeAgent(_recipe_responses())
+    agent = fake_agent(*(structured(payload) for payload in _recipe_responses()))
     out_dir = tmp_path / "run"
     vault_note = tmp_path / "Vault" / "MAVLink tools.md"
 
@@ -252,14 +243,40 @@ async def test_youtube_recipe_marks_dry_run_write_as_skipped(tmp_path: Path) -> 
         source_fetcher=_source_fetcher,
     )
 
-    assert result["updated"] is False
+    assert result.updated is False
     assert not vault_note.exists()
     manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["stages"][-1] == {
-        "stage": "vault.write",
+        "stage": "note.write",
         "status": "skipped",
         "artefacts": [],
     }
+
+
+async def test_youtube_recipe_surfaces_render_failures_as_a_recipe_error(
+    tmp_path: Path,
+) -> None:
+    def _source_fetcher_without_url(
+        url: str, *, out_dir: Path, language: str
+    ) -> SourceArtifact:
+        source = _source_fetcher(url, out_dir=out_dir, language=language)
+        return source.model_copy(update={"source_url": None})
+
+    agent = fake_agent(*(structured(payload) for payload in _recipe_responses()))
+
+    with pytest.raises(YoutubeRecipeError, match="requires source_url") as excinfo:
+        await run_youtube_source_notes_recipe(
+            agent,
+            "https://www.youtube.com/watch?v=video-123",
+            out_dir=tmp_path / "run",
+            language="en-orig",
+            dry_run=True,
+            source_fetcher=_source_fetcher_without_url,
+        )
+
+    # The recipe must present its own error type, not the underlying
+    # RenderPrimitiveError, so CLI callers only need to catch one taxonomy.
+    assert type(excinfo.value) is YoutubeRecipeError
 
 
 def _teams_source_fetcher(
@@ -310,13 +327,31 @@ def test_teams_recipe_dry_run_does_not_claim_a_vault_write(tmp_path: Path) -> No
         account="csu-teams",
         profile="default",
         out_dir=out_dir,
+        token_file=tmp_path / "token.json",
         vault_note=vault_note,
         dry_run=True,
         source_fetcher=_teams_source_fetcher,
     )
 
-    assert result["updated"] is False
+    assert result.updated is False
     assert not vault_note.exists()
     manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["stages"][-1]["stage"] == "note.write"
     assert manifest["stages"][-1]["status"] == "skipped"
+
+
+def test_teams_recipe_requires_a_vault_dir_to_write_vault_without_a_note(
+    tmp_path: Path,
+) -> None:
+    out_dir = tmp_path / "run"
+
+    with pytest.raises(TeamsRecipeError, match="DUM-C vault directory"):
+        run_teams_meeting_recipe(
+            account="csu-teams",
+            profile="dumc",
+            out_dir=out_dir,
+            token_file=tmp_path / "token.json",
+            write_vault=True,
+            dry_run=True,
+            source_fetcher=_teams_source_fetcher,
+        )
