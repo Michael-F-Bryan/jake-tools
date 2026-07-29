@@ -54,6 +54,7 @@ select = [
 ignore = ["E501"]
 
 [tool.pytest.ini_options]
+addopts = "-m \"not live\""
 asyncio_mode = "auto"
 markers = [
     "live: marks tests that hit real external services",
