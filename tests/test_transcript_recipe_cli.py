@@ -8,7 +8,7 @@ from typing import Any, cast
 import pytest
 from pydantic import BaseModel
 
-from jake_tools.hermes import Reply
+from jake_tools.claude import Reply
 from jake_tools.prompting import StructuredPrompt
 from jake_tools.transcripts.models import (
     SourceArtifact,
@@ -33,12 +33,12 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures" / "transcript"
 FIXTURE = FIXTURES_DIR / "youtube-sample.json3"
 
 
-class FakeHermes:
+class FakeAgent:
     def __init__(self, responses: list[dict[str, Any]]) -> None:
         self.responses = list(responses)
         self.prompts: list[Any] = []
 
-    def run_structured[TModel: BaseModel](
+    async def run_structured[TModel: BaseModel](
         self, prompt: StructuredPrompt[TModel]
     ) -> tuple[TModel, Reply]:
         self.prompts.append(prompt)
@@ -125,7 +125,7 @@ def _recipe_responses() -> list[dict[str, Any]]:
     ]
 
 
-def test_youtube_chunk_polish_preserves_turns_without_writing_chunk_files(
+async def test_youtube_chunk_polish_preserves_turns_without_writing_chunk_files(
     tmp_path: Path,
 ) -> None:
     transcript = TranscriptArtifact(
@@ -145,7 +145,7 @@ def test_youtube_chunk_polish_preserves_turns_without_writing_chunk_files(
             TranscriptSourceRef(turn_index=1, source_ref="captions:events[2]"),
         ],
     )
-    hermes = FakeHermes(
+    agent = FakeAgent(
         [
             {
                 "turns": [transcript.turns[0].model_dump(mode="json")],
@@ -156,8 +156,8 @@ def test_youtube_chunk_polish_preserves_turns_without_writing_chunk_files(
         ]
     )
 
-    polished, replies = _polish_youtube_chunks(
-        hermes,
+    polished, replies = await _polish_youtube_chunks(
+        agent,
         transcript,
         context="Video title: test",
     )
@@ -168,7 +168,7 @@ def test_youtube_chunk_polish_preserves_turns_without_writing_chunk_files(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_youtube_chunk_polish_rejects_unfaithful_rewrite() -> None:
+async def test_youtube_chunk_polish_rejects_unfaithful_rewrite() -> None:
     transcript = TranscriptArtifact(
         turns=[
             TranscriptTurn(
@@ -179,7 +179,7 @@ def test_youtube_chunk_polish_rejects_unfaithful_rewrite() -> None:
             )
         ]
     )
-    hermes = FakeHermes(
+    agent = FakeAgent(
         [
             {
                 "turns": [
@@ -195,18 +195,18 @@ def test_youtube_chunk_polish_rejects_unfaithful_rewrite() -> None:
     )
 
     with pytest.raises(RecipePrimitiveError, match="source fidelity"):
-        _polish_youtube_chunks(hermes, transcript, context="Video title: test")
+        await _polish_youtube_chunks(agent, transcript, context="Video title: test")
 
 
-def test_run_youtube_source_notes_recipe_writes_only_useful_artefacts(
+async def test_run_youtube_source_notes_recipe_writes_only_useful_artefacts(
     tmp_path: Path,
 ) -> None:
-    hermes = FakeHermes(_recipe_responses())
+    agent = FakeAgent(_recipe_responses())
     out_dir = tmp_path / "run"
     vault_note = tmp_path / "Vault" / "MAVLink tools.md"
 
-    result = run_youtube_source_notes_recipe(
-        hermes,
+    result = await run_youtube_source_notes_recipe(
+        agent,
         "https://www.youtube.com/watch?v=video-123",
         out_dir=out_dir,
         language="en-orig",
@@ -237,13 +237,13 @@ def test_run_youtube_source_notes_recipe_writes_only_useful_artefacts(
     ]
 
 
-def test_youtube_recipe_marks_dry_run_write_as_skipped(tmp_path: Path) -> None:
-    hermes = FakeHermes(_recipe_responses())
+async def test_youtube_recipe_marks_dry_run_write_as_skipped(tmp_path: Path) -> None:
+    agent = FakeAgent(_recipe_responses())
     out_dir = tmp_path / "run"
     vault_note = tmp_path / "Vault" / "MAVLink tools.md"
 
-    result = run_youtube_source_notes_recipe(
-        hermes,
+    result = await run_youtube_source_notes_recipe(
+        agent,
         "https://www.youtube.com/watch?v=video-123",
         out_dir=out_dir,
         language="en-orig",

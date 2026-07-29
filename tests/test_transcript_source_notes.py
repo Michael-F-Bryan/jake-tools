@@ -8,7 +8,7 @@ from typing import Any, cast
 import pytest
 from pydantic import BaseModel
 
-from jake_tools.hermes import Reply
+from jake_tools.claude import Reply
 from jake_tools.prompting import StructuredPrompt
 from jake_tools.transcripts.models import (
     ChapterPlan,
@@ -30,12 +30,12 @@ from jake_tools.transcripts.stage_primitives import (
 from jake_tools.transcripts.verify_primitives import verify_note
 
 
-class FakeHermes:
+class FakeAgent:
     def __init__(self, response: dict[str, Any]) -> None:
         self.response = response
         self.prompt: Any | None = None
 
-    def run_structured[TModel: BaseModel](
+    async def run_structured[TModel: BaseModel](
         self, prompt: StructuredPrompt[TModel]
     ) -> tuple[TModel, Reply]:
         self.prompt = prompt
@@ -103,10 +103,10 @@ def _chapters() -> ChapterPlan:
     )
 
 
-def test_source_note_plan_stage_returns_faithful_structured_notes(
+async def test_source_note_plan_stage_returns_faithful_structured_notes(
     tmp_path: Path,
 ) -> None:
-    hermes = FakeHermes(
+    agent = FakeAgent(
         {
             "overview": {
                 "summary": "Patrick Pereira presents MAVLink tools for vehicle integration and browser-based inspection.",
@@ -119,8 +119,8 @@ def test_source_note_plan_stage_returns_faithful_structured_notes(
         }
     )
 
-    plan, _reply = run_source_note_plan_stage(
-        hermes,
+    plan, _reply = await run_source_note_plan_stage(
+        agent,
         _source(tmp_path),
         _transcript(),
         draft_plan=_chapters(),
@@ -133,15 +133,17 @@ def test_source_note_plan_stage_returns_faithful_structured_notes(
         "Browser inspection exposes live MAVLink messages.",
     ]
     assert plan.chapters == _chapters()
-    assert hermes.prompt is not None
-    assert hermes.prompt.source["title"].startswith("MAVLink tools")
-    assert len(hermes.prompt.turns) == 2
+    assert agent.prompt is not None
+    assert agent.prompt.source["title"].startswith("MAVLink tools")
+    assert len(agent.prompt.turns) == 2
 
 
-def test_source_note_plan_rejects_changed_chapter_boundaries(tmp_path: Path) -> None:
+async def test_source_note_plan_rejects_changed_chapter_boundaries(
+    tmp_path: Path,
+) -> None:
     chapters = _chapters().model_dump(mode="json")
     chapters["chapters"][0]["start"] = 1.0
-    hermes = FakeHermes(
+    agent = FakeAgent(
         {
             "overview": {"summary": "Summary.", "key_points": ["Point."]},
             "chapters": chapters,
@@ -149,8 +151,8 @@ def test_source_note_plan_rejects_changed_chapter_boundaries(tmp_path: Path) -> 
     )
 
     with pytest.raises(StagePrimitiveError, match="chapter boundaries"):
-        run_source_note_plan_stage(
-            hermes,
+        await run_source_note_plan_stage(
+            agent,
             _source(tmp_path),
             _transcript(),
             draft_plan=_chapters(),

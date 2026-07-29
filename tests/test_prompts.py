@@ -1,9 +1,9 @@
 from typing import ClassVar
 
 import pytest
+from agent_fakes import fake_agent, scripted_query_of, structured
 from jinja2 import UndefinedError
 
-from jake_tools.hermes import AgentSpec, Hermes
 from jake_tools.prompting import Prompt
 from jake_tools.transcripts.models import (
     Chapter,
@@ -19,23 +19,6 @@ from jake_tools.transcripts.stages import (
     SpeakerMappingPrompt,
     TranscriptPolishPrompt,
 )
-
-
-class FakeAgent:
-    def __init__(self, responses: list[dict]):
-        self._responses = list(responses)
-        self.prompts: list[str] = []
-
-    def run_conversation(self, user_message: str) -> dict:
-        self.prompts.append(user_message)
-        return self._responses.pop(0)
-
-
-def hermes_with(agent: FakeAgent) -> Hermes:
-    def factory(_spec: AgentSpec) -> FakeAgent:
-        return agent
-
-    return Hermes(agent_factory=factory)
 
 
 def _turns() -> list[TranscriptTurn]:
@@ -99,33 +82,26 @@ def test_every_structured_prompt_binds_a_response_model() -> None:
     assert TranscriptPolishPrompt.__dict__["response_model"] is TranscriptTurnsPayload
 
 
-def test_run_structured_renders_prompt_and_parses_response_model() -> None:
-    agent = FakeAgent(
-        [
-            {
-                "final_response": '{"summary": "Quick sync", "key_points": ["Shipped it"]}',
-                "completed": True,
-                "api_calls": 1,
-            },
-        ]
+async def test_run_structured_renders_prompt_and_parses_response_model() -> None:
+    agent = fake_agent(
+        structured({"summary": "Quick sync", "key_points": ["Shipped it"]})
     )
-    hermes = hermes_with(agent)
 
-    minutes, result = hermes.run_structured(MeetingMinutesPrompt(turns=_turns()))
+    minutes, result = await agent.run_structured(MeetingMinutesPrompt(turns=_turns()))
 
     assert minutes == MeetingMinutes(summary="Quick sync", key_points=["Shipped it"])
-    assert "Hello team" in agent.prompts[0]
+    assert "Hello team" in scripted_query_of(agent).prompts[0]
     assert result.usage.api_calls == 1
 
 
-def test_run_structured_response_model_is_reflected_in_the_request_schema() -> None:
-    agent = FakeAgent(
-        [
-            {"final_response": '{"summary": "s", "key_points": []}', "completed": True},
-        ]
-    )
-    hermes = hermes_with(agent)
+async def test_run_structured_response_model_is_reflected_in_the_request_schema() -> (
+    None
+):
+    agent = fake_agent(structured({"summary": "s", "key_points": []}))
 
-    hermes.run_structured(MeetingMinutesPrompt(turns=_turns()))
+    await agent.run_structured(MeetingMinutesPrompt(turns=_turns()))
 
-    assert "key_points" in agent.prompts[0]
+    # The schema now travels in output_format rather than inside the prompt.
+    schema = scripted_query_of(agent).options[0].output_format
+    assert schema is not None
+    assert "key_points" in schema["schema"]["properties"]

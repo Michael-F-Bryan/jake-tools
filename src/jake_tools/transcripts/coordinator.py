@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from ..ai_usage import build_ai_stage_stats, build_ai_totals
-from ..hermes import Hermes, Reply
+from ..claude import ClaudeAgent, Reply
 from .audio import build_concat_plan, concatenate_recordings, run_scribe
 from .merge import (
     format_timestamp,
@@ -41,20 +41,20 @@ SourceLoader = Callable[[Path], SourceNote]
 ConcatenateRecordings = Callable[[ConcatPlan, Path], None]
 RunScribe = Callable[[Path, Path], object]
 MapSpeakers = Callable[
-    [Hermes, SourceNote, list[TranscriptTurn]],
-    tuple[SpeakerMapping, Reply | None],
+    [ClaudeAgent, SourceNote, list[TranscriptTurn]],
+    Awaitable[tuple[SpeakerMapping, Reply | None]],
 ]
 PolishTranscript = Callable[
-    [Hermes, SourceNote, list[TranscriptTurn], SpeakerMapping],
-    tuple[list[TranscriptTurn], Reply | None],
+    [ClaudeAgent, SourceNote, list[TranscriptTurn], SpeakerMapping],
+    Awaitable[tuple[list[TranscriptTurn], Reply | None]],
 ]
 RunChaptering = Callable[
-    [Hermes, list[TranscriptTurn]],
-    tuple[ChaptersPayload, Reply | None],
+    [ClaudeAgent, list[TranscriptTurn]],
+    Awaitable[tuple[ChaptersPayload, Reply | None]],
 ]
 RunMinutes = Callable[
-    [Hermes, list[TranscriptTurn], ChaptersPayload | None],
-    tuple[MeetingMinutes, Reply | None],
+    [ClaudeAgent, list[TranscriptTurn], ChaptersPayload | None],
+    Awaitable[tuple[MeetingMinutes, Reply | None]],
 ]
 
 
@@ -93,7 +93,7 @@ class ObsidianRecordingCoordinator:
     def __init__(
         self,
         *,
-        hermes: Hermes,
+        agent: ClaudeAgent,
         source_note: Path,
         dry_run: bool = False,
         source_loader: SourceLoader = load_source_note,
@@ -104,7 +104,7 @@ class ObsidianRecordingCoordinator:
         build_chapters: RunChaptering = run_chaptering_stage,
         build_minutes: RunMinutes = run_minutes_stage,
     ) -> None:
-        self.hermes = hermes
+        self.agent = agent
         self.source_note = source_note
         self.dry_run = dry_run
         self.source_loader = source_loader
@@ -115,7 +115,7 @@ class ObsidianRecordingCoordinator:
         self.build_chapters = build_chapters
         self.build_minutes = build_minutes
 
-    def run(self) -> CoordinatorResult:
+    async def run(self) -> CoordinatorResult:
         source = self.source_loader(self.source_note)
         if not source.recordings:
             raise ValueError(f"No recordings found in {self.source_note}")
@@ -131,8 +131,8 @@ class ObsidianRecordingCoordinator:
 
             stage_replies: list[tuple[str, Reply | None]] = []
 
-            speaker_mapping, speaker_mapping_result = self.map_speakers(
-                self.hermes, source, turns
+            speaker_mapping, speaker_mapping_result = await self.map_speakers(
+                self.agent, source, turns
             )
             stage_replies.append(("speaker_mapping", speaker_mapping_result))
             paths.speaker_mapping.write_text(
@@ -140,14 +140,14 @@ class ObsidianRecordingCoordinator:
                 encoding="utf-8",
             )
 
-            polished_payload, transcript_polish_result = self.polish_transcript(
-                self.hermes, source, turns, speaker_mapping
+            polished_payload, transcript_polish_result = await self.polish_transcript(
+                self.agent, source, turns, speaker_mapping
             )
             polished_turns = merge_consecutive_turns(normalise_turns(polished_payload))
             stage_replies.append(("transcript_polish", transcript_polish_result))
 
-            chapters_payload, chaptering_result = self.build_chapters(
-                self.hermes, polished_turns
+            chapters_payload, chaptering_result = await self.build_chapters(
+                self.agent, polished_turns
             )
             stage_replies.append(("chaptering", chaptering_result))
             paths.chapters.write_text(
@@ -160,8 +160,8 @@ class ObsidianRecordingCoordinator:
                 chapters_payload.chapters,
                 speaker_mapping,
             )
-            minutes, meeting_minutes_result = self.build_minutes(
-                self.hermes, polished_turns, chapters_payload
+            minutes, meeting_minutes_result = await self.build_minutes(
+                self.agent, polished_turns, chapters_payload
             )
             stage_replies.append(("meeting_minutes", meeting_minutes_result))
             paths.minutes.write_text(
@@ -231,15 +231,15 @@ class ObsidianRecordingCoordinator:
         return turns
 
 
-def process_obsidian_recording(
-    hermes: Hermes,
+async def process_obsidian_recording(
+    agent: ClaudeAgent,
     obsidian_note: Path,
     *,
     dry_run: bool = False,
 ) -> CoordinatorResult:
     coordinator = ObsidianRecordingCoordinator(
-        hermes=hermes,
+        agent=agent,
         source_note=obsidian_note,
         dry_run=dry_run,
     )
-    return coordinator.run()
+    return await coordinator.run()

@@ -3,14 +3,14 @@ from pathlib import Path
 
 import click
 
-from ..hermes import Hermes
+from ..claude import ClaudeAgent
 from ..transcripts.models import CoordinatorResult
 from ..transcripts.polish import polish_transcript
 from ..transcripts.recipe_primitives import (
     RecipePrimitiveError,
     run_obsidian_recording_recipe,
 )
-from .options import hermes
+from .options import agent, coro
 
 
 @click.group
@@ -22,14 +22,15 @@ def transcribe():
 
 
 @transcribe.command
-@hermes
+@agent
 @click.argument("transcript", required=True, type=click.File("r", encoding="utf-8"))
-def polish(hermes: Hermes, transcript):
+@coro
+async def polish(agent: ClaudeAgent, transcript):
     """
     Polish a transcript.
     """
     raw = transcript.read()
-    polished = polish_transcript(hermes, raw)
+    polished = await polish_transcript(agent, raw)
     click.echo(polished)
 
 
@@ -45,7 +46,7 @@ def _emit_obsidian_recording_result(
 
 
 @transcribe.command()
-@hermes
+@agent
 @click.option(
     "--dry-run",
     is_flag=True,
@@ -61,8 +62,9 @@ def _emit_obsidian_recording_result(
     "obsidian_note",
     type=click.Path(file_okay=True, dir_okay=False, exists=True, path_type=Path),
 )
-def obsidian_recording(
-    hermes: Hermes,
+@coro
+async def obsidian_recording(
+    agent: ClaudeAgent,
     dry_run: bool,
     as_json: bool,
     obsidian_note: Path,
@@ -71,8 +73,8 @@ def obsidian_recording(
     Process an Obsidian recording into a polished, chapterised note.
     """
     try:
-        result = run_obsidian_recording_recipe(
-            hermes,
+        result = await run_obsidian_recording_recipe(
+            agent,
             obsidian_note,
             dry_run=dry_run,
         )

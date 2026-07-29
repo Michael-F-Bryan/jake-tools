@@ -5,13 +5,13 @@ from pathlib import Path
 
 import click
 
-from ..hermes import Hermes
+from ..claude import ClaudeAgent
 from ..transcripts.recipe_primitives import (
     RecipePrimitiveError,
     run_teams_meeting_recipe,
     run_youtube_source_notes_recipe,
 )
-from .options import hermes
+from .options import agent, coro
 
 
 @click.group(help="Turn recorded sources into verified notes.")
@@ -112,7 +112,7 @@ def teams_meeting(
 
 
 @transcript.command("youtube")
-@hermes
+@agent
 @click.option(
     "--out-dir",
     required=True,
@@ -133,8 +133,9 @@ def teams_meeting(
 @click.option("--dry-run", is_flag=True, help="Do not write the vault note.")
 @click.option("--json", "as_json", is_flag=True, help="Emit a JSON result.")
 @click.argument("url")
-def youtube(
-    hermes: Hermes,
+@coro
+async def youtube(
+    agent: ClaudeAgent,
     out_dir: Path,
     language: str,
     vault_note: Path | None,
@@ -144,8 +145,8 @@ def youtube(
 ) -> None:
     """Fetch YouTube captions and produce a verified, chapterised source note."""
     try:
-        result = run_youtube_source_notes_recipe(
-            hermes,
+        result = await run_youtube_source_notes_recipe(
+            agent,
             url,
             out_dir=out_dir,
             language=language,

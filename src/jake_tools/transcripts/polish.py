@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from ..hermes import Hermes
+from ..claude import ClaudeAgent
 from ..prompting import Prompt
 
 
@@ -22,9 +22,9 @@ Respond with just the polished transcript, no other text, additional commentary,
     transcript: str
 
 
-def polish_transcript(hermes: Hermes, transcript: str) -> str:
-    reply = hermes.run(TranscriptSkillPolishPrompt(transcript=transcript).render())
+async def polish_transcript(agent: ClaudeAgent, transcript: str) -> str:
+    reply = await agent.run(TranscriptSkillPolishPrompt(transcript=transcript).render())
     if not reply.text:
-        raise ValueError("No response from Hermes")
+        raise ValueError("No response from the agent")
 
     return reply.text

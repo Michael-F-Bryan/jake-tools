@@ -1,40 +1,20 @@
-from typing import Any
-
 import pytest
+from agent_fakes import AgentTurn, fake_agent, scripted_query_of
 
-from jake_tools.hermes import Hermes
 from jake_tools.transcripts.polish import polish_transcript
 
 
-class StubAgent:
-    """Fake LLM agent injected at the `AgentConversation` seam."""
+async def test_polish_transcript_returns_agent_text() -> None:
+    agent = fake_agent(AgentTurn(text="Polished transcript"))
 
-    def __init__(self, final_response: str | None) -> None:
-        self.final_response = final_response
-        self.prompts: list[str] = []
-
-    def run_conversation(self, user_message: str) -> dict[str, Any]:
-        self.prompts.append(user_message)
-        return {"final_response": self.final_response}
-
-
-def _hermes_returning(final_response: str | None) -> tuple[Hermes, StubAgent]:
-    agent = StubAgent(final_response)
-    hermes = Hermes(agent_factory=lambda _spec: agent)
-    return hermes, agent
-
-
-def test_polish_transcript_returns_agent_text() -> None:
-    hermes, agent = _hermes_returning("Polished transcript")
-
-    polished = polish_transcript(hermes, "raw transcript text")
+    polished = await polish_transcript(agent, "raw transcript text")
 
     assert polished == "Polished transcript"
-    assert "raw transcript text" in agent.prompts[0]
+    assert "raw transcript text" in scripted_query_of(agent).prompts[0]
 
 
-def test_polish_transcript_raises_when_reply_has_no_text() -> None:
-    hermes, _ = _hermes_returning(None)
+async def test_polish_transcript_raises_when_reply_has_no_text() -> None:
+    agent = fake_agent(AgentTurn(text=None))
 
-    with pytest.raises(ValueError, match="No response from Hermes"):
-        polish_transcript(hermes, "raw transcript text")
+    with pytest.raises(ValueError, match="No response from the agent"):
+        await polish_transcript(agent, "raw transcript text")

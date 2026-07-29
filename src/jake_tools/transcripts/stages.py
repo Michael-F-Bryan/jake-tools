@@ -4,7 +4,7 @@ from typing import ClassVar
 
 from pydantic import BaseModel
 
-from ..hermes import Hermes, Reply
+from ..claude import ClaudeAgent, Reply
 from ..prompting import StructuredPrompt
 from .models import (
     Chapter,
@@ -150,10 +150,10 @@ def _fallback_two_party_call_mapping(
     )
 
 
-def run_speaker_mapping_stage(
-    hermes: Hermes, source: SourceNote, turns: list[TranscriptTurn]
+async def run_speaker_mapping_stage(
+    agent: ClaudeAgent, source: SourceNote, turns: list[TranscriptTurn]
 ) -> tuple[SpeakerMapping, Reply]:
-    mapping, reply = hermes.run_structured(
+    mapping, reply = await agent.run_structured(
         SpeakerMappingPrompt(
             title=source.title, attendees=source.attendees, turns=turns
         )
@@ -168,13 +168,13 @@ def run_speaker_mapping_stage(
     return mapping, reply
 
 
-def run_transcript_polish_stage(
-    hermes: Hermes,
+async def run_transcript_polish_stage(
+    agent: ClaudeAgent,
     source: SourceNote,
     turns: list[TranscriptTurn],
     speaker_mapping: SpeakerMapping,
 ) -> tuple[list[TranscriptTurn], Reply]:
-    payload, reply = hermes.run_structured(
+    payload, reply = await agent.run_structured(
         TranscriptPolishPrompt(
             title=source.title,
             attendees=source.attendees,
@@ -190,18 +190,18 @@ def run_transcript_polish_stage(
     return payload.turns, reply
 
 
-def run_chaptering_stage(
-    hermes: Hermes, turns: list[TranscriptTurn]
+async def run_chaptering_stage(
+    agent: ClaudeAgent, turns: list[TranscriptTurn]
 ) -> tuple[ChaptersPayload, Reply]:
-    return hermes.run_structured(ChapteringPrompt(turns=turns))
+    return await agent.run_structured(ChapteringPrompt(turns=turns))
 
 
-def run_minutes_stage(
-    hermes: Hermes,
+async def run_minutes_stage(
+    agent: ClaudeAgent,
     turns: list[TranscriptTurn],
     chapters: ChaptersPayload | None = None,
 ) -> tuple[MeetingMinutes, Reply]:
-    return hermes.run_structured(
+    return await agent.run_structured(
         MeetingMinutesPrompt(
             turns=turns, chapters=chapters.chapters if chapters else None
         )

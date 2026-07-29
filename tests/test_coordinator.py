@@ -2,7 +2,7 @@ import json
 from datetime import UTC, datetime
 
 from jake_tools.ai_usage import Usage
-from jake_tools.hermes import Hermes, Reply
+from jake_tools.claude import ClaudeAgent, Reply
 from jake_tools.transcripts.coordinator import ObsidianRecordingCoordinator
 from jake_tools.transcripts.models import (
     Chapter,
@@ -31,7 +31,7 @@ def build_source(note, tmp_path) -> SourceNote:
     )
 
 
-def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
+async def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
     note = tmp_path / "Meeting.md"
     note.write_text("# Meeting\n\n![[meeting.m4a]]\n", encoding="utf-8")
 
@@ -59,7 +59,7 @@ def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
         )
         return None
 
-    def map_speakers(hermes, source, turns):
+    async def map_speakers(agent, source, turns):
         return (
             SpeakerMapping(
                 mapping={
@@ -71,10 +71,10 @@ def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
             None,
         )
 
-    def polish_transcript(hermes, source, turns, speaker_mapping):
+    async def polish_transcript(agent, source, turns, speaker_mapping):
         return turns, None
 
-    def build_chapters(hermes, turns):
+    async def build_chapters(agent, turns):
         return (
             ChaptersPayload(
                 chapters=[Chapter(title="Kickoff", start=0, end=30, summary="Start")]
@@ -82,13 +82,13 @@ def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
             None,
         )
 
-    def build_minutes(hermes, turns, chapters):
+    async def build_minutes(agent, turns, chapters):
         return MeetingMinutes(
             summary="Summary", key_points=["Opened the meeting"]
         ), None
 
     coordinator = ObsidianRecordingCoordinator(
-        hermes=Hermes(),
+        agent=ClaudeAgent(),
         source_note=note,
         dry_run=True,
         source_loader=load_source,
@@ -100,7 +100,7 @@ def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
         build_minutes=build_minutes,
     )
 
-    result = coordinator.run()
+    result = await coordinator.run()
 
     assert result.updated is False
     assert note.read_text(encoding="utf-8") == "# Meeting\n\n![[meeting.m4a]]\n"
@@ -119,9 +119,6 @@ def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
         "output_tokens": 0,
         "cache_read_tokens": 0,
         "cache_write_tokens": 0,
-        "reasoning_tokens": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
         "total_tokens": 0,
         "estimated_cost_usd": 0.0,
     }
@@ -130,7 +127,9 @@ def test_coordinator_dry_run_preserves_note_file(tmp_path) -> None:
     ]
 
 
-def test_coordinator_builds_ai_stats_from_returned_stage_results(tmp_path) -> None:
+async def test_coordinator_builds_ai_stats_from_returned_stage_results(
+    tmp_path,
+) -> None:
     note = tmp_path / "Meeting.md"
     note.write_text("# Meeting\n\n![[meeting.m4a]]\n", encoding="utf-8")
 
@@ -158,7 +157,7 @@ def test_coordinator_builds_ai_stats_from_returned_stage_results(tmp_path) -> No
         )
         return None
 
-    def map_speakers(hermes, source, turns):
+    async def map_speakers(agent, source, turns):
         return (
             SpeakerMapping(
                 mapping={
@@ -172,16 +171,15 @@ def test_coordinator_builds_ai_stats_from_returned_stage_results(tmp_path) -> No
                     api_calls=1,
                     input_tokens=10,
                     output_tokens=5,
-                    total_tokens=15,
                     estimated_cost_usd=0.02,
                 )
             ),
         )
 
-    def polish_transcript(hermes, source, turns, speaker_mapping):
+    async def polish_transcript(agent, source, turns, speaker_mapping):
         return turns, None
 
-    def build_chapters(hermes, turns):
+    async def build_chapters(agent, turns):
         return (
             ChaptersPayload(
                 chapters=[Chapter(title="Kickoff", start=0, end=30, summary="Start")]
@@ -189,13 +187,13 @@ def test_coordinator_builds_ai_stats_from_returned_stage_results(tmp_path) -> No
             None,
         )
 
-    def build_minutes(hermes, turns, chapters):
+    async def build_minutes(agent, turns, chapters):
         return MeetingMinutes(
             summary="Summary", key_points=["Opened the meeting"]
         ), None
 
     coordinator = ObsidianRecordingCoordinator(
-        hermes=Hermes(),
+        agent=ClaudeAgent(),
         source_note=note,
         dry_run=True,
         source_loader=load_source,
@@ -207,7 +205,7 @@ def test_coordinator_builds_ai_stats_from_returned_stage_results(tmp_path) -> No
         build_minutes=build_minutes,
     )
 
-    result = coordinator.run()
+    result = await coordinator.run()
 
     assert [
         stats.model_dump(mode="json", exclude={"usage"})
@@ -216,18 +214,13 @@ def test_coordinator_builds_ai_stats_from_returned_stage_results(tmp_path) -> No
         {
             "stage": "speaker_mapping",
             "model": None,
-            "provider": None,
             "api_calls": 1,
             "input_tokens": 10,
             "output_tokens": 5,
             "cache_read_tokens": 0,
             "cache_write_tokens": 0,
-            "reasoning_tokens": 0,
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
             "total_tokens": 15,
             "estimated_cost_usd": 0.02,
-            "repair_attempted": False,
         }
     ]
     assert result.ai_totals.total_tokens == 15

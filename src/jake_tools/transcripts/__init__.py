@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ..hermes import Hermes
+from ..claude import ClaudeAgent
 from .coordinator import process_obsidian_recording
 
-__all__ = ["process_obsidian_recording", "Hermes", "Path"]
+__all__ = ["process_obsidian_recording", "ClaudeAgent", "Path"]

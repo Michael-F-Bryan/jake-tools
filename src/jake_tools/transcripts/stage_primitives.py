@@ -5,7 +5,7 @@ from typing import ClassVar, Protocol
 
 from pydantic import BaseModel, Field, ValidationError
 
-from ..hermes import Reply
+from ..claude import Reply
 from ..prompting import StructuredPrompt
 from .models import (
     ChapterPlan,
@@ -31,8 +31,8 @@ _CONTENT_WORD_RE = re.compile(r"\b[\w']+\b")
 MAX_POLISH_CONTENT_CUT_RATIO = 0.15
 
 
-class StructuredHermes(Protocol):
-    def run_structured[TModel: BaseModel](
+class StructuredAgent(Protocol):
+    async def run_structured[TModel: BaseModel](
         self, prompt: StructuredPrompt[TModel]
     ) -> tuple[TModel, Reply]: ...
 
@@ -151,8 +151,8 @@ Draft chapters:
     draft_chapters: list[dict[str, object]]
 
 
-def run_structured_with_retries[TModel: BaseModel](
-    hermes: StructuredHermes, prompt: StructuredPrompt[TModel], *, max_attempts: int
+async def run_structured_with_retries[TModel: BaseModel](
+    agent: StructuredAgent, prompt: StructuredPrompt[TModel], *, max_attempts: int
 ) -> tuple[TModel, Reply]:
     if max_attempts < 1:
         raise StagePrimitiveError("max_attempts must be at least 1.")
@@ -160,7 +160,7 @@ def run_structured_with_retries[TModel: BaseModel](
     errors: list[str] = []
     for _ in range(max_attempts):
         try:
-            return hermes.run_structured(prompt)
+            return await agent.run_structured(prompt)
         except (ValidationError, ValueError) as exc:
             errors.append(str(exc))
 
@@ -211,15 +211,15 @@ def _ensure_polish_preserves_content(
     )
 
 
-def run_polish_stage(
-    hermes: StructuredHermes,
+async def run_polish_stage(
+    agent: StructuredAgent,
     transcript: TranscriptArtifact,
     *,
     context: str = "",
     max_attempts: int,
 ) -> tuple[TranscriptArtifact, Reply]:
-    payload, reply = run_structured_with_retries(
-        hermes,
+    payload, reply = await run_structured_with_retries(
+        agent,
         PolishStagePrompt(context=context, turns=transcript.turns),
         max_attempts=max_attempts,
     )
@@ -246,22 +246,22 @@ def run_polish_stage(
     return polished, reply
 
 
-def run_map_speakers_stage(
-    hermes: StructuredHermes,
+async def run_map_speakers_stage(
+    agent: StructuredAgent,
     transcript: TranscriptArtifact,
     *,
     attendees: list[str],
     max_attempts: int,
 ) -> tuple[SpeakerMapping, Reply]:
-    return run_structured_with_retries(
-        hermes,
+    return await run_structured_with_retries(
+        agent,
         SpeakerMapPrompt(attendees=attendees, turns=transcript.turns),
         max_attempts=max_attempts,
     )
 
 
-def run_title_chapters_stage(
-    hermes: StructuredHermes,
+async def run_title_chapters_stage(
+    agent: StructuredAgent,
     transcript: TranscriptArtifact,
     *,
     draft_plan: ChapterPlan | None,
@@ -273,8 +273,8 @@ def run_title_chapters_stage(
         if draft_plan is not None
         else []
     )
-    chapter_plan, reply = run_structured_with_retries(
-        hermes,
+    chapter_plan, reply = await run_structured_with_retries(
+        agent,
         ChapterTitlePrompt(
             context=context,
             turns=transcript.turns,
@@ -300,8 +300,8 @@ def run_title_chapters_stage(
     ), reply
 
 
-def run_minutes_stage(
-    hermes: StructuredHermes,
+async def run_minutes_stage(
+    agent: StructuredAgent,
     transcript: TranscriptArtifact,
     *,
     chapters: ChapterPlan | None,
@@ -312,23 +312,23 @@ def run_minutes_stage(
         if chapters is not None
         else []
     )
-    return run_structured_with_retries(
-        hermes,
+    return await run_structured_with_retries(
+        agent,
         MinutesPrompt(turns=transcript.turns, chapters=chapter_payload),
         max_attempts=max_attempts,
     )
 
 
-def run_source_note_plan_stage(
-    hermes: StructuredHermes,
+async def run_source_note_plan_stage(
+    agent: StructuredAgent,
     source: SourceArtifact,
     transcript: TranscriptArtifact,
     *,
     draft_plan: ChapterPlan,
     max_attempts: int,
 ) -> tuple[SourceNotePlan, Reply]:
-    plan, reply = run_structured_with_retries(
-        hermes,
+    plan, reply = await run_structured_with_retries(
+        agent,
         SourceNotePlanPrompt(
             source=source.model_dump(mode="json"),
             turns=transcript.turns,

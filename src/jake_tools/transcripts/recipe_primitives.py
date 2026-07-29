@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from ..ai_usage import build_ai_stage_stats, build_ai_totals
-from ..hermes import Hermes, Reply
+from ..claude import ClaudeAgent, Reply
 from .audio import (
     AudioPipelineError,
     build_concat_plan,
@@ -54,7 +54,7 @@ from .source_primitives import (
 )
 from .stage_primitives import (
     StagePrimitiveError,
-    StructuredHermes,
+    StructuredAgent,
     run_map_speakers_stage,
     run_minutes_stage,
     run_polish_stage,
@@ -215,8 +215,8 @@ def _ordered_word_coverage(source: str, candidate: str) -> float:
     return retained / len(source_words)
 
 
-def _polish_youtube_chunks(
-    hermes: StructuredHermes,
+async def _polish_youtube_chunks(
+    agent: StructuredAgent,
     transcript: TranscriptArtifact,
     *,
     context: str,
@@ -254,8 +254,8 @@ def _polish_youtube_chunks(
             speakers=transcript.speakers,
             warnings=transcript.warnings,
         )
-        polished, reply = run_polish_stage(
-            hermes,
+        polished, reply = await run_polish_stage(
+            agent,
             chunk,
             context=context,
             max_attempts=DEFAULT_STAGE_MAX_ATTEMPTS,
@@ -282,8 +282,8 @@ def _polish_youtube_chunks(
     return transcript.model_copy(update={"turns": polished_turns}), replies
 
 
-def run_youtube_source_notes_recipe(
-    hermes: StructuredHermes,
+async def run_youtube_source_notes_recipe(
+    agent: StructuredAgent,
     url: str,
     *,
     out_dir: Path,
@@ -311,8 +311,8 @@ def run_youtube_source_notes_recipe(
 
         normalised = normalise_transcript_artifact(raw_transcript)
         context = _youtube_source_context(source)
-        polished, polish_replies = _polish_youtube_chunks(
-            hermes,
+        polished, polish_replies = await _polish_youtube_chunks(
+            agent,
             normalised,
             context=context,
         )
@@ -328,8 +328,8 @@ def run_youtube_source_notes_recipe(
         artefacts["transcript.polished"] = polished_path
 
         draft_chapters = draft_chapter_boundaries(polished, window_minutes=5.0)
-        source_note_plan, plan_reply = run_source_note_plan_stage(
-            hermes,
+        source_note_plan, plan_reply = await run_source_note_plan_stage(
+            agent,
             source,
             polished,
             draft_plan=draft_chapters,
@@ -540,8 +540,8 @@ def run_teams_meeting_recipe(
         raise RecipePrimitiveError(str(exc)) from exc
 
 
-def run_obsidian_recording_recipe(
-    hermes: Hermes,
+async def run_obsidian_recording_recipe(
+    agent: ClaudeAgent,
     obsidian_note: Path,
     *,
     dry_run: bool,
@@ -596,8 +596,8 @@ def run_obsidian_recording_recipe(
             _write_json(transcript_path, transcript.model_dump(mode="json"))
             artifact_paths["transcript.normalised"] = transcript_path
 
-            speaker_mapping, mapping_reply = run_map_speakers_stage(
-                hermes,
+            speaker_mapping, mapping_reply = await run_map_speakers_stage(
+                agent,
                 transcript,
                 attendees=source.attendees,
                 max_attempts=DEFAULT_STAGE_MAX_ATTEMPTS,
@@ -607,8 +607,8 @@ def run_obsidian_recording_recipe(
             _write_json(speaker_mapping_path, speaker_mapping.model_dump(mode="json"))
             artifact_paths["speaker-mapping"] = speaker_mapping_path
 
-            polished, polish_reply = run_polish_stage(
-                hermes,
+            polished, polish_reply = await run_polish_stage(
+                agent,
                 transcript,
                 max_attempts=DEFAULT_STAGE_MAX_ATTEMPTS,
             )
@@ -617,8 +617,8 @@ def run_obsidian_recording_recipe(
             _write_json(polished_path, polished.model_dump(mode="json"))
             artifact_paths["transcript.polished"] = polished_path
 
-            chapter_plan, chapter_reply = run_title_chapters_stage(
-                hermes,
+            chapter_plan, chapter_reply = await run_title_chapters_stage(
+                agent,
                 polished,
                 draft_plan=None,
                 max_attempts=DEFAULT_STAGE_MAX_ATTEMPTS,
@@ -628,8 +628,8 @@ def run_obsidian_recording_recipe(
             _write_json(chapters_path, chapter_plan.model_dump(mode="json"))
             artifact_paths["chapters"] = chapters_path
 
-            minutes, minutes_reply = run_minutes_stage(
-                hermes,
+            minutes, minutes_reply = await run_minutes_stage(
+                agent,
                 polished,
                 chapters=chapter_plan,
                 max_attempts=DEFAULT_STAGE_MAX_ATTEMPTS,

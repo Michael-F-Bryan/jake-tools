@@ -34,7 +34,7 @@ class DummyResult:
         }
 
 
-def fake_process_obsidian_recording(hermes, obsidian_note, dry_run):
+async def fake_process_obsidian_recording(agent, obsidian_note, dry_run):
     return DummyResult()
 
 
