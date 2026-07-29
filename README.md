@@ -25,25 +25,15 @@ all manually at any time with:
 uv run pre-commit run --all-files
 ```
 
-## Daily report
+## Choosing a model
+
+Commands that call an LLM take `--model` (a Claude model ID) and `--effort`.
+Calls go through the Claude Agent SDK, which drives the local `claude` CLI, so
+the same credentials and quota apply as when you run Claude Code by hand.
 
 ```bash
-jake-tools daily-report --date YYYY-MM-DD
-jake-tools daily-report --date YYYY-MM-DD --json
+jake-tools transcribe polish --model claude-opus-4-8 --effort high TRANSCRIPT.txt
 ```
-
-The daily-report coordinator is deterministic and read-only outside its own work
-directory:
-
-- all six lanes always run: session hindsight, memory candidates, skill review,
-  failure patterns, transcripts and DUM-C, and inbox triage
-- inbox triage uses Himalaya envelope exports only; it does not read message
-  bodies, draft replies, send mail, move mail, or delete mail
-- the workflow does not mutate external systems: no memory, skills, email, cron,
-  Obsidian, SharePoint, or git writes
-- artefacts are written under `_working/daily-report-YYYY-MM-DD/`
-- `--json` emits a machine-readable summary for automation
-- `summary.json` includes token and estimated cost totals
 
 ## Transcribing Obsidian recordings
 

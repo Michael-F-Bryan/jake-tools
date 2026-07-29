@@ -1,8 +1,8 @@
 # Jake's Tools
 
 Internal Python CLI tools for Jake. Stack: Python 3.14, `uv`, Click, Pydantic,
-and Hermes (`hermes-agent`) for LLM calls. Package layout lives under
-`src/jake_tools/`. Human onboarding is in [README.md](README.md).
+and the Claude Agent SDK (`claude-agent-sdk`) for LLM calls. Package layout
+lives under `src/jake_tools/`. Human onboarding is in [README.md](README.md).
 
 When in doubt, run `jake-tools <command> --help` for current flags.
 
@@ -12,13 +12,12 @@ When in doubt, run `jake-tools <command> --help` for current flags.
 src/jake_tools/
   cli/           # Click commands (keep thin)
   ai_watch/      # collect→fetch→scout→curate→obsidian→digest→deliver
-  daily_report/  # coordinator, lanes, synthesis, Himalaya preflight
   transcripts/   # Obsidian recording pipeline
-  hermes.py      # Hermes wrapper and structured prompts
+  claude.py      # Claude Agent SDK wrapper — the only LLM seam
+  prompting.py   # typed Jinja prompts bound to a response model
   newsletters.py # SharePoint Graph client
 tests/           # mirrors packages above
-.agents/skills/ai-watch/      # deep workflow guidance (not CLI code)
-.agents/skills/daily-report/  # deep workflow guidance (not CLI code)
+.agents/skills/ai-watch/  # deep workflow guidance (not CLI code)
 ```
 
 ## Developing
@@ -52,52 +51,32 @@ uv run pytest -q
 - Match surrounding code. Prefer typed Pydantic models over ad hoc dicts.
 - Ruff rules: `E`, `F`, `I`, `UP`, `B`, `SIM`, `C4` (see `pyproject.toml`).
 - Pyright must pass (`pyrightconfig.json`).
-- Hermes-injected commands use the `@hermes` decorator in `cli/options.py`.
-  `daily-report` constructs `Hermes()` directly with `--judgement-model` and
-  `--evidence-model`.
+- All LLM calls go through `ClaudeAgent` in `claude.py`. Nothing else imports
+  `claude_agent_sdk` directly.
+- Commands that call the LLM use the `@agent` decorator in `cli/options.py`
+  (adds `--model` and `--effort`) and `@coro`, applied closest to the callback,
+  which runs the async callback with `asyncio.run`.
+- `AgentSpec.tools` defaults to an empty tuple, which is genuinely tool-less.
+  Never pass `tools=None` to `ClaudeAgentOptions`: the SDK then omits `--tools`
+  and the agent inherits Claude Code's full default toolset.
+- Tests inject a fake at the `run_query` seam (`tests/agent_fakes.py`), so
+  prompt rendering, schema injection, and usage accounting stay real.
 
 ## External dependencies
 
 | Tool               | Used by                                               |
 | ------------------ | ----------------------------------------------------- |
-| `uv`               | dependency management and script runner               |
-| `hermes-agent`     | LLM calls (editable path dep in `pyproject.toml`)     |
-| `himalaya`         | daily-report inbox lane preflight and envelope export |
-| `ffmpeg`, `scribe` | `transcribe obsidian-recording` audio pipeline        |
-| `yt-dlp`           | YouTube caption and metadata source adapter            |
-| `az` (Azure CLI)   | `newsletter` commands (Microsoft Graph token)         |
+| `uv`                | dependency management and script runner                |
+| `claude-agent-sdk`  | LLM calls; drives the local `claude` CLI               |
+| `hermes-agent`      | `ai-watch` `web_search`/`web_extract` tool calls only  |
+| `ffmpeg`, `scribe`  | `transcribe obsidian-recording` audio pipeline         |
+| `yt-dlp`            | YouTube caption and metadata source adapter            |
+| `az` (Azure CLI)    | `newsletter` commands (Microsoft Graph token)          |
 
 If a required external tool is missing, report the blocker. Do not mock
 preflight checks or skip them silently.
 
 ## Commands
-
-### `daily-report`
-
-```bash
-jake-tools daily-report --date YYYY-MM-DD
-jake-tools daily-report --date YYYY-MM-DD --json
-```
-
-Read-only outside `_working/daily-report-YYYY-MM-DD/` under the current working
-directory. Does not mutate memory, skills, email, cron, Obsidian, SharePoint,
-or git.
-
-- All six lanes always run: session hindsight, memory candidates, skill review,
-  failure patterns, transcripts and DUM-C, and inbox triage.
-- Inbox triage is envelope-only via Himalaya; it does not read message bodies,
-  draft replies, send mail, move mail, or delete mail.
-- `--judgement-model` drives standard-tier lanes; `--evidence-model` drives
-  cheap-tier lanes. `--provider` defaults to `openrouter`.
-- `--json` emits a machine-readable summary; `summary.json` includes token and
-  estimated cost totals.
-- Exits `1` when any lane fails.
-
-Key artefacts: `report.md`, `summary.json`, `manifest.json`,
-`lane-events.jsonl`, plus `evidence/`, `subtasks/`, `prompts/`, and `logs/`.
-
-For lane orchestration, validation gates, and usage forensics, see
-[.agents/skills/daily-report/SKILL.md](.agents/skills/daily-report/SKILL.md).
 
 ### `ai-watch`
 
@@ -117,8 +96,9 @@ clear the bar.
   deliver. `run` executes all stages sequentially; individual subcommands call
   the same domain functions.
 - Discovery and fetch use Hermes `web_search` / `web_extract` (no hand-rolled
-  HTTP). Scout uses `--scout-model`; curator uses `--curator-model`. Provider
-  defaults to `openai-codex`.
+  HTTP); these are deterministic tool calls, not LLM calls, and are the one
+  place `hermes-agent` is still imported. Scout uses `--scout-model`
+  (`claude-haiku-4-5`); curator uses `--curator-model` (`claude-sonnet-5`).
 - `--dry-run` skips vault writes and live Discord send; still writes run
   artefacts including `delivery-payload.txt`.
 - Empty main digest is **silent** (no Discord message; audit records still
@@ -146,8 +126,7 @@ jake-tools transcribe polish TRANSCRIPT.txt
 Output sections: `## Meeting Notes`, `## Chapters`, `## Transcript`.
 `polish` writes polished text to stdout only.
 
-Both subcommands accept `--default-model` and `--provider` via the `@hermes`
-decorator.
+Both subcommands accept `--model` and `--effort` via the `@agent` decorator.
 
 ### `clockify`
 
@@ -181,6 +160,6 @@ Requires `az login` to the CSU tenant for a Graph access token.
 ## Boundaries
 
 - Do not commit secrets, tokens, or credentials.
-- `daily-report` is read-only outside its dated work directory; other commands
-  may write to Obsidian notes or SharePoint by design.
-- Do not assume the whole repo is read-only because daily-report is.
+- `ai-watch`, `transcribe`, and `transcript` write to Obsidian notes, and
+  `newsletter` writes to SharePoint, by design. `--dry-run` suppresses those
+  writes where the command offers it.
