@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import date, datetime
 from pathlib import Path
 
-from jake_tools.ai_watch.audit import append_model
 from jake_tools.ai_watch.audit_models import CuratorDecisionRecord, DeliveryStatus
 from jake_tools.ai_watch.delivery import (
     DISCORD_PAYLOAD_MAX_CHARS,
@@ -18,6 +17,7 @@ from jake_tools.ai_watch.models import (
     ObsidianRecommendation,
 )
 from jake_tools.ai_watch.paths import AiWatchPaths
+from jake_tools.ai_watch.records import append_model
 
 
 def _long_item(title: str, url: str, obsidian: str) -> str:

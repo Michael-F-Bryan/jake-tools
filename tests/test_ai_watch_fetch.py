@@ -4,11 +4,11 @@ import json
 from datetime import date, datetime
 from pathlib import Path
 
-from jake_tools.ai_watch.audit import append_model
 from jake_tools.ai_watch.audit_models import DiscoveredRecord, FetchRecord, FetchStatus
 from jake_tools.ai_watch.fetch import run_fetch
 from jake_tools.ai_watch.models import AiWatchCommandOptions, ExtractResult
 from jake_tools.ai_watch.paths import AiWatchPaths
+from jake_tools.ai_watch.records import append_model
 from jake_tools.ai_watch.state import SeenIndex
 from jake_tools.ai_watch.web_tools import FakeWebTools
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from ..ai_usage import AITotals
-from .audit import read_discovered_candidates, read_models, write_model
 from .audit_models import (
     CuratorDecisionRecord,
     FetchRecord,
@@ -13,6 +12,7 @@ from .audit_models import (
 )
 from .models import AiWatchCommandOptions, RunStatus, StageFailure
 from .paths import AiWatchPaths
+from .records import read_discovered_candidates, read_models, write_model
 
 
 def build_manifest(

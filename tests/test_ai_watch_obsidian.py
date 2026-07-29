@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from jake_tools.ai_watch.audit import append_model, write_model
 from jake_tools.ai_watch.audit_models import ArticleMetadata, CuratorDecisionRecord
 from jake_tools.ai_watch.models import (
     AiWatchCommandOptions,
@@ -16,6 +15,7 @@ from jake_tools.ai_watch.models import (
 )
 from jake_tools.ai_watch.obsidian import render_obsidian_note, run_obsidian_sync
 from jake_tools.ai_watch.paths import AiWatchPaths
+from jake_tools.ai_watch.records import append_model, write_model
 
 
 def test_render_obsidian_note_has_callout() -> None:

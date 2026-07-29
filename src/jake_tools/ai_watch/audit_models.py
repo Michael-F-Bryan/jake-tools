@@ -11,6 +11,7 @@ from .models import (
     CuratorDecision,
     CuratorDecisionType,
     DigestLane,
+    ExtractStatus,
     ObsidianRecommendation,
     RunStatus,
     ScoutOutput,
@@ -43,7 +44,7 @@ class ArticleMetadata(BaseModel):
     source: str
     content_hash: str
     full_text_path: str | None = None
-    status: Literal["ok", "fail"] = "ok"
+    status: ExtractStatus = "ok"
     error: str | None = None
 
 

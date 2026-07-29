@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .audit import append_model, truncate_records, utc_now
 from .audit_models import DiscoveredRecord, SeenCheckRecord
 from .calibration import DEFAULT_CALIBRATION_CASES_PATH, load_calibration_cases
 from .models import AiWatchCommandOptions, SearchResult, candidate_id_for
 from .paths import AiWatchPaths
+from .records import append_model, truncate_records, utc_now
 from .sources import DEFAULT_SOURCE_QUERIES, SourceQuery
 from .state import SeenIndex
 from .web_tools import WebTools

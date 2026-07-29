@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from .audit import read_discovered_candidates, read_models
 from .audit_models import CuratorDecisionRecord, CuratorDecisionType
-from .models import AiWatchCommandOptions
 from .paths import AiWatchPaths
+from .records import read_discovered_candidates, read_models
 
 
-def render_digest(
-    paths: AiWatchPaths, options: AiWatchCommandOptions
-) -> tuple[int, int]:
+def render_digest(paths: AiWatchPaths) -> tuple[int, int]:
     main_items: list[str] = []
     speculative_items: list[str] = []
     rejected_items: list[str] = []
@@ -54,8 +51,6 @@ def render_digest(
     return len(main_items), len(speculative_items)
 
 
-def run_digest(
-    *, options: AiWatchCommandOptions, paths: AiWatchPaths
-) -> tuple[int, int]:
+def run_digest(*, paths: AiWatchPaths) -> tuple[int, int]:
     paths.create()
-    return render_digest(paths, options)
+    return render_digest(paths)

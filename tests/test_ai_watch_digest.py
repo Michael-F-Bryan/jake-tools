@@ -3,19 +3,18 @@ from __future__ import annotations
 from datetime import date, datetime
 from pathlib import Path
 
-from jake_tools.ai_watch.audit import append_model
 from jake_tools.ai_watch.audit_models import (
     CuratorDecisionRecord,
     DiscoveredRecord,
 )
 from jake_tools.ai_watch.digest import run_digest
 from jake_tools.ai_watch.models import (
-    AiWatchCommandOptions,
     CuratorDecisionType,
     DigestLane,
     ObsidianRecommendation,
 )
 from jake_tools.ai_watch.paths import AiWatchPaths
+from jake_tools.ai_watch.records import append_model
 
 
 def test_digest_renders_surfaced_items(tmp_path: Path) -> None:
@@ -49,8 +48,7 @@ def test_digest_renders_surfaced_items(tmp_path: Path) -> None:
             ),
         ),
     )
-    options = AiWatchCommandOptions(target_date=date(2026, 7, 2), base_dir=tmp_path)
-    surfaced, speculative = run_digest(options=options, paths=paths)
+    surfaced, speculative = run_digest(paths=paths)
     assert surfaced == 1
     assert speculative == 0
     digest = paths.digest.read_text(encoding="utf-8")
@@ -61,8 +59,7 @@ def test_digest_renders_surfaced_items(tmp_path: Path) -> None:
 
 def test_empty_digest_renders_without_error(tmp_path: Path) -> None:
     paths = AiWatchPaths.for_date(tmp_path, date(2026, 7, 2)).create()
-    options = AiWatchCommandOptions(target_date=date(2026, 7, 2), base_dir=tmp_path)
-    surfaced, speculative = run_digest(options=options, paths=paths)
+    surfaced, speculative = run_digest(paths=paths)
     assert surfaced == 0
     assert speculative == 0
     assert "_No items crossed the bar._" in paths.digest.read_text(encoding="utf-8")

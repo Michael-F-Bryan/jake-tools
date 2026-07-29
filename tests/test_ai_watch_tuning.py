@@ -5,7 +5,6 @@ from datetime import date, datetime
 from pathlib import Path
 
 from jake_tools.ai_usage import AITotals
-from jake_tools.ai_watch.audit import append_model, load_model
 from jake_tools.ai_watch.audit_models import (
     CuratorDecisionRecord,
     DiscoveredRecord,
@@ -24,6 +23,7 @@ from jake_tools.ai_watch.models import (
     StageFailure,
 )
 from jake_tools.ai_watch.paths import AiWatchPaths
+from jake_tools.ai_watch.records import append_model, load_model
 from jake_tools.ai_watch.tuning import apply_surface_policy, run_tune
 
 
@@ -143,7 +143,7 @@ def test_surface_policy_keeps_only_highest_ranked_items(tmp_path: Path) -> None:
     assert decisions["sha256:low"].obsidian_recommendation.should_create_note is False
     assert "surface limit" in decisions["sha256:low"].reason
 
-    surfaced, speculative = run_digest(options=options, paths=paths)
+    surfaced, speculative = run_digest(paths=paths)
     assert surfaced == 2
     assert speculative == 1
     digest = paths.digest.read_text(encoding="utf-8")

@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 
 from ..ai_usage import AIStageStats, build_ai_totals
 from ..claude import ClaudeAgent
-from .audit import truncate_records
 from .collect import run_collect
 from .curate import run_curate
 from .delivery import HermesSendSender, MessageSender, run_delivery
@@ -14,6 +13,7 @@ from .manifest import write_manifest
 from .models import AiWatchCommandOptions, AiWatchCommandResult, RunStatus, StageFailure
 from .obsidian import run_obsidian_sync
 from .paths import AiWatchPaths
+from .records import truncate_records
 from .scout import run_scout
 from .stages import AiWatchStages, ClaudeAiWatchStages
 from .state import SeenIndex
@@ -102,7 +102,7 @@ async def run_ai_watch_command(
         failed_stages.append(StageFailure(stage="obsidian_sync", error=str(error)))
 
     try:
-        surfaced, speculative = run_digest(options=options, paths=paths)
+        surfaced, speculative = run_digest(paths=paths)
     except Exception as error:  # noqa: BLE001
         failed_stages.append(StageFailure(stage="digest", error=str(error)))
 

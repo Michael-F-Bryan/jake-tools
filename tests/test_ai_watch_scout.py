@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from jake_tools.ai_usage import Usage
-from jake_tools.ai_watch.audit import append_model, read_models
 from jake_tools.ai_watch.audit_models import (
     DiscoveredRecord,
     FetchRecord,
@@ -20,6 +19,7 @@ from jake_tools.ai_watch.models import (
     ScoutRecommendation,
 )
 from jake_tools.ai_watch.paths import AiWatchPaths
+from jake_tools.ai_watch.records import append_model, read_models
 from jake_tools.ai_watch.scout import run_scout
 from jake_tools.claude import Reply
 

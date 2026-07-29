@@ -1,66 +1,60 @@
 from __future__ import annotations
 
-import json
-import os
-from datetime import UTC, datetime
+from datetime import date, timedelta
 from pathlib import Path
 
-from pydantic import BaseModel
+from .audit_models import RunManifest
+from .records import load_model
 
-from .audit_models import DiscoveredRecord
-from .models import AuditStage
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
+_SINCE_UNIT_DAYS = {"d": 1, "w": 7}
 
 
-def append_model(path: Path, record: BaseModel) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    encoded = json.dumps(record.model_dump(mode="json"), sort_keys=True) + "\n"
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(encoded)
-        handle.flush()
-        os.fsync(handle.fileno())
+class InvalidSinceError(ValueError):
+    """Raised when a --since value isn't a supported "<N><unit>" duration."""
+
+    def __init__(self, since: str) -> None:
+        super().__init__(
+            f"invalid --since value {since!r}: expected a number followed by "
+            f"'d' or 'w' (e.g. 7d, 2w)"
+        )
+        self.since = since
 
 
-def truncate_records(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("", encoding="utf-8")
+def parse_since_days(since: str) -> int:
+    """Parse a lookback window like "7d" or "2w" into a day count."""
+    since = since.strip()
+    if len(since) < 2:
+        raise InvalidSinceError(since)
+    multiplier = _SINCE_UNIT_DAYS.get(since[-1])
+    if multiplier is None:
+        raise InvalidSinceError(since)
+    try:
+        count = int(since[:-1])
+    except ValueError as error:
+        raise InvalidSinceError(since) from error
+    return count * multiplier
 
 
-def read_models[TModel: BaseModel](path: Path, model: type[TModel]) -> list[TModel]:
-    if not path.exists():
+def audit_cutoff(*, since: str, today: date) -> date:
+    return today - timedelta(days=parse_since_days(since))
+
+
+def find_runs(base_dir: Path, *, cutoff: date) -> list[RunManifest]:
+    """Load the manifest of every ai-watch run on or after `cutoff`."""
+    watch_root = base_dir / "ai-watch"
+    if not watch_root.exists():
         return []
-    records: list[TModel] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
+    manifests: list[RunManifest] = []
+    for run_dir in sorted(watch_root.iterdir()):
+        if not run_dir.is_dir() or run_dir.name == "state":
             continue
-        records.append(model.model_validate_json(line))
-    return records
-
-
-def write_model(path: Path, payload: BaseModel) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload.model_dump(mode="json"), indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-
-
-def load_model[TModel: BaseModel](path: Path, model: type[TModel]) -> TModel:
-    return model.model_validate_json(path.read_text(encoding="utf-8"))
-
-
-def read_discovered_candidates(path: Path) -> list[DiscoveredRecord]:
-    if not path.exists():
-        return []
-    records: list[DiscoveredRecord] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
+        try:
+            run_date = date.fromisoformat(run_dir.name)
+        except ValueError:
             continue
-        payload = json.loads(line)
-        if payload.get("stage") != AuditStage.DISCOVERED:
+        if run_date < cutoff:
             continue
-        records.append(DiscoveredRecord.model_validate(payload))
-    return records
+        manifest_path = run_dir / "manifest.json"
+        if manifest_path.exists():
+            manifests.append(load_model(manifest_path, RunManifest))
+    return manifests

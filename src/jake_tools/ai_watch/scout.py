@@ -4,13 +4,6 @@ from dataclasses import dataclass
 
 from ..ai_usage import Usage
 from .archive import load_article_metadata
-from .audit import (
-    append_model,
-    read_discovered_candidates,
-    read_models,
-    truncate_records,
-    utc_now,
-)
 from .audit_models import (
     FetchRecord,
     FetchStatus,
@@ -19,6 +12,13 @@ from .audit_models import (
 )
 from .models import AiWatchCommandOptions, AiWatchStageError, ScoutRecommendation
 from .paths import AiWatchPaths
+from .records import (
+    append_model,
+    read_discovered_candidates,
+    read_models,
+    truncate_records,
+    utc_now,
+)
 from .stages import AiWatchStages, load_interest_profile
 from .validation import sanitize_evidence_quotes, validate_scouted
 

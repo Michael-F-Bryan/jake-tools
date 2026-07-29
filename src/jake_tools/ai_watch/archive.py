@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .audit import write_model
 from .audit_models import ArticleMetadata
 from .models import ExtractResult, content_hash_for
+from .records import write_model
 
 
 def archive_extract(
@@ -34,6 +34,6 @@ def archive_extract(
 
 
 def load_article_metadata(path: Path) -> ArticleMetadata:
-    from .audit import load_model
+    from .records import load_model
 
     return load_model(path, ArticleMetadata)

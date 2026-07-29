@@ -4,7 +4,6 @@ from datetime import date, datetime
 from pathlib import Path
 
 from jake_tools.ai_usage import Usage
-from jake_tools.ai_watch.audit import append_model
 from jake_tools.ai_watch.audit_models import DiscoveredRecord
 from jake_tools.ai_watch.models import (
     AiWatchCommandOptions,
@@ -19,6 +18,7 @@ from jake_tools.ai_watch.models import (
     SearchResult,
 )
 from jake_tools.ai_watch.paths import AiWatchPaths
+from jake_tools.ai_watch.records import append_model
 from jake_tools.ai_watch.runner import RunnerDeps, run_ai_watch_command
 from jake_tools.ai_watch.sources import DEFAULT_SOURCE_QUERIES
 from jake_tools.ai_watch.web_tools import FakeWebTools

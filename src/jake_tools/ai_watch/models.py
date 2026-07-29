@@ -99,12 +99,19 @@ class SearchResult(BaseModel):
     source: str
 
 
+# Shared by ExtractResult and ArticleMetadata (audit_models.py): both
+# describe the same extraction outcome, one as the live result, the other as
+# its archived record. Not FetchStatus - that's the three-way fetch *stage*
+# status (ok/fail/skipped), a different vocabulary.
+ExtractStatus = Literal["ok", "fail"]
+
+
 class ExtractResult(BaseModel):
     url: str
     title: str
     content: str
     full_text_path: str | None = None
-    status: Literal["ok", "fail"] = "ok"
+    status: ExtractStatus = "ok"
     error: str | None = None
 
 

@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import date
 
 from .archive import load_article_metadata
-from .audit import append_model, read_models, utc_now, write_model
 from .audit_models import (
     CuratorDecisionRecord,
     CuratorDecisionType,
@@ -16,6 +15,7 @@ from .audit_models import (
 from .cleanup import strip_page_chrome
 from .models import AiWatchCommandOptions, resolve_vault_path
 from .paths import AiWatchPaths
+from .records import append_model, read_models, utc_now, write_model
 
 _FALLBACK_TITLE_MAX_CHARS = 150
 

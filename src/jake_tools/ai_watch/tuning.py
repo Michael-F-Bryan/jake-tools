@@ -7,7 +7,6 @@ from datetime import date, datetime
 from pathlib import Path
 
 from ..ai_usage import AITotals
-from .audit import load_model, read_models, truncate_records
 from .audit_models import (
     CuratorDecisionRecord,
     CuratorDecisionType,
@@ -20,6 +19,7 @@ from .digest import run_digest
 from .manifest import write_manifest
 from .models import AiWatchCommandOptions, DigestLane, RunStatus
 from .paths import AiWatchPaths
+from .records import load_model, read_models
 
 
 @dataclass(frozen=True)
@@ -165,7 +165,9 @@ def _demote_surface_record(
 
 
 def _write_decisions(path: Path, records: list[CuratorDecisionRecord]) -> None:
-    truncate_records(path)
+    # write_text() already overwrites the whole file, so a truncate_records()
+    # call first would just be discarded work; only the mkdir is needed here.
+    path.parent.mkdir(parents=True, exist_ok=True)
     encoded = "".join(
         json.dumps(record.model_dump(mode="json"), sort_keys=True) + "\n"
         for record in records
@@ -331,7 +333,7 @@ def run_tune(
     surface_policy = apply_surface_policy(
         options=options, paths=paths, remove_notes=remove_notes
     )
-    surfaced, speculative = run_digest(options=options, paths=paths)
+    surfaced, speculative = run_digest(paths=paths)
     digest_text = paths.digest.read_text(encoding="utf-8")
     (paths.root / "delivery-payload.txt").write_text(
         build_discord_payload(digest_text) if surfaced else digest_text,

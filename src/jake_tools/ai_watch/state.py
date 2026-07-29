@@ -6,9 +6,9 @@ import os
 import tempfile
 from pathlib import Path
 
-from .audit import append_model, read_models, utc_now
 from .audit_models import SeenCandidateRecord
 from .models import CuratorDecisionType, candidate_id_for, content_hash_for
+from .records import append_model, read_models, utc_now
 
 
 class SeenIndex:

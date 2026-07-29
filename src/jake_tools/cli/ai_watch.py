@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 import click
 
+from ..ai_watch.audit import InvalidSinceError, audit_cutoff, find_runs
 from ..ai_watch.collect import run_collect
 from ..ai_watch.curate import run_curate
 from ..ai_watch.delivery import run_delivery
@@ -275,20 +276,13 @@ def obsidian_sync(
 
 @ai_watch.command()
 @_date_options
-@_dry_run_option
 def digest(
     target_date: date,
     base_dir: Path,
     as_json: bool,
-    dry_run: bool,
 ) -> None:
     paths = AiWatchPaths.for_date(base_dir, target_date)
-    options = AiWatchCommandOptions(
-        target_date=target_date,
-        base_dir=base_dir,
-        dry_run=dry_run,
-    )
-    surfaced, speculative = run_digest(options=options, paths=paths)
+    surfaced, speculative = run_digest(paths=paths)
     _emit_stage({"surfaced": surfaced, "speculative": speculative}, as_json=as_json)
 
 
@@ -443,32 +437,43 @@ async def run(
 
 
 @ai_watch.command()
-@click.option("--since", default="7d", show_default=True)
+@click.option(
+    "--since",
+    default="7d",
+    show_default=True,
+    help="Lookback window: a number followed by 'd' or 'w' (e.g. 7d, 2w).",
+)
 @click.option(
     "--base-dir",
     type=click.Path(path_type=Path),
     default=_option_default("base_dir"),
     show_default=True,
 )
-def audit(since: str, base_dir: Path) -> None:
-    days = int(since.removesuffix("d"))
-    cutoff = date.today() - timedelta(days=days)
-    watch_root = base_dir / "ai-watch"
-    if not watch_root.exists():
+@click.option("--json", "as_json", is_flag=True)
+def audit(since: str, base_dir: Path, as_json: bool) -> None:
+    try:
+        cutoff = audit_cutoff(since=since, today=date.today())
+    except InvalidSinceError as error:
+        raise click.BadParameter(str(error)) from error
+    manifests = find_runs(base_dir, cutoff=cutoff)
+    if as_json:
+        click.echo(
+            json.dumps(
+                [manifest.model_dump(mode="json") for manifest in manifests],
+                sort_keys=True,
+            )
+        )
+        return
+    if not manifests:
         click.echo("no runs found")
         return
-    for run_dir in sorted(watch_root.iterdir()):
-        if not run_dir.is_dir() or run_dir.name == "state":
-            continue
-        try:
-            run_date = date.fromisoformat(run_dir.name)
-        except ValueError:
-            continue
-        if run_date < cutoff:
-            continue
-        manifest = run_dir / "manifest.json"
-        if manifest.exists():
-            click.echo(manifest.read_text(encoding="utf-8"))
+    for manifest in manifests:
+        click.echo(
+            f"{manifest.run_id}: {manifest.status.value} "
+            f"surfaced={manifest.counts.surfaced} "
+            f"speculative={manifest.counts.speculative} "
+            f"failed_stages={len(manifest.failed_stages)}"
+        )
 
 
 def _emit_stage(payload: dict, *, as_json: bool) -> None:

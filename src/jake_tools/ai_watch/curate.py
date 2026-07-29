@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 from ..ai_usage import Usage
 from .archive import load_article_metadata
-from .audit import append_model, read_models, truncate_records, utc_now
 from .audit_models import CuratorDecisionRecord, ScoutEvaluationRecord
 from .models import (
     AiWatchCommandOptions,
@@ -13,6 +12,7 @@ from .models import (
     ScoutRecommendation,
 )
 from .paths import AiWatchPaths
+from .records import append_model, read_models, truncate_records, utc_now
 from .stages import AiWatchStages, load_interest_profile
 from .tuning import apply_surface_policy
 from .validation import sanitize_digest_summary, validate_curated

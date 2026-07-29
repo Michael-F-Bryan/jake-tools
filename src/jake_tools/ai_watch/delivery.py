@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .audit import append_model, read_models, utc_now
 from .audit_models import (
     CuratorDecisionRecord,
     CuratorDecisionType,
@@ -15,6 +14,7 @@ from .audit_models import (
 )
 from .models import AiWatchCommandOptions
 from .paths import AiWatchPaths
+from .records import append_model, read_models, utc_now
 
 DISCORD_PAYLOAD_MAX_CHARS = 1900
 

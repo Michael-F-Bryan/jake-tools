@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import importlib
+import json
+from datetime import date
 from pathlib import Path
 
 from click.testing import CliRunner
 
-from jake_tools.ai_usage import Usage
+from jake_tools.ai_usage import AITotals, Usage
 from jake_tools.ai_watch.curate import CurateRunResult
+from jake_tools.ai_watch.manifest import write_manifest
+from jake_tools.ai_watch.models import AiWatchCommandOptions, RunStatus
+from jake_tools.ai_watch.paths import AiWatchPaths
 from jake_tools.cli import main
 
 ai_watch_cli = importlib.import_module("jake_tools.cli.ai_watch")
@@ -164,6 +169,52 @@ def test_ai_watch_tune_help_does_not_advertise_dead_flags() -> None:
     assert result.exit_code == 0
     assert "--max-candidates" not in result.output
     assert "--calibration-only" not in result.output
+
+
+def test_ai_watch_audit_rejects_unsupported_since_unit(tmp_path: Path) -> None:
+    """--since 2w's unit is supported, but a genuinely unsupported unit
+    (e.g. months) must produce a usage error, not an uncaught traceback."""
+    result = CliRunner().invoke(
+        main,
+        ["ai-watch", "audit", "--since", "2m", "--base-dir", str(tmp_path)],
+    )
+
+    assert result.exit_code != 0
+    assert "invalid --since value" in result.output
+
+
+def test_ai_watch_audit_accepts_week_unit(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        main,
+        ["ai-watch", "audit", "--since", "2w", "--base-dir", str(tmp_path)],
+    )
+
+    assert result.exit_code == 0
+    assert "no runs found" in result.output
+
+
+def test_ai_watch_audit_json_emits_one_array(tmp_path: Path) -> None:
+    target_date = date(2026, 7, 2)
+    paths = AiWatchPaths.for_date(tmp_path, target_date).create()
+    write_manifest(
+        paths=paths,
+        options=AiWatchCommandOptions(target_date=target_date, base_dir=tmp_path),
+        status=RunStatus.OK,
+        surfaced_count=1,
+        speculative_count=0,
+        failed_stages=[],
+        summary=AITotals(),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["ai-watch", "audit", "--since", "30d", "--base-dir", str(tmp_path), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert isinstance(payload, list)
+    assert payload[0]["run_id"] == "2026-07-02"
 
 
 def test_ai_watch_deliver_rejects_removed_target_flag(tmp_path: Path) -> None:
