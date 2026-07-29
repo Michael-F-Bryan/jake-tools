@@ -42,8 +42,8 @@ def test_transcript_youtube_help_is_task_shaped() -> None:
         "--vault-note",
         "--dry-run",
         "--json",
-        "--provider",
-        "--default-model",
+        "--model",
+        "--effort",
     ):
         assert option in result.output
     assert "--show-plan" not in result.output
