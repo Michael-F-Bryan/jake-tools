@@ -9,8 +9,9 @@ instead of monkeypatching module attributes.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 
 import click
 
@@ -19,6 +20,7 @@ from ..clockify import CLOCKIFY_API_ROOT, ClockifyClient, ClockifyError
 from ..clockify_jira_sync import ClockifyInventoryClient, JiraInventoryClient
 from ..jira import JiraClient, JiraError
 from ..newsletters import NewsletterClient, NewsletterOperations
+from ..transcripts.bundle.control import BundleExecutor
 
 AgentFactory = Callable[[AgentSpec], ClaudeAgent]
 
@@ -82,7 +84,11 @@ class AppContext:
 
     Carried on Click's ``ctx.obj``. ``clockify_config`` starts unset; the
     ``clockify`` group callback is the one place that resolves and attaches
-    it, once per invocation.
+    it, once per invocation. ``bundle_executors`` is the M2 ``resume``
+    dispatch seam: v1 ships none (the empty default), so every
+    ``next_action.kind`` is an explicit "no executor registered" error
+    until a real transform is injected here -- production code never
+    populates this map either, only tests exercising the dispatch path.
     """
 
     agent_factory: AgentFactory = _default_agent_factory
@@ -90,6 +96,7 @@ class AppContext:
     jira_client_factory: JiraClientFactory = _default_jira_client_factory
     newsletter_client_factory: NewsletterClientFactory = NewsletterClient
     clockify_config: ClockifyConfig | None = None
+    bundle_executors: Mapping[str, BundleExecutor] = MappingProxyType({})
 
     def with_clockify_config(self, config: ClockifyConfig) -> AppContext:
         return replace(self, clockify_config=config)

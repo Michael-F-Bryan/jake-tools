@@ -19,9 +19,13 @@ def test_transcript_help_exposes_only_operator_tasks() -> None:
     assert "youtube" in result.output
     assert "obsidian-recording" in result.output
     assert "polish" in result.output
+    # "source" was reserved here for a since-superseded internal design; the
+    # bundle-store control plane (Phase 2) makes `transcript source ingest`
+    # a genuinely public command (ADVERSARIAL-REVIEW §4.1), so it is no
+    # longer in this "must stay hidden" list -- see
+    # test_transcript_bundle_cli.py for its own --help coverage.
     for internal_group in (
         "schema",
-        "source",
         "parse",
         "transform",
         "stage",

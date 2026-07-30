@@ -15,6 +15,14 @@ from ..transcripts.render import MeetingNoteProfile
 from ..transcripts.teams_recipe import run_teams_meeting_recipe
 from ..transcripts.youtube_recipe import run_youtube_source_notes_recipe
 from .options import agent, coro
+from .transcript_bundle import (
+    bundle_group,
+    inspect_command,
+    resume_command,
+    source_group,
+    status_command,
+    validate_command,
+)
 
 # Personal policy for the CSU/DUM-C Teams account: which token file backs it,
 # and what provenance to stamp onto the resulting SourceArtifact. The library
@@ -45,6 +53,16 @@ def _resolve_teams_account(
 @click.group(help="Turn recorded sources into verified notes.")
 def transcript() -> None:
     pass
+
+
+# Bundle control plane (Phase 2): thin registration only, orchestration
+# lives in jake_tools.transcripts.bundle.control.
+transcript.add_command(bundle_group)
+transcript.add_command(source_group)
+transcript.add_command(inspect_command)
+transcript.add_command(validate_command)
+transcript.add_command(status_command)
+transcript.add_command(resume_command)
 
 
 @transcript.command("teams-meeting")
