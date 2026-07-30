@@ -43,11 +43,17 @@ import pytest
 from jake_tools.transcripts.bundle.adapters import (
     TeamsSpeakerConfirmation,
     adapt_gemini_notes,
+    adapt_local_media,
+    adapt_obsidian_note,
     adapt_teams_vtt,
     adapt_untimed_transcript,
 )
 from jake_tools.transcripts.bundle.assemble import assemble
 from jake_tools.transcripts.bundle.components import ArtefactSelection, Disposition
+from jake_tools.transcripts.bundle.control import (
+    run_timeline_transform,
+    run_transcribe_transform,
+)
 from jake_tools.transcripts.bundle.document import TranscriptDocumentV1, project_head
 from jake_tools.transcripts.bundle.records import (
     NoDocumentYet,
@@ -697,6 +703,212 @@ def test_canary_gemini_notes_only() -> None:
     assert verdict.counts["declared attendees"] == 7
     assert verdict.counts["speaking-evidenced attendees"] == 0
     assert verdict.pre_hashes == verdict.post_hashes
+
+
+# -- fixture 4 (Phase 3A): local-single-speaker-correction, the REAL worker --
+#
+# This is the slice's acceptance evidence: a genuine end-to-end run --
+# ingest (obsidian-note + local-media adapters) -> assemble -> timeline ->
+# transcribe (the REAL pinned inference worker, no fake at the subprocess
+# seam) -> validate. Deliberately does NOT run the multi-recording fixture
+# (local-multi-recording-review) -- that is a later slice's job.
+
+
+def _run_local_single_speaker_correction_canary() -> CanaryVerdict:
+    fixture = "local-single-speaker-correction"
+    run_root = _fresh_run_root(fixture)
+    pre_hashes: dict[str, str] = {}
+    post_hashes: dict[str, str] = {}
+
+    note_path = _verify_and_copy(fixture, "input-note.md", run_root, hashes=pre_hashes)
+    verified_audio_path = _verify_and_copy(
+        fixture, "audio/meeting.m4a", run_root, hashes=pre_hashes
+    )
+    # obsidian.py's own link resolution checks the note's own directory
+    # first (a real vault would keep this in an Attachments/ folder
+    # alongside/near the note); the fixture's own `audio/` layout is a
+    # corpus-storage convention, not a vault attachment layout. Placing an
+    # extra local copy (of the already hash-verified bytes, never the
+    # fixture path itself) next to the note is this canary's own concern,
+    # not a second read of the fixture.
+    recording_path = note_path.parent / "meeting.m4a"
+    recording_path.write_bytes(verified_audio_path.read_bytes())
+
+    store = BundleStore(run_root / "bundle")
+    store.create_bundle()
+    membership = store.register_source(
+        association=SourceAssociation.OPERATOR_ASSERTION,
+        evidence=f"ingest {fixture} (Phase 3A corpus canary)",
+    )
+    note_artefact = store.ingest_artefact(
+        source_id=membership.source_id,
+        content=note_path.read_bytes(),
+        kind="obsidian-note",
+        producer="phase3a-canary",
+        acquisition_locator=str(note_path),
+    )
+    note_adaptation = adapt_obsidian_note(
+        store, note_artefact_id=note_artefact.artefact_id, note_path=note_path
+    )
+    assert note_adaptation.reference_set is not None
+
+    media_artefact = store.ingest_artefact(
+        source_id=membership.source_id,
+        content=recording_path.read_bytes(),
+        kind="audio",
+        producer="phase3a-canary",
+        acquisition_locator=str(recording_path),
+    )
+    media_adaptation = adapt_local_media(
+        store, source_artefact_id=media_artefact.artefact_id, media_path=recording_path
+    )
+
+    assemble_run = store.create_run(
+        next_action=OperationRef(
+            kind="assemble",
+            input_ids=(note_artefact.artefact_id, media_artefact.artefact_id),
+        )
+    )
+    store.acquire_lease(run_id=assemble_run.run_id, pid=os.getpid())
+    assemble(
+        store,
+        run_id=assemble_run.run_id,
+        selections=(
+            ArtefactSelection(
+                artefact_id=note_artefact.artefact_id,
+                dispositions=(Disposition.DESTINATION, Disposition.NOTES),
+            ),
+            ArtefactSelection(
+                artefact_id=media_artefact.artefact_id,
+                dispositions=(Disposition.MEDIA,),
+            ),
+        ),
+        rationale="single note + single recording (Phase 3A corpus canary)",
+        component_ids=(
+            note_adaptation.destination.component_id,
+            note_adaptation.reference_set.component_id,
+            note_adaptation.participants.component_id,
+            media_adaptation.component_id,
+        ),
+    )
+    store.release_lease(run_id=assemble_run.run_id, new_state=RunState.COMPLETED)
+
+    # transform timeline (M6) -- through the same control-plane entry
+    # point the CLI's `transform timeline` command uses.
+    run_timeline_transform(store)
+
+    # transform transcribe (M11) -- the REAL pinned worker, real
+    # subprocess, no fake at the seam: `uv run --project inference-worker
+    # python -m inference_worker run ...` against the fixture's own 50s
+    # clip.
+    run_transcribe_transform(store)
+
+    document = project_head(store)
+    assert not isinstance(document, NoDocumentYet)
+
+    _reverify(fixture, "input-note.md", pre_hashes)
+    _reverify(fixture, "audio/meeting.m4a", pre_hashes)
+    post_hashes.update(pre_hashes)
+
+    # M13's destination component has no capability key of its own (M4's
+    # table declares none for it, by design -- render/apply are a later
+    # slice); its presence is asserted directly from the component graph
+    # below instead of through a capability lookup.
+    capabilities = _capability_evidence(
+        document,
+        (
+            CapabilityKey.MEDIA_RECORDING,
+            CapabilityKey.TIMELINE_COMBINED,
+            CapabilityKey.PARTICIPANTS_DECLARED,
+            CapabilityKey.INFERENCE_ASR,
+            CapabilityKey.INFERENCE_DIARISATION,
+        ),
+    )
+
+    counts = {
+        "declared attendees": len(note_adaptation.participants.participants),
+        "recording references": len(note_adaptation.reference_set.references),
+        "media duration ms": media_adaptation.duration_ms,
+    }
+    dimension_notes = {
+        "Source integrity": (
+            "input-note.md and audio/meeting.m4a hashes unchanged before/after; "
+            "the vault-shaped Attachments copy this canary made lives only "
+            "under phase2-canaries/, never inside the fixture directory."
+        ),
+        "Capability truthfulness": (
+            "media.recording, timeline.combined, participants.declared present-"
+            "validated; inference.asr/inference.diarisation reflect the REAL "
+            "worker's own observed per-stage outcome (see the run's own "
+            "capability statuses printed alongside this verdict)."
+        ),
+        "Timing": (
+            f"single-segment combined timeline over {media_adaptation.duration_ms}ms "
+            "of real audio; no fabricated timestamps."
+        ),
+        "Speaker handling": (
+            "diarisation constraints declared min=1, max=2 (M11: max = declared "
+            "attendee count) -- speaker assignment/review is a later slice; this "
+            "canary only asserts the raw worker capability statuses."
+        ),
+    }
+    judgement = (
+        "Real end-to-end evidence for Phase 3A: ingest -> assemble -> timeline "
+        "-> transcribe via the actual pinned local worker, no fake at the "
+        "subprocess seam. See capability statuses for the worker's own "
+        "observed per-stage outcome on this run."
+    )
+
+    verdict = CanaryVerdict(
+        fixture=fixture,
+        run_root=run_root,
+        pre_hashes=pre_hashes,
+        post_hashes=post_hashes,
+        capabilities=capabilities,
+        counts=counts,
+        dimension_notes=dimension_notes,
+        judgement=judgement,
+    )
+    _write_verdict(verdict)
+    return verdict
+
+
+@_requires_corpus
+def test_canary_local_single_speaker_correction_real_worker() -> None:
+    """The slice's acceptance evidence (CONTRACTS.md M11): a real,
+    unfaked end-to-end run over the local-single-speaker-correction
+    fixture's own 50s recording. Asserts the *structural* guarantees this
+    slice owns (media/timeline/participants present-validated, no
+    fabricated capability) and reports -- never silently swallows -- the
+    real worker's own observed inference.asr/inference.diarisation
+    statuses, since those depend on this machine's model cache/gating
+    rather than on this slice's own code."""
+    _skip_if_no_corpus()
+    verdict = _run_local_single_speaker_correction_canary()
+
+    by_key = {c.key: c for c in verdict.capabilities}
+    assert by_key["media.recording"].status == CapabilityStatus.PRESENT_VALIDATED.value
+    assert (
+        by_key["timeline.combined"].status == CapabilityStatus.PRESENT_VALIDATED.value
+    )
+    assert (
+        by_key["participants.declared"].status
+        == CapabilityStatus.PRESENT_VALIDATED.value
+    )
+    assert verdict.counts["declared attendees"] == 2
+    assert verdict.counts["recording references"] == 1
+    assert 49_000 <= verdict.counts["media duration ms"] <= 51_000
+    assert verdict.pre_hashes == verdict.post_hashes
+
+    # The real worker's own observed outcome -- reported honestly rather
+    # than asserted to a fixed value, since it depends on this machine's
+    # model cache/gating, not on this slice's own code. Both statuses
+    # must at least be genuine proofs (never NOT_ATTEMPTED, which would
+    # mean the registry itself regressed to a stub).
+    asr_status = by_key["inference.asr"].status
+    diarisation_status = by_key["inference.diarisation"].status
+    assert asr_status != CapabilityStatus.NOT_ATTEMPTED.value
+    assert diarisation_status != CapabilityStatus.NOT_ATTEMPTED.value
 
 
 if __name__ == "__main__":
