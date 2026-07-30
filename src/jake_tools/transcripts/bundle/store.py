@@ -61,6 +61,7 @@ from .components import (
     ComponentKind,
     ComponentRecord,
     assemble_component_record,
+    component_body_type,
     component_input_refs,
 )
 from .ids import ArtefactId, ComponentId, RevisionId, RunId, SourceId, mint_id
@@ -149,15 +150,24 @@ def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _component_content_hash(model: BaseModel) -> str:
+def _component_content_hash(model: ComponentBody | ComponentRecord) -> str:
     """M1: SHA-256 of a component's canonical JSON body.
 
-    Works uniformly on a ``*Body`` (no ``component_id``/``created_at`` to
-    begin with) and on a stored ``*Component`` record (excluded
-    explicitly) -- both hash to the same value for the same content, which
-    is what makes :meth:`BundleStore.add_component`'s dedup check correct.
+    Works uniformly on a ``*Body`` (dumped as-is: it declares no identity
+    fields to begin with) and on a stored ``*Component`` record (dumped
+    via ``include=`` restricted to exactly its ``*Body`` type's own field
+    names, via :func:`.components.component_body_type`) -- both hash to
+    the same value for the same content, which is what makes
+    :meth:`BundleStore.add_component`'s dedup check correct. Deliberately
+    an inclusion list keyed off the ``*Body`` type rather than an
+    ``exclude={"component_id", "created_at", ...}`` list: a future
+    identity-only field added to a ``*Component`` subclass is excluded
+    automatically (it is not part of its ``*Body``), never silently
+    folded into the content hash because someone forgot to extend an
+    exclusion set.
     """
-    payload = model.model_dump(mode="json", exclude={"component_id", "created_at"})
+    body_type = component_body_type(model)
+    payload = model.model_dump(mode="json", include=set(body_type.model_fields))
     canonical = json.dumps(payload, sort_keys=True)
     return _sha256_hex(canonical.encode("utf-8"))
 
@@ -174,18 +184,34 @@ def _pid_is_alive(pid: int) -> bool:
 
 
 def _no_op_capability_validator(revision: RevisionRecord) -> None:
-    """Default ``validate_capabilities`` seam (M16).
+    """Structural-only ``validate_capabilities`` seam (M16) -- the explicit
+    escape hatch for ``validate_capabilities=None``.
 
     Structural closure — revision/ancestor/artefact/component existence
     and refs — is always checked by :meth:`BundleStore.update_head` via
-    :meth:`BundleStore._validate_structural_closure`. This seam is where
-    *semantic* capability validation plugs in; a caller wanting the
-    capability registry (M4) enforced on every head move passes
-    ``document.capability_validating_seam(root)`` explicitly as
-    ``validate_capabilities`` — this default stays a no-op rather than
-    silently assuming that wiring, since not every caller needs it (e.g. a
-    diagnostic script inspecting structural validity only).
+    :meth:`BundleStore._validate_structural_closure`, regardless of this
+    seam. This function skips *semantic* (M4 registry) validation
+    entirely; the default seam (:meth:`BundleStore._default_capability_validator`)
+    enforces the registry, so this is only reached when a caller
+    deliberately opts out (e.g. a diagnostic script, or a test that needs
+    to construct a deliberately-invalid revision without the registry
+    refusing it).
     """
+
+
+class _UseRegistryDefault:
+    """Sentinel type for ``BundleStore``'s ``validate_capabilities`` default.
+
+    Distinct from ``None`` (the explicit "structural only" escape hatch)
+    and from a caller-supplied callable: it means "bind the real M4
+    registry to *this* store's own root", resolved lazily in
+    :meth:`BundleStore._default_capability_validator` so ``store.py``
+    never has to import ``document.py`` at module level (that import runs
+    the other way -- ``document.py`` imports ``BundleStore`` from here).
+    """
+
+
+_USE_REGISTRY_DEFAULT = _UseRegistryDefault()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -250,6 +276,28 @@ class UnknownComponentKindError(BundleStoreError):
     """A persisted component's ``component_kind`` is outside v1's closed
     set (M1). Fail-closed: an unrecognised kind is refused rather than
     silently skipped or guessed at during closure resolution.
+    """
+
+
+class InvalidComponentFileError(BundleStoreError):
+    """A component file on disk does not parse as any known component.
+
+    Distinct from :class:`UnknownComponentKindError` (a syntactically
+    valid record with an unrecognised ``component_kind``): this is a file
+    that fails validation outright (corrupt JSON, missing required
+    fields). Raised by :meth:`BundleStore._iter_components` naming the
+    offending path, so one bad file fails closed for that file's own
+    resolution rather than silently poisoning every future
+    :meth:`BundleStore.add_component` dedup scan with an opaque
+    ``ValidationError``.
+    """
+
+
+class InvalidSupersessionError(BundleStoreError):
+    """A revision's ``superseded_component_ids`` claim is malformed (M21).
+
+    Raised when a revision supersedes a component ID absent from its own
+    ancestors' closure, or supersedes an ID it also carries itself.
     """
 
 
@@ -318,16 +366,48 @@ class BundleStore:
         *,
         replace: ReplaceFn = os.replace,
         link: LinkFn = os.link,
-        validate_capabilities: CapabilityValidator = _no_op_capability_validator,
+        validate_capabilities: CapabilityValidator
+        | None
+        | _UseRegistryDefault = _USE_REGISTRY_DEFAULT,
     ) -> None:
+        """``validate_capabilities`` defaults ON (M16/MAJOR 5): every head
+        move is gated by the real M4 registry, bound to *this instance's*
+        own ``root`` -- never an independently-supplied second root that
+        could silently disagree with the store actually performing the
+        move. Pass ``None`` for the explicit structural-only escape hatch,
+        or a callable to inject a fully custom seam (as the store's own
+        tests do to exercise the seam mechanism itself).
+        """
         self._root = root
         self._replace = replace
         self._link = link
-        self._validate_capabilities = validate_capabilities
+        if isinstance(validate_capabilities, _UseRegistryDefault):
+            self._validate_capabilities = self._default_capability_validator
+        elif validate_capabilities is None:
+            self._validate_capabilities = _no_op_capability_validator
+        else:
+            self._validate_capabilities = validate_capabilities
 
     @property
     def root(self) -> Path:
         return self._root
+
+    def _default_capability_validator(self, revision: RevisionRecord) -> None:
+        """Default ``validate_capabilities`` seam: the real M4 registry
+        (MAJOR 5), bound to this store's own ``root``.
+
+        Imported lazily -- ``document.py`` imports ``BundleStore`` from
+        this module at module level, so this module cannot import
+        ``document.py`` at module level too without a cycle; by the time
+        any store actually moves a head (this method only ever runs from
+        inside :meth:`update_head`), both modules have long finished
+        loading, so the import here is cheap and safe. Always passes
+        ``self`` (never a fresh, independently-rooted store) so the
+        validated root can never disagree with the store doing the move.
+        """
+        from .document import capability_validating_seam
+
+        capability_validating_seam(self)(revision)
 
     # -- paths ------------------------------------------------------------
 
@@ -742,18 +822,39 @@ class BundleStore:
     # -- components -------------------------------------------------------
 
     def _iter_components(self) -> Iterator[ComponentRecord]:
+        """Every stored component, or a typed, file-naming error.
+
+        A single unparseable file must not "poison" every future
+        :meth:`add_component` dedup scan with an opaque, path-less
+        ``pydantic.ValidationError`` -- wrapping it here, naming the exact
+        file, keeps the failure diagnosable (MINOR 13).
+        """
         components_dir = self._root / "components"
         if not components_dir.exists():
             return
         for path in sorted(components_dir.glob("*.json")):
-            yield _COMPONENT_RECORD_ADAPTER.validate_json(
-                path.read_text(encoding="utf-8")
-            )
+            try:
+                yield _COMPONENT_RECORD_ADAPTER.validate_json(
+                    path.read_text(encoding="utf-8")
+                )
+            except ValidationError as exc:
+                raise InvalidComponentFileError(
+                    f"component file {path} does not parse as a known component: {exc}"
+                ) from exc
 
-    def _find_existing_component(self, body: ComponentBody) -> ComponentRecord | None:
-        target_hash = _component_content_hash(body)
+    def _find_existing_component_by_hash(
+        self, content_hash: str
+    ) -> ComponentRecord | None:
+        """Dedup lookup by the *persisted* ``content_hash`` field.
+
+        Compares against each stored record's own already-computed hash
+        rather than re-hashing every existing component's full canonical
+        JSON on every call -- an O(n) directory scan is unavoidable
+        without a secondary hash index, but re-hashing every candidate on
+        every add is pure waste this avoids (MINOR 13).
+        """
         for record in self._iter_components():
-            if _component_content_hash(record) == target_hash:
+            if record.content_hash == content_hash:
                 return record
         return None
 
@@ -784,19 +885,30 @@ class BundleStore:
 
         ``body`` carries no ``component_id``/``created_at`` -- those are
         minted here, never by the caller (M1: "IDs are minted by the store
-        at record creation"). Adding a body whose content already matches
-        a stored component is idempotent and returns the existing record
-        untouched, mirroring :meth:`ingest_artefact`'s dedup shape; the
-        dedup decision is a read-modify-write and runs under
-        :meth:`_locked` for the same reason that one does.
+        at record creation"). For a notes body, every section's
+        :data:`.ids.SegmentId` is *also* minted here for the same reason
+        (MAJOR 6) -- a caller supplies section content only
+        (:class:`.components.NotesSectionBody`), never an ID. Adding a
+        body whose content already matches a stored component is
+        idempotent and returns the existing record untouched (with its
+        original section IDs), mirroring :meth:`ingest_artefact`'s dedup
+        shape; the dedup decision is a read-modify-write and runs under
+        :meth:`_locked` for the same reason that one does. The content
+        hash is computed once and reused for both the dedup lookup and
+        (on a miss) the stored record's own ``content_hash`` field.
         """
         with self._locked():
-            existing = self._find_existing_component(body)
+            content_hash = _component_content_hash(body)
+            existing = self._find_existing_component_by_hash(content_hash)
             if existing is not None:
                 return existing
 
             record = assemble_component_record(
-                body, component_id=mint_id("component"), created_at=_utc_now()
+                body,
+                component_id=mint_id("component"),
+                content_hash=content_hash,
+                created_at=_utc_now(),
+                mint_segment_id=lambda: mint_id("seg"),
             )
             self._write_json_exclusive(
                 self._component_path(record.component_id),
@@ -820,8 +932,19 @@ class BundleStore:
         parent_revision_ids: tuple[RevisionId, ...] = (),
         artefact_ids: tuple[ArtefactId, ...] = (),
         component_ids: tuple[ComponentId, ...] = (),
+        superseded_component_ids: tuple[ComponentId, ...] = (),
     ) -> RevisionRecord:
-        """Append one revision to the DAG (M1). Never rewrites an existing one."""
+        """Append one revision to the DAG (M1). Never rewrites an existing one.
+
+        ``superseded_component_ids`` (M21) records this revision's
+        corrections: components it removes from the closure it and its
+        descendants compute. Only cheap, immediate checks run here
+        (parents exist) -- whether the supersession claim is actually
+        well-formed against the ancestor closure is validated lazily, at
+        closure-resolution time (:meth:`_validate_structural_closure`),
+        matching how artefact/component *ref* resolution already works:
+        ``append_revision`` never re-walks the whole ancestor DAG itself.
+        """
         manifest = self.load_manifest()
         missing_parents = [
             parent_id
@@ -838,6 +961,7 @@ class BundleStore:
             bundle_id=manifest.bundle_id,
             parent_revision_ids=parent_revision_ids,
             component_ids=component_ids,
+            superseded_component_ids=superseded_component_ids,
             artefact_ids=artefact_ids,
             operation=operation,
             created_at=_utc_now(),
@@ -856,23 +980,27 @@ class BundleStore:
         dict[RevisionId, RevisionRecord],
         dict[ComponentId, ComponentRecord],
     ]:
-        """M16: revision exists, every ancestor resolves, every artefact and
-        component ref resolves *within the closure*.
+        """M16/M21: revision exists, every ancestor resolves, every artefact
+        and component ref resolves *within the closure*, and every
+        supersession claim is well-formed.
 
-        A revision's component graph is the union of every ancestor's own
-        ``component_ids`` (components accumulate across the DAG the same
-        way ``artefact_ids`` do); each of those components is loaded
-        (fail-closed on an unknown kind, M1) and its own declared input
-        artefact/component refs (:func:`.components.component_input_refs`)
-        must themselves already be members of this same closure -- not
-        merely exist somewhere else in the bundle. This is the
-        coherent-snapshot rule (F1): a component embedded in one document
-        can never silently pull in evidence that a different revision
-        assembled.
+        A revision's component graph is ``union(component_ids of self +
+        ancestors) - union(superseded_component_ids of self + ancestors)``
+        (M21) -- components accumulate across the DAG the same way
+        ``artefact_ids`` do, except a later revision may also *retract* an
+        earlier one's component by superseding its ID (correcting a
+        one-cardinality component without bricking the bundle). Each live
+        component is loaded (fail-closed on an unknown kind, M1) and its
+        own declared input artefact/component refs
+        (:func:`.components.component_input_refs`) must themselves already
+        be members of this same closure -- not merely exist somewhere else
+        in the bundle. This is the coherent-snapshot rule (F1): a
+        component embedded in one document can never silently pull in
+        evidence that a different revision assembled.
 
         Returns the target revision, its full ancestor closure (keyed by
-        revision ID, including the target itself), and every resolved
-        component (keyed by component ID).
+        revision ID, including the target itself), and every resolved,
+        still-live component (keyed by component ID).
         """
         target = self.load_revision(revision_id)
         revision_closure: dict[RevisionId, RevisionRecord] = {revision_id: target}
@@ -886,7 +1014,6 @@ class BundleStore:
                 frontier.append(parent_id)
 
         closure_artefact_ids: set[ArtefactId] = set()
-        closure_component_ids: set[ComponentId] = set()
         for revision in revision_closure.values():
             missing_artefacts = [
                 artefact_id
@@ -899,7 +1026,10 @@ class BundleStore:
                     f"ID(s): {missing_artefacts}"
                 )
             closure_artefact_ids.update(revision.artefact_ids)
-            closure_component_ids.update(revision.component_ids)
+
+        closure_component_ids = self._resolve_live_component_ids(
+            revision_id, revision_closure
+        )
 
         resolved_components: dict[ComponentId, ComponentRecord] = {}
         for component_id in closure_component_ids:
@@ -910,6 +1040,67 @@ class BundleStore:
                 resolved=resolved_components,
             )
         return target, revision_closure, resolved_components
+
+    def _resolve_live_component_ids(
+        self,
+        target_id: RevisionId,
+        revision_closure: Mapping[RevisionId, RevisionRecord],
+    ) -> set[ComponentId]:
+        """M21: the live component ID set after supersession, plus the
+        per-revision validation M21 requires.
+
+        Walks the ancestor closure in topological (root-first) order --
+        a revision only after every revision it recursively descends from
+        via ``parent_revision_ids`` -- maintaining one running "live so
+        far" set. For each revision, that running set (before applying
+        the revision's *own* contribution) is exactly its ancestors'
+        closure: M21 requires that every ID the revision supersedes is a
+        member of that set (superseding an ID no ancestor ever
+        contributed, or one already superseded earlier, is refused), and
+        that it does not also carry an ID it supersedes in the same
+        breath. This walk computes the same result as M21's flat
+        "union(component_ids) - union(superseded_component_ids)" formula
+        for the single-parent revision chains this store produces today
+        (D3 defers branching semantics); a true multi-parent *merge*
+        revision would need per-branch tracking so one branch's
+        supersession is never validated against an unrelated sibling
+        branch's contributions -- out of scope until merge revisions
+        exist.
+        """
+        order: list[RevisionRecord] = []
+        visited: set[RevisionId] = set()
+
+        def visit(rev_id: RevisionId) -> None:
+            if rev_id in visited:
+                return
+            visited.add(rev_id)
+            revision = revision_closure[rev_id]
+            for parent_id in revision.parent_revision_ids:
+                visit(parent_id)
+            order.append(revision)
+
+        visit(target_id)
+
+        live: set[ComponentId] = set()
+        for revision in order:
+            own_components = set(revision.component_ids)
+            own_superseded = set(revision.superseded_component_ids)
+
+            unresolved_supersessions = own_superseded - live
+            if unresolved_supersessions:
+                raise InvalidSupersessionError(
+                    f"revision {revision.revision_id} supersedes component ID(s) "
+                    f"absent from its ancestors' closure: "
+                    f"{sorted(unresolved_supersessions)}"
+                )
+            self_superseding = own_superseded & own_components
+            if self_superseding:
+                raise InvalidSupersessionError(
+                    f"revision {revision.revision_id} both carries and supersedes "
+                    f"component ID(s): {sorted(self_superseding)}"
+                )
+            live = (live | own_components) - own_superseded
+        return live
 
     def _resolve_component_closure(
         self,

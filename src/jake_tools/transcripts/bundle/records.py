@@ -105,9 +105,19 @@ class OperationRef(BaseModel):
 class RevisionRecord(BaseModel):
     """M1/M16: one append-only node in the bundle's revision DAG.
 
-    ``component_ids`` stays empty until a future task adds component
-    storage; ``artefact_ids`` is checked for resolution by
-    ``BundleStore.update_head`` (M16 structural closure).
+    ``component_ids``/``artefact_ids`` are checked for resolution by
+    ``BundleStore.update_head`` (M16 structural closure): a revision's
+    component graph is the union of every ancestor's ``component_ids``.
+
+    ``superseded_component_ids`` is M21's correction mechanism: a revision
+    that carries a replacement component and supersedes the old one's ID
+    removes that ID from the closure computed for it and every descendant
+    (``union(component_ids) - union(superseded_component_ids)`` over the
+    revision plus its ancestors) without ever rewriting or deleting the
+    superseded component's own immutable file -- history is never
+    destroyed, only excluded from later closures. ``BundleStore``
+    validates that a revision never supersedes an ID absent from its own
+    ancestors' closure, nor one it also carries itself (M21).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -116,6 +126,7 @@ class RevisionRecord(BaseModel):
     bundle_id: BundleId
     parent_revision_ids: tuple[RevisionId, ...] = ()
     component_ids: tuple[ComponentId, ...] = ()
+    superseded_component_ids: tuple[ComponentId, ...] = ()
     artefact_ids: tuple[ArtefactId, ...] = ()
     operation: OperationRef
     created_at: datetime

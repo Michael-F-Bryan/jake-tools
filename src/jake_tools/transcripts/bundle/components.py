@@ -3,12 +3,14 @@
 A component is immutable and identified by the SHA-256 of its own content
 -- never by a caller-minted ID (M1). Every kind here is split into a
 ``*Body`` type (the hashed content, with no ``component_id``/``created_at``)
-and a ``*Component`` record type (the body plus those two store-minted
+and a ``*Component`` record type (the body plus those store-minted
 fields) -- so "the canonical JSON body excluding component_id and
 timestamps" (M1) is a structural fact about the ``Body`` type, not a
 field-exclusion list someone could forget to update. :class:`.store.
 BundleStore.add_component` is the only place a ``Body`` becomes a
-``Component``.
+``Component`` -- and, for notes, the only place a section gets its
+``section_id``: a caller supplies section *content* only
+(:class:`NotesSectionBody`), never an ID (see :class:`NotesSection`).
 
 v1 ships exactly the two component kinds the inference-free fixtures need:
 the M20 notes component and an M19 participant set. ``ComponentKind`` is
@@ -18,13 +20,15 @@ job, once their components exist to back it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal, NamedTuple
+from typing import Annotated, Literal, NamedTuple, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .ids import ArtefactId, ComponentId, ParticipantId, SourceId
+from .ids import ArtefactId, ComponentId, ParticipantId, SegmentId, SourceId
+from .records import Sha256Hex
 
 # -- M19: participant records -------------------------------------------
 
@@ -95,20 +99,33 @@ class NotesKind(StrEnum):
     AUTHORED_PREP = "authored-prep"
 
 
-class NotesSection(BaseModel):
-    """M20: one ordered, addressable section of a notes component.
+class NotesSectionBody(BaseModel):
+    """M20: the hashed content of one notes section -- no identity field.
 
-    ``section_id`` uses the ``seg`` prefix (minted via
-    :func:`.ids.mint_id` at component construction, per the M20 task
-    scope) -- M10 evidence refs cite these IDs, which is what makes a
-    notes-derived minutes finding mechanically auditable.
+    ``section_id`` is minted by the store, never supplied here (see
+    :class:`NotesSection`): a caller-chosen ID could collide across
+    components or be arbitrary junk, which is exactly the class of bug
+    this split closes off structurally rather than by convention.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    section_id: Annotated[str, Field(pattern=r"^seg_.+$")]
     title: str = Field(min_length=1)
     text: str = Field(min_length=1)
+
+
+class NotesSection(NotesSectionBody):
+    """M20: one ordered, addressable, store-identified notes section.
+
+    ``section_id`` is a genuine :data:`.ids.SegmentId` (the ``seg``
+    prefix's uuid7 pattern), minted by :meth:`.store.BundleStore.
+    add_component` -- never caller-supplied free text. M10 evidence refs
+    cite these IDs, which is what makes a notes-derived minutes finding
+    mechanically auditable; a caller-controlled ID would make that
+    auditability worthless.
+    """
+
+    section_id: SegmentId
 
 
 class ComponentKind(StrEnum):
@@ -124,6 +141,18 @@ class ComponentKind(StrEnum):
     PARTICIPANT_SET = "participant-set"
 
 
+def _check_authored_matches_notes_kind(
+    *, notes_kind: NotesKind, authored: bool
+) -> None:
+    expected = notes_kind == NotesKind.AUTHORED_PREP
+    if authored != expected:
+        raise ValueError(
+            f"authored={authored!r} disagrees with notes_kind={notes_kind.value!r}: "
+            "authored must be True iff notes_kind is authored-prep, and False for "
+            "every provider-* kind."
+        )
+
+
 class NotesComponentBody(BaseModel):
     """M20: the hashed content of a notes component -- no identity fields."""
 
@@ -133,19 +162,63 @@ class NotesComponentBody(BaseModel):
     notes_kind: NotesKind
     source_artefact_id: ArtefactId
     authored: bool
-    sections: tuple[NotesSection, ...]
+    sections: tuple[NotesSectionBody, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_authored_matches_notes_kind(self) -> Self:
+        _check_authored_matches_notes_kind(
+            notes_kind=self.notes_kind, authored=self.authored
+        )
+        return self
 
 
-class NotesComponent(NotesComponentBody):
-    """M20: a stored notes component (body plus store-minted identity)."""
+class NotesComponent(BaseModel):
+    """M20: a stored notes component (body content plus store-minted identity).
 
+    Deliberately *not* a subclass of :class:`NotesComponentBody`: its
+    ``sections`` field holds identified :class:`NotesSection` entries
+    rather than :class:`NotesSectionBody`, and a mutable-looking field
+    override on a subclass is invariant under static typing even though
+    both models are frozen at runtime (pyright's
+    ``reportIncompatibleVariableOverride``) -- duplicating the shared
+    fields here avoids fighting that rather than suppressing it. Content
+    identity is still computed correctly (:func:`component_body_type` /
+    :meth:`.store.BundleStore.add_component`'s hashing) because that goes
+    by matching field *names* against :class:`NotesComponentBody`, not by
+    Python inheritance. Loaded directly from disk (not always built via
+    :func:`assemble_component_record`), so it re-runs the same
+    authored/notes_kind check independently -- a hand-edited or corrupted
+    on-disk record must fail closed here too, not just at construction
+    time via a body that was never actually re-validated.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    component_kind: Literal[ComponentKind.NOTES] = ComponentKind.NOTES
+    notes_kind: NotesKind
+    source_artefact_id: ArtefactId
+    authored: bool
+    sections: tuple[NotesSection, ...] = Field(min_length=1)
     component_id: ComponentId
+    content_hash: Sha256Hex
     created_at: datetime
+
+    @model_validator(mode="after")
+    def _validate_authored_matches_notes_kind(self) -> Self:
+        _check_authored_matches_notes_kind(
+            notes_kind=self.notes_kind, authored=self.authored
+        )
+        return self
 
 
 class ParticipantSetComponentBody(BaseModel):
     """M4/M19: the hashed content backing the ``participants.declared``
     capability -- a snapshot of participant records for one bundle.
+
+    Participants are canonicalised by sorting on ``participant_id`` so the
+    same set hashes identically regardless of the order the caller
+    happened to list them in (content identity, M1) -- unlike notes
+    sections, participant order carries no meaning M19 defines.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -153,11 +226,19 @@ class ParticipantSetComponentBody(BaseModel):
     component_kind: Literal[ComponentKind.PARTICIPANT_SET] = (
         ComponentKind.PARTICIPANT_SET
     )
-    participants: tuple[ParticipantRecord, ...] = ()
+    participants: tuple[ParticipantRecord, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _sort_participants_by_id(self) -> Self:
+        ordered = tuple(sorted(self.participants, key=lambda p: p.participant_id))
+        if ordered != self.participants:
+            object.__setattr__(self, "participants", ordered)
+        return self
 
 
 class ParticipantSetComponent(ParticipantSetComponentBody):
     component_id: ComponentId
+    content_hash: Sha256Hex
     created_at: datetime
 
 
@@ -198,25 +279,71 @@ def component_input_refs(
             return ComponentInputRefs(artefact_ids=(), component_ids=())
 
 
+def component_body_type(
+    component: NotesComponentBody
+    | NotesComponent
+    | ParticipantSetComponentBody
+    | ParticipantSetComponent,
+) -> type[NotesComponentBody | ParticipantSetComponentBody]:
+    """The ``*Body`` type backing a component's content identity.
+
+    Accepts either a bare ``*Body`` (returned as-is) or a stored
+    ``*Component`` record (mapped to its base ``*Body``). Participant-set
+    records are an ordinary subclass of their body, so matching on the
+    ``*Body`` type alone already covers both via ``isinstance``; notes
+    records are *not* a subclass of their body (see :class:`NotesComponent`),
+    so they need their own explicit case.
+
+    Used by :meth:`.store.BundleStore` to hash exactly the fields the
+    corresponding ``*Body`` declares (``model_dump(include=...)``) instead
+    of an ``exclude={"component_id", "created_at", ...}`` list that a
+    future identity-only field could silently slip past.
+    """
+    match component:
+        case NotesComponentBody() | NotesComponent():
+            return NotesComponentBody
+        case ParticipantSetComponentBody():
+            return ParticipantSetComponentBody
+
+
 def assemble_component_record(
     body: NotesComponentBody | ParticipantSetComponentBody,
     *,
     component_id: ComponentId,
+    content_hash: Sha256Hex,
     created_at: datetime,
+    mint_segment_id: Callable[[], str],
 ) -> NotesComponent | ParticipantSetComponent:
     """Attach store-minted identity to a body, producing its stored record.
 
     The only place a ``*Body`` becomes a ``*Component``; kept here (not in
-    ``store.py``) so the closed kind set and its dispatch live next to each
-    other -- adding a new component kind only ever touches this module.
+    ``store.py``) so the closed kind set and its dispatch live next to
+    each other -- adding a new component kind only ever touches this
+    module. ``mint_segment_id`` is called once per notes section (never by
+    this module directly minting an ID itself -- M1: the store mints,
+    nowhere else) to attach each section's :data:`.ids.SegmentId`.
     """
-    fields = body.model_dump(mode="python")
     match body:
         case NotesComponentBody():
+            sections = tuple(
+                NotesSection(
+                    section_id=mint_segment_id(), title=section.title, text=section.text
+                )
+                for section in body.sections
+            )
+            fields = body.model_dump(mode="python", exclude={"sections"})
             return NotesComponent(
-                **fields, component_id=component_id, created_at=created_at
+                **fields,
+                sections=sections,
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
             )
         case ParticipantSetComponentBody():
+            fields = body.model_dump(mode="python")
             return ParticipantSetComponent(
-                **fields, component_id=component_id, created_at=created_at
+                **fields,
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
             )

@@ -18,7 +18,7 @@ is the "capabilities are proofs" rule enforced as code, not just as prose.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -47,6 +47,27 @@ class ValidatorKeyMismatchError(RegistryError):
     """A validator returned a record for a different key than it was
     registered under -- almost certainly a copy-paste bug in the registry
     table, caught here rather than silently mislabelling a proof.
+    """
+
+
+class PrerequisiteNotSatisfiedError(RegistryError):
+    """A validator returned present-validated while a declared prerequisite
+    key was not itself present-validated (M4: "prerequisites are
+    validation preconditions"). This is a validator-authoring error, not
+    a capability status -- raised, never silently downgraded to a status,
+    so a validator can never claim more than its own prerequisites support.
+    """
+
+
+class RegistryConfigurationError(RegistryError):
+    """The registry table itself is malformed.
+
+    Raised at import time (from :func:`_build_registry`) rather than
+    letting a bad table surface as a ``KeyError`` the first time
+    :func:`validate` happens to need the missing ``prerequisite_statuses``
+    entry -- e.g. a key declaring a prerequisite that the M4 table order
+    places *after* it, which :func:`validate`'s single dispatch pass
+    (table order) could never have computed yet.
     """
 
 
@@ -168,6 +189,10 @@ class CapabilityRecord(BaseModel):
 
     ``members`` is populated only for ``many``-cardinality keys; a ``one``
     key's proof lives entirely in the top-level ``status``.
+    ``failure_detail`` names *why* a ``one``-cardinality key is not
+    present-validated (e.g. "no participants" vs "two candidate
+    components") so that distinction is diagnosable straight from the
+    record -- a ``many`` key's equivalent detail lives per-member instead.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -180,6 +205,7 @@ class CapabilityRecord(BaseModel):
     provenance_classes: tuple[str, ...] = ()
     validator_version: str = Field(min_length=1)
     members: tuple[CapabilityMemberStatus, ...] = ()
+    failure_detail: str = ""
     trust_class_coverage: tuple[TrustClassCoverage, ...] = ()
     proxy_config_hash: str | None = None
 
@@ -212,17 +238,77 @@ class RegistryEntry:
     implemented: bool = False
 
 
+# -- shared many-key aggregation (MAJOR 4) -----------------------------------
+
+
+def _aggregate_many_key_status(
+    member_statuses: Iterable[CapabilityStatus],
+) -> CapabilityStatus:
+    """M4: summarise a many-key's members without hiding a genuine failure
+    or blocking on a merely-absent one.
+
+    ``present-validated`` only if *every* member validates; ``failed`` if
+    *any* member genuinely failed (never smoothed over). Otherwise -- no
+    failures, but not everything validated either, e.g. M4's own worked
+    example "two validated recordings and one reference-only embed" -- the
+    aggregate degrades to the shared non-validated status when every
+    remaining member agrees on one, so a caller reading only the
+    top-level status still gets an honest label. A genuinely mixed bag of
+    *different* non-failed statuses has no single honest label at the
+    aggregate level, so it falls back to ``failed`` as the conservative
+    choice; this never blocks anything by itself, because the seam
+    (``document.capability_validating_seam``) gates on member-level
+    ``failed`` only -- ``capability_members`` is the actual consumer path
+    M4 mandates for many keys, the aggregate is a summary.
+    """
+    statuses = list(member_statuses)
+    if not statuses:
+        return CapabilityStatus.ABSENT
+    if all(status == CapabilityStatus.PRESENT_VALIDATED for status in statuses):
+        return CapabilityStatus.PRESENT_VALIDATED
+    if any(status == CapabilityStatus.FAILED for status in statuses):
+        return CapabilityStatus.FAILED
+    degraded = {
+        status for status in statuses if status != CapabilityStatus.PRESENT_VALIDATED
+    }
+    if len(degraded) == 1:
+        return next(iter(degraded))
+    return CapabilityStatus.FAILED
+
+
 # -- real validators: notes.provider / notes.authored (M20) -----------------
 
 
+def _duplicate_section_ids(components: Iterable[ComponentRecord]) -> frozenset[str]:
+    """MAJOR 6: section IDs are one namespace across every notes component
+    in the closure -- M10 evidence refs cite a section ID alone, not a
+    (component, section) pair -- so uniqueness is checked globally, not
+    just within a single component.
+    """
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for component in components:
+        if not isinstance(component, NotesComponent):
+            continue
+        for section in component.sections:
+            if section.section_id in seen:
+                duplicates.add(section.section_id)
+            seen.add(section.section_id)
+    return frozenset(duplicates)
+
+
 def _validate_one_notes_component(
-    component: NotesComponent,
+    component: NotesComponent, duplicate_section_ids: frozenset[str]
 ) -> tuple[CapabilityStatus, str]:
-    if not component.sections:
-        return CapabilityStatus.FAILED, "notes component has no sections"
     section_ids = [section.section_id for section in component.sections]
     if len(set(section_ids)) != len(section_ids):
-        return CapabilityStatus.FAILED, "duplicate section IDs"
+        return CapabilityStatus.FAILED, "duplicate section IDs within this component"
+    collisions = duplicate_section_ids.intersection(section_ids)
+    if collisions:
+        return (
+            CapabilityStatus.FAILED,
+            f"section ID(s) shared with another notes component: {sorted(collisions)}",
+        )
     return CapabilityStatus.PRESENT_VALIDATED, ""
 
 
@@ -242,9 +328,12 @@ def _make_notes_validator(
                 validator_version=_VALIDATOR_VERSION,
             )
 
+        duplicate_section_ids = _duplicate_section_ids(context.components.values())
         members = []
         for component in matching:
-            status, detail = _validate_one_notes_component(component)
+            status, detail = _validate_one_notes_component(
+                component, duplicate_section_ids
+            )
             members.append(
                 CapabilityMemberStatus(
                     member_id=component.component_id,
@@ -253,14 +342,7 @@ def _make_notes_validator(
                     detail=detail,
                 )
             )
-        overall = (
-            CapabilityStatus.PRESENT_VALIDATED
-            if all(
-                member.status == CapabilityStatus.PRESENT_VALIDATED
-                for member in members
-            )
-            else CapabilityStatus.FAILED
-        )
+        overall = _aggregate_many_key_status(member.status for member in members)
         return CapabilityRecord(
             key=key,
             status=overall,
@@ -298,16 +380,13 @@ def _validate_participants_declared(context: ValidationContext) -> CapabilityRec
             status=CapabilityStatus.FAILED,
             component_ids=tuple(component.component_id for component in matching),
             validator_version=_VALIDATOR_VERSION,
+            failure_detail=(
+                f"{len(matching)} participant-set components present for a "
+                "one-cardinality key"
+            ),
         )
 
     component = matching[0]
-    if not component.participants:
-        return CapabilityRecord(
-            key=CapabilityKey.PARTICIPANTS_DECLARED,
-            status=CapabilityStatus.FAILED,
-            component_ids=(component.component_id,),
-            validator_version=_VALIDATOR_VERSION,
-        )
     provenance_classes = tuple(
         sorted(
             {
@@ -346,6 +425,46 @@ def _make_not_attempted_stub(key: CapabilityKey) -> CapabilityValidatorFn:
         )
 
     return _validate
+
+
+_KEY_TABLE_ORDER: Mapping[CapabilityKey, int] = {
+    key: index for index, key in enumerate(CapabilityKey)
+}
+
+
+def _check_prerequisite_ordering(
+    entries: Mapping[CapabilityKey, RegistryEntry],
+) -> None:
+    """MAJOR 3's topological guard: every prerequisite must be declared
+    *earlier* in the M4 table (:class:`CapabilityKey`'s own declaration
+    order) than the key that depends on it.
+
+    :func:`validate` dispatches in exactly that table order, building
+    ``prerequisite_statuses`` from results it has *already* computed --
+    a prerequisite declared later would still be missing from ``results``
+    when its dependent runs, so :func:`validate` would raise a bare
+    ``KeyError`` at the first bundle that ever exercised it rather than
+    this failing loudly, at import time, against the table itself.
+    Exposed as a standalone function (not inlined in
+    :func:`_build_registry`) so it can be exercised directly against a
+    synthetic, deliberately-misordered table without having to corrupt
+    the real one.
+    """
+    for key, entry in entries.items():
+        for prerequisite in entry.prerequisites:
+            if prerequisite not in _KEY_TABLE_ORDER:
+                raise RegistryConfigurationError(
+                    f"capability {key.value!r} declares prerequisite "
+                    f"{prerequisite!r}, which is not a member of CapabilityKey."
+                )
+            if _KEY_TABLE_ORDER[prerequisite] >= _KEY_TABLE_ORDER[key]:
+                raise RegistryConfigurationError(
+                    f"capability {key.value!r} declares prerequisite "
+                    f"{prerequisite.value!r}, which is not declared earlier in the "
+                    "M4 table order -- validate() dispatches in table order and "
+                    "would KeyError computing prerequisite_statuses at runtime "
+                    "instead of failing here, at import time."
+                )
 
 
 def _build_registry() -> dict[CapabilityKey, RegistryEntry]:
@@ -387,6 +506,7 @@ def _build_registry() -> dict[CapabilityKey, RegistryEntry]:
         entries[CapabilityKey.CHAPTERS],
         prerequisites=(CapabilityKey.TRANSCRIPT_TIMED,),
     )
+    _check_prerequisite_ordering(entries)
     return entries
 
 
@@ -410,26 +530,33 @@ def validate(
 
     Dispatches every :class:`CapabilityKey` in declaration order (M4 table
     order), so a key's ``prerequisites`` -- all declared earlier in the
-    table -- have already been validated by the time it runs. Raises
+    table, enforced at import time by :func:`_check_prerequisite_ordering`
+    -- have already been validated by the time it runs. Raises
     :class:`StubEmittedPresentValidatedError` if a key registered with
     ``implemented=False`` ever returns ``present-validated``: capabilities
-    are proofs, and a stub must never be allowed to fake one.
+    are proofs, and a stub must never be allowed to fake one. Raises
+    :class:`PrerequisiteNotSatisfiedError` if a validator returns
+    ``present-validated`` while any of *its own declared* prerequisites
+    was not itself ``present-validated`` (M4: prerequisites are
+    validation preconditions -- centrally enforced here rather than left
+    to each validator to remember to check ``prerequisite_statuses``).
 
     ``registry`` defaults to the module's own closed table; it is an
     explicit parameter (not a monkeypatch target) purely so tests can
-    exercise this safety net with a deliberately-broken validator without
-    mutating shared, module-level state.
+    exercise these safety nets with a deliberately-broken validator or
+    table without mutating shared, module-level state.
     """
     results: dict[CapabilityKey, CapabilityRecord] = {}
     for key in CapabilityKey:
         entry = registry[key]
+        prerequisite_statuses = {
+            prerequisite: results[prerequisite].status
+            for prerequisite in entry.prerequisites
+        }
         context = ValidationContext(
             revision_id=revision_id,
             components=components,
-            prerequisite_statuses={
-                prerequisite: results[prerequisite].status
-                for prerequisite in entry.prerequisites
-            },
+            prerequisite_statuses=prerequisite_statuses,
         )
         record = entry.validator(context)
         if record.key != key:
@@ -445,5 +572,16 @@ def validate(
                 f"capability {key.value!r} has no v1 implementation and its stub "
                 "validator must never emit present-validated."
             )
+        if record.status == CapabilityStatus.PRESENT_VALIDATED:
+            unsatisfied = {
+                prerequisite.value: status.value
+                for prerequisite, status in prerequisite_statuses.items()
+                if status != CapabilityStatus.PRESENT_VALIDATED
+            }
+            if unsatisfied:
+                raise PrerequisiteNotSatisfiedError(
+                    f"validator for {key.value!r} returned present-validated while "
+                    f"its prerequisite(s) were not: {unsatisfied}."
+                )
         results[key] = record
     return results

@@ -10,10 +10,13 @@ from pathlib import Path
 
 import pytest
 
+import jake_tools.transcripts.bundle.store as store_module
 from jake_tools.transcripts.bundle.components import (
+    ComponentBody,
+    ComponentRecord,
     NotesComponentBody,
     NotesKind,
-    NotesSection,
+    NotesSectionBody,
     ParticipantDeclarationSource,
     ParticipantRecord,
     ParticipantSetComponentBody,
@@ -34,8 +37,10 @@ from jake_tools.transcripts.bundle.store import (
     BundleAlreadyExistsError,
     BundleStore,
     HeadNotAncestorError,
+    InvalidComponentFileError,
     InvalidIdError,
     InvalidRunTransitionError,
+    InvalidSupersessionError,
     LeaseHeldError,
     NextActionPreconditionError,
     NotABundleError,
@@ -84,20 +89,20 @@ def _notes_body(artefact_id: str, *, section_count: int = 1) -> NotesComponentBo
         source_artefact_id=artefact_id,
         authored=False,
         sections=tuple(
-            NotesSection(section_id=mint_id("seg"), title=f"Section {i}", text="text")
+            NotesSectionBody(title=f"Section {i}", text="text")
             for i in range(section_count)
         ),
     )
 
 
-def _participant_body() -> ParticipantSetComponentBody:
+def _participant_body(name: str = "Jake") -> ParticipantSetComponentBody:
     return ParticipantSetComponentBody(
         participants=(
             ParticipantRecord(
                 participant_id=mint_id("participant"),
                 declaration_source=ParticipantDeclarationSource.OPERATOR,
-                declaration_evidence="cli: --participant 'Jake'",
-                display_names=("Jake",),
+                declaration_evidence=f"cli: --participant '{name}'",
+                display_names=(name,),
                 status=ParticipantStatus.DECLARED,
             ),
         )
@@ -129,6 +134,7 @@ def test_create_bundle_lays_out_every_m16_directory(tmp_path: Path) -> None:
         "blobs",
         "artefacts",
         "revisions",
+        "components",
         "runs",
         "attempts",
         "reviews",
@@ -588,6 +594,89 @@ def test_load_component_raises_unknown_component_kind_error_for_an_unrecognised_
         store.load_component(component_id)
 
 
+def test_add_component_raises_a_typed_file_naming_error_for_one_corrupt_file(
+    tmp_path: Path,
+) -> None:
+    """MINOR 13: a single unparseable component file must not poison every
+    future add_component dedup scan with an opaque, path-less
+    ValidationError -- the wrapped error names the offending file."""
+    store = _store(tmp_path)
+    corrupt_path = store.root / "components" / f"{mint_id('component')}.json"
+    corrupt_path.write_text('{"component_kind": "notes"}', encoding="utf-8")
+    source_id = _registered_source(store)
+    artefact = store.ingest_artefact(
+        source_id=source_id,
+        content=b"notes bytes",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/notes.md",
+    )
+
+    with pytest.raises(InvalidComponentFileError, match=str(corrupt_path)):
+        store.add_component(_notes_body(artefact.artefact_id))
+
+
+def test_add_component_persists_the_content_hash_on_the_stored_record(
+    tmp_path: Path,
+) -> None:
+    """MINOR 13: the stored record carries its own content_hash field."""
+    store = _store(tmp_path)
+    source_id = _registered_source(store)
+    artefact = store.ingest_artefact(
+        source_id=source_id,
+        content=b"notes bytes",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/notes.md",
+    )
+
+    component = store.add_component(_notes_body(artefact.artefact_id))
+
+    assert len(component.content_hash) == 64
+    stored = json.loads(
+        (store.root / "components" / f"{component.component_id}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert stored["content_hash"] == component.content_hash
+
+
+def test_add_component_dedup_reads_the_persisted_hash_without_rehashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR 13: dedup compares against each existing record's own
+    already-computed content_hash field -- it must not recompute the
+    canonical-JSON SHA-256 of every existing component on every add."""
+    store = _store(tmp_path)
+    source_id = _registered_source(store)
+    artefact = store.ingest_artefact(
+        source_id=source_id,
+        content=b"notes bytes",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/notes.md",
+    )
+    # Three distinct existing components already on disk.
+    for i in range(3):
+        store.add_component(_notes_body(artefact.artefact_id, section_count=i + 1))
+
+    call_count = 0
+    real_hash = store_module._component_content_hash
+
+    def counting_hash(model: ComponentBody | ComponentRecord) -> str:
+        nonlocal call_count
+        call_count += 1
+        return real_hash(model)
+
+    monkeypatch.setattr(store_module, "_component_content_hash", counting_hash)
+
+    store.add_component(_notes_body(artefact.artefact_id, section_count=4))
+
+    # Exactly one hash computation -- for the new incoming body -- not one
+    # per existing record scanned during the dedup lookup.
+    assert call_count == 1
+
+
 def test_update_head_accepts_a_component_bearing_revision(tmp_path: Path) -> None:
     """Component storage now exists (unlike the pre-component-storage
     behaviour where any component_ids on a revision were rejected
@@ -696,6 +785,182 @@ def test_resolve_revision_closure_resolves_components_across_ancestor_revisions(
         notes_component.component_id,
         participant_component.component_id,
     }
+
+
+# -- M21: component supersession ---------------------------------------------
+
+
+def test_append_revision_accepts_superseded_component_ids(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    old_component = store.add_component(_participant_body("Wrong Name"))
+    root_revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        component_ids=(old_component.component_id,),
+    )
+    new_component = store.add_component(_participant_body("Correct Name"))
+
+    correction = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(root_revision.revision_id,),
+        component_ids=(new_component.component_id,),
+        superseded_component_ids=(old_component.component_id,),
+    )
+
+    assert correction.superseded_component_ids == (old_component.component_id,)
+
+
+def test_resolve_revision_closure_excludes_a_superseded_component(
+    tmp_path: Path,
+) -> None:
+    """M21: closure = union(component_ids) - union(superseded_component_ids)
+    over the revision and its ancestors -- the superseded ID drops out of
+    the live component set, and its replacement is exactly what remains."""
+    store = _store(tmp_path)
+    old_component = store.add_component(_participant_body("Wrong Name"))
+    root_revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        component_ids=(old_component.component_id,),
+    )
+    new_component = store.add_component(_participant_body("Correct Name"))
+    correction = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(root_revision.revision_id,),
+        component_ids=(new_component.component_id,),
+        superseded_component_ids=(old_component.component_id,),
+    )
+
+    closure = store.resolve_revision_closure(correction.revision_id)
+
+    assert set(closure.components) == {new_component.component_id}
+    # History is never destroyed -- the superseded component file remains
+    # loadable directly, just excluded from this closure.
+    assert store.load_component(old_component.component_id) == old_component
+
+
+def test_resolve_revision_closure_of_the_pre_correction_revision_still_sees_the_original(
+    tmp_path: Path,
+) -> None:
+    """Projecting the OLD revision (before the correction) must still see
+    the original component -- supersession only affects closures that
+    include the superseding revision."""
+    store = _store(tmp_path)
+    old_component = store.add_component(_participant_body("Wrong Name"))
+    root_revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        component_ids=(old_component.component_id,),
+    )
+    new_component = store.add_component(_participant_body("Correct Name"))
+    store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(root_revision.revision_id,),
+        component_ids=(new_component.component_id,),
+        superseded_component_ids=(old_component.component_id,),
+    )
+
+    closure = store.resolve_revision_closure(root_revision.revision_id)
+
+    assert set(closure.components) == {old_component.component_id}
+
+
+def test_update_head_refuses_a_revision_that_supersedes_an_id_outside_its_ancestors(
+    tmp_path: Path,
+) -> None:
+    """M21: 'a revision may not supersede an ID absent from its ancestors'
+    closure' -- superseding an ID no ancestor ever contributed (here: a
+    real component that exists, but was never part of this lineage) is
+    refused, not silently accepted."""
+    store = _store(tmp_path)
+    unrelated_component = store.add_component(_participant_body("Unrelated"))
+    revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        superseded_component_ids=(unrelated_component.component_id,),
+    )
+    run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+
+    with pytest.raises(InvalidSupersessionError, match="absent from"):
+        store.update_head(run_id=run.run_id, revision_id=revision.revision_id)
+
+
+def test_update_head_refuses_a_revision_that_both_carries_and_supersedes_the_same_id(
+    tmp_path: Path,
+) -> None:
+    """M21: a revision cannot supersede an ID it also carries itself."""
+    store = _store(tmp_path)
+    old_component = store.add_component(_participant_body("Wrong Name"))
+    root_revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        component_ids=(old_component.component_id,),
+    )
+    self_superseding = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(root_revision.revision_id,),
+        component_ids=(old_component.component_id,),
+        superseded_component_ids=(old_component.component_id,),
+    )
+    run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+
+    with pytest.raises(InvalidSupersessionError, match="both carries and supersedes"):
+        store.update_head(run_id=run.run_id, revision_id=self_superseding.revision_id)
+
+
+def test_update_head_refuses_re_superseding_an_already_superseded_id(
+    tmp_path: Path,
+) -> None:
+    """M21: once an ID is superseded, a later revision cannot supersede it
+    again -- it is no longer part of the live ancestors' closure."""
+    store = _store(tmp_path)
+    original = store.add_component(_participant_body("Original"))
+    root_revision = store.append_revision(
+        operation=OperationRef(kind="assemble"), component_ids=(original.component_id,)
+    )
+    replacement = store.add_component(_participant_body("Replacement"))
+    correction = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(root_revision.revision_id,),
+        component_ids=(replacement.component_id,),
+        superseded_component_ids=(original.component_id,),
+    )
+    double_correction = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(correction.revision_id,),
+        superseded_component_ids=(original.component_id,),
+    )
+    run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+
+    with pytest.raises(InvalidSupersessionError):
+        store.update_head(run_id=run.run_id, revision_id=double_correction.revision_id)
+
+
+def test_update_head_accepts_a_correction_revision_and_moves_the_head(
+    tmp_path: Path,
+) -> None:
+    """The blocker scenario end to end at the store layer: correcting a
+    one-cardinality component no longer bricks the bundle -- update_head
+    accepts the correction and the head moves onto it."""
+    store = _store(tmp_path)
+    old_component = store.add_component(_participant_body("Wrong Name"))
+    root_revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        component_ids=(old_component.component_id,),
+    )
+    run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+    store.update_head(run_id=run.run_id, revision_id=root_revision.revision_id)
+
+    new_component = store.add_component(_participant_body("Correct Name"))
+    correction = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(root_revision.revision_id,),
+        component_ids=(new_component.component_id,),
+        superseded_component_ids=(old_component.component_id,),
+    )
+
+    updated = store.update_head(run_id=run.run_id, revision_id=correction.revision_id)
+
+    assert updated.head_revision_id == correction.revision_id
 
 
 # -- transactional head -------------------------------------------------------
