@@ -46,7 +46,7 @@ from typing import Annotated, Literal, NamedTuple, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .ids import ArtefactId, ComponentId, ParticipantId, SegmentId, SourceId
+from .ids import ArtefactId, AttemptId, ComponentId, ParticipantId, SegmentId, SourceId
 from .records import Sha256Hex
 
 # -- M5: speaker trust classes --------------------------------------------
@@ -189,6 +189,12 @@ class ComponentKind(StrEnum):
     PROVIDER_LABEL_SET = "provider-label-set"
     TRANSCRIPT_ABSENCE_DECLARATION = "transcript-absence-declaration"
     ASSEMBLY_MANIFEST = "assembly-manifest"
+    MEDIA_RECORDING = "media-recording"
+    RECORDING_REFERENCE_SET = "recording-reference-set"
+    DESTINATION = "destination"
+    TIMELINE_COMBINED = "timeline-combined"
+    ASR_RESULT = "asr-result"
+    DIARISATION_RESULT = "diarisation-result"
 
 
 def _check_authored_matches_notes_kind(
@@ -557,6 +563,293 @@ class AssemblyManifestComponent(AssemblyManifestComponentBody):
     created_at: datetime
 
 
+# -- M13: destination component (note snapshot, target identity, owned region) -
+
+
+class OwnedRegionState(StrEnum):
+    """M13: what the note's own content shows about a prior jake-tools
+    write, detected only -- never written -- by the ingest adapter.
+    ``markers-present`` means the explicit
+    ``<!-- jake-tools:transcript:begin/end -->`` comment pair already
+    exists; ``legacy-headings`` means no markers but at least one of
+    ``merge.py``'s ``GENERATED_HEADINGS`` is present (the migration case
+    M13 describes); ``none`` means neither -- a first-ever write.
+    """
+
+    MARKERS_PRESENT = "markers-present"
+    LEGACY_HEADINGS = "legacy-headings"
+    NONE = "none"
+
+
+class DestinationComponentBody(BaseModel):
+    """M13: the apply target's identity -- vault-relative path plus the
+    note snapshot artefact (content hash) taken at ingest -- and the
+    owned-region state observed in that snapshot. Detection only: render
+    and apply (which would use this to write back) are a later slice
+    (CONTRACTS.md M13 scope note); this component only records what was
+    observed.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_kind: Literal[ComponentKind.DESTINATION] = ComponentKind.DESTINATION
+    note_artefact_id: ArtefactId
+    vault_relative_path: str = Field(min_length=1)
+    owned_region_state: OwnedRegionState
+
+
+class DestinationComponent(DestinationComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+# -- M3: recording references from note embeds --------------------------
+
+
+class RecordingReference(BaseModel):
+    """M3: one embed link found in a note, plus the local path it resolves
+    to. A reference alone never satisfies ``media.recording`` (M3) -- the
+    ``media.recording`` validator (``registry.py``) matches
+    ``resolved_path`` against a separately-ingested
+    :class:`MediaRecordingComponent`'s own ``media_path`` to decide
+    whether this reference is backed by ingested media or is
+    reference-only.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    raw_link: str = Field(min_length=1)
+    resolved_path: str = Field(min_length=1)
+
+
+class RecordingReferenceSetComponentBody(BaseModel):
+    """M3/M6: every recording embed in one note, in note-embed (textual)
+    order -- the M6 default ordering for the combined timeline. Order is
+    preserved exactly as found, never re-sorted (unlike
+    :class:`ParticipantSetComponentBody`, for which M19 defines no
+    meaningful order) -- this is deliberately *not*
+    ``obsidian.py``'s ``SourceNote.recordings`` (which re-sorts by file
+    creation time for the older scribe-based recipe); the adapter reads
+    ``extract_recording_links``/``resolve_recording_path`` directly to
+    keep the note's own textual order.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_kind: Literal[ComponentKind.RECORDING_REFERENCE_SET] = (
+        ComponentKind.RECORDING_REFERENCE_SET
+    )
+    note_artefact_id: ArtefactId
+    references: tuple[RecordingReference, ...] = Field(min_length=1)
+
+
+class RecordingReferenceSetComponent(RecordingReferenceSetComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+# -- M4/M11: ingested media recording ------------------------------------
+
+
+class MediaRecordingComponentBody(BaseModel):
+    """M4: the proof behind ``media.recording`` -- an **ingested** media
+    artefact with a known duration, which is what defines its
+    ``source:<artefact_id>`` coordinate domain (M6: "origin = media start
+    = 0"). ``media_path`` is the same resolved filesystem path used as the
+    artefact's own ``acquisition_locator`` at ingest -- the join key the
+    ``media.recording`` validator uses to match this component against a
+    note's own :class:`RecordingReferenceSetComponent` entries (M3).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_kind: Literal[ComponentKind.MEDIA_RECORDING] = (
+        ComponentKind.MEDIA_RECORDING
+    )
+    source_artefact_id: ArtefactId
+    media_path: str = Field(min_length=1)
+    duration_ms: int = Field(gt=0)
+    codec: str = Field(min_length=1)
+    sample_rate_hz: int = Field(gt=0)
+    channels: int = Field(gt=0)
+
+
+class MediaRecordingComponent(MediaRecordingComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+# -- M6: combined timeline ------------------------------------------------
+
+
+class TimelineMappingSegment(BaseModel):
+    """M6: one piecewise mapping ``{artefact, [src_start, src_end) ->
+    [dst_start, dst_end)}``. Both spans are half-open with a strictly
+    positive length, and the mapping is a pure shift -- it must preserve
+    span length exactly, never stretch or compress time.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    artefact_id: ArtefactId
+    source_start_ms: int = Field(ge=0)
+    source_end_ms: int = Field(ge=0)
+    combined_start_ms: int = Field(ge=0)
+    combined_end_ms: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _check_spans(self) -> Self:
+        if self.source_end_ms <= self.source_start_ms:
+            raise ValueError(
+                f"source span [{self.source_start_ms}, {self.source_end_ms}) is not "
+                "half-open with end > start (M6)."
+            )
+        if self.combined_end_ms <= self.combined_start_ms:
+            raise ValueError(
+                f"combined span [{self.combined_start_ms}, {self.combined_end_ms}) is "
+                "not half-open with end > start (M6)."
+            )
+        source_len = self.source_end_ms - self.source_start_ms
+        combined_len = self.combined_end_ms - self.combined_start_ms
+        if source_len != combined_len:
+            raise ValueError(
+                f"mapping segment for {self.artefact_id} does not preserve span "
+                f"length (source {source_len}ms, combined {combined_len}ms) -- a "
+                "combined-timeline mapping is a pure shift (M6)."
+            )
+        return self
+
+
+class TimelineGapRecord(BaseModel):
+    """M6: an explicit inter-recording gap in the combined domain.
+    Zero-length gaps are legal (adjacent recordings with no declared
+    real-world break); ``combined_end_ms < combined_start_ms`` never is.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    after_artefact_id: ArtefactId
+    before_artefact_id: ArtefactId
+    combined_start_ms: int = Field(ge=0)
+    combined_end_ms: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _check_span(self) -> Self:
+        if self.combined_end_ms < self.combined_start_ms:
+            raise ValueError(
+                f"gap [{self.combined_start_ms}, {self.combined_end_ms}) has end < "
+                "start (M6)."
+            )
+        return self
+
+
+class TimelineCombinedComponentBody(BaseModel):
+    """M6: the assembled multi-recording timeline. ``segments`` must
+    already be in ascending ``combined_start_ms`` order and must not
+    overlap -- v1's assembly policy is sequential, non-overlapping
+    fragments (M6); an overlapping pair is refused here, at construction,
+    rather than silently flattened. This is the enforcement mechanism
+    behind M6's "overlapping recordings are unsupported in v1 --
+    assembly fails with an explicit error."
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_kind: Literal[ComponentKind.TIMELINE_COMBINED] = (
+        ComponentKind.TIMELINE_COMBINED
+    )
+    segments: tuple[TimelineMappingSegment, ...] = Field(min_length=1)
+    gaps: tuple[TimelineGapRecord, ...] = ()
+
+    @model_validator(mode="after")
+    def _check_sequential_non_overlapping(self) -> Self:
+        ordered = sorted(self.segments, key=lambda segment: segment.combined_start_ms)
+        if list(ordered) != list(self.segments):
+            raise ValueError(
+                "segments must be listed in ascending combined_start_ms order (M6)."
+            )
+        for earlier, later in zip(ordered, ordered[1:], strict=False):
+            if later.combined_start_ms < earlier.combined_end_ms:
+                raise ValueError(
+                    f"overlapping recordings in the combined timeline: "
+                    f"{earlier.artefact_id} ends at {earlier.combined_end_ms}ms but "
+                    f"{later.artefact_id} starts at {later.combined_start_ms}ms -- "
+                    "unsupported in v1 (M6); assembly must fail explicitly rather "
+                    "than silently flatten this."
+                )
+        return self
+
+
+class TimelineCombinedComponent(TimelineCombinedComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+# -- M11: worker inference results (ASR / diarisation) -------------------
+
+
+class AsrResultComponentBody(BaseModel):
+    """M4/M11: the proof behind ``inference.asr`` for one media artefact.
+    Only ever constructed for a *completed* ASR stage (M11's partial-
+    failure semantics: a failed stage never becomes a component -- it
+    stays absent for this member until a retry succeeds, which is also
+    what keeps a failed sibling stage from blocking this one's own
+    capability). ``request_fingerprint`` is the caller's own
+    deterministic hash over the inputs/config it controls (audio hash,
+    declared model identity, audio-preparation config) -- computed
+    *before* invoking the worker, so resume-by-hash matching never
+    depends on anything the worker itself resolves at runtime (e.g. a
+    locally-cached model revision). ``worker_config_hash`` is the
+    worker's own reported stage config hash, kept for provenance/audit
+    only.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_kind: Literal[ComponentKind.ASR_RESULT] = ComponentKind.ASR_RESULT
+    media_artefact_id: ArtefactId
+    result_artefact_id: ArtefactId
+    attempt_id: AttemptId
+    request_fingerprint: Sha256Hex
+    worker_config_hash: str = Field(min_length=1)
+    model_name: str = Field(min_length=1)
+    model_version: str = Field(min_length=1)
+
+
+class AsrResultComponent(AsrResultComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+class DiarisationResultComponentBody(BaseModel):
+    """M4/M11: the ``inference.diarisation`` proof, mirroring
+    :class:`AsrResultComponentBody` exactly (see its docstring)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_kind: Literal[ComponentKind.DIARISATION_RESULT] = (
+        ComponentKind.DIARISATION_RESULT
+    )
+    media_artefact_id: ArtefactId
+    result_artefact_id: ArtefactId
+    attempt_id: AttemptId
+    request_fingerprint: Sha256Hex
+    worker_config_hash: str = Field(min_length=1)
+    model_name: str = Field(min_length=1)
+    model_version: str = Field(min_length=1)
+
+
+class DiarisationResultComponent(DiarisationResultComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
 ComponentBody = Annotated[
     NotesComponentBody
     | ParticipantSetComponentBody
@@ -564,7 +857,13 @@ ComponentBody = Annotated[
     | TimedTurnSetComponentBody
     | ProviderLabelSetComponentBody
     | TranscriptAbsenceDeclarationBody
-    | AssemblyManifestComponentBody,
+    | AssemblyManifestComponentBody
+    | DestinationComponentBody
+    | RecordingReferenceSetComponentBody
+    | MediaRecordingComponentBody
+    | TimelineCombinedComponentBody
+    | AsrResultComponentBody
+    | DiarisationResultComponentBody,
     Field(discriminator="component_kind"),
 ]
 ComponentRecord = Annotated[
@@ -574,7 +873,13 @@ ComponentRecord = Annotated[
     | TimedTurnSetComponent
     | ProviderLabelSetComponent
     | TranscriptAbsenceDeclaration
-    | AssemblyManifestComponent,
+    | AssemblyManifestComponent
+    | DestinationComponent
+    | RecordingReferenceSetComponent
+    | MediaRecordingComponent
+    | TimelineCombinedComponent
+    | AsrResultComponent
+    | DiarisationResultComponent,
     Field(discriminator="component_kind"),
 ]
 
@@ -633,6 +938,33 @@ def component_input_refs(record: ComponentRecord) -> ComponentInputRefs:
                 artefact_ids=tuple(
                     selection.artefact_id for selection in record.selections
                 ),
+                component_ids=(),
+            )
+        case DestinationComponent():
+            return ComponentInputRefs(
+                artefact_ids=(record.note_artefact_id,), component_ids=()
+            )
+        case RecordingReferenceSetComponent():
+            return ComponentInputRefs(
+                artefact_ids=(record.note_artefact_id,), component_ids=()
+            )
+        case MediaRecordingComponent():
+            return ComponentInputRefs(
+                artefact_ids=(record.source_artefact_id,), component_ids=()
+            )
+        case TimelineCombinedComponent():
+            return ComponentInputRefs(
+                artefact_ids=tuple(segment.artefact_id for segment in record.segments),
+                component_ids=(),
+            )
+        case AsrResultComponent():
+            return ComponentInputRefs(
+                artefact_ids=(record.media_artefact_id, record.result_artefact_id),
+                component_ids=(),
+            )
+        case DiarisationResultComponent():
+            return ComponentInputRefs(
+                artefact_ids=(record.media_artefact_id, record.result_artefact_id),
                 component_ids=(),
             )
 
@@ -708,6 +1040,62 @@ def component_as_body(component: ComponentBody | ComponentRecord) -> ComponentBo
                 selections=component.selections, rationale=component.rationale
             )
         case AssemblyManifestComponentBody():
+            return component
+        case DestinationComponent():
+            return DestinationComponentBody(
+                note_artefact_id=component.note_artefact_id,
+                vault_relative_path=component.vault_relative_path,
+                owned_region_state=component.owned_region_state,
+            )
+        case DestinationComponentBody():
+            return component
+        case RecordingReferenceSetComponent():
+            return RecordingReferenceSetComponentBody(
+                note_artefact_id=component.note_artefact_id,
+                references=component.references,
+            )
+        case RecordingReferenceSetComponentBody():
+            return component
+        case MediaRecordingComponent():
+            return MediaRecordingComponentBody(
+                source_artefact_id=component.source_artefact_id,
+                media_path=component.media_path,
+                duration_ms=component.duration_ms,
+                codec=component.codec,
+                sample_rate_hz=component.sample_rate_hz,
+                channels=component.channels,
+            )
+        case MediaRecordingComponentBody():
+            return component
+        case TimelineCombinedComponent():
+            return TimelineCombinedComponentBody(
+                segments=component.segments, gaps=component.gaps
+            )
+        case TimelineCombinedComponentBody():
+            return component
+        case AsrResultComponent():
+            return AsrResultComponentBody(
+                media_artefact_id=component.media_artefact_id,
+                result_artefact_id=component.result_artefact_id,
+                attempt_id=component.attempt_id,
+                request_fingerprint=component.request_fingerprint,
+                worker_config_hash=component.worker_config_hash,
+                model_name=component.model_name,
+                model_version=component.model_version,
+            )
+        case AsrResultComponentBody():
+            return component
+        case DiarisationResultComponent():
+            return DiarisationResultComponentBody(
+                media_artefact_id=component.media_artefact_id,
+                result_artefact_id=component.result_artefact_id,
+                attempt_id=component.attempt_id,
+                request_fingerprint=component.request_fingerprint,
+                worker_config_hash=component.worker_config_hash,
+                model_name=component.model_name,
+                model_version=component.model_version,
+            )
+        case DiarisationResultComponentBody():
             return component
 
 
@@ -796,6 +1184,54 @@ def assemble_component_record(
         case AssemblyManifestComponentBody():
             fields = body.model_dump(mode="python")
             return AssemblyManifestComponent(
+                **fields,
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case DestinationComponentBody():
+            fields = body.model_dump(mode="python")
+            return DestinationComponent(
+                **fields,
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case RecordingReferenceSetComponentBody():
+            fields = body.model_dump(mode="python")
+            return RecordingReferenceSetComponent(
+                **fields,
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case MediaRecordingComponentBody():
+            fields = body.model_dump(mode="python")
+            return MediaRecordingComponent(
+                **fields,
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case TimelineCombinedComponentBody():
+            fields = body.model_dump(mode="python")
+            return TimelineCombinedComponent(
+                **fields,
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case AsrResultComponentBody():
+            fields = body.model_dump(mode="python")
+            return AsrResultComponent(
+                **fields,
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case DiarisationResultComponentBody():
+            fields = body.model_dump(mode="python")
+            return DiarisationResultComponent(
                 **fields,
                 component_id=component_id,
                 content_hash=content_hash,

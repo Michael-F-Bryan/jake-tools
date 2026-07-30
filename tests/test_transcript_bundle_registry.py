@@ -7,6 +7,12 @@ from datetime import UTC, datetime
 import pytest
 
 from jake_tools.transcripts.bundle.components import (
+    AsrResultComponent,
+    AsrResultComponentBody,
+    DiarisationResultComponent,
+    DiarisationResultComponentBody,
+    MediaRecordingComponent,
+    MediaRecordingComponentBody,
     NotesComponent,
     NotesComponentBody,
     NotesKind,
@@ -19,9 +25,13 @@ from jake_tools.transcripts.bundle.components import (
     ProviderLabelSetComponent,
     ProviderLabelSetComponentBody,
     ProviderLabelSpan,
+    RecordingReference,
+    RecordingReferenceSetComponentBody,
     TimedTurn,
     TimedTurnSetComponent,
     TimedTurnSetComponentBody,
+    TimelineCombinedComponentBody,
+    TimelineMappingSegment,
     TranscriptAbsenceDeclaration,
     TranscriptAbsenceDeclarationBody,
     TrustClass,
@@ -288,19 +298,25 @@ def test_aggregate_many_key_status_is_absent_with_no_members() -> None:
 # -- stub validators ------------------------------------------------------
 
 
+_IMPLEMENTED_KEYS = {
+    CapabilityKey.NOTES_PROVIDER,
+    CapabilityKey.NOTES_AUTHORED,
+    CapabilityKey.PARTICIPANTS_DECLARED,
+    CapabilityKey.TRANSCRIPT_UNTIMED,
+    CapabilityKey.TRANSCRIPT_TIMED,
+    CapabilityKey.SPEAKERS_PROVIDER_LABELS,
+    CapabilityKey.MEDIA_RECORDING,
+    CapabilityKey.TIMELINE_COMBINED,
+    CapabilityKey.INFERENCE_ASR,
+    CapabilityKey.INFERENCE_DIARISATION,
+}
+
+
 def test_every_unimplemented_key_stub_returns_not_attempted() -> None:
-    implemented = {
-        CapabilityKey.NOTES_PROVIDER,
-        CapabilityKey.NOTES_AUTHORED,
-        CapabilityKey.PARTICIPANTS_DECLARED,
-        CapabilityKey.TRANSCRIPT_UNTIMED,
-        CapabilityKey.TRANSCRIPT_TIMED,
-        CapabilityKey.SPEAKERS_PROVIDER_LABELS,
-    }
     results = validate(mint_id("rev"), {})
 
     for key in CapabilityKey:
-        if key in implemented:
+        if key in _IMPLEMENTED_KEYS:
             continue
         assert results[key].status == CapabilityStatus.NOT_ATTEMPTED, key.value
 
@@ -309,17 +325,9 @@ def test_every_implemented_key_reports_absent_on_an_empty_closure() -> None:
     """The mirror of the stub check above: a real validator over an empty
     component set must report a genuine, evidence-based status -- never
     the stub's not-attempted (that would mean it never actually looked)."""
-    implemented = {
-        CapabilityKey.NOTES_PROVIDER,
-        CapabilityKey.NOTES_AUTHORED,
-        CapabilityKey.PARTICIPANTS_DECLARED,
-        CapabilityKey.TRANSCRIPT_UNTIMED,
-        CapabilityKey.TRANSCRIPT_TIMED,
-        CapabilityKey.SPEAKERS_PROVIDER_LABELS,
-    }
     results = validate(mint_id("rev"), {})
 
-    for key in implemented:
+    for key in _IMPLEMENTED_KEYS:
         assert results[key].status == CapabilityStatus.ABSENT, key.value
 
 
@@ -334,14 +342,14 @@ def test_stub_validator_cannot_be_made_to_emit_present_validated() -> None:
 
     def _lying_stub(context: ValidationContext) -> CapabilityRecord:
         return CapabilityRecord(
-            key=CapabilityKey.MEDIA_RECORDING,
+            key=CapabilityKey.CHAPTERS,
             status=CapabilityStatus.PRESENT_VALIDATED,
             validator_version="v1",
         )
 
     lying_registry = dict(REGISTRY)
-    lying_registry[CapabilityKey.MEDIA_RECORDING] = dataclasses.replace(
-        REGISTRY[CapabilityKey.MEDIA_RECORDING], validator=_lying_stub
+    lying_registry[CapabilityKey.CHAPTERS] = dataclasses.replace(
+        REGISTRY[CapabilityKey.CHAPTERS], validator=_lying_stub
     )
 
     with pytest.raises(StubEmittedPresentValidatedError):
@@ -789,3 +797,305 @@ def test_speakers_provider_labels_fails_on_inconsistent_proxy_config_hash() -> N
     assert all(
         "inconsistent proxy_config_hash" in member.detail for member in record.members
     )
+
+
+# -- media.recording (Phase 3A, M3/M4) ---------------------------------------
+
+
+def _media_recording_component(
+    *, media_path: str = "/tmp/meeting.m4a"
+) -> MediaRecordingComponent:
+    body = MediaRecordingComponentBody(
+        source_artefact_id=mint_id("artefact"),
+        media_path=media_path,
+        duration_ms=50_000,
+        codec="opus",
+        sample_rate_hz=48000,
+        channels=1,
+    )
+    record = assemble_component_record(
+        body,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+    assert isinstance(record, MediaRecordingComponent)
+    return record
+
+
+def _recording_reference_set_component(*, resolved_path: str = "/tmp/meeting.m4a"):
+    body = RecordingReferenceSetComponentBody(
+        note_artefact_id=mint_id("artefact"),
+        references=(
+            RecordingReference(raw_link="[[meeting.m4a]]", resolved_path=resolved_path),
+        ),
+    )
+    return assemble_component_record(
+        body,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+
+
+def test_media_recording_is_absent_with_no_evidence_either_way() -> None:
+    results = validate(mint_id("rev"), {})
+
+    assert results[CapabilityKey.MEDIA_RECORDING].status == CapabilityStatus.ABSENT
+
+
+def test_media_recording_is_present_validated_for_standalone_ingested_media() -> None:
+    """A local-media ingest with no accompanying note reference is still
+    a usable member on its own (M3's operator-assertion path)."""
+    media = _media_recording_component()
+
+    results = validate(mint_id("rev"), {media.component_id: media})
+
+    record = results[CapabilityKey.MEDIA_RECORDING]
+    assert record.status == CapabilityStatus.PRESENT_VALIDATED
+    assert record.members[0].member_id == media.media_path
+    assert record.members[0].component_id == media.component_id
+
+
+def test_media_recording_matches_a_reference_to_its_ingested_media_by_path() -> None:
+    media = _media_recording_component(media_path="/tmp/meeting.m4a")
+    reference_set = _recording_reference_set_component(resolved_path="/tmp/meeting.m4a")
+
+    results = validate(
+        mint_id("rev"),
+        {media.component_id: media, reference_set.component_id: reference_set},
+    )
+
+    record = results[CapabilityKey.MEDIA_RECORDING]
+    assert record.status == CapabilityStatus.PRESENT_VALIDATED
+    assert (
+        len(record.members) == 1
+    )  # the reference and the media are one member, not two
+    assert record.members[0].component_id == media.component_id
+
+
+def test_media_recording_reports_not_available_from_source_for_a_reference_only_embed() -> (
+    None
+):
+    """M3: "a reference alone never satisfies media.recording" -- the
+    embed is still visible as its own member, honestly not-available."""
+    reference_set = _recording_reference_set_component(
+        resolved_path="/tmp/never-ingested.m4a"
+    )
+
+    results = validate(mint_id("rev"), {reference_set.component_id: reference_set})
+
+    record = results[CapabilityKey.MEDIA_RECORDING]
+    # M4's own worked example: a reference-only embed degrades the
+    # aggregate status honestly rather than reporting present-validated.
+    assert record.status == CapabilityStatus.NOT_AVAILABLE_FROM_SOURCE
+    assert record.members[0].status == CapabilityStatus.NOT_AVAILABLE_FROM_SOURCE
+    assert record.members[0].component_id is None
+
+
+def test_media_recording_per_member_query_on_mixed_reference_and_standalone_media() -> (
+    None
+):
+    """M4's own worked example: "two validated recordings and one
+    reference-only embed still has two usable media.recording members" --
+    consumers must query per member, never by aggregate status alone."""
+    matched_media = _media_recording_component(media_path="/tmp/a.m4a")
+    standalone_media = _media_recording_component(media_path="/tmp/b.m4a")
+    reference_set = RecordingReferenceSetComponentBody(
+        note_artefact_id=mint_id("artefact"),
+        references=(
+            RecordingReference(raw_link="[[a]]", resolved_path="/tmp/a.m4a"),
+            RecordingReference(
+                raw_link="[[c]]", resolved_path="/tmp/never-ingested.m4a"
+            ),
+        ),
+    )
+    reference_set_record = assemble_component_record(
+        reference_set,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+
+    results = validate(
+        mint_id("rev"),
+        {
+            matched_media.component_id: matched_media,
+            standalone_media.component_id: standalone_media,
+            reference_set_record.component_id: reference_set_record,
+        },
+    )
+
+    record = results[CapabilityKey.MEDIA_RECORDING]
+    statuses = {member.member_id: member.status for member in record.members}
+    assert statuses["/tmp/a.m4a"] == CapabilityStatus.PRESENT_VALIDATED
+    assert statuses["/tmp/b.m4a"] == CapabilityStatus.PRESENT_VALIDATED
+    assert (
+        statuses["/tmp/never-ingested.m4a"]
+        == CapabilityStatus.NOT_AVAILABLE_FROM_SOURCE
+    )
+    usable = [
+        m for m in record.members if m.status == CapabilityStatus.PRESENT_VALIDATED
+    ]
+    assert len(usable) == 2
+
+
+# -- timeline.combined (Phase 3A, M6) ----------------------------------------
+
+
+def _timeline_combined_component():
+    body = TimelineCombinedComponentBody(
+        segments=(
+            TimelineMappingSegment(
+                artefact_id=mint_id("artefact"),
+                source_start_ms=0,
+                source_end_ms=1000,
+                combined_start_ms=0,
+                combined_end_ms=1000,
+            ),
+        )
+    )
+    return assemble_component_record(
+        body,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+
+
+def test_timeline_combined_is_absent_with_no_timeline_component() -> None:
+    results = validate(mint_id("rev"), {})
+
+    assert results[CapabilityKey.TIMELINE_COMBINED].status == CapabilityStatus.ABSENT
+
+
+def test_timeline_combined_is_present_validated_with_one_component() -> None:
+    timeline = _timeline_combined_component()
+
+    results = validate(mint_id("rev"), {timeline.component_id: timeline})
+
+    record = results[CapabilityKey.TIMELINE_COMBINED]
+    assert record.status == CapabilityStatus.PRESENT_VALIDATED
+    assert record.component_ids == (timeline.component_id,)
+
+
+def test_timeline_combined_fails_for_more_than_one_component() -> None:
+    """timeline.combined is a `one`-cardinality key: two candidate
+    combined-timeline components in one closure is ambiguous."""
+    first = _timeline_combined_component()
+    second = _timeline_combined_component()
+
+    results = validate(
+        mint_id("rev"), {first.component_id: first, second.component_id: second}
+    )
+
+    record = results[CapabilityKey.TIMELINE_COMBINED]
+    assert record.status == CapabilityStatus.FAILED
+
+
+# -- inference.asr / inference.diarisation (Phase 3A, M11) -------------------
+
+
+def _asr_result_component(
+    *, media_artefact_id: str | None = None, model_name: str = "parakeet"
+) -> AsrResultComponent:
+    body = AsrResultComponentBody(
+        media_artefact_id=media_artefact_id or mint_id("artefact"),
+        result_artefact_id=mint_id("artefact"),
+        attempt_id=mint_id("attempt"),
+        request_fingerprint=_FAKE_HASH,
+        worker_config_hash="cfg",
+        model_name=model_name,
+        model_version="unpinned",
+    )
+    record = assemble_component_record(
+        body,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+    assert isinstance(record, AsrResultComponent)
+    return record
+
+
+def _diarisation_result_component(
+    *, media_artefact_id: str | None = None
+) -> DiarisationResultComponent:
+    body = DiarisationResultComponentBody(
+        media_artefact_id=media_artefact_id or mint_id("artefact"),
+        result_artefact_id=mint_id("artefact"),
+        attempt_id=mint_id("attempt"),
+        request_fingerprint=_FAKE_HASH,
+        worker_config_hash="cfg",
+        model_name="pyannote",
+        model_version="unpinned",
+    )
+    record = assemble_component_record(
+        body,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+    assert isinstance(record, DiarisationResultComponent)
+    return record
+
+
+def test_inference_asr_is_absent_with_no_result_component() -> None:
+    results = validate(mint_id("rev"), {})
+
+    assert results[CapabilityKey.INFERENCE_ASR].status == CapabilityStatus.ABSENT
+
+
+def test_inference_asr_is_present_validated_per_recording() -> None:
+    """inference.asr is a `many` key (M4: one per source/recording) -- a
+    completed component always validates, since one only ever exists for
+    a completed stage (M11's partial-failure semantics live in whether
+    the component was created at all, not in its status field)."""
+    first = _asr_result_component()
+    second = _asr_result_component()
+
+    results = validate(
+        mint_id("rev"), {first.component_id: first, second.component_id: second}
+    )
+
+    record = results[CapabilityKey.INFERENCE_ASR]
+    assert record.status == CapabilityStatus.PRESENT_VALIDATED
+    assert len(record.members) == 2
+    assert record.provenance_classes == ("parakeet",)
+
+
+def test_inference_diarisation_partial_failure_never_touches_inference_asr() -> None:
+    """The structural half of M11's partial-failure rule: a diarisation
+    that failed for some recording never even creates a component, so
+    inference.asr for the SAME recording is completely unaffected."""
+    media_artefact_id = mint_id("artefact")
+    asr = _asr_result_component(media_artefact_id=media_artefact_id)
+    # No DiarisationResultComponent at all for this media -- the failed
+    # stage's own absence *is* the honest signal (see components.py's
+    # AsrResultComponentBody docstring).
+
+    results = validate(mint_id("rev"), {asr.component_id: asr})
+
+    assert (
+        results[CapabilityKey.INFERENCE_ASR].status
+        == CapabilityStatus.PRESENT_VALIDATED
+    )
+    assert (
+        results[CapabilityKey.INFERENCE_DIARISATION].status == CapabilityStatus.ABSENT
+    )
+
+
+def test_inference_diarisation_is_present_validated_per_recording() -> None:
+    diarisation = _diarisation_result_component()
+
+    results = validate(mint_id("rev"), {diarisation.component_id: diarisation})
+
+    record = results[CapabilityKey.INFERENCE_DIARISATION]
+    assert record.status == CapabilityStatus.PRESENT_VALIDATED
+    assert record.members[0].member_id == diarisation.media_artefact_id

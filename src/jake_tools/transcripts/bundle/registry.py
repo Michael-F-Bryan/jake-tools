@@ -7,14 +7,19 @@ of what can be proven in v1 (:class:`CapabilityKey`), the typed payload
 every proof is recorded in (:class:`CapabilityRecord`), and :func:`validate`
 -- the single dispatcher every consumer goes through.
 
-v1 can now *prove* six things: ``notes.provider``/``notes.authored`` (M20),
+v1 can now *prove* ten things: ``notes.provider``/``notes.authored`` (M20),
 ``participants.declared`` (M19), ``transcript.untimed``/``transcript.timed``
-(M6/M7/D6), and ``speakers.provider-labels`` (M5, evidence only -- it
-satisfies no product gate). Every other key is registered with a stub
-validator that always returns ``not-attempted`` and is structurally
-incapable of returning ``present-validated`` -- :func:`validate` raises if
-one ever tries, which is the "capabilities are proofs" rule enforced as
-code, not just as prose.
+(M6/M7/D6), ``speakers.provider-labels`` (M5, evidence only -- it
+satisfies no product gate), ``media.recording`` (M3/M4/M11: an ingested
+media artefact with duration, matched against a note's own recording
+references), ``timeline.combined`` (M6: the assembled multi-recording
+mapping), and ``inference.asr``/``inference.diarisation`` (M11: raw worker
+output -- a component exists only for a *completed* stage, so a failed
+sibling never blocks the other's own proof). Every other key is
+registered with a stub validator that always returns ``not-attempted`` and
+is structurally incapable of returning ``present-validated`` --
+:func:`validate` raises if one ever tries, which is the "capabilities are
+proofs" rule enforced as code, not just as prose.
 """
 
 from __future__ import annotations
@@ -27,11 +32,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..errors import TranscriptError
 from .components import (
+    AsrResultComponent,
     ComponentRecord,
+    DiarisationResultComponent,
+    MediaRecordingComponent,
     NotesComponent,
     ParticipantSetComponent,
     ProviderLabelSetComponent,
+    RecordingReferenceSetComponent,
     TimedTurnSetComponent,
+    TimelineCombinedComponent,
     TranscriptAbsenceDeclaration,
     TrustClass,
     UntimedTurnSetComponent,
@@ -637,6 +647,190 @@ def _validate_speakers_provider_labels(context: ValidationContext) -> Capability
     )
 
 
+# -- real validator: media.recording (M3/M4/M11) -----------------------------
+
+
+def _validate_media_recording(context: ValidationContext) -> CapabilityRecord:
+    """M4: an ingested media artefact with duration proves this key, per
+    member. A note's own recording references (:class:`RecordingReferenceSetComponent`,
+    M3) also contribute members -- matched against an ingested
+    :class:`MediaRecordingComponent` by resolved filesystem path -- so a
+    reference whose target was never separately ingested still shows up
+    as its own member, honestly ``not-available-from-source`` (M3: "a
+    reference alone never satisfies media.recording"), exactly M4's own
+    worked example ("two validated recordings and one reference-only
+    embed").
+    """
+    media_components = [
+        component
+        for component in context.components.values()
+        if isinstance(component, MediaRecordingComponent)
+    ]
+    reference_sets = [
+        component
+        for component in context.components.values()
+        if isinstance(component, RecordingReferenceSetComponent)
+    ]
+    if not media_components and not reference_sets:
+        return CapabilityRecord(
+            key=CapabilityKey.MEDIA_RECORDING,
+            status=CapabilityStatus.ABSENT,
+            validator_version=_VALIDATOR_VERSION,
+        )
+
+    media_by_path = {component.media_path: component for component in media_components}
+    referenced_paths: set[str] = set()
+    members: list[CapabilityMemberStatus] = []
+    for reference_set in reference_sets:
+        for reference in reference_set.references:
+            referenced_paths.add(reference.resolved_path)
+            matched = media_by_path.get(reference.resolved_path)
+            if matched is None:
+                members.append(
+                    CapabilityMemberStatus(
+                        member_id=reference.resolved_path,
+                        status=CapabilityStatus.NOT_AVAILABLE_FROM_SOURCE,
+                        detail=(
+                            "embed reference was never separately ingested as "
+                            "media (M3)"
+                        ),
+                    )
+                )
+            else:
+                members.append(
+                    CapabilityMemberStatus(
+                        member_id=reference.resolved_path,
+                        status=CapabilityStatus.PRESENT_VALIDATED,
+                        component_id=matched.component_id,
+                    )
+                )
+    # Media ingested standalone (e.g. a bare `local-media` ingest with no
+    # accompanying note reference, or a note ingested separately from its
+    # media) is still a usable member in its own right (M3's
+    # operator-assertion path).
+    for media in media_components:
+        if media.media_path not in referenced_paths:
+            members.append(
+                CapabilityMemberStatus(
+                    member_id=media.media_path,
+                    status=CapabilityStatus.PRESENT_VALIDATED,
+                    component_id=media.component_id,
+                )
+            )
+
+    overall = _aggregate_many_key_status(member.status for member in members)
+    return CapabilityRecord(
+        key=CapabilityKey.MEDIA_RECORDING,
+        status=overall,
+        component_ids=tuple(component.component_id for component in media_components),
+        input_revision_ids=(context.revision_id,),
+        validator_version=_VALIDATOR_VERSION,
+        members=tuple(members),
+    )
+
+
+# -- real validator: timeline.combined (M6) ----------------------------------
+
+
+def _validate_timeline_combined(context: ValidationContext) -> CapabilityRecord:
+    matching = [
+        component
+        for component in context.components.values()
+        if isinstance(component, TimelineCombinedComponent)
+    ]
+    if not matching:
+        return CapabilityRecord(
+            key=CapabilityKey.TIMELINE_COMBINED,
+            status=CapabilityStatus.ABSENT,
+            validator_version=_VALIDATOR_VERSION,
+        )
+    if len(matching) > 1:
+        # timeline.combined is a `one`-cardinality key (M4): more than one
+        # candidate combined-timeline component is ambiguous, not a case
+        # to silently pick-first from.
+        return CapabilityRecord(
+            key=CapabilityKey.TIMELINE_COMBINED,
+            status=CapabilityStatus.FAILED,
+            component_ids=tuple(component.component_id for component in matching),
+            validator_version=_VALIDATOR_VERSION,
+            failure_detail=(
+                f"{len(matching)} combined-timeline components present for a "
+                "one-cardinality key"
+            ),
+        )
+
+    component = matching[0]
+    # Sequential, non-overlapping ordering and span-length preservation
+    # are enforced by TimelineCombinedComponentBody/TimelineMappingSegment's
+    # own validators (components.py) at construction *and* re-checked on
+    # every load from disk (the Component subclasses the Body) -- a
+    # component that reached this point already carries both proofs.
+    return CapabilityRecord(
+        key=CapabilityKey.TIMELINE_COMBINED,
+        status=CapabilityStatus.PRESENT_VALIDATED,
+        component_ids=(component.component_id,),
+        input_revision_ids=(context.revision_id,),
+        validator_version=_VALIDATOR_VERSION,
+    )
+
+
+# -- real validators: inference.asr / inference.diarisation (M11) -----------
+
+
+def _make_inference_validator[T: AsrResultComponent | DiarisationResultComponent](
+    *, key: CapabilityKey, component_type: type[T]
+) -> CapabilityValidatorFn:
+    """M11: a component of ``component_type`` exists only for a
+    *completed* stage (see :class:`AsrResultComponentBody`'s docstring) --
+    so unlike every other many-key validator here, every member this
+    finds is trivially ``present-validated``; a recording with no
+    completed stage output simply contributes no member at all (M11's
+    partial-failure semantics: a failed sibling stage never blocks this
+    one, because it never produced a component to begin with).
+
+    ``component_type`` is a genuine ``type[T]`` (not a bare ``type``)
+    purely so ``isinstance(component, component_type)`` below actually
+    narrows ``matching``'s element type for the type checker -- an
+    unparameterized ``type`` cannot narrow a discriminated union member
+    at all.
+    """
+
+    def _validate(context: ValidationContext) -> CapabilityRecord:
+        matching: list[T] = [
+            component
+            for component in context.components.values()
+            if isinstance(component, component_type)
+        ]
+        if not matching:
+            return CapabilityRecord(
+                key=key,
+                status=CapabilityStatus.ABSENT,
+                validator_version=_VALIDATOR_VERSION,
+            )
+        members = tuple(
+            CapabilityMemberStatus(
+                member_id=component.media_artefact_id,
+                status=CapabilityStatus.PRESENT_VALIDATED,
+                component_id=component.component_id,
+            )
+            for component in matching
+        )
+        overall = _aggregate_many_key_status(member.status for member in members)
+        return CapabilityRecord(
+            key=key,
+            status=overall,
+            component_ids=tuple(component.component_id for component in matching),
+            input_revision_ids=(context.revision_id,),
+            provenance_classes=tuple(
+                sorted({component.model_name for component in matching})
+            ),
+            validator_version=_VALIDATOR_VERSION,
+            members=members,
+        )
+
+    return _validate
+
+
 # -- stub validator: every other key -----------------------------------------
 
 
@@ -746,6 +940,35 @@ def _build_registry() -> dict[CapabilityKey, RegistryEntry]:
         key=CapabilityKey.SPEAKERS_PROVIDER_LABELS,
         cardinality=cardinality_of(CapabilityKey.SPEAKERS_PROVIDER_LABELS),
         validator=_validate_speakers_provider_labels,
+        implemented=True,
+    )
+    entries[CapabilityKey.MEDIA_RECORDING] = RegistryEntry(
+        key=CapabilityKey.MEDIA_RECORDING,
+        cardinality=cardinality_of(CapabilityKey.MEDIA_RECORDING),
+        validator=_validate_media_recording,
+        implemented=True,
+    )
+    entries[CapabilityKey.TIMELINE_COMBINED] = RegistryEntry(
+        key=CapabilityKey.TIMELINE_COMBINED,
+        cardinality=cardinality_of(CapabilityKey.TIMELINE_COMBINED),
+        validator=_validate_timeline_combined,
+        implemented=True,
+    )
+    entries[CapabilityKey.INFERENCE_ASR] = RegistryEntry(
+        key=CapabilityKey.INFERENCE_ASR,
+        cardinality=cardinality_of(CapabilityKey.INFERENCE_ASR),
+        validator=_make_inference_validator(
+            key=CapabilityKey.INFERENCE_ASR, component_type=AsrResultComponent
+        ),
+        implemented=True,
+    )
+    entries[CapabilityKey.INFERENCE_DIARISATION] = RegistryEntry(
+        key=CapabilityKey.INFERENCE_DIARISATION,
+        cardinality=cardinality_of(CapabilityKey.INFERENCE_DIARISATION),
+        validator=_make_inference_validator(
+            key=CapabilityKey.INFERENCE_DIARISATION,
+            component_type=DiarisationResultComponent,
+        ),
         implemented=True,
     )
 

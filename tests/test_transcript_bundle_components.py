@@ -8,16 +8,27 @@ from pydantic import ValidationError
 
 from jake_tools.transcripts.bundle.components import (
     ArtefactSelection,
+    AsrResultComponent,
+    AsrResultComponentBody,
     AssemblyManifestComponent,
     AssemblyManifestComponentBody,
+    ComponentBody,
     ComponentInputRefs,
     ComponentKind,
+    ComponentRecord,
+    DestinationComponent,
+    DestinationComponentBody,
+    DiarisationResultComponent,
+    DiarisationResultComponentBody,
     Disposition,
+    MediaRecordingComponent,
+    MediaRecordingComponentBody,
     NotesComponent,
     NotesComponentBody,
     NotesKind,
     NotesSection,
     NotesSectionBody,
+    OwnedRegionState,
     ParticipantDeclarationSource,
     ParticipantRecord,
     ParticipantSetComponent,
@@ -26,9 +37,15 @@ from jake_tools.transcripts.bundle.components import (
     ProviderLabelSetComponent,
     ProviderLabelSetComponentBody,
     ProviderLabelSpan,
+    RecordingReference,
+    RecordingReferenceSetComponent,
+    RecordingReferenceSetComponentBody,
     TimedTurn,
     TimedTurnSetComponent,
     TimedTurnSetComponentBody,
+    TimelineCombinedComponent,
+    TimelineCombinedComponentBody,
+    TimelineMappingSegment,
     TranscriptAbsenceDeclaration,
     TranscriptAbsenceDeclarationBody,
     TrustClass,
@@ -788,3 +805,184 @@ def test_component_input_refs_for_the_new_kinds() -> None:
     assert component_input_refs(manifest) == ComponentInputRefs(
         artefact_ids=(manifest_artefact_id,), component_ids=()
     )
+
+
+# -- Phase 3A: destination / recording-reference-set / media-recording ------
+
+
+def _mint(body: ComponentBody) -> ComponentRecord:
+    return assemble_component_record(
+        body,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+
+
+def test_destination_component_body_round_trips_through_as_body_and_input_refs() -> (
+    None
+):
+    note_artefact_id = mint_id("artefact")
+    body = DestinationComponentBody(
+        note_artefact_id=note_artefact_id,
+        vault_relative_path="2 Areas/Home Loan/note.md",
+        owned_region_state=OwnedRegionState.NONE,
+    )
+    record = _mint(body)
+
+    assert isinstance(record, DestinationComponent)
+    assert component_as_body(record) == body
+    assert component_input_refs(record) == ComponentInputRefs(
+        artefact_ids=(note_artefact_id,), component_ids=()
+    )
+
+
+def test_recording_reference_set_preserves_note_embed_order_not_sorted() -> None:
+    note_artefact_id = mint_id("artefact")
+    body = RecordingReferenceSetComponentBody(
+        note_artefact_id=note_artefact_id,
+        references=(
+            RecordingReference(raw_link="[[z.m4a]]", resolved_path="/tmp/z.m4a"),
+            RecordingReference(raw_link="[[a.m4a]]", resolved_path="/tmp/a.m4a"),
+        ),
+    )
+    record = _mint(body)
+
+    assert isinstance(record, RecordingReferenceSetComponent)
+    assert [r.raw_link for r in record.references] == ["[[z.m4a]]", "[[a.m4a]]"]
+    assert component_as_body(record) == body
+    assert component_input_refs(record) == ComponentInputRefs(
+        artefact_ids=(note_artefact_id,), component_ids=()
+    )
+
+
+def test_recording_reference_set_body_rejects_an_empty_reference_list() -> None:
+    with pytest.raises(ValidationError):
+        RecordingReferenceSetComponentBody(
+            note_artefact_id=mint_id("artefact"), references=()
+        )
+
+
+def test_media_recording_component_body_requires_a_positive_duration() -> None:
+    with pytest.raises(ValidationError):
+        MediaRecordingComponentBody(
+            source_artefact_id=mint_id("artefact"),
+            media_path="/tmp/x.m4a",
+            duration_ms=0,
+            codec="opus",
+            sample_rate_hz=48000,
+            channels=1,
+        )
+
+
+def test_media_recording_component_round_trips_through_as_body_and_input_refs() -> None:
+    source_artefact_id = mint_id("artefact")
+    body = MediaRecordingComponentBody(
+        source_artefact_id=source_artefact_id,
+        media_path="/tmp/x.m4a",
+        duration_ms=50_000,
+        codec="opus",
+        sample_rate_hz=48000,
+        channels=1,
+    )
+    record = _mint(body)
+
+    assert isinstance(record, MediaRecordingComponent)
+    assert component_as_body(record) == body
+    assert component_input_refs(record) == ComponentInputRefs(
+        artefact_ids=(source_artefact_id,), component_ids=()
+    )
+
+
+# -- Phase 3A: combined timeline ---------------------------------------------
+
+
+def test_timeline_combined_component_round_trips_and_names_every_segment_artefact() -> (
+    None
+):
+    first_artefact_id = mint_id("artefact")
+    second_artefact_id = mint_id("artefact")
+    body = TimelineCombinedComponentBody(
+        segments=(
+            TimelineMappingSegment(
+                artefact_id=first_artefact_id,
+                source_start_ms=0,
+                source_end_ms=1000,
+                combined_start_ms=0,
+                combined_end_ms=1000,
+            ),
+            TimelineMappingSegment(
+                artefact_id=second_artefact_id,
+                source_start_ms=0,
+                source_end_ms=500,
+                combined_start_ms=1000,
+                combined_end_ms=1500,
+            ),
+        )
+    )
+    record = _mint(body)
+
+    assert isinstance(record, TimelineCombinedComponent)
+    assert component_as_body(record) == body
+    assert component_input_refs(record) == ComponentInputRefs(
+        artefact_ids=(first_artefact_id, second_artefact_id), component_ids=()
+    )
+
+
+# -- Phase 3A: ASR / diarisation result components ---------------------------
+
+
+def test_asr_result_component_round_trips_and_names_both_artefacts() -> None:
+    media_artefact_id = mint_id("artefact")
+    result_artefact_id = mint_id("artefact")
+    body = AsrResultComponentBody(
+        media_artefact_id=media_artefact_id,
+        result_artefact_id=result_artefact_id,
+        attempt_id=mint_id("attempt"),
+        request_fingerprint=_FAKE_HASH,
+        worker_config_hash="worker-hash",
+        model_name="mlx-community/parakeet-tdt-0.6b-v2",
+        model_version="unpinned",
+    )
+    record = _mint(body)
+
+    assert isinstance(record, AsrResultComponent)
+    assert component_as_body(record) == body
+    assert component_input_refs(record) == ComponentInputRefs(
+        artefact_ids=(media_artefact_id, result_artefact_id), component_ids=()
+    )
+
+
+def test_diarisation_result_component_round_trips_and_names_both_artefacts() -> None:
+    media_artefact_id = mint_id("artefact")
+    result_artefact_id = mint_id("artefact")
+    body = DiarisationResultComponentBody(
+        media_artefact_id=media_artefact_id,
+        result_artefact_id=result_artefact_id,
+        attempt_id=mint_id("attempt"),
+        request_fingerprint=_FAKE_HASH,
+        worker_config_hash="worker-hash",
+        model_name="pyannote/speaker-diarization-community-1",
+        model_version="unpinned",
+    )
+    record = _mint(body)
+
+    assert isinstance(record, DiarisationResultComponent)
+    assert component_as_body(record) == body
+    assert component_input_refs(record) == ComponentInputRefs(
+        artefact_ids=(media_artefact_id, result_artefact_id), component_ids=()
+    )
+
+
+def test_asr_result_component_requires_a_genuine_attempt_id() -> None:
+    with pytest.raises(ValidationError):
+        AsrResultComponentBody(
+            media_artefact_id=mint_id("artefact"),
+            result_artefact_id=mint_id("artefact"),
+            attempt_id="not-a-real-attempt-id",
+            request_fingerprint=_FAKE_HASH,
+            worker_config_hash="worker-hash",
+            model_name="x",
+            model_version="y",
+        )
