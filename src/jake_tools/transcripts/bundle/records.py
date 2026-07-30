@@ -17,11 +17,14 @@ from typing import Annotated, Self
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from .ids import (
+    ApplyId,
     ArtefactId,
     AttemptId,
     BundleId,
     ComponentId,
     DocumentId,
+    RenderId,
+    ReviewId,
     RevisionId,
     RunId,
     SourceId,
@@ -225,6 +228,95 @@ class AttemptRecord(BaseModel):
     bundle_id: BundleId
     status: AttemptStatus
     retained_artefact_ids: tuple[ArtefactId, ...] = ()
+    created_at: datetime
+
+
+class ReviewRecord(BaseModel):
+    """M8/M16: the audit trail for one applied speaker review.
+
+    The *decisions* live in the document (a
+    :class:`~.components.SpeakerReviewComponent` inside the applied
+    revision's closure), because M17 forbids a renderer from reading
+    anything outside the revision it is bound to. This record is the
+    other half: who reviewed, which pack bytes they returned, and which
+    revision the application produced. It doubles as M8's application
+    registry -- re-applying the same ``review_id`` finds this record and
+    returns ``result_revision_id`` instead of appending a second,
+    duplicate revision.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    review_id: ReviewId
+    bundle_id: BundleId
+    input_revision_id: RevisionId
+    result_revision_id: RevisionId
+    decision_component_id: ComponentId
+    pack_schema_version: str = Field(min_length=1)
+    pack_sha256: Sha256Hex
+    reviewer: str = Field(min_length=1)
+    created_at: datetime
+
+
+class RenderRecord(BaseModel):
+    """M17: a render's *complete* identity.
+
+    Every field here participates in "rendering the same revision with
+    the same identity fields is byte-deterministic": the bound revision,
+    the profile and its version, the renderer implementation version, the
+    template hash, and every parameter (locale, timezone, whether the
+    transcript body is included). ``input_capability_keys`` records the
+    capability closure the render actually consumed, and ``output_sha256``
+    names the bytes -- stored as a content-addressed blob, since a render
+    is a derived output and never a capability.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    render_id: RenderId
+    bundle_id: BundleId
+    revision_id: RevisionId
+    profile: str = Field(min_length=1)
+    profile_version: str = Field(min_length=1)
+    renderer_version: str = Field(min_length=1)
+    template_sha256: Sha256Hex
+    parameters: dict[str, str] = Field(default_factory=dict)
+    destination_snapshot_artefact_id: ArtefactId | None = None
+    input_capability_keys: tuple[str, ...] = ()
+    output_sha256: Sha256Hex
+    created_at: datetime
+
+
+class ApplyState(StrEnum):
+    """M13's four apply outcomes. ``written-unverified`` is deliberately
+    distinct from ``verified``: bytes reached the target but the read-back
+    check did not confirm them, which is a different operational
+    situation from a clean success and must never be reported as one.
+    """
+
+    NOT_WRITTEN = "not-written"
+    PARTIALLY_WRITTEN = "partially-written"
+    WRITTEN_UNVERIFIED = "written-unverified"
+    VERIFIED = "verified"
+
+
+class ApplyRecord(BaseModel):
+    """M13: one attempt to write a render into its destination note."""
+
+    model_config = ConfigDict(frozen=True)
+
+    apply_id: ApplyId
+    bundle_id: BundleId
+    render_id: RenderId
+    revision_id: RevisionId
+    target_path: str = Field(min_length=1)
+    precondition_sha256: Sha256Hex
+    post_write_sha256: Sha256Hex | None = None
+    state: ApplyState
+    allow_stale_render: bool = False
+    adopted_edited_region: bool = False
+    migrated_legacy_headings: bool = False
+    detail: str = ""
     created_at: datetime
 
 

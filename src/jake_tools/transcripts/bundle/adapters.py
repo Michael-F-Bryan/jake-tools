@@ -92,7 +92,7 @@ from .components import (
     UntimedTurnSetComponent,
     UntimedTurnSetComponentBody,
 )
-from .ids import ArtefactId, mint_id
+from .ids import ArtefactId, mint_id, source_domain
 from .store import BundleStore
 
 
@@ -172,7 +172,10 @@ def adapt_untimed_transcript(
         source_artefact_id=source_artefact_id,
         turns=tuple(
             UntimedTurn(
-                source_segment_id=mint_id("seg"), speaker_label=label, text=text
+                turn_id=mint_id("turn"),
+                source_segment_id=mint_id("seg"),
+                speaker_label=label,
+                text=text,
             )
             for label, text in parsed
         ),
@@ -327,7 +330,9 @@ def adapt_teams_vtt(
         segment_id = mint_id("seg")
         turns.append(
             TimedTurn(
+                turn_id=mint_id("turn"),
                 source_segment_id=segment_id,
+                source_artefact_id=source_artefact_id,
                 speaker_label=cue.speaker,
                 text=cue.text,
                 start_ms=start_ms,
@@ -366,8 +371,13 @@ def adapt_teams_vtt(
             "label evidence only; no participant record represents them."
         )
 
+    # A provider VTT's cues are already in that caption artefact's own
+    # coordinate domain (M6: origin = media start = 0) -- there is no
+    # combined timeline here, and nothing may pretend otherwise.
     turn_set_body = TimedTurnSetComponentBody(
-        source_artefact_id=source_artefact_id, turns=tuple(turns)
+        source_artefact_ids=(source_artefact_id,),
+        coordinate_domain=source_domain(source_artefact_id),
+        turns=tuple(turns),
     )
     turn_set = store.add_component(turn_set_body)
     assert isinstance(turn_set, TimedTurnSetComponent)

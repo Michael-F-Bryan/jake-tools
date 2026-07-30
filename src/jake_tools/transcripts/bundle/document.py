@@ -22,7 +22,7 @@ from types import MappingProxyType
 from typing import TypeVar
 
 from ..errors import TranscriptError
-from .components import ComponentRecord, NotesComponent, ParticipantSetComponent
+from .components import ComponentRecord
 from .ids import BundleId, ComponentId, DocumentId, RevisionId
 from .records import NoDocumentYet
 from .registry import (
@@ -34,7 +34,10 @@ from .registry import (
 from .registry import validate as _run_registry_validation
 from .store import BundleStore, CapabilityValidator, RevisionRecord
 
-_ComponentT = TypeVar("_ComponentT", bound=NotesComponent | ParticipantSetComponent)
+# Bounded to v1's whole closed component-record union, so
+# `components_of(object)` is still a type error while every real kind --
+# not just the two Phase 2 had -- narrows correctly.
+_ComponentT = TypeVar("_ComponentT", bound=ComponentRecord)
 
 
 class TranscriptProjectionError(TranscriptError):

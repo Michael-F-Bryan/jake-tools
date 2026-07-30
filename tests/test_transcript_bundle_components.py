@@ -56,7 +56,7 @@ from jake_tools.transcripts.bundle.components import (
     component_as_body,
     component_input_refs,
 )
-from jake_tools.transcripts.bundle.ids import mint_id
+from jake_tools.transcripts.bundle.ids import mint_id, source_domain
 
 NOW = datetime.now(UTC)
 _FAKE_HASH = hashlib.sha256(b"fixture").hexdigest()
@@ -379,7 +379,12 @@ def test_untimed_turn_carries_no_timing_fields() -> None:
     """The type itself is the enforcement mechanism behind
     transcript.untimed's 'no timing fields present' check -- there is no
     start_ms/end_ms field for a caller to accidentally set."""
-    turn = UntimedTurn(source_segment_id=mint_id("seg"), speaker_label="A", text="hi")
+    turn = UntimedTurn(
+        turn_id=mint_id("turn"),
+        source_segment_id=mint_id("seg"),
+        speaker_label="A",
+        text="hi",
+    )
 
     assert not hasattr(turn, "start_ms")
     assert not hasattr(turn, "end_ms")
@@ -394,6 +399,7 @@ def test_untimed_turn_rejects_an_unknown_field_instead_of_silently_dropping_it()
     were wrong. Fail-closed beats silent-ignore."""
     with pytest.raises(ValidationError, match="start_ms"):
         UntimedTurn(
+            turn_id=mint_id("turn"),
             source_segment_id=mint_id("seg"),
             speaker_label="A",
             text="hi",
@@ -425,7 +431,12 @@ def test_participant_record_rejects_an_unknown_field() -> None:
 def test_untimed_turn_set_body_preserves_supplied_import_order() -> None:
     """M6: untimed turn sets are never reordered."""
     turns = tuple(
-        UntimedTurn(source_segment_id=mint_id("seg"), speaker_label=label, text="x")
+        UntimedTurn(
+            turn_id=mint_id("turn"),
+            source_segment_id=mint_id("seg"),
+            speaker_label=label,
+            text="x",
+        )
         for label in ("C", "A", "B")
     )
 
@@ -449,7 +460,9 @@ def test_timed_turn_rejects_a_zero_length_span() -> None:
     in a canonical timed turn."""
     with pytest.raises(ValidationError, match="half-open"):
         TimedTurn(
+            turn_id=mint_id("turn"),
             source_segment_id=mint_id("seg"),
+            source_artefact_id=mint_id("artefact"),
             speaker_label="A",
             text="x",
             start_ms=1000,
@@ -460,7 +473,9 @@ def test_timed_turn_rejects_a_zero_length_span() -> None:
 def test_timed_turn_rejects_end_before_start() -> None:
     with pytest.raises(ValidationError, match="half-open"):
         TimedTurn(
+            turn_id=mint_id("turn"),
             source_segment_id=mint_id("seg"),
+            source_artefact_id=mint_id("artefact"),
             speaker_label="A",
             text="x",
             start_ms=1000,
@@ -468,15 +483,31 @@ def test_timed_turn_rejects_end_before_start() -> None:
         )
 
 
+#: One artefact ID shared by every helper-built timed turn below, so a
+#: set built from them satisfies TimedTurnSetComponentBody's "every turn's
+#: source artefact must be declared" check without each test restating it.
+_TURN_ARTEFACT_ID = mint_id("artefact")
+
+
 def _timed_turn(
     *, start_ms: int, end_ms: int, segment_id: str | None = None
 ) -> TimedTurn:
     return TimedTurn(
+        turn_id=mint_id("turn"),
         source_segment_id=segment_id or mint_id("seg"),
+        source_artefact_id=_TURN_ARTEFACT_ID,
         speaker_label="A",
         text="x",
         start_ms=start_ms,
         end_ms=end_ms,
+    )
+
+
+def _timed_turn_set_body(turns: tuple[TimedTurn, ...]) -> TimedTurnSetComponentBody:
+    return TimedTurnSetComponentBody(
+        source_artefact_ids=(_TURN_ARTEFACT_ID,),
+        coordinate_domain=source_domain(_TURN_ARTEFACT_ID),
+        turns=turns,
     )
 
 
@@ -487,9 +518,7 @@ def test_timed_turn_set_body_accepts_turns_already_in_canonical_order() -> None:
         _timed_turn(start_ms=200, end_ms=300),
     )
 
-    body = TimedTurnSetComponentBody(
-        source_artefact_id=mint_id("artefact"), turns=turns
-    )
+    body = _timed_turn_set_body(turns)
 
     assert body.turns == turns
 
@@ -503,7 +532,7 @@ def test_timed_turn_set_body_rejects_turns_out_of_canonical_order() -> None:
     )
 
     with pytest.raises(ValidationError, match="canonical order"):
-        TimedTurnSetComponentBody(source_artefact_id=mint_id("artefact"), turns=turns)
+        _timed_turn_set_body(turns)
 
 
 def test_timed_turn_set_body_breaks_ties_on_source_segment_id() -> None:
@@ -517,15 +546,11 @@ def test_timed_turn_set_body_breaks_ties_on_source_segment_id() -> None:
     )
     descending = tuple(reversed(ascending))
 
-    accepted = TimedTurnSetComponentBody(
-        source_artefact_id=mint_id("artefact"), turns=ascending
-    )
+    accepted = _timed_turn_set_body(ascending)
     assert accepted.turns == ascending
 
     with pytest.raises(ValidationError, match="canonical order"):
-        TimedTurnSetComponentBody(
-            source_artefact_id=mint_id("artefact"), turns=descending
-        )
+        _timed_turn_set_body(descending)
 
 
 def test_timed_turn_set_component_re_validates_canonical_order_on_load() -> None:
@@ -539,7 +564,8 @@ def test_timed_turn_set_component_re_validates_canonical_order_on_load() -> None
 
     with pytest.raises(ValidationError, match="canonical order"):
         TimedTurnSetComponent(
-            source_artefact_id=mint_id("artefact"),
+            source_artefact_ids=(_TURN_ARTEFACT_ID,),
+            coordinate_domain=source_domain(_TURN_ARTEFACT_ID),
             turns=turns,
             component_id=mint_id("component"),
             content_hash=_FAKE_HASH,
@@ -660,7 +686,12 @@ def test_assemble_component_record_attaches_identity_to_an_untimed_turn_set() ->
     body = UntimedTurnSetComponentBody(
         source_artefact_id=mint_id("artefact"),
         turns=(
-            UntimedTurn(source_segment_id=mint_id("seg"), speaker_label="A", text="x"),
+            UntimedTurn(
+                turn_id=mint_id("turn"),
+                source_segment_id=mint_id("seg"),
+                speaker_label="A",
+                text="x",
+            ),
         ),
     )
 
@@ -678,10 +709,7 @@ def test_assemble_component_record_attaches_identity_to_an_untimed_turn_set() ->
 
 
 def test_assemble_component_record_attaches_identity_to_a_timed_turn_set() -> None:
-    body = TimedTurnSetComponentBody(
-        source_artefact_id=mint_id("artefact"),
-        turns=(_timed_turn(start_ms=0, end_ms=100),),
-    )
+    body = _timed_turn_set_body((_timed_turn(start_ms=0, end_ms=100),))
 
     record = assemble_component_record(
         body,
@@ -773,7 +801,10 @@ def test_component_input_refs_for_the_new_kinds() -> None:
             source_artefact_id=artefact_id,
             turns=(
                 UntimedTurn(
-                    source_segment_id=mint_id("seg"), speaker_label="A", text="x"
+                    turn_id=mint_id("turn"),
+                    source_segment_id=mint_id("seg"),
+                    speaker_label="A",
+                    text="x",
                 ),
             ),
         ),

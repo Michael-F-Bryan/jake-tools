@@ -64,6 +64,31 @@ ApplyId = Annotated[str, StringConstraints(pattern=_pattern("apply"))]
 AttemptId = Annotated[str, StringConstraints(pattern=_pattern("attempt"))]
 
 
+#: M6: the named coordinate domains a timed component may live in.
+#: ``source:<artefact_id>`` is one media/caption artefact's own domain
+#: (origin = media start = 0); ``combined:<component_id>`` is an assembled
+#: multi-recording timeline's domain. ``wallclock`` and ``external:`` are
+#: deliberately absent -- M6 allows both, but no capability may depend on
+#: an ``external:`` mapping and nothing in v1 records wallclock as truth,
+#: so admitting either into this pattern would only create a way to store
+#: a domain no validator can honour.
+CoordinateDomain = Annotated[
+    str,
+    StringConstraints(pattern=rf"^(source:artefact|combined:component)_{_UUID7}$"),
+]
+
+
+def source_domain(artefact_id: ArtefactId) -> str:
+    """M6: name the ``source:<artefact_id>`` domain of one media artefact."""
+    return f"source:{artefact_id}"
+
+
+def combined_domain(component_id: ComponentId) -> str:
+    """M6: name the ``combined:<component_id>`` domain of one assembled
+    timeline component."""
+    return f"combined:{component_id}"
+
+
 def mint_id(prefix: IdPrefix) -> str:
     """Mint a fresh ``<prefix>_<uuid7>`` ID.
 

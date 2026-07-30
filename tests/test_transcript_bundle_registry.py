@@ -40,7 +40,7 @@ from jake_tools.transcripts.bundle.components import (
     UntimedTurnSetComponentBody,
     assemble_component_record,
 )
-from jake_tools.transcripts.bundle.ids import mint_id
+from jake_tools.transcripts.bundle.ids import mint_id, source_domain
 from jake_tools.transcripts.bundle.registry import (
     REGISTRY,
     CapabilityKey,
@@ -309,6 +309,9 @@ _IMPLEMENTED_KEYS = {
     CapabilityKey.TIMELINE_COMBINED,
     CapabilityKey.INFERENCE_ASR,
     CapabilityKey.INFERENCE_DIARISATION,
+    CapabilityKey.SPEAKERS_MACHINE_CLUSTERED,
+    CapabilityKey.SPEAKERS_HUMAN_REVIEWED,
+    CapabilityKey.SPEAKERS_HUMAN_CONFIRMED,
 }
 
 
@@ -521,7 +524,12 @@ def _untimed_turn_set_component(*, turn_count: int = 1) -> UntimedTurnSetCompone
     body = UntimedTurnSetComponentBody(
         source_artefact_id=mint_id("artefact"),
         turns=tuple(
-            UntimedTurn(source_segment_id=mint_id("seg"), speaker_label="A", text="x")
+            UntimedTurn(
+                turn_id=mint_id("turn"),
+                source_segment_id=mint_id("seg"),
+                speaker_label="A",
+                text="x",
+            )
             for _ in range(turn_count)
         ),
     )
@@ -537,12 +545,15 @@ def _untimed_turn_set_component(*, turn_count: int = 1) -> UntimedTurnSetCompone
 
 
 def _timed_turn_set_component(*, turn_count: int = 1) -> TimedTurnSetComponent:
+    artefact_id = mint_id("artefact")
     turns = []
     start_ms = 0
     for _ in range(turn_count):
         turns.append(
             TimedTurn(
+                turn_id=mint_id("turn"),
                 source_segment_id=mint_id("seg"),
+                source_artefact_id=artefact_id,
                 speaker_label="A",
                 text="x",
                 start_ms=start_ms,
@@ -551,7 +562,9 @@ def _timed_turn_set_component(*, turn_count: int = 1) -> TimedTurnSetComponent:
         )
         start_ms += 100
     body = TimedTurnSetComponentBody(
-        source_artefact_id=mint_id("artefact"), turns=tuple(turns)
+        source_artefact_ids=(artefact_id,),
+        coordinate_domain=source_domain(artefact_id),
+        turns=tuple(turns),
     )
     record = assemble_component_record(
         body,

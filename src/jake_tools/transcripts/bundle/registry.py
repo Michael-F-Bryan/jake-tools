@@ -31,19 +31,31 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..errors import TranscriptError
+from .assignment import (
+    AssignmentCoverage,
+    assignment_coverage,
+    canonical_turns,
+    effective_assignments,
+)
 from .components import (
     AsrResultComponent,
+    ClusterDecision,
     ComponentRecord,
     DiarisationResultComponent,
+    MachineAttributionSetComponent,
     MediaRecordingComponent,
     NotesComponent,
     ParticipantSetComponent,
     ProviderLabelSetComponent,
     RecordingReferenceSetComponent,
+    SpeakerReviewComponent,
+    TextEditLedgerComponent,
+    TextEditOperation,
     TimedTurnSetComponent,
     TimelineCombinedComponent,
     TranscriptAbsenceDeclaration,
     TrustClass,
+    TurnDecision,
     UntimedTurnSetComponent,
 )
 from .ids import ComponentId, RevisionId
@@ -831,6 +843,278 @@ def _make_inference_validator[T: AsrResultComponent | DiarisationResultComponent
     return _validate
 
 
+# -- real validators: the speaker capabilities (M4/M5/M7/M8) ----------------
+
+
+def _dropped_turn_ids(components: Mapping[ComponentId, ComponentRecord]) -> set[str]:
+    """Turn IDs an M9 text pass legitimately removed (``drop-empty``).
+
+    M7's remap set says a dropped node's own bindings are *discharged*,
+    not invalidated -- "routine polish after review therefore never
+    invalidates the applied review". A review or chapter referring to a
+    turn that vanished is only a failure when nothing accounts for the
+    disappearance, and the text-edit ledger is what accounts for it.
+    """
+    return {
+        turn_id
+        for ledger in components.values()
+        if isinstance(ledger, TextEditLedgerComponent)
+        for entry in ledger.entries
+        if entry.operation == TextEditOperation.DROP_EMPTY
+        for turn_id in entry.input_turn_ids
+    }
+
+
+def _single_component[T](
+    context: ValidationContext, kind: type[T], *, label: str
+) -> tuple[T | None, CapabilityRecord | None]:
+    """Resolve a one-cardinality key's single candidate component.
+
+    Returns ``(None, record)`` with a ready-made ``absent``/``failed``
+    record when there is not exactly one -- the shape every
+    one-cardinality validator here already used, factored out because
+    three more keys now need exactly it.
+    """
+    matching = [
+        component
+        for component in context.components.values()
+        if isinstance(component, kind)
+    ]
+    if not matching:
+        return None, CapabilityRecord(
+            key=CapabilityKey(label),
+            status=CapabilityStatus.ABSENT,
+            validator_version=_VALIDATOR_VERSION,
+        )
+    if len(matching) > 1:
+        return None, CapabilityRecord(
+            key=CapabilityKey(label),
+            status=CapabilityStatus.FAILED,
+            component_ids=tuple(component.component_id for component in matching),  # pyright: ignore[reportAttributeAccessIssue]
+            validator_version=_VALIDATOR_VERSION,
+            failure_detail=(
+                f"{len(matching)} candidate components present for the "
+                "one-cardinality key {label}"
+            ),
+        )
+    return matching[0], None
+
+
+def _validate_speakers_machine_clustered(
+    context: ValidationContext,
+) -> CapabilityRecord:
+    """M4: "diarisation clusters exist for the timed set".
+
+    Proves three things, all by inspection: exactly one attribution set
+    exists, every turn it names is a live canonical turn (or one a text
+    pass accounted for), and every cluster it assigns to is one it
+    declares (the component's own validator). The payload carries the
+    coverage fraction M5 asks for. Nothing here maps a cluster to a
+    person -- that is the whole point of the key (F13).
+    """
+    attribution, failure = _single_component(
+        context,
+        MachineAttributionSetComponent,
+        label=CapabilityKey.SPEAKERS_MACHINE_CLUSTERED.value,
+    )
+    if failure is not None:
+        return failure
+    assert attribution is not None
+
+    turns = canonical_turns(context.components)
+    if not turns:
+        return CapabilityRecord(
+            key=CapabilityKey.SPEAKERS_MACHINE_CLUSTERED,
+            status=CapabilityStatus.FAILED,
+            component_ids=(attribution.component_id,),
+            validator_version=_VALIDATOR_VERSION,
+            failure_detail=(
+                "machine clusters exist but no single canonical timed turn set "
+                "does, so there is nothing the clusters are clusters *of*"
+            ),
+        )
+    live_turn_ids = {turn.turn_id for turn in turns} | _dropped_turn_ids(
+        context.components
+    )
+    named = {assignment.turn_id for assignment in attribution.assignments} | set(
+        attribution.unattributed_turn_ids
+    )
+    unresolved = sorted(named - live_turn_ids)
+    if unresolved:
+        return CapabilityRecord(
+            key=CapabilityKey.SPEAKERS_MACHINE_CLUSTERED,
+            status=CapabilityStatus.FAILED,
+            component_ids=(attribution.component_id,),
+            validator_version=_VALIDATOR_VERSION,
+            failure_detail=(
+                f"attribution names turn ID(s) absent from the canonical turn set "
+                f"and unaccounted for by any text-edit ledger: {unresolved}"
+            ),
+        )
+    if not named:
+        return CapabilityRecord(
+            key=CapabilityKey.SPEAKERS_MACHINE_CLUSTERED,
+            status=CapabilityStatus.FAILED,
+            component_ids=(attribution.component_id,),
+            validator_version=_VALIDATOR_VERSION,
+            failure_detail=(
+                "attribution set names no canonical turn at all -- clusters with "
+                "nothing attributed to them prove nothing about the timed set"
+            ),
+        )
+    return CapabilityRecord(
+        key=CapabilityKey.SPEAKERS_MACHINE_CLUSTERED,
+        status=CapabilityStatus.PRESENT_VALIDATED,
+        component_ids=(attribution.component_id,),
+        coverage=(
+            f"attributed={len(attribution.assignments)}",
+            f"unattributed={len(attribution.unattributed_turn_ids)}",
+            f"total_turns={len(turns)}",
+            f"clusters={len(attribution.clusters)}",
+        ),
+        input_revision_ids=(context.revision_id,),
+        provenance_classes=("machine-clustered",),
+        validator_version=_VALIDATOR_VERSION,
+    )
+
+
+def _review_target_failures(
+    review: SpeakerReviewComponent, context: ValidationContext
+) -> tuple[str, ...]:
+    """Which of a review's decisions no longer resolve (M7's remap set).
+
+    Turn-scoped decisions may legitimately lose their target to an M9
+    ``drop-empty`` (bindings discharged); anything else vanishing means a
+    structural change outside M7's closed remap set, which invalidates the
+    review explicitly rather than carrying it silently onto other turns.
+    """
+    live_turn_ids = {
+        turn.turn_id for turn in canonical_turns(context.components)
+    } | _dropped_turn_ids(context.components)
+    live_cluster_ids = {
+        cluster.cluster_id
+        for component in context.components.values()
+        if isinstance(component, MachineAttributionSetComponent)
+        for cluster in component.clusters
+    }
+    problems: list[str] = []
+    for decision in review.decisions:
+        match decision:
+            case TurnDecision() if decision.turn_id not in live_turn_ids:
+                problems.append(f"turn {decision.turn_id}")
+            case ClusterDecision() if decision.cluster_id not in live_cluster_ids:
+                problems.append(f"cluster {decision.cluster_id}")
+            case _:
+                continue
+    return tuple(problems)
+
+
+def _speaker_coverage_payload(
+    context: ValidationContext,
+) -> tuple[AssignmentCoverage, tuple[str, ...]]:
+    assignments = effective_assignments(context.components)
+    coverage = assignment_coverage(assignments.values())
+    provenance_classes = tuple(
+        sorted(
+            provenance.value
+            for provenance, count in coverage.by_provenance.items()
+            if count
+        )
+    )
+    return coverage, provenance_classes
+
+
+def _validate_speakers_human_reviewed(context: ValidationContext) -> CapabilityRecord:
+    """M4: "review applied; coverage + unresolved counts".
+
+    Present-validated means an applied review exists whose decisions all
+    still resolve. It deliberately does *not* require full coverage: a
+    partial review is a real, recorded human act, and M8 keeps partial and
+    complete distinguishable by coverage rather than by refusing one.
+    ``speakers.human-confirmed`` is where full coverage matters.
+    """
+    review, failure = _single_component(
+        context,
+        SpeakerReviewComponent,
+        label=CapabilityKey.SPEAKERS_HUMAN_REVIEWED.value,
+    )
+    if failure is not None:
+        return failure
+    assert review is not None
+
+    problems = _review_target_failures(review, context)
+    if problems:
+        return CapabilityRecord(
+            key=CapabilityKey.SPEAKERS_HUMAN_REVIEWED,
+            status=CapabilityStatus.FAILED,
+            component_ids=(review.component_id,),
+            validator_version=_VALIDATOR_VERSION,
+            failure_detail=(
+                "applied review names target(s) that no longer exist and are not "
+                f"accounted for by M7's remap set: {list(problems)}"
+            ),
+        )
+    coverage, provenance_classes = _speaker_coverage_payload(context)
+    return CapabilityRecord(
+        key=CapabilityKey.SPEAKERS_HUMAN_REVIEWED,
+        status=CapabilityStatus.PRESENT_VALIDATED,
+        component_ids=(review.component_id,),
+        coverage=(
+            f"reviewed={coverage.reviewed}",
+            f"total_turns={coverage.total_turns}",
+            f"unresolved={coverage.unresolved}",
+            f"gate_satisfying={coverage.gate_satisfying}",
+        ),
+        input_revision_ids=(review.input_revision_id, context.revision_id),
+        provenance_classes=provenance_classes,
+        validator_version=_VALIDATOR_VERSION,
+    )
+
+
+def _validate_speakers_human_confirmed(context: ValidationContext) -> CapabilityRecord:
+    """M4: "full-coverage confirmed assignments".
+
+    Every canonical turn must resolve to a participant *via a reviewed
+    decision*. An explicit ``unclear-speaker`` is a legitimate and
+    gate-satisfying review outcome (D1) but is not a confirmed assignment,
+    so a document carrying one is honestly ``absent`` here rather than
+    confirmed -- which is exactly the distinction that stops "we reviewed
+    it" from being read as "we know who everyone was".
+    """
+    reviews = [
+        component
+        for component in context.components.values()
+        if isinstance(component, SpeakerReviewComponent)
+    ]
+    if not reviews:
+        return CapabilityRecord(
+            key=CapabilityKey.SPEAKERS_HUMAN_CONFIRMED,
+            status=CapabilityStatus.ABSENT,
+            validator_version=_VALIDATOR_VERSION,
+        )
+    coverage, provenance_classes = _speaker_coverage_payload(context)
+    if not coverage.fully_confirmed:
+        return CapabilityRecord(
+            key=CapabilityKey.SPEAKERS_HUMAN_CONFIRMED,
+            status=CapabilityStatus.ABSENT,
+            component_ids=tuple(review.component_id for review in reviews),
+            validator_version=_VALIDATOR_VERSION,
+            failure_detail=(
+                f"{coverage.reviewed}/{coverage.total_turns} turns reviewed, "
+                f"{coverage.unresolved} unresolved"
+            ),
+        )
+    return CapabilityRecord(
+        key=CapabilityKey.SPEAKERS_HUMAN_CONFIRMED,
+        status=CapabilityStatus.PRESENT_VALIDATED,
+        component_ids=tuple(review.component_id for review in reviews),
+        coverage=(f"reviewed={coverage.reviewed}/{coverage.total_turns}",),
+        input_revision_ids=(context.revision_id,),
+        provenance_classes=provenance_classes,
+        validator_version=_VALIDATOR_VERSION,
+    )
+
+
 # -- stub validator: every other key -----------------------------------------
 
 
@@ -969,6 +1253,25 @@ def _build_registry() -> dict[CapabilityKey, RegistryEntry]:
             key=CapabilityKey.INFERENCE_DIARISATION,
             component_type=DiarisationResultComponent,
         ),
+        implemented=True,
+    )
+
+    entries[CapabilityKey.SPEAKERS_MACHINE_CLUSTERED] = RegistryEntry(
+        key=CapabilityKey.SPEAKERS_MACHINE_CLUSTERED,
+        cardinality=cardinality_of(CapabilityKey.SPEAKERS_MACHINE_CLUSTERED),
+        validator=_validate_speakers_machine_clustered,
+        implemented=True,
+    )
+    entries[CapabilityKey.SPEAKERS_HUMAN_REVIEWED] = RegistryEntry(
+        key=CapabilityKey.SPEAKERS_HUMAN_REVIEWED,
+        cardinality=cardinality_of(CapabilityKey.SPEAKERS_HUMAN_REVIEWED),
+        validator=_validate_speakers_human_reviewed,
+        implemented=True,
+    )
+    entries[CapabilityKey.SPEAKERS_HUMAN_CONFIRMED] = RegistryEntry(
+        key=CapabilityKey.SPEAKERS_HUMAN_CONFIRMED,
+        cardinality=cardinality_of(CapabilityKey.SPEAKERS_HUMAN_CONFIRMED),
+        validator=_validate_speakers_human_confirmed,
         implemented=True,
     )
 

@@ -39,14 +39,27 @@ manifest.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import itertools
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal, NamedTuple, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .ids import ArtefactId, AttemptId, ComponentId, ParticipantId, SegmentId, SourceId
+from .ids import (
+    ArtefactId,
+    AttemptId,
+    ClusterId,
+    ComponentId,
+    CoordinateDomain,
+    ParticipantId,
+    ReviewId,
+    RevisionId,
+    SegmentId,
+    SourceId,
+    TurnId,
+)
 from .records import Sha256Hex
 
 # -- M5: speaker trust classes --------------------------------------------
@@ -195,6 +208,13 @@ class ComponentKind(StrEnum):
     TIMELINE_COMBINED = "timeline-combined"
     ASR_RESULT = "asr-result"
     DIARISATION_RESULT = "diarisation-result"
+    NORMALISATION_LEDGER = "normalisation-ledger"
+    MACHINE_ATTRIBUTION_SET = "machine-attribution-set"
+    SPEAKER_HYPOTHESIS_SET = "speaker-hypothesis-set"
+    SPEAKER_REVIEW = "speaker-review"
+    TEXT_EDIT_LEDGER = "text-edit-ledger"
+    CHAPTER_SET = "chapter-set"
+    MINUTES = "minutes"
 
 
 def _check_authored_matches_notes_kind(
@@ -305,18 +325,39 @@ class UntimedTurn(BaseModel):
     """M6/M7/D6: one speaker-labelled turn with no timing evidence.
 
     ``source_segment_id`` is minted by the caller (an adapter) at parse
-    time (M7), never by this module. The absence of any ``start_ms``/
-    ``end_ms`` field is itself the enforcement mechanism behind
-    ``transcript.untimed``'s "no timing fields present" check
-    (``registry.py``) -- there is no value this type could hold that
-    would smuggle timing in; the type simply has no such field to set.
+    time (M7), never by this module. ``turn_id`` is the M7 *editorial*
+    node ID -- a different concept from the immutable source-segment ID,
+    and the thing chapters, review decisions, and M10 minutes evidence
+    all bind to. The absence of any ``start_ms``/``end_ms`` field is
+    itself the enforcement mechanism behind ``transcript.untimed``'s "no
+    timing fields present" check (``registry.py``) -- there is no value
+    this type could hold that would smuggle timing in; the type simply
+    has no such field to set.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    turn_id: TurnId
     source_segment_id: SegmentId
     speaker_label: str = Field(min_length=1)
     text: str = Field(min_length=1)
+
+
+def _check_distinct_turn_ids(turn_ids: Sequence[str]) -> None:
+    """M7: ``turn_id`` is the editorial node identity every binding
+    (chapters, review decisions, minutes evidence) resolves against, so a
+    duplicate inside one turn set would make those bindings ambiguous --
+    refused at construction rather than discovered when a chapter
+    silently covers two different turns.
+    """
+    duplicates = sorted(
+        {turn_id for turn_id in turn_ids if turn_ids.count(turn_id) > 1}
+    )
+    if duplicates:
+        raise ValueError(
+            f"duplicate turn_id(s) within one turn set: {duplicates} -- M7 turn IDs "
+            "identify one editorial node each."
+        )
 
 
 class UntimedTurnSetComponentBody(BaseModel):
@@ -333,6 +374,11 @@ class UntimedTurnSetComponentBody(BaseModel):
     source_artefact_id: ArtefactId
     turns: tuple[UntimedTurn, ...] = Field(min_length=1)
 
+    @model_validator(mode="after")
+    def _check_turn_ids(self) -> Self:
+        _check_distinct_turn_ids([turn.turn_id for turn in self.turns])
+        return self
+
 
 class UntimedTurnSetComponent(UntimedTurnSetComponentBody):
     component_id: ComponentId
@@ -344,11 +390,21 @@ class TimedTurn(BaseModel):
     """M6: one canonical timed turn -- half-open ``[start_ms, end_ms)``,
     ``end_ms > start_ms`` strictly (zero-length cues are legal only in
     raw source evidence, never in a canonical timed turn -- M6).
+
+    ``start_ms``/``end_ms`` are expressed in the *set's* declared
+    coordinate domain (:attr:`TimedTurnSetComponentBody.coordinate_domain`),
+    not necessarily in ``source_artefact_id``'s own domain: a canonical
+    multi-recording set lives in ``combined:<component_id>`` while each
+    turn still records which recording its evidence came from, which is
+    what M8's source-range review scope and M6's reversible mappings both
+    need.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    turn_id: TurnId
     source_segment_id: SegmentId
+    source_artefact_id: ArtefactId
     speaker_label: str = Field(min_length=1)
     text: str = Field(min_length=1)
     start_ms: int = Field(ge=0)
@@ -378,7 +434,8 @@ class TimedTurnSetComponentBody(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     component_kind: Literal[ComponentKind.TIMED_TURN_SET] = ComponentKind.TIMED_TURN_SET
-    source_artefact_id: ArtefactId
+    source_artefact_ids: tuple[ArtefactId, ...] = Field(min_length=1)
+    coordinate_domain: CoordinateDomain
     turns: tuple[TimedTurn, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -391,6 +448,21 @@ class TimedTurnSetComponentBody(BaseModel):
                 "turns are not in M6 canonical order (start_ms, end_ms, "
                 "source_segment_id ascending); the adapter/normaliser must sort "
                 "before constructing this component."
+            )
+        _check_distinct_turn_ids([turn.turn_id for turn in self.turns])
+        declared = set(self.source_artefact_ids)
+        undeclared = sorted(
+            {
+                turn.source_artefact_id
+                for turn in self.turns
+                if turn.source_artefact_id not in declared
+            }
+        )
+        if undeclared:
+            raise ValueError(
+                f"turn(s) cite source artefact(s) this set does not declare: "
+                f"{undeclared} -- source_artefact_ids is the set's own input "
+                "closure (M16) and must name every artefact its turns come from."
             )
         return self
 
@@ -850,6 +922,692 @@ class DiarisationResultComponent(DiarisationResultComponentBody):
     created_at: datetime
 
 
+# -- M7: normalisation lineage and coverage ledgers ------------------------
+
+
+class DropReason(StrEnum):
+    """M7's closed lineage vocabulary for what normalisation removes.
+
+    Deliberately only the two dispositions normalisation itself produces:
+    ``split_from``/``merged_from`` are created where splits and merges
+    actually happen (the M9 text transforms), not here.
+    """
+
+    DROPPED_AS_DUPLICATE = "dropped_as_duplicate"
+    DROPPED_AS_EMPTY = "dropped_as_empty"
+
+
+class DroppedSegmentRecord(BaseModel):
+    """M7: one raw source segment normalisation removed, and why.
+
+    A duplicate must name the segment that was *retained* in its place --
+    that reference is what makes the raw-segment ledger auditable rather
+    than merely a count; an empty (zero-length) segment has no retained
+    counterpart and must not claim one.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source_segment_id: SegmentId
+    source_artefact_id: ArtefactId
+    reason: DropReason
+    retained_source_segment_id: SegmentId | None = None
+    detail: str = ""
+
+    @model_validator(mode="after")
+    def _check_retained_ref_matches_reason(self) -> Self:
+        if self.reason == DropReason.DROPPED_AS_DUPLICATE:
+            if self.retained_source_segment_id is None:
+                raise ValueError(
+                    "a dropped_as_duplicate record must name the retained segment "
+                    "it was a duplicate of (M7)."
+                )
+        elif self.retained_source_segment_id is not None:
+            raise ValueError(
+                f"reason {self.reason.value!r} must not name a retained segment -- "
+                "only dropped_as_duplicate has one (M7)."
+            )
+        return self
+
+
+class CoverageLedger(BaseModel):
+    """M7: one coverage universe's accounting. ``accounted + dropped ==
+    total`` exactly -- a ledger that does not add up is the failure mode
+    this type exists to make unrepresentable.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    total: int = Field(ge=0)
+    accounted: int = Field(ge=0)
+    dropped: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _check_ledger_balances(self) -> Self:
+        if self.accounted + self.dropped != self.total:
+            raise ValueError(
+                f"coverage ledger does not balance: accounted={self.accounted} + "
+                f"dropped={self.dropped} != total={self.total} (M7)."
+            )
+        return self
+
+
+class NormalisationLedgerComponentBody(BaseModel):
+    """M7: the audit trail behind one normalisation pass.
+
+    Two of M7's three coverage universes live here, never conflated:
+    ``raw_source_segments`` (every raw ASR token this pass saw, and what
+    became of it) and ``canonical_turns`` (the editorial sequence it
+    produced). The third -- rendered turns -- is a render-time concern and
+    lives on the render record (M17).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_kind: Literal[ComponentKind.NORMALISATION_LEDGER] = (
+        ComponentKind.NORMALISATION_LEDGER
+    )
+    source_artefact_ids: tuple[ArtefactId, ...] = Field(min_length=1)
+    config_hash: Sha256Hex
+    raw_source_segments: CoverageLedger
+    canonical_turns: CoverageLedger
+    dropped: tuple[DroppedSegmentRecord, ...] = ()
+
+    @model_validator(mode="after")
+    def _check_dropped_matches_ledger(self) -> Self:
+        if len(self.dropped) != self.raw_source_segments.dropped:
+            raise ValueError(
+                f"{len(self.dropped)} dropped-segment record(s) but the raw-segment "
+                f"ledger claims {self.raw_source_segments.dropped} dropped -- the "
+                "ledger must account for exactly the records it carries (M7)."
+            )
+        return self
+
+
+class NormalisationLedgerComponent(NormalisationLedgerComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+# -- M4/M5: machine voice clusters and their per-turn attribution -----------
+
+
+class SpeakerCluster(BaseModel):
+    """M5: one machine voice cluster, scoped to a single diarisation
+    output over a single media artefact. ``raw_label`` (``SPEAKER_00``) is
+    retained as a *field*, never as identity (F13): a rerun mints new
+    cluster IDs, and the same raw label on a different recording is a
+    different cluster.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    cluster_id: ClusterId
+    raw_label: str = Field(min_length=1)
+    media_artefact_id: ArtefactId
+    diarisation_artefact_id: ArtefactId
+    segment_count: int = Field(ge=1)
+    total_ms: int = Field(ge=0)
+
+
+class TurnClusterAssignment(BaseModel):
+    """M7: one canonical turn's machine hypothesis, with the overlap that
+    justified it (maximal-overlap token->segment rule)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    turn_id: TurnId
+    cluster_id: ClusterId
+    overlap_ms: int = Field(ge=0)
+
+
+class MachineAttributionSetComponentBody(BaseModel):
+    """M4's ``speakers.machine-clustered`` proof: clusters exist for the
+    timed set, and each canonical turn is either attributed to exactly one
+    of them or explicitly listed as unattributed.
+
+    Machine clusters are **not** participant identities (F13, corpus §6):
+    nothing here names a participant, and no rung above M8's rung 7 can
+    read this component -- which is the structural reason a bare machine
+    hypothesis can never satisfy the meeting-note speaker gate.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_kind: Literal[ComponentKind.MACHINE_ATTRIBUTION_SET] = (
+        ComponentKind.MACHINE_ATTRIBUTION_SET
+    )
+    clusters: tuple[SpeakerCluster, ...] = Field(min_length=1)
+    assignments: tuple[TurnClusterAssignment, ...] = ()
+    unattributed_turn_ids: tuple[TurnId, ...] = ()
+
+    @model_validator(mode="after")
+    def _check_cluster_and_turn_identity(self) -> Self:
+        cluster_ids = [cluster.cluster_id for cluster in self.clusters]
+        if len(set(cluster_ids)) != len(cluster_ids):
+            raise ValueError("duplicate cluster_id within one attribution set (M1).")
+        undeclared = sorted(
+            {
+                assignment.cluster_id
+                for assignment in self.assignments
+                if assignment.cluster_id not in set(cluster_ids)
+            }
+        )
+        if undeclared:
+            raise ValueError(
+                f"assignment(s) name cluster(s) this set does not declare: {undeclared}."
+            )
+        turn_ids = [assignment.turn_id for assignment in self.assignments] + list(
+            self.unattributed_turn_ids
+        )
+        _check_distinct_turn_ids(turn_ids)
+        return self
+
+
+class MachineAttributionSetComponent(MachineAttributionSetComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+# -- M8 rung 7: machine hypotheses (proposals, never assignments) -----------
+
+
+class SpeakerHypothesis(BaseModel):
+    """M8 rung 7: the machine's *proposed* participant for one cluster.
+
+    ``participant_id`` may be ``None`` -- "no candidate the evidence
+    supports" is a first-class outcome, not a gap to be filled by
+    guessing. A hypothesis renders into a transcript honestly labelled as
+    a hypothesis, and never into a meeting note (M5).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    cluster_id: ClusterId
+    participant_id: ParticipantId | None = None
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence_turn_ids: tuple[TurnId, ...] = ()
+    rationale: str = Field(min_length=1)
+
+
+class SpeakerHypothesisSetComponentBody(BaseModel):
+    """M8: one proposal pass's hypotheses, at most one per cluster."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_kind: Literal[ComponentKind.SPEAKER_HYPOTHESIS_SET] = (
+        ComponentKind.SPEAKER_HYPOTHESIS_SET
+    )
+    proposer: str = Field(min_length=1)
+    config_hash: Sha256Hex
+    hypotheses: tuple[SpeakerHypothesis, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _one_hypothesis_per_cluster(self) -> Self:
+        cluster_ids = [hypothesis.cluster_id for hypothesis in self.hypotheses]
+        if len(set(cluster_ids)) != len(cluster_ids):
+            raise ValueError(
+                "more than one hypothesis for the same cluster -- rung 7 resolves "
+                "one candidate per cluster, so competing proposals must be "
+                "reconciled by the proposer, not left for the ladder to guess (M8)."
+            )
+        return self
+
+
+class SpeakerHypothesisSetComponent(SpeakerHypothesisSetComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+# -- M8: the applied human review ------------------------------------------
+
+
+class ReviewScope(StrEnum):
+    """M8's four decision scopes, in precedence order (rungs 1-4)."""
+
+    TURN = "turn"
+    SOURCE_RANGE = "source-range"
+    CLUSTER = "cluster"
+    PROVIDER_LABEL = "provider-label"
+
+
+class ReviewDecisionKind(StrEnum):
+    """M8: an assignment, or the reviewer's explicit uncertainty.
+
+    ``unclear-speaker`` is a *decision*, not an absence: at its scope it
+    blocks every weaker rung, so a reviewer who has genuinely looked and
+    cannot tell is never overridden by a machine guess.
+    """
+
+    ASSIGN = "assign"
+    UNCLEAR_SPEAKER = "unclear-speaker"
+
+
+class _ReviewDecisionBase(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: ReviewDecisionKind
+    participant_id: ParticipantId | None = None
+    rationale: str = ""
+
+    @model_validator(mode="after")
+    def _check_participant_matches_kind(self) -> Self:
+        if self.kind == ReviewDecisionKind.ASSIGN:
+            if self.participant_id is None:
+                raise ValueError("an 'assign' decision must name a participant (M8).")
+        elif self.participant_id is not None:
+            raise ValueError(
+                "an 'unclear-speaker' decision must not name a participant -- it is "
+                "projected as participant_unresolved, never stored as a record (M1)."
+            )
+        return self
+
+
+class TurnDecision(_ReviewDecisionBase):
+    """M8 rung 1: the narrowest, highest-precedence override."""
+
+    scope: Literal[ReviewScope.TURN] = ReviewScope.TURN
+    turn_id: TurnId
+
+
+class SourceRangeDecision(_ReviewDecisionBase):
+    """M8 rung 2: a half-open ``[start_ms, end_ms)`` window in one source
+    recording's own domain -- deliberately *source* coordinates, so a
+    reviewer's range decision survives a combined timeline being rebuilt.
+    """
+
+    scope: Literal[ReviewScope.SOURCE_RANGE] = ReviewScope.SOURCE_RANGE
+    source_artefact_id: ArtefactId
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _check_half_open_span(self) -> Self:
+        if self.end_ms <= self.start_ms:
+            raise ValueError(
+                f"review range [{self.start_ms}, {self.end_ms}) is not half-open "
+                "with end_ms > start_ms (M6)."
+            )
+        return self
+
+
+class ClusterDecision(_ReviewDecisionBase):
+    """M8 rung 3: a voice-specific default for one machine cluster."""
+
+    scope: Literal[ReviewScope.CLUSTER] = ReviewScope.CLUSTER
+    cluster_id: ClusterId
+
+
+class ProviderLabelDecision(_ReviewDecisionBase):
+    """M8 rung 4: a default for one raw provider label. Outranked by rung
+    3 because a room-proxy label describes an aggregate, not a voice (D1).
+    """
+
+    scope: Literal[ReviewScope.PROVIDER_LABEL] = ReviewScope.PROVIDER_LABEL
+    raw_label: str = Field(min_length=1)
+
+
+ReviewDecision = Annotated[
+    TurnDecision | SourceRangeDecision | ClusterDecision | ProviderLabelDecision,
+    Field(discriminator="scope"),
+]
+
+
+class SpeakerReviewComponentBody(BaseModel):
+    """M8: one applied ``ReviewDecisionSet``, bound to the exact revision
+    and inventories it was produced against.
+
+    ``pack_item_ids`` is the full list of items the exported pack asked
+    the reviewer to address; which of them a decision actually targets is
+    derived, never stored -- that is what makes "a partial review" (some
+    items never addressed) mechanically distinguishable from "a complete
+    review with unresolved items" (every item addressed, some as
+    ``unclear-speaker``) without a flag anyone could set wrongly (M8).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_kind: Literal[ComponentKind.SPEAKER_REVIEW] = ComponentKind.SPEAKER_REVIEW
+    review_id: ReviewId
+    input_revision_id: RevisionId
+    turn_inventory_hash: Sha256Hex
+    cluster_inventory_hash: Sha256Hex
+    pack_schema_version: str = Field(min_length=1)
+    reviewer: str = Field(min_length=1)
+    pack_item_ids: tuple[str, ...] = ()
+    decisions: tuple[ReviewDecision, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_decision_targets(self) -> Self:
+        targets: list[tuple[str, str]] = []
+        ranges: list[SourceRangeDecision] = []
+        for decision in self.decisions:
+            match decision:
+                case TurnDecision():
+                    targets.append((decision.scope.value, decision.turn_id))
+                case ClusterDecision():
+                    targets.append((decision.scope.value, decision.cluster_id))
+                case ProviderLabelDecision():
+                    targets.append((decision.scope.value, decision.raw_label))
+                case SourceRangeDecision():
+                    ranges.append(decision)
+        duplicates = sorted({t for t in targets if targets.count(t) > 1})
+        if duplicates:
+            raise ValueError(
+                f"more than one decision for the same scope+target: {duplicates} -- "
+                "M8's ladder resolves one decision per scope, so a conflict must be "
+                "rejected at review validation, not resolved by precedence."
+            )
+        for first, second in itertools.combinations(ranges, 2):
+            if first.source_artefact_id != second.source_artefact_id:
+                continue
+            if first.start_ms < second.end_ms and second.start_ms < first.end_ms:
+                raise ValueError(
+                    f"overlapping source-range decisions on {first.source_artefact_id}: "
+                    f"[{first.start_ms}, {first.end_ms}) and [{second.start_ms}, "
+                    f"{second.end_ms}) -- rejected at review validation (M8)."
+                )
+        return self
+
+
+class SpeakerReviewComponent(SpeakerReviewComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+# -- M9: text-edit ledger ---------------------------------------------------
+
+
+class TextEditMode(StrEnum):
+    """M9's two distinct passes -- distinguished in provenance even when
+    one public command orchestrates both (corpus §7)."""
+
+    CORRECT = "correct"
+    POLISH = "polish"
+
+
+class TextEditOperation(StrEnum):
+    """M7's closed v1 remap set, as it appears in an M9 ledger.
+
+    ``split`` is admitted by the type but refused by the polish/correct
+    transforms in v1 (no fixture needs it and M7's remap set does not
+    define how bindings follow a split); it exists here so a later slice
+    that does need it records the lineage rather than inventing a new one.
+    """
+
+    IDENTITY = "identity"
+    TEXT_EDIT = "text-edit"
+    MERGE = "merge"
+    SPLIT = "split"
+    DROP_EMPTY = "drop-empty"
+
+
+class RemovalReason(StrEnum):
+    """M9's closed removal-reason enum. Nothing else is a legal reason to
+    remove words from transcript text."""
+
+    FILLER = "filler"
+    STUTTER_REPEAT = "stutter-repeat"
+    FALSE_START = "false-start"
+    NON_LEXICAL = "non-lexical"
+    DUPLICATE = "duplicate"
+
+
+class TextEditEntry(BaseModel):
+    """M9: one accounted-for change (or non-change) between the input and
+    output turn sets."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    operation: TextEditOperation
+    input_turn_ids: tuple[TurnId, ...] = Field(min_length=1)
+    output_turn_ids: tuple[TurnId, ...] = ()
+    old_text_sha256: Sha256Hex
+    new_text_sha256: Sha256Hex | None = None
+    removal_reasons: tuple[RemovalReason, ...] = ()
+    evidence_ref: str = ""
+
+    @model_validator(mode="after")
+    def _check_operation_shape(self) -> Self:
+        match self.operation:
+            case TextEditOperation.DROP_EMPTY:
+                if self.output_turn_ids or self.new_text_sha256 is not None:
+                    raise ValueError(
+                        "a drop-empty entry produces no output turn and no new text."
+                    )
+                if not self.removal_reasons:
+                    raise ValueError(
+                        "a drop-empty entry must record why the turn emptied (M9's "
+                        "closed removal-reason enum)."
+                    )
+            case TextEditOperation.MERGE:
+                if len(self.input_turn_ids) < 2 or len(self.output_turn_ids) != 1:
+                    raise ValueError(
+                        "a merge entry takes two or more input turns and produces "
+                        "exactly one output turn (M7)."
+                    )
+            case TextEditOperation.SPLIT:
+                if len(self.input_turn_ids) != 1 or len(self.output_turn_ids) < 2:
+                    raise ValueError(
+                        "a split entry takes one input turn and produces two or "
+                        "more output turns (M7)."
+                    )
+            case TextEditOperation.IDENTITY | TextEditOperation.TEXT_EDIT:
+                if len(self.input_turn_ids) != 1 or len(self.output_turn_ids) != 1:
+                    raise ValueError(
+                        f"a {self.operation.value} entry maps exactly one turn to "
+                        "one turn (M7: text-only edits retain the turn_id)."
+                    )
+                if self.input_turn_ids != self.output_turn_ids:
+                    raise ValueError(
+                        f"a {self.operation.value} entry must retain the turn_id "
+                        "(M7 identity remap); a changed ID is a split or a merge."
+                    )
+        if self.operation != TextEditOperation.DROP_EMPTY and (
+            self.new_text_sha256 is None
+        ):
+            raise ValueError(
+                f"a {self.operation.value} entry must record the resulting text hash."
+            )
+        if (
+            self.operation == TextEditOperation.IDENTITY
+            and self.new_text_sha256 != self.old_text_sha256
+        ):
+            raise ValueError(
+                "an identity entry's text hash must be unchanged -- a changed hash "
+                "is a text-edit and must be recorded as one (M9)."
+            )
+        return self
+
+
+class TextEditLedgerComponentBody(BaseModel):
+    """M9: the complete diff accounting behind one ``text.corrected`` /
+    ``text.polished`` proof.
+
+    ``input_turn_set_component_id`` and ``output_turn_set_component_id``
+    are recorded for audit but deliberately **not** declared as component
+    input refs (:func:`component_input_refs`): the input turn set is
+    superseded by this very transform (M21), so a hard ref to it would
+    dangle the moment the correction landed, and the output set may itself
+    be superseded by a later pass. Component-to-component hard refs are
+    only safe to declare for components nothing supersedes.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_kind: Literal[ComponentKind.TEXT_EDIT_LEDGER] = (
+        ComponentKind.TEXT_EDIT_LEDGER
+    )
+    mode: TextEditMode
+    input_turn_set_component_id: ComponentId
+    output_turn_set_component_id: ComponentId
+    editor: str = Field(min_length=1)
+    config_hash: Sha256Hex
+    entries: tuple[TextEditEntry, ...] = Field(min_length=1)
+
+
+class TextEditLedgerComponent(TextEditLedgerComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+# -- M10: chapters ----------------------------------------------------------
+
+
+class ChapterRecord(BaseModel):
+    """M10: one chapter, citing the exact ordered turn range it covers.
+
+    Titles and summaries derive only from covered turns -- ``turn_ids`` is
+    both the citation and the coverage claim the ``chapters`` validator
+    checks against the canonical turn sequence.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    title: str = Field(min_length=1)
+    summary: str = ""
+    turn_ids: tuple[TurnId, ...] = Field(min_length=1)
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _check_span(self) -> Self:
+        if self.end_ms <= self.start_ms:
+            raise ValueError(
+                f"chapter {self.title!r} span [{self.start_ms}, {self.end_ms}) is "
+                "not half-open with end_ms > start_ms (M6)."
+            )
+        return self
+
+
+class ChapterSetComponentBody(BaseModel):
+    """M4's ``chapters`` proof: an ordered partition of the canonical turn
+    sequence. Disjointness is enforced here; *exact* coverage needs the
+    turn set too and is enforced by the registry validator.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_kind: Literal[ComponentKind.CHAPTER_SET] = ComponentKind.CHAPTER_SET
+    chapters: tuple[ChapterRecord, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_disjoint_and_ordered(self) -> Self:
+        seen: set[str] = set()
+        for chapter in self.chapters:
+            overlap = sorted(seen.intersection(chapter.turn_ids))
+            if overlap:
+                raise ValueError(
+                    f"chapter {chapter.title!r} covers turn(s) already covered by an "
+                    f"earlier chapter: {overlap} -- every canonical turn belongs to "
+                    "exactly one chapter (M7)."
+                )
+            seen.update(chapter.turn_ids)
+        starts = [chapter.start_ms for chapter in self.chapters]
+        if starts != sorted(starts):
+            raise ValueError("chapters must be listed in ascending start_ms order.")
+        return self
+
+
+class ChapterSetComponent(ChapterSetComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+# -- M10/M20: minutes -------------------------------------------------------
+
+
+class FindingKind(StrEnum):
+    DECISION = "decision"
+    ACTION = "action"
+    RISK = "risk"
+    QUESTION = "question"
+
+
+class ClaimStatus(StrEnum):
+    """M10: where a claim came from. Rendered visibly distinct (D2, F22),
+    which is why it is a stored field and not a rendering heuristic."""
+
+    TRANSCRIPT_DERIVED = "transcript-derived"
+    NOTES_DERIVED = "notes-derived"
+    MIXED = "mixed"
+
+
+class _EvidencedClaim(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    text: str = Field(min_length=1)
+    claim_status: ClaimStatus
+    evidence_turn_ids: tuple[TurnId, ...] = ()
+    evidence_section_ids: tuple[SegmentId, ...] = ()
+
+    @model_validator(mode="after")
+    def _check_evidence_matches_claim_status(self) -> Self:
+        has_turns = bool(self.evidence_turn_ids)
+        has_sections = bool(self.evidence_section_ids)
+        if not has_turns and not has_sections:
+            raise ValueError(
+                "every minutes claim carries at least one evidence ref -- turn IDs "
+                "and/or notes section IDs (M10); an unsourced claim is invalid, not "
+                "merely unattributed."
+            )
+        expected = {
+            (True, False): ClaimStatus.TRANSCRIPT_DERIVED,
+            (False, True): ClaimStatus.NOTES_DERIVED,
+            (True, True): ClaimStatus.MIXED,
+        }[(has_turns, has_sections)]
+        if self.claim_status != expected:
+            raise ValueError(
+                f"claim_status {self.claim_status.value!r} disagrees with the "
+                f"evidence actually cited (expected {expected.value!r}) -- the "
+                "status is a fact about the refs, not a label a stage may choose."
+            )
+        return self
+
+
+class MinutesSummary(_EvidencedClaim):
+    """M9/M10: even the summary is evidence-linked. Editorial synthesis is
+    legal in a minutes component precisely *because* every claim in it
+    carries refs -- prose with no ref is the failure mode this closes."""
+
+
+class MinutesFinding(_EvidencedClaim):
+    """M10: one decision, action, risk, or question.
+
+    ``owner_participant_id`` may only ever be a participant record's ID
+    (F21): owners are never invented and never inferred from a display
+    name appearing in the text.
+    """
+
+    kind: FindingKind
+    owner_participant_id: ParticipantId | None = None
+    due: str = ""
+
+
+class MinutesComponentBody(BaseModel):
+    """M4's ``minutes`` proof: evidence-linked findings only."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_kind: Literal[ComponentKind.MINUTES] = ComponentKind.MINUTES
+    summary: MinutesSummary
+    findings: tuple[MinutesFinding, ...] = ()
+    author: str = Field(min_length=1)
+    config_hash: Sha256Hex
+
+
+class MinutesComponent(MinutesComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
 ComponentBody = Annotated[
     NotesComponentBody
     | ParticipantSetComponentBody
@@ -863,7 +1621,14 @@ ComponentBody = Annotated[
     | MediaRecordingComponentBody
     | TimelineCombinedComponentBody
     | AsrResultComponentBody
-    | DiarisationResultComponentBody,
+    | DiarisationResultComponentBody
+    | NormalisationLedgerComponentBody
+    | MachineAttributionSetComponentBody
+    | SpeakerHypothesisSetComponentBody
+    | SpeakerReviewComponentBody
+    | TextEditLedgerComponentBody
+    | ChapterSetComponentBody
+    | MinutesComponentBody,
     Field(discriminator="component_kind"),
 ]
 ComponentRecord = Annotated[
@@ -879,7 +1644,14 @@ ComponentRecord = Annotated[
     | MediaRecordingComponent
     | TimelineCombinedComponent
     | AsrResultComponent
-    | DiarisationResultComponent,
+    | DiarisationResultComponent
+    | NormalisationLedgerComponent
+    | MachineAttributionSetComponent
+    | SpeakerHypothesisSetComponent
+    | SpeakerReviewComponent
+    | TextEditLedgerComponent
+    | ChapterSetComponent
+    | MinutesComponent,
     Field(discriminator="component_kind"),
 ]
 
@@ -923,7 +1695,7 @@ def component_input_refs(record: ComponentRecord) -> ComponentInputRefs:
             )
         case TimedTurnSetComponent():
             return ComponentInputRefs(
-                artefact_ids=(record.source_artefact_id,), component_ids=()
+                artefact_ids=record.source_artefact_ids, component_ids=()
             )
         case ProviderLabelSetComponent():
             return ComponentInputRefs(
@@ -967,6 +1739,65 @@ def component_input_refs(record: ComponentRecord) -> ComponentInputRefs:
                 artefact_ids=(record.media_artefact_id, record.result_artefact_id),
                 component_ids=(),
             )
+        case NormalisationLedgerComponent():
+            return ComponentInputRefs(
+                artefact_ids=record.source_artefact_ids, component_ids=()
+            )
+        case MachineAttributionSetComponent():
+            return ComponentInputRefs(
+                artefact_ids=tuple(
+                    sorted(
+                        {
+                            artefact_id
+                            for cluster in record.clusters
+                            for artefact_id in (
+                                cluster.media_artefact_id,
+                                cluster.diarisation_artefact_id,
+                            )
+                        }
+                    )
+                ),
+                component_ids=(),
+            )
+        # The four kinds below bind to *turn/cluster IDs*, never to the
+        # components those IDs happen to live in (M8: "chapters and review
+        # decisions bind to a revision plus its turn/cluster inventory
+        # hashes"). That is deliberate and load-bearing under M21: a text
+        # pass supersedes the turn-set component while retaining every
+        # turn_id (M7 identity remap), so an applied review, a chapter
+        # set, or a minutes component that declared a hard ref to the old
+        # component ID would dangle the instant routine polish ran. ID-level
+        # binding survives it; the registry validators below resolve those
+        # IDs against whatever turn set is live in the closure and report a
+        # soft failure if one no longer resolves.
+        case SpeakerHypothesisSetComponent():
+            return ComponentInputRefs(artefact_ids=(), component_ids=())
+        case SpeakerReviewComponent():
+            return ComponentInputRefs(artefact_ids=(), component_ids=())
+        case TextEditLedgerComponent():
+            return ComponentInputRefs(artefact_ids=(), component_ids=())
+        case ChapterSetComponent():
+            return ComponentInputRefs(artefact_ids=(), component_ids=())
+        case MinutesComponent():
+            return ComponentInputRefs(artefact_ids=(), component_ids=())
+
+
+def _strip_stored_identity[BodyT: BaseModel](
+    body_type: type[BodyT], component: BaseModel
+) -> BodyT:
+    """Rebuild ``body_type`` from a ``*Component`` record that subclasses it.
+
+    Projects exactly ``body_type``'s own declared fields, so the record's
+    three store-minted fields (``component_id``/``content_hash``/
+    ``created_at``) are dropped by construction rather than by an
+    exclusion list that a new identity field could silently escape. Only
+    valid for kinds whose record is a plain subclass with no minted
+    identity nested *inside* a body field -- :class:`NotesComponent` is
+    the standing counter-example and is reconstructed explicitly instead.
+    """
+    return body_type.model_validate(
+        {name: getattr(component, name) for name in body_type.model_fields}
+    )
 
 
 def component_as_body(component: ComponentBody | ComponentRecord) -> ComponentBody:
@@ -1016,7 +1847,9 @@ def component_as_body(component: ComponentBody | ComponentRecord) -> ComponentBo
             return component
         case TimedTurnSetComponent():
             return TimedTurnSetComponentBody(
-                source_artefact_id=component.source_artefact_id, turns=component.turns
+                source_artefact_ids=component.source_artefact_ids,
+                coordinate_domain=component.coordinate_domain,
+                turns=component.turns,
             )
         case TimedTurnSetComponentBody():
             return component
@@ -1096,6 +1929,40 @@ def component_as_body(component: ComponentBody | ComponentRecord) -> ComponentBo
                 model_version=component.model_version,
             )
         case DiarisationResultComponentBody():
+            return component
+        # Every kind below is a plain ``*Body`` subclass with no minted
+        # identity nested inside a field, so :func:`_strip_stored_identity`
+        # reconstructs it exactly -- the explicit field-by-field cases
+        # above exist for the kinds where that is *not* true
+        # (``NotesComponent.sections``) or where the record deliberately
+        # is not a subclass at all.
+        case NormalisationLedgerComponent():
+            return _strip_stored_identity(NormalisationLedgerComponentBody, component)
+        case NormalisationLedgerComponentBody():
+            return component
+        case MachineAttributionSetComponent():
+            return _strip_stored_identity(MachineAttributionSetComponentBody, component)
+        case MachineAttributionSetComponentBody():
+            return component
+        case SpeakerHypothesisSetComponent():
+            return _strip_stored_identity(SpeakerHypothesisSetComponentBody, component)
+        case SpeakerHypothesisSetComponentBody():
+            return component
+        case SpeakerReviewComponent():
+            return _strip_stored_identity(SpeakerReviewComponentBody, component)
+        case SpeakerReviewComponentBody():
+            return component
+        case TextEditLedgerComponent():
+            return _strip_stored_identity(TextEditLedgerComponentBody, component)
+        case TextEditLedgerComponentBody():
+            return component
+        case ChapterSetComponent():
+            return _strip_stored_identity(ChapterSetComponentBody, component)
+        case ChapterSetComponentBody():
+            return component
+        case MinutesComponent():
+            return _strip_stored_identity(MinutesComponentBody, component)
+        case MinutesComponentBody():
             return component
 
 
@@ -1233,6 +2100,55 @@ def assemble_component_record(
             fields = body.model_dump(mode="python")
             return DiarisationResultComponent(
                 **fields,
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case NormalisationLedgerComponentBody():
+            return NormalisationLedgerComponent(
+                **body.model_dump(mode="python"),
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case MachineAttributionSetComponentBody():
+            return MachineAttributionSetComponent(
+                **body.model_dump(mode="python"),
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case SpeakerHypothesisSetComponentBody():
+            return SpeakerHypothesisSetComponent(
+                **body.model_dump(mode="python"),
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case SpeakerReviewComponentBody():
+            return SpeakerReviewComponent(
+                **body.model_dump(mode="python"),
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case TextEditLedgerComponentBody():
+            return TextEditLedgerComponent(
+                **body.model_dump(mode="python"),
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case ChapterSetComponentBody():
+            return ChapterSetComponent(
+                **body.model_dump(mode="python"),
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case MinutesComponentBody():
+            return MinutesComponent(
+                **body.model_dump(mode="python"),
                 component_id=component_id,
                 content_hash=content_hash,
                 created_at=created_at,

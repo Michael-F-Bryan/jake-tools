@@ -64,14 +64,27 @@ from .components import (
     component_as_body,
     component_input_refs,
 )
-from .ids import ArtefactId, ComponentId, RevisionId, RunId, SourceId, mint_id
+from .ids import (
+    ApplyId,
+    ArtefactId,
+    ComponentId,
+    RenderId,
+    ReviewId,
+    RevisionId,
+    RunId,
+    SourceId,
+    mint_id,
+)
 from .records import (
     DURABLE_RUN_STATES,
+    ApplyRecord,
     ArtefactRecord,
     BundleManifest,
     Lease,
     NoDocumentYet,
     OperationRef,
+    RenderRecord,
+    ReviewRecord,
     RevisionRecord,
     RunRecord,
     RunState,
@@ -135,7 +148,10 @@ _LEGAL_RUN_STATE_EDGES: dict[RunState, frozenset[RunState]] = {
     RunState.COMPLETED: frozenset(),
 }
 
+_APPLY_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(ApplyId)
 _ARTEFACT_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(ArtefactId)
+_RENDER_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(RenderId)
+_REVIEW_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(ReviewId)
 _REVISION_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(RevisionId)
 _RUN_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(RunId)
 _COMPONENT_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(ComponentId)
@@ -270,6 +286,30 @@ class UnknownSourceError(BundleStoreError):
 
 class UnknownComponentError(BundleStoreError):
     pass
+
+
+class ArtefactBlobHashMismatchError(BundleStoreError):
+    """An artefact's stored bytes no longer hash to the value its record
+    declares. Source evidence is immutable (M16); reading it anyway would
+    let edited bytes flow into a transform as if they were the acquired
+    evidence."""
+
+
+class UnknownReviewError(BundleStoreError):
+    pass
+
+
+class UnknownRenderError(BundleStoreError):
+    pass
+
+
+class RenderOutputHashMismatchError(BundleStoreError):
+    """A render's declared ``output_sha256`` does not match the bytes it
+    was stored with, or the blob those bytes live in has since changed.
+    M17 makes a render's identity complete precisely so this is
+    detectable; returning the bytes anyway would let an edited blob be
+    applied to a note under a trusted render ID.
+    """
 
 
 class UnknownComponentKindError(BundleStoreError):
@@ -459,6 +499,21 @@ class BundleStore:
     def _component_path(self, component_id: ComponentId) -> Path:
         return self._validated_record_path(
             "components", _COMPONENT_ID_ADAPTER, component_id, kind="component"
+        )
+
+    def _review_path(self, review_id: ReviewId) -> Path:
+        return self._validated_record_path(
+            "reviews", _REVIEW_ID_ADAPTER, review_id, kind="review"
+        )
+
+    def _render_path(self, render_id: RenderId) -> Path:
+        return self._validated_record_path(
+            "renders", _RENDER_ID_ADAPTER, render_id, kind="render"
+        )
+
+    def _apply_path(self, apply_id: ApplyId) -> Path:
+        return self._validated_record_path(
+            "applies", _APPLY_ID_ADAPTER, apply_id, kind="apply"
         )
 
     # -- locking and generic atomic IO ---------------------------------------
@@ -711,6 +766,26 @@ class BundleStore:
         if not path.exists():
             raise UnknownArtefactError(f"artefact {artefact_id} does not exist.")
         return ArtefactRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def load_artefact_bytes(self, artefact_id: ArtefactId) -> bytes:
+        """The immutable bytes behind one artefact, hash-verified on read.
+
+        Every downstream transform (normalisation reading ``asr.json``,
+        rendering reading a note snapshot) goes through this rather than
+        touching ``blobs/`` directly, so a corrupted or hand-edited blob
+        fails closed at one place instead of being silently parsed as
+        evidence.
+        """
+        record = self.load_artefact(artefact_id)
+        content = self._blob_path(record.sha256).read_bytes()
+        actual = _sha256_hex(content)
+        if actual != record.sha256:
+            raise ArtefactBlobHashMismatchError(
+                f"artefact {artefact_id}'s blob hashes to {actual}, not the "
+                f"{record.sha256} its record declares -- the blob has been "
+                "modified or corrupted."
+            )
+        return content
 
     def ingest_artefact(
         self,
@@ -1289,6 +1364,119 @@ class BundleStore:
             )
             self._write_json_atomic(self._manifest_path(), updated)
             return updated
+
+    # -- derived-output records: reviews, renders, applies (M8/M13/M16/M17) --
+
+    def add_review(self, record: ReviewRecord) -> ReviewRecord:
+        """M16: append one immutable ``reviews/<review_id>.json`` record.
+
+        Exclusive-write, so a second application of the same
+        ``review_id`` can never overwrite the first's result -- the
+        idempotency path (:meth:`find_review`) is expected to have caught
+        it long before, and this is the structural backstop if it did not.
+        """
+        self._write_json_exclusive(
+            self._review_path(record.review_id),
+            record,
+            conflict_error=RecordIdCollisionError,
+        )
+        return record
+
+    def load_review(self, review_id: ReviewId) -> ReviewRecord:
+        path = self._review_path(review_id)
+        if not path.exists():
+            raise UnknownReviewError(f"review {review_id} does not exist.")
+        return ReviewRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def iter_reviews(self) -> Iterator[ReviewRecord]:
+        """Every applied review, oldest first. M8's application registry:
+        both the idempotent-re-apply check and the "a second, differing
+        review set against the same input revision is rejected" rule read
+        this, rather than each deriving applied-ness from revision
+        archaeology.
+        """
+        directory = self._root / "reviews"
+        if not directory.is_dir():
+            return
+        records = [
+            ReviewRecord.model_validate_json(path.read_text(encoding="utf-8"))
+            for path in sorted(directory.glob("review_*.json"))
+        ]
+        yield from sorted(records, key=lambda record: record.created_at)
+
+    def find_review(self, review_id: ReviewId) -> ReviewRecord | None:
+        path = self._review_path(review_id)
+        if not path.exists():
+            return None
+        return ReviewRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def add_render(self, record: RenderRecord, *, output: bytes) -> RenderRecord:
+        """M17: store a render's bytes (content-addressed) and its record.
+
+        The bytes go to ``blobs/<sha256>`` -- the same content-addressed
+        store artefacts use -- so two byte-identical renders of the same
+        revision cost one blob, which is also how the determinism check
+        (double render, compare ``output_sha256``) stays cheap. The record
+        is written second: a crash between the two leaves an unreferenced
+        blob, never a record pointing at bytes that are not there.
+        """
+        actual = _sha256_hex(output)
+        if actual != record.output_sha256:
+            raise RenderOutputHashMismatchError(
+                f"render {record.render_id} declares output_sha256={record.output_sha256}"
+                f" but the supplied bytes hash to {actual}."
+            )
+        with self._locked():
+            self._write_blob(self._blob_path(actual), output)
+            self._write_json_exclusive(
+                self._render_path(record.render_id),
+                record,
+                conflict_error=RecordIdCollisionError,
+            )
+        return record
+
+    def load_render(self, render_id: RenderId) -> RenderRecord:
+        path = self._render_path(render_id)
+        if not path.exists():
+            raise UnknownRenderError(f"render {render_id} does not exist.")
+        return RenderRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def load_render_output(self, render_id: RenderId) -> bytes:
+        """The exact bytes a render produced, verified against the hash its
+        own record declared -- a tampered blob is refused, never returned."""
+        record = self.load_render(render_id)
+        content = self._blob_path(record.output_sha256).read_bytes()
+        actual = _sha256_hex(content)
+        if actual != record.output_sha256:
+            raise RenderOutputHashMismatchError(
+                f"render {render_id}'s stored blob hashes to {actual}, not the "
+                f"{record.output_sha256} its record declares."
+            )
+        return content
+
+    def add_apply(self, record: ApplyRecord) -> ApplyRecord:
+        """M13: append one immutable ``applies/<apply_id>.json`` record.
+
+        Every outcome is recorded, including refusals and partial writes --
+        an apply that did not happen is evidence too, and the record is
+        written whether or not the target was ever touched.
+        """
+        self._write_json_exclusive(
+            self._apply_path(record.apply_id),
+            record,
+            conflict_error=RecordIdCollisionError,
+        )
+        return record
+
+    def iter_applies(self) -> Iterator[ApplyRecord]:
+        directory = self._root / "applies"
+        if not directory.is_dir():
+            return
+        records = [
+            ApplyRecord.model_validate_json(path.read_text(encoding="utf-8"))
+            for path in sorted(directory.glob("apply_*.json"))
+        ]
+        yield from sorted(records, key=lambda record: record.created_at)
 
     def document_head(self) -> RevisionRecord | NoDocumentYet:
         """M16: the loaded head revision, or the explicit no-document-yet state."""

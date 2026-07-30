@@ -200,3 +200,47 @@ class WireStageResult(BaseModel):
     config_hash: str
     model_provenance: WireModelProvenance | None = None
     error: WireStageError | None = None
+
+
+class WireAsrToken(BaseModel):
+    """One raw ASR token. ``text`` carries its own leading whitespace --
+    the worker builds its full transcript with ``"".join(token.text)``, so
+    normalisation must join the same way rather than inserting separators
+    the model never emitted."""
+
+    start_ms: int
+    end_ms: int
+    text: str
+    confidence: float
+
+
+class WireAsrOutput(BaseModel):
+    text: str
+    tokens: list[WireAsrToken] = Field(default_factory=list)
+    chunk_boundaries_ms: list[int] = Field(default_factory=list)
+
+
+class WireAsrStageResult(WireStageResult):
+    """``asr.json`` as normalisation reads it: the stage envelope plus the
+    raw token stream. Raw output is faithful to the model (M11) --
+    duplicates and zero-length tokens are legal here and are cleaned, with
+    lineage, only when a canonical turn set is built."""
+
+    output: WireAsrOutput | None = None
+
+
+class WireDiarisationSegment(BaseModel):
+    """One diarised span. ``speaker_label`` is a *local cluster* label
+    (``SPEAKER_00``), never a participant identity (F13)."""
+
+    start_ms: int
+    end_ms: int
+    speaker_label: str
+
+
+class WireDiarisationOutput(BaseModel):
+    segments: list[WireDiarisationSegment] = Field(default_factory=list)
+
+
+class WireDiarisationStageResult(WireStageResult):
+    output: WireDiarisationOutput | None = None
