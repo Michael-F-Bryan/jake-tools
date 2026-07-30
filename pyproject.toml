@@ -39,6 +39,9 @@ jake-tools = "jake_tools.__main__:main"
 [tool.ruff]
 target-version = "py314"
 src = ["src"]
+# inference-worker/ is a standalone uv project (own pyproject.toml, own
+# py312 ruff config) — don't lint it as part of the jake-tools package.
+extend-exclude = ["inference-worker"]
 
 [tool.ruff.lint]
 select = [
@@ -54,6 +57,7 @@ select = [
 ignore = ["E501"]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 addopts = "-m \"not live\""
 asyncio_mode = "auto"
 markers = [
