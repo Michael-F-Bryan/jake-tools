@@ -85,6 +85,23 @@ def test_run_diarisation_reports_timeout_and_still_carries_model_provenance():
     )
 
 
+def test_run_diarisation_populates_input_audio_sha256_on_failure():
+    """Same fix applied for consistency as run_asr's (chunking finding,
+    point 2): the wav is already hashed (by prepare.py) before
+    run_diarisation is ever called — a failure here is no reason to lose
+    that provenance and report input_audio_sha256: null."""
+    result = run_diarisation(
+        Path("does-not-need-to-exist.wav"),
+        "a" * 64,
+        SpeakerConstraints(),
+        duration_ms=1000,
+        timeout_s=0.0001,
+    )
+
+    assert result.status == "failed"
+    assert result.input_audio_sha256 == "a" * 64
+
+
 def test_run_diarisation_retains_the_wav_on_failure():
     """M5: retained_artefacts is the flagship partial-failure record — a
     failed diarisation stage must name the prepared wav that still
