@@ -8,8 +8,11 @@ outright).
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
+
+from pydantic import ValidationError
 
 from inference_worker.models import (
     DiarisationOutput,
@@ -22,36 +25,70 @@ from inference_worker.models import (
 )
 from inference_worker.provenance import (
     config_hash,
-    hf_repo_revision,
+    local_model_revision,
     package_version,
     stage_observations,
 )
 from inference_worker.timeouts import StageTimeoutError, enforce_timeout
 
+# B1: pyannote-audio 4.0.7 enables OpenTelemetry metrics BY DEFAULT
+# (pyannote/audio/telemetry/metrics.py sets PYANNOTE_METRICS_ENABLED=true
+# at import time if unset) and sends recording duration + the requested
+# min/max/exact speaker constraints + a per-process session UUID to
+# https://otel.pyannote.ai/v1/traces on every pipeline call — with the
+# OpenTelemetry logger forced to CRITICAL, so a blocked/failed export is
+# invisible. That's undeclared egress of source-derived metadata from a
+# worker M15 requires to run local-only. This must be set before
+# pyannote.audio is imported anywhere below (it's only ever imported
+# lazily, inside run_diarisation) so our value wins pyannote's own
+# "set default if unset" race. Do not remove this without also verifying
+# pyannote-audio has actually turned telemetry off by default upstream.
+os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
+
 PIPELINE_ID = "pyannote/speaker-diarization-community-1"
 
 
 def diarisation_stage_config_hash(constraints: SpeakerConstraints) -> str:
-    return config_hash({"pipeline_id": PIPELINE_ID, **constraints.model_dump()})
+    # M2: fold in the resolved model revision + package versions, not just
+    # the compile-time PIPELINE_ID constant — two runs against different
+    # cached revisions must hash differently for M11/M12 hash-keyed reuse
+    # to be sound.
+    return config_hash(
+        {
+            "pipeline_id": PIPELINE_ID,
+            "model_revision": local_model_revision(PIPELINE_ID) or "unresolved",
+            "pyannote-audio": package_version("pyannote-audio"),
+            "torch": package_version("torch"),
+            **constraints.model_dump(),
+        }
+    )
+
+
+def _model_provenance() -> ModelProvenance | None:
+    """Best-effort model identity from whatever's locally cached right
+    now — reachable even when the gated weights below aren't (a prior
+    successful run cached them), and None (never a fabricated "unknown")
+    if nothing has ever been cached."""
+    revision = local_model_revision(PIPELINE_ID)
+    if revision is None:
+        return None
+    return ModelProvenance(
+        identity=ModelIdentity(name=PIPELINE_ID, version=revision),
+        package_versions={
+            "pyannote-audio": package_version("pyannote-audio"),
+            "torch": package_version("torch"),
+        },
+    )
 
 
 def run_diarisation(
     wav_path: Path,
     wav_sha256: str,
     constraints: SpeakerConstraints,
+    duration_ms: int,
     timeout_s: float,
 ) -> DiarisationStageResult:
     stage_config_hash = diarisation_stage_config_hash(constraints)
-    # Public repo metadata (the pinned revision) is reachable even when the
-    # gated weights below are not, so provenance is available in both the
-    # completed and the model-access-denied outcome.
-    model_provenance = ModelProvenance(
-        identity=ModelIdentity(name=PIPELINE_ID, version=hf_repo_revision(PIPELINE_ID)),
-        package_versions={
-            "pyannote-audio": package_version("pyannote-audio"),
-            "torch": package_version("torch"),
-        },
-    )
     started = time.monotonic()
     try:
         with enforce_timeout(timeout_s):
@@ -71,7 +108,8 @@ def run_diarisation(
                     f"{PIPELINE_ID} is gated and the worker's Hugging Face "
                     f"credentials have not been granted access: {exc}",
                     retryable=True,
-                    model_provenance=model_provenance,
+                    model_provenance=_model_provenance(),
+                    retained_artefacts=[str(wav_path)],
                 )
             if pipeline is None:
                 return _failed(
@@ -80,7 +118,8 @@ def run_diarisation(
                     "diarisation-failed",
                     f"Pipeline.from_pretrained({PIPELINE_ID!r}) returned None",
                     retryable=False,
-                    model_provenance=model_provenance,
+                    model_provenance=_model_provenance(),
+                    retained_artefacts=[str(wav_path)],
                 )
             device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
             pipeline.to(device)
@@ -92,7 +131,8 @@ def run_diarisation(
             "timeout",
             str(exc),
             retryable=True,
-            model_provenance=model_provenance,
+            model_provenance=_model_provenance(),
+            retained_artefacts=[str(wav_path)],
         )
     except Exception as exc:
         return _failed(
@@ -101,7 +141,23 @@ def run_diarisation(
             "diarisation-failed",
             f"{type(exc).__name__}: {exc}",
             retryable=False,
-            model_provenance=model_provenance,
+            model_provenance=_model_provenance(),
+            retained_artefacts=[str(wav_path)],
+        )
+
+    # A successful call means the pipeline just loaded (and, if this was
+    # the first-ever run, downloaded-then-cached) the model, so a cached
+    # revision must now be resolvable. If it somehow isn't, that's a real
+    # problem, not a silent "unknown" on a status="completed" stage (M1).
+    model_provenance = _model_provenance()
+    if model_provenance is None:
+        return _failed(
+            stage_config_hash,
+            started,
+            "diarisation-failed",
+            f"diarisation completed but no cached revision for {PIPELINE_ID!r} could be resolved locally",
+            retryable=False,
+            retained_artefacts=[str(wav_path)],
         )
 
     # Community-1 returns a DiarizeOutput (speaker_diarization /
@@ -110,14 +166,22 @@ def run_diarisation(
     # `speaker_diarization` — `exclusive_speaker_diarization` serialises
     # overlap away, which the M11 contract doesn't ask us to discard.
     annotation = getattr(output, "speaker_diarization", output)
-    segments = [
-        DiarisationSegment(
-            start_ms=round(turn.start * 1000),
-            end_ms=round(turn.end * 1000),
-            speaker_label=str(speaker),
+    try:
+        segments = _build_segments(annotation, duration_ms)
+    except ValidationError as exc:
+        # A reversed span survives the overshoot clamp only if pyannote
+        # returned a segment starting after the file's own duration —
+        # that's a modelling error, not evidence worth keeping.
+        return _failed(
+            stage_config_hash,
+            started,
+            "diarisation-invalid-output",
+            f"pyannote returned a segment with an invalid span: {exc}",
+            retryable=False,
+            model_provenance=model_provenance,
+            retained_artefacts=[str(wav_path)],
         )
-        for turn, _, speaker in annotation.itertracks(yield_label=True)
-    ]
+
     return DiarisationStageResult(
         status="completed",
         config_hash=stage_config_hash,
@@ -126,6 +190,24 @@ def run_diarisation(
         model_provenance=model_provenance,
         output=DiarisationOutput(segments=segments),
     )
+
+
+def _build_segments(annotation, duration_ms: int) -> list[DiarisationSegment]:
+    """Pure mapping from pyannote's Annotation.itertracks() to typed
+    DiarisationSegments, pulled out of run_diarisation so it's
+    unit-testable (M6) with a fake annotation, without the real gated
+    model: clamps end_ms overshoot past the file's own duration, and
+    raises pydantic's ValidationError on a span that's still reversed
+    after clamping (caught by the caller and converted into a clean
+    stage failure)."""
+    return [
+        DiarisationSegment(
+            start_ms=round(turn.start * 1000),
+            end_ms=min(round(turn.end * 1000), duration_ms),
+            speaker_label=str(speaker),
+        )
+        for turn, _, speaker in annotation.itertracks(yield_label=True)
+    ]
 
 
 def _speaker_kwargs(constraints: SpeakerConstraints) -> dict[str, int]:
@@ -147,11 +229,17 @@ def _failed(
     *,
     retryable: bool,
     model_provenance: ModelProvenance | None = None,
+    retained_artefacts: list[str] | None = None,
 ) -> DiarisationStageResult:
     return DiarisationStageResult(
         status="failed",
         config_hash=stage_config_hash,
         model_provenance=model_provenance,
         observations=stage_observations(started),
-        error=StageError(error_class=error_class, message=message, retryable=retryable),
+        error=StageError(
+            error_class=error_class,
+            message=message,
+            retryable=retryable,
+            retained_artefacts=retained_artefacts or [],
+        ),
     )

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from inference_worker import asr, diarise
 from inference_worker.models import (
     AudioArtefact,
     InferenceRequest,
@@ -25,10 +26,11 @@ from inference_worker.models import (
 )
 from inference_worker.provenance import sha256_file
 
-# A structurally valid M1 request ID: "<prefix>_<uuid7>". The uuid7 half
-# has version nibble 7 and variant nibble in {8,9,a,b}; it doesn't need to
-# encode a real timestamp for these tests, only the right shape.
-VALID_REQUEST_ID = "test_018f4c3e-1c1a-7f00-8b1a-2f6b6c1b0a11"
+# A structurally valid M1 request ID: "<prefix>_<uuid7>". "infreq" is this
+# worker's reserved prefix (models.py's _VALID_ID_PREFIXES); the uuid7
+# half has version nibble 7 and variant nibble in {8,9,a,b} and doesn't
+# need to encode a real timestamp for tests, only the right shape.
+VALID_REQUEST_ID = "infreq_018f4c3e-1c1a-7f00-8b1a-2f6b6c1b0a11"
 
 
 def write_sine_wav(
@@ -61,22 +63,27 @@ def make_request(
     audio_sha256: str | None = None,
     request_id: str = VALID_REQUEST_ID,
     speaker_constraints: SpeakerConstraints | None = None,
+    asr_model_name: str = asr.MODEL_ID,
+    diarisation_model_name: str = diarise.PIPELINE_ID,
     prepare_s: float = 30.0,
     asr_s: float = 60.0,
     diarise_s: float = 60.0,
 ) -> InferenceRequest:
-    """A minimal, valid InferenceRequest pointed at a real audio file."""
+    """A minimal, valid InferenceRequest pointed at a real audio file.
+
+    Defaults declare exactly the models this worker pins (M4) so most
+    tests don't need to think about it; pass `asr_model_name`/
+    `diarisation_model_name` to build the M4 mismatch/refusal case.
+    """
     return InferenceRequest(
         request_id=request_id,
         audio=AudioArtefact(
             path=str(audio_path),
             sha256=audio_sha256 or sha256_file(audio_path),
         ),
-        asr_model=ModelIdentity(
-            name="mlx-community/parakeet-tdt-0.6b-v2", version="expected"
-        ),
+        asr_model=ModelIdentity(name=asr_model_name, version="expected"),
         diarisation_model=ModelIdentity(
-            name="pyannote/speaker-diarization-community-1", version="expected"
+            name=diarisation_model_name, version="expected"
         ),
         runtime_provenance=RuntimeProvenance(
             python_version="3.12.11",

@@ -2,12 +2,14 @@
 download/load) — opt-in via `-m model`, excluded from the default
 `pytest -q` run.
 
-This currently exercises whichever of the two honest M11 outcomes the
-worker's Hugging Face credentials produce: `completed` once
-`pyannote/speaker-diarization-community-1`'s gated terms are accepted, or
-a clean `model-access-denied` failure while they aren't. Both are correct
-per the KNOWN CONSTRAINT in this worker's brief — this test must never
-assert one branch only, and must never fall back to a hosted API (M15).
+m7: access is granted on this machine, so this asserts `completed`
+outright rather than accepting either outcome — an either/or assertion
+would pass silently even with a genuinely broken diariser. If access is
+ever revoked (a `model-access-denied` failure, per the KNOWN CONSTRAINT
+in this worker's brief), the test skips with the reason instead of
+failing, so a real regression in the diariser itself is never confused
+with an access/credentials problem. Never falls back to a hosted API
+(M15) regardless of which branch this hits.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from inference_worker.provenance import sha256_file
 pytestmark = pytest.mark.model
 
 
-def test_run_diarisation_completes_or_cleanly_denies_access(sine_wav_factory, tmp_path):
+def test_run_diarisation_completes_on_synthetic_audio(sine_wav_factory, tmp_path):
     wav = sine_wav_factory(
         tmp_path / "prepared.wav", seconds=4.0, sample_rate=16000, channels=1
     )
@@ -31,21 +33,25 @@ def test_run_diarisation_completes_or_cleanly_denies_access(sine_wav_factory, tm
         wav,
         wav_sha256,
         SpeakerConstraints(min_speakers=1, max_speakers=2),
+        duration_ms=4000,
         timeout_s=180.0,
     )
 
-    assert result.status in ("completed", "failed")
-    if result.status == "completed":
-        assert result.input_audio_sha256 == wav_sha256
-        assert result.output is not None
-        assert isinstance(result.output.segments, list)
-    else:
-        assert result.error is not None
-        assert result.error.error_class == "model-access-denied"
-        assert result.error.retryable is True
+    if (
+        result.status == "failed"
+        and result.error is not None
+        and result.error.error_class == "model-access-denied"
+    ):
+        pytest.skip(
+            f"Community-1 gated access denied on this machine: {result.error.message}"
+        )
 
-    # Either way, public repo metadata (the pinned revision) must have
-    # resolved — it doesn't require the gated weights.
+    assert result.status == "completed", result.error
+    assert result.input_audio_sha256 == wav_sha256
+    assert result.output is not None
+    assert isinstance(result.output.segments, list)
+    # Public repo metadata (the pinned revision) must have resolved from
+    # the local cache — it's what we just loaded the weights from.
     assert result.model_provenance is not None
     assert (
         result.model_provenance.identity.name
