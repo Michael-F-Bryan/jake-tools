@@ -7,12 +7,14 @@ of what can be proven in v1 (:class:`CapabilityKey`), the typed payload
 every proof is recorded in (:class:`CapabilityRecord`), and :func:`validate`
 -- the single dispatcher every consumer goes through.
 
-v1 can only *prove* three things from the components that exist so far:
-``notes.provider``/``notes.authored`` (M20) and ``participants.declared``
-(M19). Every other key is registered with a stub validator that always
-returns ``not-attempted`` and is structurally incapable of returning
-``present-validated`` -- :func:`validate` raises if one ever tries, which
-is the "capabilities are proofs" rule enforced as code, not just as prose.
+v1 can now *prove* six things: ``notes.provider``/``notes.authored`` (M20),
+``participants.declared`` (M19), ``transcript.untimed``/``transcript.timed``
+(M6/M7/D6), and ``speakers.provider-labels`` (M5, evidence only -- it
+satisfies no product gate). Every other key is registered with a stub
+validator that always returns ``not-attempted`` and is structurally
+incapable of returning ``present-validated`` -- :func:`validate` raises if
+one ever tries, which is the "capabilities are proofs" rule enforced as
+code, not just as prose.
 """
 
 from __future__ import annotations
@@ -24,7 +26,16 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..errors import TranscriptError
-from .components import ComponentRecord, NotesComponent, ParticipantSetComponent
+from .components import (
+    ComponentRecord,
+    NotesComponent,
+    ParticipantSetComponent,
+    ProviderLabelSetComponent,
+    TimedTurnSetComponent,
+    TranscriptAbsenceDeclaration,
+    TrustClass,
+    UntimedTurnSetComponent,
+)
 from .ids import ComponentId, RevisionId
 
 _VALIDATOR_VERSION = "v1"
@@ -140,22 +151,9 @@ class CapabilityStatus(StrEnum):
     NOT_ATTEMPTED = "not-attempted"
 
 
-class TrustClass(StrEnum):
-    """M5 shape only -- no speaker validator in this phase populates this.
-
-    Kept here (not deferred) because M5 names exactly these three values
-    and the payload needs a typed home for them now; nothing in v1
-    constructs one outside a test fixture.
-    """
-
-    PER_PARTICIPANT_STREAM = "per-participant-stream"
-    ROOM_PROXY = "room-proxy"
-    IMPORTED_UNVERIFIED = "imported-unverified"
-
-
 class TrustClassCoverage(BaseModel):
     """M5: per-trust-class coverage breakdown on a speaker capability
-    payload -- shape only, never populated in this phase.
+    payload. Populated by ``speakers.provider-labels``' validator below.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -405,6 +403,240 @@ def _validate_participants_declared(context: ValidationContext) -> CapabilityRec
     )
 
 
+# -- shared: D2/M5 "the source declares no transcript" signal ----------------
+
+
+def _absence_declaration_status(
+    components: Mapping[ComponentId, ComponentRecord],
+) -> tuple[CapabilityStatus, tuple[ComponentId, ...], str]:
+    """D2/M5: when no turn-set component exists, decide between the two
+    honest reasons why -- ``absent`` (genuinely no evidence either way) vs
+    ``not-available-from-source`` (the source explicitly states no
+    transcript exists, carried as a :class:`TranscriptAbsenceDeclaration`
+    in the closure) -- never silently defaulting to ``absent`` and losing
+    that distinction (D2: "never absent, because the absence statement is
+    itself the evidence the product must preserve"). More than one
+    declaration in the closure is ambiguous, not a case to pick-first
+    from.
+    """
+    declarations = [
+        component
+        for component in components.values()
+        if isinstance(component, TranscriptAbsenceDeclaration)
+    ]
+    if len(declarations) > 1:
+        return (
+            CapabilityStatus.FAILED,
+            tuple(component.component_id for component in declarations),
+            (
+                f"{len(declarations)} transcript-absence declarations present for "
+                "a one-cardinality signal"
+            ),
+        )
+    if declarations:
+        return (
+            CapabilityStatus.NOT_AVAILABLE_FROM_SOURCE,
+            (declarations[0].component_id,),
+            "",
+        )
+    return CapabilityStatus.ABSENT, (), ""
+
+
+# -- real validators: transcript.untimed / transcript.timed (M6/M7/D6) ------
+#
+# Unlike notes section IDs (one namespace across the whole closure, M10),
+# turn segment lineage is only ever compared within its own turn-set
+# component in this phase -- each validator below checks that inline.
+
+
+def _validate_transcript_untimed(context: ValidationContext) -> CapabilityRecord:
+    matching = [
+        component
+        for component in context.components.values()
+        if isinstance(component, UntimedTurnSetComponent)
+    ]
+    if not matching:
+        status, component_ids, detail = _absence_declaration_status(context.components)
+        return CapabilityRecord(
+            key=CapabilityKey.TRANSCRIPT_UNTIMED,
+            status=status,
+            component_ids=component_ids,
+            failure_detail=detail,
+            validator_version=_VALIDATOR_VERSION,
+        )
+    if len(matching) > 1:
+        # transcript.untimed is a `one`-cardinality key (M4): more than one
+        # candidate untimed turn set in the closure is ambiguous, not a
+        # case to silently pick-first from.
+        return CapabilityRecord(
+            key=CapabilityKey.TRANSCRIPT_UNTIMED,
+            status=CapabilityStatus.FAILED,
+            component_ids=tuple(component.component_id for component in matching),
+            validator_version=_VALIDATOR_VERSION,
+            failure_detail=(
+                f"{len(matching)} untimed turn-set components present for a "
+                "one-cardinality key"
+            ),
+        )
+
+    component = matching[0]
+    segment_ids = [turn.source_segment_id for turn in component.turns]
+    if len(set(segment_ids)) != len(segment_ids):
+        return CapabilityRecord(
+            key=CapabilityKey.TRANSCRIPT_UNTIMED,
+            status=CapabilityStatus.FAILED,
+            component_ids=(component.component_id,),
+            validator_version=_VALIDATOR_VERSION,
+            failure_detail=(
+                "duplicate source_segment_id across turns; segment lineage does "
+                "not resolve to distinct raw segments"
+            ),
+        )
+    # "No timing fields present" is enforced by UntimedTurn's own type
+    # shape (components.py) -- there is no start_ms/end_ms field this
+    # validator could find even if it looked, so there is nothing further
+    # to check for that half of the M4 table entry here.
+    return CapabilityRecord(
+        key=CapabilityKey.TRANSCRIPT_UNTIMED,
+        status=CapabilityStatus.PRESENT_VALIDATED,
+        component_ids=(component.component_id,),
+        input_revision_ids=(context.revision_id,),
+        validator_version=_VALIDATOR_VERSION,
+    )
+
+
+def _validate_transcript_timed(context: ValidationContext) -> CapabilityRecord:
+    matching = [
+        component
+        for component in context.components.values()
+        if isinstance(component, TimedTurnSetComponent)
+    ]
+    if not matching:
+        status, component_ids, detail = _absence_declaration_status(context.components)
+        return CapabilityRecord(
+            key=CapabilityKey.TRANSCRIPT_TIMED,
+            status=status,
+            component_ids=component_ids,
+            failure_detail=detail,
+            validator_version=_VALIDATOR_VERSION,
+        )
+    if len(matching) > 1:
+        return CapabilityRecord(
+            key=CapabilityKey.TRANSCRIPT_TIMED,
+            status=CapabilityStatus.FAILED,
+            component_ids=tuple(component.component_id for component in matching),
+            validator_version=_VALIDATOR_VERSION,
+            failure_detail=(
+                f"{len(matching)} timed turn-set components present for a "
+                "one-cardinality key"
+            ),
+        )
+
+    component = matching[0]
+    segment_ids = [turn.source_segment_id for turn in component.turns]
+    if len(set(segment_ids)) != len(segment_ids):
+        return CapabilityRecord(
+            key=CapabilityKey.TRANSCRIPT_TIMED,
+            status=CapabilityStatus.FAILED,
+            component_ids=(component.component_id,),
+            validator_version=_VALIDATOR_VERSION,
+            failure_detail=(
+                "duplicate source_segment_id across turns; segment lineage does "
+                "not resolve to distinct raw segments"
+            ),
+        )
+    # Canonical order and half-open spans are enforced by
+    # TimedTurnSetComponentBody/TimedTurn's own validators (components.py)
+    # at construction *and* re-checked on every load from disk (the
+    # Component subclasses the Body, so it inherits those validators) --
+    # a component that reached this point already carries both proofs.
+    return CapabilityRecord(
+        key=CapabilityKey.TRANSCRIPT_TIMED,
+        status=CapabilityStatus.PRESENT_VALIDATED,
+        component_ids=(component.component_id,),
+        input_revision_ids=(context.revision_id,),
+        validator_version=_VALIDATOR_VERSION,
+    )
+
+
+# -- real validator: speakers.provider-labels (M5) -- evidence only ---------
+
+
+def _validate_speakers_provider_labels(context: ValidationContext) -> CapabilityRecord:
+    matching = [
+        component
+        for component in context.components.values()
+        if isinstance(component, ProviderLabelSetComponent)
+    ]
+    if not matching:
+        return CapabilityRecord(
+            key=CapabilityKey.SPEAKERS_PROVIDER_LABELS,
+            status=CapabilityStatus.ABSENT,
+            validator_version=_VALIDATOR_VERSION,
+        )
+
+    known_cue_segment_ids = {
+        turn.source_segment_id
+        for component in context.components.values()
+        if isinstance(component, TimedTurnSetComponent)
+        for turn in component.turns
+    }
+    proxy_hashes = {component.proxy_config_hash for component in matching}
+    inconsistent_proxy = len(proxy_hashes) > 1
+
+    members: list[CapabilityMemberStatus] = []
+    trust_counts: dict[TrustClass, int] = {}
+    for component in matching:
+        if inconsistent_proxy:
+            status = CapabilityStatus.FAILED
+            detail = "inconsistent proxy_config_hash across provider-label-set members"
+        else:
+            unresolved = sorted(
+                span.source_segment_id
+                for span in component.spans
+                if span.source_segment_id not in known_cue_segment_ids
+            )
+            if unresolved:
+                status = CapabilityStatus.FAILED
+                detail = (
+                    f"span(s) do not resolve to a cue in this closure: {unresolved}"
+                )
+            else:
+                status, detail = CapabilityStatus.PRESENT_VALIDATED, ""
+                for span in component.spans:
+                    trust_counts[span.trust_class] = (
+                        trust_counts.get(span.trust_class, 0) + 1
+                    )
+        members.append(
+            CapabilityMemberStatus(
+                member_id=component.component_id,
+                status=status,
+                component_id=component.component_id,
+                detail=detail,
+            )
+        )
+
+    overall = _aggregate_many_key_status(member.status for member in members)
+    trust_class_coverage = tuple(
+        TrustClassCoverage(
+            trust_class=trust_class, covered_turn_count=count, unresolved_count=0
+        )
+        for trust_class, count in sorted(
+            trust_counts.items(), key=lambda pair: pair[0].value
+        )
+    )
+    return CapabilityRecord(
+        key=CapabilityKey.SPEAKERS_PROVIDER_LABELS,
+        status=overall,
+        component_ids=tuple(component.component_id for component in matching),
+        input_revision_ids=(context.revision_id,),
+        validator_version=_VALIDATOR_VERSION,
+        members=tuple(members),
+        trust_class_coverage=trust_class_coverage,
+        proxy_config_hash=next(iter(proxy_hashes)) if len(proxy_hashes) == 1 else None,
+    )
+
+
 # -- stub validator: every other key -----------------------------------------
 
 
@@ -496,6 +728,24 @@ def _build_registry() -> dict[CapabilityKey, RegistryEntry]:
         key=CapabilityKey.PARTICIPANTS_DECLARED,
         cardinality=cardinality_of(CapabilityKey.PARTICIPANTS_DECLARED),
         validator=_validate_participants_declared,
+        implemented=True,
+    )
+    entries[CapabilityKey.TRANSCRIPT_UNTIMED] = RegistryEntry(
+        key=CapabilityKey.TRANSCRIPT_UNTIMED,
+        cardinality=cardinality_of(CapabilityKey.TRANSCRIPT_UNTIMED),
+        validator=_validate_transcript_untimed,
+        implemented=True,
+    )
+    entries[CapabilityKey.TRANSCRIPT_TIMED] = RegistryEntry(
+        key=CapabilityKey.TRANSCRIPT_TIMED,
+        cardinality=cardinality_of(CapabilityKey.TRANSCRIPT_TIMED),
+        validator=_validate_transcript_timed,
+        implemented=True,
+    )
+    entries[CapabilityKey.SPEAKERS_PROVIDER_LABELS] = RegistryEntry(
+        key=CapabilityKey.SPEAKERS_PROVIDER_LABELS,
+        cardinality=cardinality_of(CapabilityKey.SPEAKERS_PROVIDER_LABELS),
+        validator=_validate_speakers_provider_labels,
         implemented=True,
     )
 

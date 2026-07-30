@@ -1,4 +1,4 @@
-"""Typed, content-identified components (M1, M19, M20).
+"""Typed, content-identified components (M1, M6, M7, M18, M19, M20).
 
 A component is immutable and identified by the SHA-256 of its own content
 -- never by a caller-minted ID (M1). Every kind here is split into a
@@ -8,14 +8,33 @@ fields) -- so "the canonical JSON body excluding component_id and
 timestamps" (M1) is a structural fact about the ``Body`` type, not a
 field-exclusion list someone could forget to update. :class:`.store.
 BundleStore.add_component` is the only place a ``Body`` becomes a
-``Component`` -- and, for notes, the only place a section gets its
-``section_id``: a caller supplies section *content* only
-(:class:`NotesSectionBody`), never an ID (see :class:`NotesSection`).
+``Component``.
 
-v1 ships exactly the two component kinds the inference-free fixtures need:
-the M20 notes component and an M19 participant set. ``ComponentKind`` is
-deliberately closed to just these two -- expanding it is later phases'
-job, once their components exist to back it.
+Two ID-minting shapes coexist here, both store-only (M1: "IDs are minted
+by the store at record creation, nowhere else"):
+
+- Notes sections get their :class:`~.ids.SegmentId` minted *inside*
+  ``add_component`` (via the injected ``mint_segment_id`` callback in
+  :func:`assemble_component_record`) -- a caller supplies section
+  *content* only (:class:`NotesSectionBody`), never an ID.
+- Turn segment IDs (:attr:`TimedTurn.source_segment_id`,
+  :attr:`UntimedTurn.source_segment_id`) and participant IDs
+  (:attr:`ParticipantRecord.participant_id`) are minted by the *caller*
+  (an adapter in ``adapters.py``, or a test) via
+  :func:`.ids.mint_id` directly, then supplied as already-identified
+  values -- the established precedent for :class:`ParticipantRecord`
+  (every existing test constructs one with a caller-minted
+  ``participant_id``; there is no store method that mints one for a
+  caller). Turn sets follow the same shape: this is what lets M6's
+  canonical order -- keyed on ``(start_ms, end_ms, source_segment_id)``,
+  the third field included -- be validated in full at *body*
+  construction time, rather than needing a second, post-mint order check
+  for a field that would otherwise not exist yet.
+
+v1's closed :class:`ComponentKind` set: the M20 notes component, the M19
+participant set, the M6/M7 untimed and timed turn sets, the M5 provider
+label set, the D2/M5 transcript-absence declaration, and the M18 assembly
+manifest.
 """
 
 from __future__ import annotations
@@ -29,6 +48,29 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .ids import ArtefactId, ComponentId, ParticipantId, SegmentId, SourceId
 from .records import Sha256Hex
+
+# -- M5: speaker trust classes --------------------------------------------
+
+
+class TrustClass(StrEnum):
+    """M5: the class of evidence backing one provider-label span.
+
+    Derived from the mapped participant's record, never from the label
+    text itself: ``per-participant-stream`` (D1: a genuine per-attendee
+    audio stream -- trusted), ``room-proxy`` (D1: a room-proxy display
+    name aggregates multiple real speakers -- unresolved evidence, takes
+    the local-diarisation-and-review path), ``imported-unverified``
+    (labels carried over from an already-imported transcript -- rendered
+    as supplied, never counted as reviewed). Lives here (not in
+    ``registry.py``) because :class:`ProviderLabelSpan` -- a component
+    field -- needs it, and ``registry.py`` already imports domain types
+    from this module, never the reverse.
+    """
+
+    PER_PARTICIPANT_STREAM = "per-participant-stream"
+    ROOM_PROXY = "room-proxy"
+    IMPORTED_UNVERIFIED = "imported-unverified"
+
 
 # -- M19: participant records -------------------------------------------
 
@@ -70,9 +112,12 @@ class ParticipantRecord(BaseModel):
 
     ``display_names`` are aliases only -- display-name string equality is
     never identity equality (M19); a label -> participant mapping is a
-    separate, explicitly recorded edge (out of scope this phase: no
-    speaker capability validators exist yet). ``room_proxy`` is set only
-    from explicit operator config (M5); nothing in this module infers it.
+    separate, explicitly recorded edge (M19's four-value edge-provenance
+    enum, backing ``speakers.provider-attributed`` -- still a stub this
+    phase; adapters instead confirm a raw label against a participant
+    explicitly and record it via ``status``, see ``adapters.py``).
+    ``room_proxy`` is set only from explicit operator config (M5);
+    nothing in this module infers it.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -132,13 +177,18 @@ class ComponentKind(StrEnum):
     """The closed set of component kinds v1 can store (M1).
 
     Fail-closed by construction: a persisted component whose
-    ``component_kind`` is not one of these two values does not match
+    ``component_kind`` is not one of these values does not match
     :data:`ComponentRecord`'s discriminated union, so
     :meth:`.store.BundleStore.load_component` raises rather than guessing.
     """
 
     NOTES = "notes"
     PARTICIPANT_SET = "participant-set"
+    UNTIMED_TURN_SET = "untimed-turn-set"
+    TIMED_TURN_SET = "timed-turn-set"
+    PROVIDER_LABEL_SET = "provider-label-set"
+    TRANSCRIPT_ABSENCE_DECLARATION = "transcript-absence-declaration"
+    ASSEMBLY_MANIFEST = "assembly-manifest"
 
 
 def _check_authored_matches_notes_kind(
@@ -242,12 +292,289 @@ class ParticipantSetComponent(ParticipantSetComponentBody):
     created_at: datetime
 
 
+# -- M6/M7: untimed and timed turn sets -----------------------------------
+
+
+class UntimedTurn(BaseModel):
+    """M6/M7/D6: one speaker-labelled turn with no timing evidence.
+
+    ``source_segment_id`` is minted by the caller (an adapter) at parse
+    time (M7), never by this module. The absence of any ``start_ms``/
+    ``end_ms`` field is itself the enforcement mechanism behind
+    ``transcript.untimed``'s "no timing fields present" check
+    (``registry.py``) -- there is no value this type could hold that
+    would smuggle timing in; the type simply has no such field to set.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source_segment_id: SegmentId
+    speaker_label: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+
+
+class UntimedTurnSetComponentBody(BaseModel):
+    """M6: turns preserved in exactly their supplied import order -- never
+    reordered (unlike :class:`ParticipantSetComponentBody`, for which
+    M19 defines no meaningful order).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    component_kind: Literal[ComponentKind.UNTIMED_TURN_SET] = (
+        ComponentKind.UNTIMED_TURN_SET
+    )
+    source_artefact_id: ArtefactId
+    turns: tuple[UntimedTurn, ...] = Field(min_length=1)
+
+
+class UntimedTurnSetComponent(UntimedTurnSetComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+class TimedTurn(BaseModel):
+    """M6: one canonical timed turn -- half-open ``[start_ms, end_ms)``,
+    ``end_ms > start_ms`` strictly (zero-length cues are legal only in
+    raw source evidence, never in a canonical timed turn -- M6).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source_segment_id: SegmentId
+    speaker_label: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _check_half_open_span(self) -> Self:
+        if self.end_ms <= self.start_ms:
+            raise ValueError(
+                f"turn span [{self.start_ms}, {self.end_ms}) is not half-open "
+                "with end_ms > start_ms (M6); the adapter/normaliser must drop "
+                "zero-length cues before constructing a canonical timed turn."
+            )
+        return self
+
+
+class TimedTurnSetComponentBody(BaseModel):
+    """M6: turns fixed in canonical order -- ``(start_ms, end_ms,
+    source_segment_id)`` ascending -- at construction, never recomputed at
+    render time. Enforced here (not silently re-sorted, unlike
+    :class:`ParticipantSetComponentBody`'s order-independent participants)
+    because M6 requires the order to be a *decision* the
+    adapter/normaliser makes once, not an incidental byproduct of
+    whatever order components happen to be re-serialised in.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    component_kind: Literal[ComponentKind.TIMED_TURN_SET] = ComponentKind.TIMED_TURN_SET
+    source_artefact_id: ArtefactId
+    turns: tuple[TimedTurn, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_canonical_order(self) -> Self:
+        keys = [
+            (turn.start_ms, turn.end_ms, turn.source_segment_id) for turn in self.turns
+        ]
+        if keys != sorted(keys):
+            raise ValueError(
+                "turns are not in M6 canonical order (start_ms, end_ms, "
+                "source_segment_id ascending); the adapter/normaliser must sort "
+                "before constructing this component."
+            )
+        return self
+
+
+class TimedTurnSetComponent(TimedTurnSetComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+# -- M5: provider label set -------------------------------------------------
+
+
+class ProviderLabelSpan(BaseModel):
+    """M5: one raw provider label, preserved as evidence.
+
+    ``source_segment_id`` is the cue-lineage reference: it names the
+    :class:`TimedTurn` (in a sibling :class:`TimedTurnSetComponent`, same
+    revision closure) this span's raw cue was normalised into --
+    ``registry.py``'s ``speakers.provider-labels`` validator resolves it
+    against every timed turn set in the closure ("spans resolve to
+    cues"). ``trust_class`` is set by the adapter from D1/M5's rules
+    (room-proxy config vs a genuine per-attendee stream), never inferred
+    from the label text.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source_segment_id: SegmentId
+    raw_label: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    trust_class: TrustClass
+
+
+class ProviderLabelSetComponentBody(BaseModel):
+    """M5: raw provider labels for one source, plus the M5 room-proxy
+    config hash that produced their trust classes -- a later change to
+    that config must change this hash (M5: "changing the proxy list
+    changes the hash and invalidates those capabilities").
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    component_kind: Literal[ComponentKind.PROVIDER_LABEL_SET] = (
+        ComponentKind.PROVIDER_LABEL_SET
+    )
+    source_artefact_id: ArtefactId
+    proxy_config_hash: Sha256Hex
+    spans: tuple[ProviderLabelSpan, ...] = Field(min_length=1)
+
+
+class ProviderLabelSetComponent(ProviderLabelSetComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+# -- D2/M5: transcript-absence declaration -----------------------------------
+
+
+class TranscriptAbsenceDeclarationBody(BaseModel):
+    """D2/M5: the source's own explicit statement that no transcript was
+    available for this meeting -- the concrete, typed carrier that lets
+    ``registry.py``'s ``transcript.timed``/``transcript.untimed``
+    validators report ``not-available-from-source`` instead of a bare
+    ``absent`` when it is present in the closure (D2: "the absence
+    statement is itself the evidence the product must preserve"). Its
+    mere presence is the signal; ``absent`` remains correct whenever no
+    such declaration exists (e.g. a source that simply has no timed
+    evidence, with no claim either way).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    component_kind: Literal[ComponentKind.TRANSCRIPT_ABSENCE_DECLARATION] = (
+        ComponentKind.TRANSCRIPT_ABSENCE_DECLARATION
+    )
+    source_artefact_id: ArtefactId
+    statement: str = Field(min_length=1)
+
+
+class TranscriptAbsenceDeclaration(TranscriptAbsenceDeclarationBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+# -- M18: assembly manifest --------------------------------------------------
+
+
+class Disposition(StrEnum):
+    """M18: the closed set of roles a selected artefact may play in an
+    assembly revision. An artefact may carry more than one at once (e.g.
+    an Obsidian source note is both ``destination`` and ``notes`` --
+    M18's own worked example).
+    """
+
+    EVIDENCE_ONLY = "evidence-only"
+    MEDIA = "media"
+    TRANSCRIPT_CANDIDATE = "transcript-candidate"
+    SELECTED_TRANSCRIPT = "selected-transcript"
+    NOTES = "notes"
+    DESTINATION = "destination"
+
+
+class ArtefactSelection(BaseModel):
+    """M18: one artefact's disposition set within an assembly revision.
+
+    ``dispositions`` is a genuine *set* (M18: "non-empty disposition
+    set") represented as a canonically sorted, deduplicated tuple --
+    never a bare ``frozenset``/``set`` field, whose iteration order is
+    process-randomised for ``str`` members (``PYTHONHASHSEED``) and would
+    make this component's content hash non-deterministic across runs
+    (the same failure mode :class:`ParticipantSetComponentBody` already
+    solves for participant order).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    artefact_id: ArtefactId
+    dispositions: tuple[Disposition, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _sort_and_dedupe_dispositions(self) -> Self:
+        deduped = set(self.dispositions)
+        if len(deduped) != len(self.dispositions):
+            raise ValueError(
+                f"duplicate disposition(s) for artefact {self.artefact_id!r} -- "
+                "M18 requires a set, not a bag."
+            )
+        ordered = tuple(sorted(deduped, key=lambda disposition: disposition.value))
+        if ordered != self.dispositions:
+            object.__setattr__(self, "dispositions", ordered)
+        return self
+
+
+class AssemblyManifestComponentBody(BaseModel):
+    """M18: the record of exactly which artefacts one assembly revision
+    selected, each with its disposition set, plus the operation's
+    rationale (D5: "the selection revision records the chosen candidate
+    and rationale"). Lives as a component (not a new ``RevisionRecord``
+    field) because ``records.py`` is read-only to this slice and
+    ``RevisionRecord.artefact_ids`` already carries the flat selected-ID
+    list the store's own closure validation needs -- this component adds
+    exactly the richer per-artefact disposition/rationale detail that
+    field cannot.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    component_kind: Literal[ComponentKind.ASSEMBLY_MANIFEST] = (
+        ComponentKind.ASSEMBLY_MANIFEST
+    )
+    selections: tuple[ArtefactSelection, ...] = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _no_duplicate_artefact_selections(self) -> Self:
+        artefact_ids = [selection.artefact_id for selection in self.selections]
+        if len(set(artefact_ids)) != len(artefact_ids):
+            raise ValueError(
+                "an assembly manifest may not select the same artefact twice (M18)."
+            )
+        return self
+
+
+class AssemblyManifestComponent(AssemblyManifestComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
 ComponentBody = Annotated[
-    NotesComponentBody | ParticipantSetComponentBody,
+    NotesComponentBody
+    | ParticipantSetComponentBody
+    | UntimedTurnSetComponentBody
+    | TimedTurnSetComponentBody
+    | ProviderLabelSetComponentBody
+    | TranscriptAbsenceDeclarationBody
+    | AssemblyManifestComponentBody,
     Field(discriminator="component_kind"),
 ]
 ComponentRecord = Annotated[
-    NotesComponent | ParticipantSetComponent,
+    NotesComponent
+    | ParticipantSetComponent
+    | UntimedTurnSetComponent
+    | TimedTurnSetComponent
+    | ProviderLabelSetComponent
+    | TranscriptAbsenceDeclaration
+    | AssemblyManifestComponent,
     Field(discriminator="component_kind"),
 ]
 
@@ -259,9 +586,7 @@ class ComponentInputRefs(NamedTuple):
     component_ids: tuple[ComponentId, ...]
 
 
-def component_input_refs(
-    record: NotesComponent | ParticipantSetComponent,
-) -> ComponentInputRefs:
+def component_input_refs(record: ComponentRecord) -> ComponentInputRefs:
     """Every artefact/component this component declares as an input.
 
     :meth:`.store.BundleStore._validate_structural_closure` resolves these
@@ -269,6 +594,16 @@ def component_input_refs(
     closure -- a component embedded in a document can never silently pull
     in an artefact or component that was never actually assembled into
     that document's lineage (F1).
+
+    A :class:`ProviderLabelSetComponent` deliberately does *not* declare
+    its sibling :class:`TimedTurnSetComponent` as a component ref here:
+    that would make the turn set a *mandatory* dependency
+    (``_resolve_component_closure`` hard-fails a revision whose declared
+    component ref is missing from the closure), whereas a label set
+    missing its cues is a *soft*, inspectable capability failure
+    (``speakers.provider-labels`` reports ``failed`` with the unresolved
+    span IDs named) -- the label evidence itself is still a perfectly
+    loadable component either way.
     """
     match record:
         case NotesComponent():
@@ -277,14 +612,32 @@ def component_input_refs(
             )
         case ParticipantSetComponent():
             return ComponentInputRefs(artefact_ids=(), component_ids=())
+        case UntimedTurnSetComponent():
+            return ComponentInputRefs(
+                artefact_ids=(record.source_artefact_id,), component_ids=()
+            )
+        case TimedTurnSetComponent():
+            return ComponentInputRefs(
+                artefact_ids=(record.source_artefact_id,), component_ids=()
+            )
+        case ProviderLabelSetComponent():
+            return ComponentInputRefs(
+                artefact_ids=(record.source_artefact_id,), component_ids=()
+            )
+        case TranscriptAbsenceDeclaration():
+            return ComponentInputRefs(
+                artefact_ids=(record.source_artefact_id,), component_ids=()
+            )
+        case AssemblyManifestComponent():
+            return ComponentInputRefs(
+                artefact_ids=tuple(
+                    selection.artefact_id for selection in record.selections
+                ),
+                component_ids=(),
+            )
 
 
-def component_as_body(
-    component: NotesComponentBody
-    | NotesComponent
-    | ParticipantSetComponentBody
-    | ParticipantSetComponent,
-) -> NotesComponentBody | ParticipantSetComponentBody:
+def component_as_body(component: ComponentBody | ComponentRecord) -> ComponentBody:
     """The exact ``*Body`` a component's content hashes as (MINOR C).
 
     A bare ``*Body`` is returned unchanged. A stored ``*Component`` record
@@ -323,16 +676,49 @@ def component_as_body(
             return ParticipantSetComponentBody(participants=component.participants)
         case ParticipantSetComponentBody():
             return component
+        case UntimedTurnSetComponent():
+            return UntimedTurnSetComponentBody(
+                source_artefact_id=component.source_artefact_id, turns=component.turns
+            )
+        case UntimedTurnSetComponentBody():
+            return component
+        case TimedTurnSetComponent():
+            return TimedTurnSetComponentBody(
+                source_artefact_id=component.source_artefact_id, turns=component.turns
+            )
+        case TimedTurnSetComponentBody():
+            return component
+        case ProviderLabelSetComponent():
+            return ProviderLabelSetComponentBody(
+                source_artefact_id=component.source_artefact_id,
+                proxy_config_hash=component.proxy_config_hash,
+                spans=component.spans,
+            )
+        case ProviderLabelSetComponentBody():
+            return component
+        case TranscriptAbsenceDeclaration():
+            return TranscriptAbsenceDeclarationBody(
+                source_artefact_id=component.source_artefact_id,
+                statement=component.statement,
+            )
+        case TranscriptAbsenceDeclarationBody():
+            return component
+        case AssemblyManifestComponent():
+            return AssemblyManifestComponentBody(
+                selections=component.selections, rationale=component.rationale
+            )
+        case AssemblyManifestComponentBody():
+            return component
 
 
 def assemble_component_record(
-    body: NotesComponentBody | ParticipantSetComponentBody,
+    body: ComponentBody,
     *,
     component_id: ComponentId,
     content_hash: Sha256Hex,
     created_at: datetime,
     mint_segment_id: Callable[[], str],
-) -> NotesComponent | ParticipantSetComponent:
+) -> ComponentRecord:
     """Attach store-minted identity to a body, producing its stored record.
 
     The only place a ``*Body`` becomes a ``*Component``; kept here (not in
@@ -341,6 +727,15 @@ def assemble_component_record(
     module. ``mint_segment_id`` is called once per notes section (never by
     this module directly minting an ID itself -- M1: the store mints,
     nowhere else) to attach each section's :data:`.ids.SegmentId`.
+
+    The turn-set, label-set, absence-declaration, and assembly-manifest
+    kinds mint no identity of their own here: their per-item IDs
+    (``source_segment_id``, ``participant_id``) are already present on
+    the body, minted by the caller before construction (module docstring)
+    -- so attaching store identity is the same "dump the body's fields,
+    re-validate them onto the ``*Component`` subclass plus its three
+    identity fields" shape :class:`ParticipantSetComponentBody` already
+    established, not a new pattern.
     """
     match body:
         case NotesComponentBody():
@@ -361,6 +756,46 @@ def assemble_component_record(
         case ParticipantSetComponentBody():
             fields = body.model_dump(mode="python")
             return ParticipantSetComponent(
+                **fields,
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case UntimedTurnSetComponentBody():
+            fields = body.model_dump(mode="python")
+            return UntimedTurnSetComponent(
+                **fields,
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case TimedTurnSetComponentBody():
+            fields = body.model_dump(mode="python")
+            return TimedTurnSetComponent(
+                **fields,
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case ProviderLabelSetComponentBody():
+            fields = body.model_dump(mode="python")
+            return ProviderLabelSetComponent(
+                **fields,
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case TranscriptAbsenceDeclarationBody():
+            fields = body.model_dump(mode="python")
+            return TranscriptAbsenceDeclaration(
+                **fields,
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case AssemblyManifestComponentBody():
+            fields = body.model_dump(mode="python")
+            return AssemblyManifestComponent(
                 **fields,
                 component_id=component_id,
                 content_hash=content_hash,

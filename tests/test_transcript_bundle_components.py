@@ -7,8 +7,12 @@ import pytest
 from pydantic import ValidationError
 
 from jake_tools.transcripts.bundle.components import (
+    ArtefactSelection,
+    AssemblyManifestComponent,
+    AssemblyManifestComponentBody,
     ComponentInputRefs,
     ComponentKind,
+    Disposition,
     NotesComponent,
     NotesComponentBody,
     NotesKind,
@@ -19,6 +23,18 @@ from jake_tools.transcripts.bundle.components import (
     ParticipantSetComponent,
     ParticipantSetComponentBody,
     ParticipantStatus,
+    ProviderLabelSetComponent,
+    ProviderLabelSetComponentBody,
+    ProviderLabelSpan,
+    TimedTurn,
+    TimedTurnSetComponent,
+    TimedTurnSetComponentBody,
+    TranscriptAbsenceDeclaration,
+    TranscriptAbsenceDeclarationBody,
+    TrustClass,
+    UntimedTurn,
+    UntimedTurnSetComponent,
+    UntimedTurnSetComponentBody,
     assemble_component_record,
     component_as_body,
     component_input_refs,
@@ -337,3 +353,401 @@ def test_component_as_body_strips_each_section_id_not_just_the_component_id() ->
 
     assert isinstance(reconstructed, NotesComponentBody)
     assert not any(hasattr(section, "section_id") for section in reconstructed.sections)
+
+
+# -- UntimedTurn / UntimedTurnSetComponentBody (M6/D6) ------------------------
+
+
+def test_untimed_turn_carries_no_timing_fields() -> None:
+    """The type itself is the enforcement mechanism behind
+    transcript.untimed's 'no timing fields present' check -- there is no
+    start_ms/end_ms field for a caller to accidentally set."""
+    turn = UntimedTurn(source_segment_id=mint_id("seg"), speaker_label="A", text="hi")
+
+    assert not hasattr(turn, "start_ms")
+    assert not hasattr(turn, "end_ms")
+
+
+def test_untimed_turn_set_body_preserves_supplied_import_order() -> None:
+    """M6: untimed turn sets are never reordered."""
+    turns = tuple(
+        UntimedTurn(source_segment_id=mint_id("seg"), speaker_label=label, text="x")
+        for label in ("C", "A", "B")
+    )
+
+    body = UntimedTurnSetComponentBody(
+        source_artefact_id=mint_id("artefact"), turns=turns
+    )
+
+    assert body.turns == turns
+
+
+def test_untimed_turn_set_body_rejects_an_empty_turn_list() -> None:
+    with pytest.raises(ValidationError):
+        UntimedTurnSetComponentBody(source_artefact_id=mint_id("artefact"), turns=())
+
+
+# -- TimedTurn / TimedTurnSetComponentBody (M6) -------------------------------
+
+
+def test_timed_turn_rejects_a_zero_length_span() -> None:
+    """M6: zero-length cues are legal only in raw source evidence, never
+    in a canonical timed turn."""
+    with pytest.raises(ValidationError, match="half-open"):
+        TimedTurn(
+            source_segment_id=mint_id("seg"),
+            speaker_label="A",
+            text="x",
+            start_ms=1000,
+            end_ms=1000,
+        )
+
+
+def test_timed_turn_rejects_end_before_start() -> None:
+    with pytest.raises(ValidationError, match="half-open"):
+        TimedTurn(
+            source_segment_id=mint_id("seg"),
+            speaker_label="A",
+            text="x",
+            start_ms=1000,
+            end_ms=500,
+        )
+
+
+def _timed_turn(
+    *, start_ms: int, end_ms: int, segment_id: str | None = None
+) -> TimedTurn:
+    return TimedTurn(
+        source_segment_id=segment_id or mint_id("seg"),
+        speaker_label="A",
+        text="x",
+        start_ms=start_ms,
+        end_ms=end_ms,
+    )
+
+
+def test_timed_turn_set_body_accepts_turns_already_in_canonical_order() -> None:
+    turns = (
+        _timed_turn(start_ms=0, end_ms=100),
+        _timed_turn(start_ms=100, end_ms=200),
+        _timed_turn(start_ms=200, end_ms=300),
+    )
+
+    body = TimedTurnSetComponentBody(
+        source_artefact_id=mint_id("artefact"), turns=turns
+    )
+
+    assert body.turns == turns
+
+
+def test_timed_turn_set_body_rejects_turns_out_of_canonical_order() -> None:
+    """M6: canonical order is enforced at construction, not silently fixed
+    -- the adapter/normaliser is responsible for sorting first."""
+    turns = (
+        _timed_turn(start_ms=200, end_ms=300),
+        _timed_turn(start_ms=0, end_ms=100),
+    )
+
+    with pytest.raises(ValidationError, match="canonical order"):
+        TimedTurnSetComponentBody(source_artefact_id=mint_id("artefact"), turns=turns)
+
+
+def test_timed_turn_set_body_breaks_ties_on_source_segment_id() -> None:
+    """M6: for turns sharing (start_ms, end_ms), source_segment_id is the
+    tertiary sort key -- supplying them in ascending segment-id order for
+    a genuine tie is accepted; descending is rejected."""
+    first, second = sorted((mint_id("seg"), mint_id("seg")))
+    ascending = (
+        _timed_turn(start_ms=0, end_ms=100, segment_id=first),
+        _timed_turn(start_ms=0, end_ms=100, segment_id=second),
+    )
+    descending = tuple(reversed(ascending))
+
+    accepted = TimedTurnSetComponentBody(
+        source_artefact_id=mint_id("artefact"), turns=ascending
+    )
+    assert accepted.turns == ascending
+
+    with pytest.raises(ValidationError, match="canonical order"):
+        TimedTurnSetComponentBody(
+            source_artefact_id=mint_id("artefact"), turns=descending
+        )
+
+
+def test_timed_turn_set_component_re_validates_canonical_order_on_load() -> None:
+    """TimedTurnSetComponent subclasses the Body, so it inherits the same
+    order check -- a hand-edited/corrupted on-disk record must fail
+    closed here too, not just at Body-construction time."""
+    turns = (
+        _timed_turn(start_ms=200, end_ms=300),
+        _timed_turn(start_ms=0, end_ms=100),
+    )
+
+    with pytest.raises(ValidationError, match="canonical order"):
+        TimedTurnSetComponent(
+            source_artefact_id=mint_id("artefact"),
+            turns=turns,
+            component_id=mint_id("component"),
+            content_hash=_FAKE_HASH,
+            created_at=NOW,
+        )
+
+
+# -- ProviderLabelSpan / ProviderLabelSetComponentBody (M5) -------------------
+
+
+def test_provider_label_set_body_requires_a_proxy_config_hash() -> None:
+    with pytest.raises(ValidationError):
+        ProviderLabelSetComponentBody(
+            source_artefact_id=mint_id("artefact"),
+            proxy_config_hash="not-a-sha256",
+            spans=(
+                ProviderLabelSpan(
+                    source_segment_id=mint_id("seg"),
+                    raw_label="Michael BRYAN",
+                    text="hi",
+                    trust_class=TrustClass.PER_PARTICIPANT_STREAM,
+                ),
+            ),
+        )
+
+
+def test_provider_label_set_body_accepts_a_real_proxy_config_hash() -> None:
+    body = ProviderLabelSetComponentBody(
+        source_artefact_id=mint_id("artefact"),
+        proxy_config_hash=_FAKE_HASH,
+        spans=(
+            ProviderLabelSpan(
+                source_segment_id=mint_id("seg"),
+                raw_label="Michael BRYAN",
+                text="hi",
+                trust_class=TrustClass.PER_PARTICIPANT_STREAM,
+            ),
+        ),
+    )
+
+    assert body.spans[0].trust_class == TrustClass.PER_PARTICIPANT_STREAM
+
+
+# -- TranscriptAbsenceDeclarationBody (D2/M5) ---------------------------------
+
+
+def test_transcript_absence_declaration_requires_a_non_empty_statement() -> None:
+    with pytest.raises(ValidationError):
+        TranscriptAbsenceDeclarationBody(
+            source_artefact_id=mint_id("artefact"), statement=""
+        )
+
+
+# -- Disposition / ArtefactSelection (M18) ------------------------------------
+
+
+def test_artefact_selection_rejects_an_empty_disposition_set() -> None:
+    with pytest.raises(ValidationError):
+        ArtefactSelection(artefact_id=mint_id("artefact"), dispositions=())
+
+
+def test_artefact_selection_rejects_a_duplicate_disposition() -> None:
+    with pytest.raises(ValidationError, match="duplicate disposition"):
+        ArtefactSelection(
+            artefact_id=mint_id("artefact"),
+            dispositions=(Disposition.NOTES, Disposition.NOTES),
+        )
+
+
+def test_artefact_selection_canonicalises_disposition_order() -> None:
+    """So the same set, supplied in a different order, hashes identically
+    (mirrors ParticipantSetComponentBody's participant-order handling)."""
+    forward = ArtefactSelection(
+        artefact_id=mint_id("artefact"),
+        dispositions=(Disposition.SELECTED_TRANSCRIPT, Disposition.MEDIA),
+    )
+    reverse = ArtefactSelection(
+        artefact_id=forward.artefact_id,
+        dispositions=(Disposition.MEDIA, Disposition.SELECTED_TRANSCRIPT),
+    )
+
+    assert forward.dispositions == reverse.dispositions
+
+
+def test_assembly_manifest_body_rejects_selecting_the_same_artefact_twice() -> None:
+    artefact_id = mint_id("artefact")
+    with pytest.raises(ValidationError, match="same artefact twice"):
+        AssemblyManifestComponentBody(
+            selections=(
+                ArtefactSelection(
+                    artefact_id=artefact_id, dispositions=(Disposition.NOTES,)
+                ),
+                ArtefactSelection(
+                    artefact_id=artefact_id, dispositions=(Disposition.MEDIA,)
+                ),
+            ),
+            rationale="test",
+        )
+
+
+def test_assembly_manifest_body_requires_a_non_empty_rationale() -> None:
+    with pytest.raises(ValidationError):
+        AssemblyManifestComponentBody(
+            selections=(
+                ArtefactSelection(
+                    artefact_id=mint_id("artefact"), dispositions=(Disposition.NOTES,)
+                ),
+            ),
+            rationale="",
+        )
+
+
+# -- assemble_component_record / component_as_body / component_input_refs ---
+# for the five new component kinds -------------------------------------------
+
+
+def test_assemble_component_record_attaches_identity_to_an_untimed_turn_set() -> None:
+    body = UntimedTurnSetComponentBody(
+        source_artefact_id=mint_id("artefact"),
+        turns=(
+            UntimedTurn(source_segment_id=mint_id("seg"), speaker_label="A", text="x"),
+        ),
+    )
+
+    record = assemble_component_record(
+        body,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+
+    assert isinstance(record, UntimedTurnSetComponent)
+    assert record.turns == body.turns
+    assert component_as_body(record) == body
+
+
+def test_assemble_component_record_attaches_identity_to_a_timed_turn_set() -> None:
+    body = TimedTurnSetComponentBody(
+        source_artefact_id=mint_id("artefact"),
+        turns=(_timed_turn(start_ms=0, end_ms=100),),
+    )
+
+    record = assemble_component_record(
+        body,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+
+    assert isinstance(record, TimedTurnSetComponent)
+    assert record.turns == body.turns
+    assert component_as_body(record) == body
+
+
+def test_assemble_component_record_attaches_identity_to_a_provider_label_set() -> None:
+    body = ProviderLabelSetComponentBody(
+        source_artefact_id=mint_id("artefact"),
+        proxy_config_hash=_FAKE_HASH,
+        spans=(
+            ProviderLabelSpan(
+                source_segment_id=mint_id("seg"),
+                raw_label="Sam Lintern",
+                text="hi",
+                trust_class=TrustClass.PER_PARTICIPANT_STREAM,
+            ),
+        ),
+    )
+
+    record = assemble_component_record(
+        body,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+
+    assert isinstance(record, ProviderLabelSetComponent)
+    assert record.spans == body.spans
+    assert component_as_body(record) == body
+
+
+def test_assemble_component_record_attaches_identity_to_an_absence_declaration() -> (
+    None
+):
+    body = TranscriptAbsenceDeclarationBody(
+        source_artefact_id=mint_id("artefact"),
+        statement="No Gemini transcript was available for this meeting.",
+    )
+
+    record = assemble_component_record(
+        body,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+
+    assert isinstance(record, TranscriptAbsenceDeclaration)
+    assert component_as_body(record) == body
+
+
+def test_assemble_component_record_attaches_identity_to_an_assembly_manifest() -> None:
+    body = AssemblyManifestComponentBody(
+        selections=(
+            ArtefactSelection(
+                artefact_id=mint_id("artefact"),
+                dispositions=(Disposition.SELECTED_TRANSCRIPT,),
+            ),
+        ),
+        rationale="only candidate available",
+    )
+
+    record = assemble_component_record(
+        body,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+
+    assert isinstance(record, AssemblyManifestComponent)
+    assert component_as_body(record) == body
+
+
+def test_component_input_refs_for_the_new_kinds() -> None:
+    artefact_id = mint_id("artefact")
+    untimed = assemble_component_record(
+        UntimedTurnSetComponentBody(
+            source_artefact_id=artefact_id,
+            turns=(
+                UntimedTurn(
+                    source_segment_id=mint_id("seg"), speaker_label="A", text="x"
+                ),
+            ),
+        ),
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+    assert component_input_refs(untimed) == ComponentInputRefs(
+        artefact_ids=(artefact_id,), component_ids=()
+    )
+
+    manifest_artefact_id = mint_id("artefact")
+    manifest = assemble_component_record(
+        AssemblyManifestComponentBody(
+            selections=(
+                ArtefactSelection(
+                    artefact_id=manifest_artefact_id,
+                    dispositions=(Disposition.NOTES,),
+                ),
+            ),
+            rationale="test",
+        ),
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+    assert component_input_refs(manifest) == ComponentInputRefs(
+        artefact_ids=(manifest_artefact_id,), component_ids=()
+    )

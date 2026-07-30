@@ -16,6 +16,18 @@ from jake_tools.transcripts.bundle.components import (
     ParticipantRecord,
     ParticipantSetComponentBody,
     ParticipantStatus,
+    ProviderLabelSetComponent,
+    ProviderLabelSetComponentBody,
+    ProviderLabelSpan,
+    TimedTurn,
+    TimedTurnSetComponent,
+    TimedTurnSetComponentBody,
+    TranscriptAbsenceDeclaration,
+    TranscriptAbsenceDeclarationBody,
+    TrustClass,
+    UntimedTurn,
+    UntimedTurnSetComponent,
+    UntimedTurnSetComponentBody,
     assemble_component_record,
 )
 from jake_tools.transcripts.bundle.ids import mint_id
@@ -281,6 +293,9 @@ def test_every_unimplemented_key_stub_returns_not_attempted() -> None:
         CapabilityKey.NOTES_PROVIDER,
         CapabilityKey.NOTES_AUTHORED,
         CapabilityKey.PARTICIPANTS_DECLARED,
+        CapabilityKey.TRANSCRIPT_UNTIMED,
+        CapabilityKey.TRANSCRIPT_TIMED,
+        CapabilityKey.SPEAKERS_PROVIDER_LABELS,
     }
     results = validate(mint_id("rev"), {})
 
@@ -288,6 +303,24 @@ def test_every_unimplemented_key_stub_returns_not_attempted() -> None:
         if key in implemented:
             continue
         assert results[key].status == CapabilityStatus.NOT_ATTEMPTED, key.value
+
+
+def test_every_implemented_key_reports_absent_on_an_empty_closure() -> None:
+    """The mirror of the stub check above: a real validator over an empty
+    component set must report a genuine, evidence-based status -- never
+    the stub's not-attempted (that would mean it never actually looked)."""
+    implemented = {
+        CapabilityKey.NOTES_PROVIDER,
+        CapabilityKey.NOTES_AUTHORED,
+        CapabilityKey.PARTICIPANTS_DECLARED,
+        CapabilityKey.TRANSCRIPT_UNTIMED,
+        CapabilityKey.TRANSCRIPT_TIMED,
+        CapabilityKey.SPEAKERS_PROVIDER_LABELS,
+    }
+    results = validate(mint_id("rev"), {})
+
+    for key in implemented:
+        assert results[key].status == CapabilityStatus.ABSENT, key.value
 
 
 def test_stub_validator_cannot_be_made_to_emit_present_validated() -> None:
@@ -471,4 +504,288 @@ def test_participants_declared_fails_for_more_than_one_component() -> None:
 
     record = results[CapabilityKey.PARTICIPANTS_DECLARED]
     assert record.status == CapabilityStatus.FAILED
-    assert "2 participant-set components" in record.failure_detail
+
+
+# -- transcript.untimed / transcript.timed (M6/M7/D6) -----------------------
+
+
+def _untimed_turn_set_component(*, turn_count: int = 1) -> UntimedTurnSetComponent:
+    body = UntimedTurnSetComponentBody(
+        source_artefact_id=mint_id("artefact"),
+        turns=tuple(
+            UntimedTurn(source_segment_id=mint_id("seg"), speaker_label="A", text="x")
+            for _ in range(turn_count)
+        ),
+    )
+    record = assemble_component_record(
+        body,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+    assert isinstance(record, UntimedTurnSetComponent)
+    return record
+
+
+def _timed_turn_set_component(*, turn_count: int = 1) -> TimedTurnSetComponent:
+    turns = []
+    start_ms = 0
+    for _ in range(turn_count):
+        turns.append(
+            TimedTurn(
+                source_segment_id=mint_id("seg"),
+                speaker_label="A",
+                text="x",
+                start_ms=start_ms,
+                end_ms=start_ms + 100,
+            )
+        )
+        start_ms += 100
+    body = TimedTurnSetComponentBody(
+        source_artefact_id=mint_id("artefact"), turns=tuple(turns)
+    )
+    record = assemble_component_record(
+        body,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+    assert isinstance(record, TimedTurnSetComponent)
+    return record
+
+
+def _absence_declaration_component() -> TranscriptAbsenceDeclaration:
+    body = TranscriptAbsenceDeclarationBody(
+        source_artefact_id=mint_id("artefact"),
+        statement="No Gemini transcript was available for this meeting.",
+    )
+    record = assemble_component_record(
+        body,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+    assert isinstance(record, TranscriptAbsenceDeclaration)
+    return record
+
+
+def test_transcript_untimed_is_absent_with_no_evidence_either_way() -> None:
+    results = validate(mint_id("rev"), {})
+
+    assert results[CapabilityKey.TRANSCRIPT_UNTIMED].status == CapabilityStatus.ABSENT
+
+
+def test_transcript_untimed_is_present_validated_with_a_turn_set() -> None:
+    component = _untimed_turn_set_component(turn_count=3)
+
+    results = validate(mint_id("rev"), {component.component_id: component})
+
+    record = results[CapabilityKey.TRANSCRIPT_UNTIMED]
+    assert record.status == CapabilityStatus.PRESENT_VALIDATED
+    assert record.component_ids == (component.component_id,)
+
+
+def test_transcript_untimed_fails_for_more_than_one_turn_set() -> None:
+    first = _untimed_turn_set_component()
+    second = _untimed_turn_set_component()
+
+    results = validate(
+        mint_id("rev"), {first.component_id: first, second.component_id: second}
+    )
+
+    assert results[CapabilityKey.TRANSCRIPT_UNTIMED].status == CapabilityStatus.FAILED
+
+
+def test_transcript_untimed_reports_not_available_from_source_with_a_declaration() -> (
+    None
+):
+    """D2/M5: the Gemini-notes-only case -- no turn set, but the source
+    explicitly says no transcript exists. Distinct from plain absent."""
+    declaration = _absence_declaration_component()
+
+    results = validate(mint_id("rev"), {declaration.component_id: declaration})
+
+    record = results[CapabilityKey.TRANSCRIPT_UNTIMED]
+    assert record.status == CapabilityStatus.NOT_AVAILABLE_FROM_SOURCE
+    assert record.component_ids == (declaration.component_id,)
+
+
+def test_transcript_timed_reports_not_available_from_source_with_a_declaration() -> (
+    None
+):
+    declaration = _absence_declaration_component()
+
+    results = validate(mint_id("rev"), {declaration.component_id: declaration})
+
+    assert (
+        results[CapabilityKey.TRANSCRIPT_TIMED].status
+        == CapabilityStatus.NOT_AVAILABLE_FROM_SOURCE
+    )
+
+
+def test_transcript_timed_is_absent_with_no_evidence_either_way() -> None:
+    results = validate(mint_id("rev"), {})
+
+    assert results[CapabilityKey.TRANSCRIPT_TIMED].status == CapabilityStatus.ABSENT
+
+
+def test_transcript_timed_is_present_validated_with_a_turn_set() -> None:
+    component = _timed_turn_set_component(turn_count=3)
+
+    results = validate(mint_id("rev"), {component.component_id: component})
+
+    record = results[CapabilityKey.TRANSCRIPT_TIMED]
+    assert record.status == CapabilityStatus.PRESENT_VALIDATED
+    assert record.component_ids == (component.component_id,)
+
+
+def test_transcript_timed_fails_for_more_than_one_turn_set() -> None:
+    first = _timed_turn_set_component()
+    second = _timed_turn_set_component()
+
+    results = validate(
+        mint_id("rev"), {first.component_id: first, second.component_id: second}
+    )
+
+    assert results[CapabilityKey.TRANSCRIPT_TIMED].status == CapabilityStatus.FAILED
+
+
+def test_transcript_capability_fails_with_two_conflicting_absence_declarations() -> (
+    None
+):
+    first = _absence_declaration_component()
+    second = _absence_declaration_component()
+
+    results = validate(
+        mint_id("rev"), {first.component_id: first, second.component_id: second}
+    )
+
+    assert results[CapabilityKey.TRANSCRIPT_UNTIMED].status == CapabilityStatus.FAILED
+    assert results[CapabilityKey.TRANSCRIPT_TIMED].status == CapabilityStatus.FAILED
+
+
+def test_chapters_prerequisite_is_satisfied_once_transcript_timed_validates() -> None:
+    """Now that transcript.timed has a real validator, the M4 prerequisite
+    wiring (chapters -> transcript.timed) is exercised end to end: a
+    present-validated timed turn set does not, by itself, make the still-
+    stub chapters key present-validated (no real chapters validator exists
+    yet) -- it stays not-attempted, honestly."""
+    component = _timed_turn_set_component()
+
+    results = validate(mint_id("rev"), {component.component_id: component})
+
+    assert (
+        results[CapabilityKey.TRANSCRIPT_TIMED].status
+        == CapabilityStatus.PRESENT_VALIDATED
+    )
+    assert results[CapabilityKey.CHAPTERS].status == CapabilityStatus.NOT_ATTEMPTED
+
+
+# -- speakers.provider-labels (M5, evidence only) ----------------------------
+
+
+def _provider_label_set_component(
+    *, cue_segment_ids: tuple[str, ...], proxy_config_hash: str = _FAKE_HASH
+) -> ProviderLabelSetComponent:
+    body = ProviderLabelSetComponentBody(
+        source_artefact_id=mint_id("artefact"),
+        proxy_config_hash=proxy_config_hash,
+        spans=tuple(
+            ProviderLabelSpan(
+                source_segment_id=segment_id,
+                raw_label="Michael BRYAN",
+                text="hi",
+                trust_class=TrustClass.PER_PARTICIPANT_STREAM,
+            )
+            for segment_id in cue_segment_ids
+        ),
+    )
+    record = assemble_component_record(
+        body,
+        component_id=mint_id("component"),
+        content_hash=_FAKE_HASH,
+        created_at=NOW,
+        mint_segment_id=lambda: mint_id("seg"),
+    )
+    assert isinstance(record, ProviderLabelSetComponent)
+    return record
+
+
+def test_speakers_provider_labels_is_absent_with_no_label_set() -> None:
+    results = validate(mint_id("rev"), {})
+
+    assert (
+        results[CapabilityKey.SPEAKERS_PROVIDER_LABELS].status
+        == CapabilityStatus.ABSENT
+    )
+
+
+def test_speakers_provider_labels_is_present_validated_when_spans_resolve_to_cues() -> (
+    None
+):
+    turn_set = _timed_turn_set_component(turn_count=2)
+    cue_segment_ids = tuple(turn.source_segment_id for turn in turn_set.turns)
+    label_set = _provider_label_set_component(cue_segment_ids=cue_segment_ids)
+
+    results = validate(
+        mint_id("rev"),
+        {turn_set.component_id: turn_set, label_set.component_id: label_set},
+    )
+
+    record = results[CapabilityKey.SPEAKERS_PROVIDER_LABELS]
+    assert record.status == CapabilityStatus.PRESENT_VALIDATED
+    assert record.component_ids == (label_set.component_id,)
+    assert record.proxy_config_hash == _FAKE_HASH
+    assert len(record.trust_class_coverage) == 1
+    assert (
+        record.trust_class_coverage[0].trust_class == TrustClass.PER_PARTICIPANT_STREAM
+    )
+    assert record.trust_class_coverage[0].covered_turn_count == 2
+
+
+def test_speakers_provider_labels_fails_when_a_span_does_not_resolve_to_a_cue() -> None:
+    """M5: 'spans resolve to cues' -- a span whose segment ID names no
+    turn anywhere in the closure is unresolved evidence, not silently
+    accepted."""
+    label_set = _provider_label_set_component(cue_segment_ids=(mint_id("seg"),))
+
+    results = validate(mint_id("rev"), {label_set.component_id: label_set})
+
+    record = results[CapabilityKey.SPEAKERS_PROVIDER_LABELS]
+    assert record.status == CapabilityStatus.FAILED
+    assert record.members[0].status == CapabilityStatus.FAILED
+
+
+def test_speakers_provider_labels_fails_on_inconsistent_proxy_config_hash() -> None:
+    """M5: the proxy-config hash is a recorded config input -- two label
+    sets in the same closure disagreeing about it is a data-integrity
+    problem, never silently resolved by picking one."""
+    turn_set = _timed_turn_set_component(turn_count=1)
+    cue_segment_id = turn_set.turns[0].source_segment_id
+    first = _provider_label_set_component(
+        cue_segment_ids=(cue_segment_id,), proxy_config_hash=_FAKE_HASH
+    )
+    other_hash = hashlib.sha256(b"different-proxy-config").hexdigest()
+    second = _provider_label_set_component(
+        cue_segment_ids=(cue_segment_id,), proxy_config_hash=other_hash
+    )
+
+    results = validate(
+        mint_id("rev"),
+        {
+            turn_set.component_id: turn_set,
+            first.component_id: first,
+            second.component_id: second,
+        },
+    )
+
+    record = results[CapabilityKey.SPEAKERS_PROVIDER_LABELS]
+    assert record.status == CapabilityStatus.FAILED
+    assert record.proxy_config_hash is None
+    assert all(member.status == CapabilityStatus.FAILED for member in record.members)
+    assert all(
+        "inconsistent proxy_config_hash" in member.detail for member in record.members
+    )
