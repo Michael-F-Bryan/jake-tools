@@ -18,17 +18,25 @@ Two concerns are kept deliberately separate:
   own record as it moves through its state machine — via a temp file and
   the injectable ``replace`` seam). Both seams default to the real syscall
   and exist so tests can simulate a crash at the exact commit point of
-  each primitive (between the temp write and the rename/link).
+  each primitive (between the temp write and the rename/link). Note
+  ``os.link`` requires the bundle root to sit on a filesystem that
+  supports hard links (true of the default ``_working/`` on APFS/ext4/
+  etc.); since ``root`` is operator-overridable, pointing it at exFAT,
+  FUSE, or another filesystem without hard-link support would break this
+  primitive.
 - **Cross-process concurrency** (two processes interleave between a read
   and the write it informs) is handled by :meth:`BundleStore._locked`, a
-  single advisory ``flock`` per bundle held for the duration of one
-  read-modify-write critical section. Every operation that reads
-  ``manifest.json`` (or the lease) and then writes back a decision based on
-  that read — ``register_source``, ``create_run``'s manifest update,
-  ``update_head``, ``acquire_lease``, ``release_lease`` — holds this lock
-  for its whole critical section. Pure append-only writes (fresh artefacts,
-  revisions) do not need it: exclusive creation is already race-safe by
-  construction.
+  single advisory ``flock`` per bundle, reentrant per thread, held for the
+  duration of one read-modify-write critical section. This covers not
+  just manifest/lease read-then-write sequences (``register_source``,
+  ``create_run``'s manifest update, ``update_head``, ``acquire_lease``,
+  ``release_lease``) but *any* decision made from a read before a write —
+  notably ``ingest_artefact``'s dedup check (does a matching artefact
+  already exist) is a read-modify-write too, not a pure append, and holds
+  this same lock. Only genuinely unconditional writes skip it: minting a
+  revision, and the content-addressed blob write itself (racing writers
+  of the same ``sha256`` write byte-identical content, so the race is
+  harmless).
 """
 
 from __future__ import annotations
@@ -39,6 +47,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -243,6 +252,7 @@ class BundleStore:
         self._replace = replace
         self._link = link
         self._validate_capabilities = validate_capabilities
+        self._lock_state = threading.local()
 
     @property
     def root(self) -> Path:
@@ -301,15 +311,42 @@ class BundleStore:
         The per-file write primitives below protect against a *crash*
         mid-write; they say nothing about two processes interleaving
         between a read and the write it informs (e.g. two processes both
-        reading "no lease held" and both proceeding to acquire). This is a
-        single advisory ``flock`` per bundle for exactly that.
+        reading "no lease held" and both proceeding to acquire, or two
+        processes both deciding an artefact needs a fresh record). This is
+        a single advisory ``flock`` per bundle for exactly that.
+
+        Reentrant per thread via a depth counter: a callback invoked while
+        the lock is held (chiefly ``validate_capabilities``, whose whole
+        purpose is to host the future capability registry, which *will*
+        resolve components through other store methods) can call back into
+        another locking method without self-deadlocking. A second
+        ``flock(LOCK_EX)`` from a fresh ``open()`` on the *same* process
+        would otherwise block forever waiting for a lock this same thread
+        already holds -- ``flock`` treats distinct file descriptors
+        independently even within one process, so re-opening the lock file
+        does not see this thread's own hold as "mine". Only the outermost
+        call actually touches the filesystem lock; nested calls just track
+        depth. Does not require ``root`` to exist beforehand -- refuses
+        with `NotABundleError` instead of creating it as a side effect.
         """
-        self._root.mkdir(parents=True, exist_ok=True)
-        with open(self._root / _LOCK_FILENAME, "a+") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        depth = getattr(self._lock_state, "depth", 0)
+        if depth > 0:
+            self._lock_state.depth = depth + 1
             try:
                 yield
             finally:
+                self._lock_state.depth = depth
+            return
+
+        if not self._root.is_dir():
+            raise NotABundleError(f"{self._root} is not a bundle (no manifest.json).")
+        with open(self._root / _LOCK_FILENAME, "a+") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            self._lock_state.depth = 1
+            try:
+                yield
+            finally:
+                self._lock_state.depth = depth
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _fsync_directory(self, directory: Path) -> None:
@@ -535,6 +572,17 @@ class BundleStore:
         are evidence of a distinct acquisition and get a new artefact
         record (M1 §3.2), even though the underlying bytes dedupe at blob
         storage. The head never moves as a side effect of this (M12).
+
+        The dedup decision (does a record for this identity already exist,
+        and does its metadata match) is a read-modify-write, not a pure
+        append -- deciding "no existing record" and then minting one must
+        be one atomic step across processes, or concurrent ingests of the
+        same identity mint duplicate records (M16 requires exactly one).
+        It runs under :meth:`_locked`. The content-addressed blob write
+        itself stays outside the lock: two processes racing to write the
+        same ``sha256`` are writing byte-identical content to the same
+        path, so the race is harmless (whichever ``replace`` lands last,
+        the bytes are the same either way).
         """
         manifest = self.load_manifest()
         known_sources = {
@@ -556,39 +604,40 @@ class BundleStore:
             )
 
         sha256 = _sha256_hex(content)
-        existing = self._find_existing_artefact(
-            sha256=sha256,
-            source_id=source_id,
-            acquisition_locator=acquisition_locator,
-            kind=kind,
-            producer=producer,
-            derived_from=derived_from,
-        )
-        if existing is not None:
-            return existing
-
         blob_path = self._blob_path(sha256)
         if not blob_path.exists():
             self._write_blob(blob_path, content)
 
-        record = ArtefactRecord(
-            artefact_id=mint_id("artefact"),
-            bundle_id=manifest.bundle_id,
-            source_id=source_id,
-            acquisition_locator=acquisition_locator,
-            sha256=sha256,
-            blob_ref=f"blobs/{sha256}",
-            kind=kind,
-            producer=producer,
-            derived_from=derived_from,
-            created_at=_utc_now(),
-        )
-        self._write_json_exclusive(
-            self._artefact_path(record.artefact_id),
-            record,
-            conflict_error=RecordIdCollisionError,
-        )
-        return record
+        with self._locked():
+            existing = self._find_existing_artefact(
+                sha256=sha256,
+                source_id=source_id,
+                acquisition_locator=acquisition_locator,
+                kind=kind,
+                producer=producer,
+                derived_from=derived_from,
+            )
+            if existing is not None:
+                return existing
+
+            record = ArtefactRecord(
+                artefact_id=mint_id("artefact"),
+                bundle_id=manifest.bundle_id,
+                source_id=source_id,
+                acquisition_locator=acquisition_locator,
+                sha256=sha256,
+                blob_ref=f"blobs/{sha256}",
+                kind=kind,
+                producer=producer,
+                derived_from=derived_from,
+                created_at=_utc_now(),
+            )
+            self._write_json_exclusive(
+                self._artefact_path(record.artefact_id),
+                record,
+                conflict_error=RecordIdCollisionError,
+            )
+            return record
 
     def _write_blob(self, blob_path: Path, content: bytes) -> None:
         blob_path.parent.mkdir(parents=True, exist_ok=True)
@@ -809,10 +858,19 @@ class BundleStore:
     ) -> Lease:
         """Acquire the bundle's single run lease (M2).
 
-        The run must exist and be in an acquirable state — ``created`` or
-        one of the durable states — checked *before* the lease is ever
-        touched, so a bad ``run_id`` or a ``completed`` run never leaves a
-        stuck lease behind. If a lease is already held:
+        The run must exist and be in an acquirable state — ``created``,
+        one of the durable states, or ``running`` *with no lease currently
+        held* — checked *before* the lease is ever touched, so a bad
+        ``run_id`` or a ``completed`` run never leaves a stuck lease
+        behind. The ``running``-with-no-lease case exists because
+        ``running`` is otherwise not acquirable, but a run stuck showing
+        it with no lease at all is provably an orphan (holding the lease
+        *is* what ``running`` means operationally) — the residual crash
+        window inside this very method, between the run-record write and
+        the lease write below, produces exactly this state, and it must
+        stay recoverable rather than immortally stranded.
+
+        If a lease is already held:
 
         - and its run's own record is **not** in state ``running`` — that
           is provably a crash remnant (M2: any durable-state entry
@@ -832,16 +890,21 @@ class BundleStore:
         the writes that follow it are one atomic step across processes;
         within that, the run record is written to ``running`` before the
         lease file (a crash in between leaves an orphaned run record but
-        *no* lease, which is trivially self-recovering, rather than a
+        *no* lease, which is trivially self-recovering via the
+        ``running``-with-no-lease acquirability rule above, rather than a
         lease nobody can clear).
         """
         with self._locked():
             run = self.load_run(run_id)
-            if run.state not in _ACQUIRABLE_RUN_STATES:
+            current = self.load_lease()
+
+            running_orphan = run.state == RunState.RUNNING and current is None
+            if run.state not in _ACQUIRABLE_RUN_STATES and not running_orphan:
                 raise RunNotAcquirableError(
                     f"run {run_id} is in state {run.state.value!r}; only "
-                    f"{[state.value for state in _ACQUIRABLE_RUN_STATES]} may "
-                    "acquire the lease."
+                    f"{[state.value for state in _ACQUIRABLE_RUN_STATES]} (or "
+                    "'running' with no lease currently held, a crash-orphaned run) "
+                    "may acquire the lease."
                 )
             if take_over and run.takeover_of_run_id is None:
                 raise TakeOverRefusedError(
@@ -850,7 +913,6 @@ class BundleStore:
                     "take_over=True."
                 )
 
-            current = self.load_lease()
             if current is not None:
                 holder = self.load_run(current.run_id)
                 if holder.state != RunState.RUNNING:
@@ -900,15 +962,34 @@ class BundleStore:
     ) -> RunRecord:
         """Enter a durable or terminal state and release the lease (M2).
 
-        Only the current lease holder may release it. ``next_action`` is a
-        precondition checked up front — every durable state must carry one
-        (so a resume replays it exactly), and ``completed`` must not carry
-        one (it is terminal) — raising a typed error naming the rule,
-        rather than letting a bare ``ValidationError`` from `RunRecord`'s
-        own invariant leak out uncontextualised. Which *states* are legal
-        targets at all is enforced generically by `_replace_run_fields`'s
-        edge table.
+        ``new_state`` must be one of M2's durable/terminal states, checked
+        up front by an explicit whitelist: `_replace_run_fields`'s edge
+        table alone is not enough here, because it only checks an edge
+        when the target state *differs* from the run's current one --
+        releasing into the run's own current state (``running`` ->
+        ``running``) trivially satisfies "no transition happened" and
+        would sail through un-checked, silently releasing the lease
+        without the run ever entering a durable state.
+
+        Only the current lease holder may release it -- and "holder" means
+        the actual process that acquired it: a mismatched but *live* PID
+        is refused even if it names the right ``run_id``, so a second
+        process that merely learned the run ID cannot release a lease out
+        from under the process actively using it. A *dead* PID's lease may
+        still be released by a different (recovering) process.
+
+        ``next_action`` is a precondition checked up front — every durable
+        state must carry one (so a resume replays it exactly), and
+        ``completed`` must not carry one (it is terminal) — raising a
+        typed error naming the rule, rather than letting a bare
+        ``ValidationError`` from `RunRecord`'s own invariant leak out
+        uncontextualised.
         """
+        if new_state not in (*DURABLE_RUN_STATES, RunState.COMPLETED):
+            raise InvalidRunTransitionError(
+                "release_lease only accepts a durable or terminal state, got "
+                f"{new_state.value!r}."
+            )
         if new_state != RunState.COMPLETED and next_action is None:
             raise NextActionPreconditionError(
                 f"release_lease(new_state={new_state.value!r}) requires next_action: "
@@ -926,6 +1007,12 @@ class BundleStore:
                 holder = current.run_id if current is not None else "no active run"
                 raise NotLeaseHolderError(
                     f"run {run_id} does not hold the bundle's lease (held by {holder})."
+                )
+            if current.pid != os.getpid() and _pid_is_alive(current.pid):
+                raise NotLeaseHolderError(
+                    f"run {run_id}'s lease is held by live process {current.pid}; "
+                    f"only that process (or a later process taking over a dead one) "
+                    f"may release it (this process is {os.getpid()})."
                 )
 
             run = self.load_run(run_id)

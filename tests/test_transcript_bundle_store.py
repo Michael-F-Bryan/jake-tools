@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from jake_tools.transcripts.bundle.records import (
+    ArtefactRecord,
     Lease,
     NoDocumentYet,
     OperationRef,
@@ -135,6 +136,24 @@ def test_load_manifest_raises_a_typed_error_for_a_non_bundle_directory(
         store.load_manifest()
 
 
+def test_locked_does_not_create_the_bundle_root_as_a_side_effect(
+    tmp_path: Path,
+) -> None:
+    """Finding NEW-4: _locked() used to mkdir the bundle root before
+    checking anything, so a locking call on a non-bundle path (e.g.
+    register_source) left a directory containing only .store.lock behind
+    even though the call correctly failed. Failing must not leave debris."""
+    root = tmp_path / "not-a-bundle"
+    store = BundleStore(root)
+
+    with pytest.raises(NotABundleError):
+        store.register_source(
+            association=SourceAssociation.OPERATOR_ASSERTION, evidence="cli"
+        )
+
+    assert not root.exists()
+
+
 # -- ingestion ------------------------------------------------------------
 
 
@@ -240,6 +259,41 @@ def test_ingest_artefact_raises_on_metadata_conflict_for_the_same_acquisition(
             producer="ingest:a",
             acquisition_locator="/tmp/a.wav",
         )
+
+
+def test_concurrent_ingest_of_the_same_acquisition_identity_produces_one_record(
+    tmp_path: Path,
+) -> None:
+    """Finding NEW-2: ingest_artefact's find-existing-then-write dedup
+    decision is a read-modify-write, not a pure append -- it must be one
+    atomic step across processes, or racing ingests of the exact same
+    (hash, source, locator) triple mint one artefact record each instead
+    of the single record M16 requires. Real threads, not a mocked race."""
+    store = _store(tmp_path)
+    source_id = _registered_source(store)
+    racer_count = 6
+    barrier = threading.Barrier(racer_count)
+    results: list[ArtefactRecord | None] = [None] * racer_count
+
+    def ingest(index: int) -> None:
+        barrier.wait()
+        results[index] = store.ingest_artefact(
+            source_id=source_id,
+            content=b"same bytes",
+            kind="audio",
+            producer="ingest:test",
+            acquisition_locator="/tmp/a.wav",
+        )
+
+    threads = [threading.Thread(target=ingest, args=(i,)) for i in range(racer_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    artefact_ids = {record.artefact_id for record in results if record is not None}
+    assert len(artefact_ids) == 1
+    assert len(list((store.root / "artefacts").glob("*.json"))) == 1
 
 
 def test_load_artefact_returns_the_stored_record(tmp_path: Path) -> None:
@@ -536,6 +590,45 @@ def test_update_head_allows_moving_forward_to_a_descendant_of_the_current_head(
     assert updated.head_revision_id == child.revision_id
 
 
+def test_capability_validator_can_call_back_into_a_locking_store_method(
+    tmp_path: Path,
+) -> None:
+    """Finding NEW-3: _locked() opened a fresh file handle and flock'd it
+    on every call, so a validate_capabilities callback invoked from inside
+    update_head's own lock -- exactly the seam the future M4 capability
+    registry will use to resolve components through other store methods
+    -- would self-deadlock the moment it called back into any locking
+    method (a second LOCK_EX from the same process, via a different fd,
+    blocks on the lock this same thread already holds). _locked() is now
+    reentrant per thread. Run on a background thread with a bounded join
+    so a regression fails the test instead of hanging the whole suite."""
+    completed = threading.Event()
+
+    def validator(revision: RevisionRecord) -> None:
+        store.register_source(
+            association=SourceAssociation.OPERATOR_ASSERTION, evidence="from validator"
+        )
+
+    store = BundleStore(tmp_path / "bundle", validate_capabilities=validator)
+    store.create_bundle()
+    revision = store.append_revision(operation=OperationRef(kind="assemble"))
+    run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+
+    def run_update_head() -> None:
+        store.update_head(run_id=run.run_id, revision_id=revision.revision_id)
+        completed.set()
+
+    thread = threading.Thread(target=run_update_head, daemon=True)
+    thread.start()
+    thread.join(timeout=5.0)
+
+    assert completed.is_set(), (
+        "update_head did not complete -- _locked likely deadlocked"
+    )
+    assert len(store.load_manifest().source_memberships) == 1
+
+
 # -- leases -----------------------------------------------------------------
 
 
@@ -652,6 +745,82 @@ def test_release_lease_refuses_a_run_that_does_not_hold_the_lease(
             new_state=RunState.FAILED,
             next_action=OperationRef(kind="assemble"),
         )
+
+
+def test_release_lease_refuses_a_non_durable_target_state(tmp_path: Path) -> None:
+    """Finding NEW-1: _replace_run_fields's edge check only fires when the
+    target state differs from the run's current one, so
+    release_lease(new_state=RUNNING) -- releasing into the run's own
+    current state -- sailed through un-checked: the lease was unlinked
+    without the run ever entering a durable state, permanently stranding
+    it (RUNNING is not acquirable, and re-releasing raises
+    NotLeaseHolderError since the lease is already gone). The explicit
+    whitelist catches exactly this case, which the edge table cannot."""
+    store = _store(tmp_path)
+    run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+
+    with pytest.raises(InvalidRunTransitionError):
+        store.release_lease(
+            run_id=run.run_id,
+            new_state=RunState.RUNNING,
+            next_action=OperationRef(kind="assemble"),
+        )
+
+    # Rejected outright: the run is still running and still holds the lease.
+    assert store.load_run(run.run_id).state == RunState.RUNNING
+    lease = store.load_lease()
+    assert lease is not None
+    assert lease.run_id == run.run_id
+
+
+def test_release_lease_refuses_a_different_live_process_even_with_the_right_run_id(
+    tmp_path: Path,
+) -> None:
+    """Finding NEW-5: release_lease authenticated by run_id alone, so any
+    process that merely knew the run_id could release a LIVE run's lease
+    out from under the process actively using it. A real (not faked)
+    external process is spawned and kept alive to prove this."""
+    store = _store(tmp_path)
+    run = store.create_run(next_action=OperationRef(kind="assemble"))
+    other_process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(5)"]
+    )
+    try:
+        store.acquire_lease(run_id=run.run_id, pid=other_process.pid)
+
+        with pytest.raises(NotLeaseHolderError, match=str(other_process.pid)):
+            store.release_lease(
+                run_id=run.run_id,
+                new_state=RunState.FAILED,
+                next_action=OperationRef(kind="assemble"),
+            )
+    finally:
+        other_process.kill()
+        other_process.wait()
+
+    lease = store.load_lease()
+    assert lease is not None
+    assert lease.pid == other_process.pid
+
+
+def test_release_lease_allows_a_different_process_to_release_a_dead_pids_lease(
+    tmp_path: Path,
+) -> None:
+    """The PID check only refuses a *live* mismatch -- a dead holder's
+    lease may still be released by a different (recovering) process."""
+    store = _store(tmp_path)
+    run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=run.run_id, pid=_dead_pid())
+
+    updated = store.release_lease(
+        run_id=run.run_id,
+        new_state=RunState.FAILED,
+        next_action=OperationRef(kind="assemble"),
+    )
+
+    assert updated.state == RunState.FAILED
+    assert store.load_lease() is None
 
 
 def test_release_lease_raises_a_typed_error_for_a_missing_next_action(
@@ -826,6 +995,39 @@ def test_acquire_lease_crash_after_run_write_leaves_no_stuck_lease(
     lease = recovery_store.acquire_lease(run_id=fresh_run.run_id, pid=os.getpid())
 
     assert lease.run_id == fresh_run.run_id
+
+
+def test_acquire_lease_recovers_the_orphaned_run_itself_with_no_lease(
+    tmp_path: Path,
+) -> None:
+    """Finding NEW-6: the crash window above leaves the *original* run's
+    own record stuck showing 'running' with no lease -- 'running' is
+    otherwise not an acquirable state, so without this fix that run is
+    immortally stranded (never acquirable, never releasable). A 'running'
+    run with no lease held is provably not active, so it must remain
+    acquirable -- recovering the same run_id, not just a fresh one."""
+    root = tmp_path / "bundle"
+    setup_store = BundleStore(root)
+    setup_store.create_bundle()
+    run = setup_store.create_run(next_action=OperationRef(kind="assemble"))
+
+    def replace_then_crash(src: str, dst: str) -> None:
+        os.replace(src, dst)
+        raise OSError(
+            "simulated crash after the run-record write, before the lease write"
+        )
+
+    crashing_store = BundleStore(root, replace=replace_then_crash)
+    with pytest.raises(OSError, match="simulated crash"):
+        crashing_store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+
+    recovery_store = BundleStore(root)
+    assert recovery_store.load_run(run.run_id).state == RunState.RUNNING
+    assert recovery_store.load_lease() is None
+
+    lease = recovery_store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+
+    assert lease.run_id == run.run_id
 
 
 def test_acquire_lease_refuses_a_completed_run_without_touching_the_lease(
