@@ -26,11 +26,11 @@ from inference_worker.models import (
 )
 from inference_worker.provenance import sha256_file
 
-# A structurally valid M1 request ID: "<prefix>_<uuid7>". "infreq" is this
-# worker's reserved prefix (models.py's _VALID_ID_PREFIXES); the uuid7
-# half has version nibble 7 and variant nibble in {8,9,a,b} and doesn't
-# need to encode a real timestamp for tests, only the right shape.
-VALID_REQUEST_ID = "infreq_018f4c3e-1c1a-7f00-8b1a-2f6b6c1b0a11"
+# A structurally valid M1 request ID: "<prefix>_<uuid7>", "attempt"
+# being the normal per-operation-attempt caller identity. The uuid7 half
+# has version nibble 7 and variant nibble in {8,9,a,b} and doesn't need
+# to encode a real timestamp for tests, only the right shape.
+VALID_REQUEST_ID = "attempt_018f4c3e-1c1a-7f00-8b1a-2f6b6c1b0a11"
 
 
 def write_sine_wav(

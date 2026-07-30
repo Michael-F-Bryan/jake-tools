@@ -31,14 +31,13 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-# M1 ID format: "<prefix>_<uuid7>", prefix drawn from a fixed set (not
-# free-form). ASSUMPTION: the settled CONTRACTS.md's exact prefix
-# enumeration wasn't available to this worker; "infreq" (inference
-# request) is this worker's own reservation for its request namespace,
-# flagged explicitly in this project's delivery notes pending the real
-# enumeration. The uuid7 half enforces RFC 9562 version nibble '7' and
-# variant nibbles {8,9,a,b}.
-_VALID_ID_PREFIXES = frozenset({"infreq"})
+# M1 ID format: "<prefix>_<uuid7>", prefix drawn from M1's fixed set.
+# The uuid7 half enforces RFC 9562 version nibble '7' and variant
+# nibbles {8,9,a,b}.
+# The worker is invoked per operation attempt (M11); jake-tools mints
+# attempt_/run_ IDs per M1. "attempt" is the expected caller identity;
+# "run" is tolerated for manual diagnostic invocations.
+_VALID_ID_PREFIXES = frozenset({"attempt", "run"})
 _REQUEST_ID_RE = re.compile(
     r"^(?P<prefix>[a-z][a-z0-9]*)_"
     r"(?P<uuid7>[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$"

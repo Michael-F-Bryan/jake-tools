@@ -21,7 +21,7 @@ from inference_worker.models import (
     StageObservations,
 )
 
-_VALID_ID = "infreq_018f4c3e-1c1a-7f00-8b1a-2f6b6c1b0a11"
+_VALID_ID = "attempt_018f4c3e-1c1a-7f00-8b1a-2f6b6c1b0a11"
 
 
 def test_request_round_trips_through_json(request_factory, sine_wav_factory, tmp_path):
@@ -45,19 +45,20 @@ def test_request_id_must_match_prefix_uuid7_format(
 def test_request_id_rejects_uuid4_shape(request_factory, sine_wav_factory, tmp_path):
     wav = sine_wav_factory(tmp_path / "source.wav")
     # Valid UUID shape, but version nibble '4' (uuid4), not '7'.
-    uuid4_id = "infreq_018f4c3e-1c1a-4f00-8b1a-2f6b6c1b0a11"
+    uuid4_id = "attempt_018f4c3e-1c1a-4f00-8b1a-2f6b6c1b0a11"
 
     with pytest.raises(ValidationError, match="M1"):
         request_factory(audio_path=wav, request_id=uuid4_id)
 
 
-@pytest.mark.parametrize("prefix", ["banana", "test", "req", "run"])
+@pytest.mark.parametrize("prefix", ["banana", "test", "req", "infreq"])
 def test_request_id_rejects_prefixes_outside_the_m1_set(
     request_factory, sine_wav_factory, tmp_path, prefix
 ):
-    """m3: the prefix is drawn from a fixed set, not free-form — an
-    arbitrary prefix like "banana" (or the old fixture prefix "test")
-    must be rejected, not silently accepted."""
+    """m3: the prefix is drawn from M1's fixed set ("attempt" for the
+    normal per-operation-attempt invocation, "run" for manual diagnostic
+    runs) — an arbitrary prefix like "banana", the old fixture prefix
+    "test", or the interim "infreq" reservation must be rejected."""
     wav = sine_wav_factory(tmp_path / "source.wav")
     other_prefix_id = f"{prefix}_018f4c3e-1c1a-7f00-8b1a-2f6b6c1b0a11"
 
@@ -65,7 +66,7 @@ def test_request_id_rejects_prefixes_outside_the_m1_set(
         request_factory(audio_path=wav, request_id=other_prefix_id)
 
 
-def test_request_id_accepts_the_reserved_infreq_prefix(
+def test_request_id_accepts_the_reserved_attempt_prefix(
     request_factory, sine_wav_factory, tmp_path
 ):
     wav = sine_wav_factory(tmp_path / "source.wav")
