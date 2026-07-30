@@ -1,0 +1,525 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fixtures_bundle import registered_source_and_artefact
+
+from jake_tools.transcripts.bundle.adapters import (
+    AdapterError,
+    NoTurnsFoundError,
+    TeamsSpeakerConfirmation,
+    adapt_gemini_notes,
+    adapt_teams_vtt,
+    adapt_untimed_transcript,
+    parse_untimed_markdown_turns,
+)
+from jake_tools.transcripts.bundle.components import ParticipantStatus, TrustClass
+from jake_tools.transcripts.bundle.store import BundleStore
+from jake_tools.transcripts.models import SourceArtifact
+from jake_tools.transcripts.parse import parse_teams_vtt
+
+# Real, immutable evaluation-corpus fixtures (CONTRACTS.md Phase 2 brief):
+# read-only, absolute path -- this worktree has no _working/ of its own,
+# but the corpus lives at a fixed location on this machine regardless of
+# which git worktree is running the tests.
+_CORPUS_FIXTURES = Path(
+    "/Users/work/Documents/jake-tools/_working/"
+    "transcription-overhaul-context-2026-07-29/evaluation-corpus/fixtures"
+)
+_HAS_CORPUS = _CORPUS_FIXTURES.is_dir()
+_requires_corpus = pytest.mark.skipif(
+    not _HAS_CORPUS, reason=f"evaluation corpus not present at {_CORPUS_FIXTURES}"
+)
+
+
+def _store(tmp_path: Path) -> BundleStore:
+    store = BundleStore(tmp_path / "bundle")
+    store.create_bundle()
+    return store
+
+
+# -- parse_untimed_markdown_turns: synthetic edge cases -----------------------
+
+
+def test_parse_untimed_markdown_turns_skips_a_non_matching_paragraph() -> None:
+    text = "# Title\n\n**Alice:** hello\n\n**Bob:** hi there\n"
+
+    turns = parse_untimed_markdown_turns(text)
+
+    assert turns == (("Alice", "hello"), ("Bob", "hi there"))
+
+
+def test_parse_untimed_markdown_turns_returns_empty_for_no_matches() -> None:
+    assert parse_untimed_markdown_turns("just some prose, no speaker turns") == ()
+
+
+def test_parse_untimed_markdown_turns_collapses_internal_whitespace() -> None:
+    text = "**Alice:** line one\nstill line one   with  extra space\n"
+
+    turns = parse_untimed_markdown_turns(text)
+
+    assert turns == (("Alice", "line one still line one with extra space"),)
+
+
+# -- adapt_untimed_transcript --------------------------------------------------
+
+
+def test_adapt_untimed_transcript_raises_when_no_turns_found(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=b"# just a title")
+
+    with pytest.raises(NoTurnsFoundError):
+        adapt_untimed_transcript(
+            store,
+            source_artefact_id=artefact.artefact_id,
+            markdown_text="# just a title",
+        )
+
+
+def test_adapt_untimed_transcript_dedupes_participants_by_label(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    text = "**Alice:** hi\n\n**Bob:** hey\n\n**Alice:** again\n"
+    artefact = registered_source_and_artefact(store, content=text.encode())
+
+    result = adapt_untimed_transcript(
+        store, source_artefact_id=artefact.artefact_id, markdown_text=text
+    )
+
+    assert len(result.turn_set.turns) == 3
+    assert [turn.speaker_label for turn in result.turn_set.turns] == [
+        "Alice",
+        "Bob",
+        "Alice",
+    ]
+    assert len(result.participants.participants) == 2
+    assert all(
+        participant.status == ParticipantStatus.SPEAKING_EVIDENCED
+        for participant in result.participants.participants
+    )
+
+
+@_requires_corpus
+def test_adapt_untimed_transcript_preserves_the_real_fixture_import_order(
+    tmp_path: Path,
+) -> None:
+    text = (_CORPUS_FIXTURES / "existing-untimed-transcript" / "input.md").read_text(
+        encoding="utf-8"
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=text.encode("utf-8"))
+
+    result = adapt_untimed_transcript(
+        store, source_artefact_id=artefact.artefact_id, markdown_text=text
+    )
+
+    assert [turn.speaker_label for turn in result.turn_set.turns] == [
+        "Michael Bryan",
+        "Michael Bryan",
+        "Morgan McDermont",
+        "Michael Bryan",
+        "David Htet",
+        "Michael Bryan",
+        "Michael Bryan",
+    ]
+    assert not hasattr(result.turn_set.turns[0], "start_ms")
+    display_names = {
+        participant.display_names[0] for participant in result.participants.participants
+    }
+    assert display_names == {"Michael Bryan", "Morgan McDermont", "David Htet"}
+    assert all(
+        participant.status == ParticipantStatus.SPEAKING_EVIDENCED
+        for participant in result.participants.participants
+    )
+
+
+# -- adapt_teams_vtt: synthetic controlled cases -------------------------------
+
+
+def _write_vtt(tmp_path: Path, body: str) -> Path:
+    path = tmp_path / "input.vtt"
+    path.write_text("WEBVTT\n\n" + body, encoding="utf-8")
+    return path
+
+
+def test_adapt_teams_vtt_drops_zero_length_cues_with_a_warning(tmp_path: Path) -> None:
+    vtt_path = _write_vtt(
+        tmp_path,
+        "00:00:00.000 --> 00:00:00.000\n<v Alice>silent</v>\n\n"
+        "00:00:01.000 --> 00:00:02.000\n<v Alice>hello</v>\n",
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=vtt_path.read_bytes())
+
+    result = adapt_teams_vtt(
+        store,
+        source_artefact_id=artefact.artefact_id,
+        vtt_path=vtt_path,
+        declared_attendees=("Alice",),
+    )
+
+    assert len(result.turn_set.turns) == 1
+    assert result.turn_set.turns[0].text == "hello"
+    assert len(result.warnings) == 1
+    assert "zero-length" in result.warnings[0]
+
+
+def test_adapt_teams_vtt_raises_when_every_cue_is_zero_length(tmp_path: Path) -> None:
+    vtt_path = _write_vtt(
+        tmp_path, "00:00:00.000 --> 00:00:00.000\n<v Alice>silent</v>\n"
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=vtt_path.read_bytes())
+
+    with pytest.raises(NoTurnsFoundError):
+        adapt_teams_vtt(
+            store,
+            source_artefact_id=artefact.artefact_id,
+            vtt_path=vtt_path,
+            declared_attendees=("Alice",),
+        )
+
+
+def test_adapt_teams_vtt_room_proxy_config_sets_trust_class_and_participant_flag(
+    tmp_path: Path,
+) -> None:
+    vtt_path = _write_vtt(
+        tmp_path,
+        "00:00:00.000 --> 00:00:01.000\n<v Meetings Ahoy>hello everyone</v>\n\n"
+        "00:00:01.000 --> 00:00:02.000\n<v Alice>hi</v>\n",
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=vtt_path.read_bytes())
+
+    result = adapt_teams_vtt(
+        store,
+        source_artefact_id=artefact.artefact_id,
+        vtt_path=vtt_path,
+        declared_attendees=("Meetings Ahoy", "Alice"),
+        room_proxy_display_names=frozenset({"Meetings Ahoy"}),
+    )
+
+    trust_by_label = {
+        span.raw_label: span.trust_class for span in result.label_set.spans
+    }
+    assert trust_by_label["Meetings Ahoy"] == TrustClass.ROOM_PROXY
+    assert trust_by_label["Alice"] == TrustClass.PER_PARTICIPANT_STREAM
+    proxy_participant = next(
+        p
+        for p in result.participants.participants
+        if p.display_names[0] == "Meetings Ahoy"
+    )
+    assert proxy_participant.room_proxy is True
+
+
+def test_adapt_teams_vtt_confirmed_attendee_becomes_speaking_evidenced(
+    tmp_path: Path,
+) -> None:
+    vtt_path = _write_vtt(
+        tmp_path, "00:00:00.000 --> 00:00:01.000\n<v Alice X>hi</v>\n"
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=vtt_path.read_bytes())
+
+    result = adapt_teams_vtt(
+        store,
+        source_artefact_id=artefact.artefact_id,
+        vtt_path=vtt_path,
+        declared_attendees=("Alice X", "Bob Never Speaks"),
+        speaker_confirmations=(
+            TeamsSpeakerConfirmation(
+                raw_label="Alice X", participant_display_name="Alice X"
+            ),
+        ),
+    )
+
+    statuses = {p.display_names[0]: p.status for p in result.participants.participants}
+    assert statuses["Alice X"] == ParticipantStatus.SPEAKING_EVIDENCED
+    assert statuses["Bob Never Speaks"] == ParticipantStatus.DECLARED
+
+
+# -- adapt_teams_vtt: real fixture quirk tests --------------------------------
+
+
+@_requires_corpus
+def test_adapt_teams_vtt_preserves_michael_bryan_casing_quirk_verbatim(
+    tmp_path: Path,
+) -> None:
+    """The raw VTT cue label is `Michael BRYAN` (provider casing), which
+    differs from the declared attendee `Michael Bryan`. The adapter must
+    never silently case-fold this into a match (M19/F14) -- it is
+    preserved verbatim as evidence, and only becomes an edge to the
+    participant via an explicit TeamsSpeakerConfirmation."""
+    vtt_path = _CORPUS_FIXTURES / "teams-attributed-vtt" / "input.vtt"
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=vtt_path.read_bytes())
+
+    result = adapt_teams_vtt(
+        store,
+        source_artefact_id=artefact.artefact_id,
+        vtt_path=vtt_path,
+        declared_attendees=(
+            "Michael Bryan",
+            "Joanne Olsen",
+            "Sam Lintern",
+            "Des Everingham",
+        ),
+    )
+
+    raw_labels = {span.raw_label for span in result.label_set.spans}
+    assert "Michael BRYAN" in raw_labels
+    assert "Michael Bryan" not in raw_labels
+    # Without an explicit confirmation, Michael Bryan is NOT auto-matched
+    # despite the labels differing only in case.
+    statuses = {p.display_names[0]: p.status for p in result.participants.participants}
+    assert statuses["Michael Bryan"] == ParticipantStatus.DECLARED
+
+
+@_requires_corpus
+def test_adapt_teams_vtt_explicit_confirmation_resolves_the_casing_quirk(
+    tmp_path: Path,
+) -> None:
+    vtt_path = _CORPUS_FIXTURES / "teams-attributed-vtt" / "input.vtt"
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=vtt_path.read_bytes())
+
+    result = adapt_teams_vtt(
+        store,
+        source_artefact_id=artefact.artefact_id,
+        vtt_path=vtt_path,
+        declared_attendees=(
+            "Michael Bryan",
+            "Joanne Olsen",
+            "Sam Lintern",
+            "Des Everingham",
+        ),
+        speaker_confirmations=(
+            TeamsSpeakerConfirmation(
+                raw_label="Michael BRYAN", participant_display_name="Michael Bryan"
+            ),
+            TeamsSpeakerConfirmation(
+                raw_label="Joanne Olsen", participant_display_name="Joanne Olsen"
+            ),
+            TeamsSpeakerConfirmation(
+                raw_label="Sam Lintern", participant_display_name="Sam Lintern"
+            ),
+        ),
+    )
+
+    statuses = {p.display_names[0]: p.status for p in result.participants.participants}
+    assert statuses["Michael Bryan"] == ParticipantStatus.SPEAKING_EVIDENCED
+    assert statuses["Joanne Olsen"] == ParticipantStatus.SPEAKING_EVIDENCED
+    assert statuses["Sam Lintern"] == ParticipantStatus.SPEAKING_EVIDENCED
+    # Des Everingham is declared but never speaks in this window (D1/M19
+    # -- fixture's expected-behaviour.md).
+    assert statuses["Des Everingham"] == ParticipantStatus.DECLARED
+
+
+@_requires_corpus
+def test_adapt_teams_vtt_preserves_every_overlapping_cue_without_loss(
+    tmp_path: Path,
+) -> None:
+    """The fixture's raw cues are not in chronological file order and
+    include genuine cross-speaker overlap (e.g. Michael's short "Mm."
+    interjection during Sam's longer turn). Normalisation must not drop
+    or duplicate any of them (eval corpus §"How to evaluate" 5)."""
+    vtt_path = _CORPUS_FIXTURES / "teams-attributed-vtt" / "input.vtt"
+    raw_cue_count = len(
+        parse_teams_vtt(
+            SourceArtifact(kind="msgraph-teams", raw_text_path=vtt_path)
+        ).turns
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=vtt_path.read_bytes())
+
+    result = adapt_teams_vtt(
+        store,
+        source_artefact_id=artefact.artefact_id,
+        vtt_path=vtt_path,
+        declared_attendees=("Michael Bryan", "Joanne Olsen", "Sam Lintern"),
+    )
+
+    assert len(result.turn_set.turns) == raw_cue_count
+    assert len(result.label_set.spans) == raw_cue_count
+    assert not result.warnings
+
+
+@_requires_corpus
+def test_adapt_teams_vtt_orders_turns_canonically_despite_file_order_quirk(
+    tmp_path: Path,
+) -> None:
+    vtt_path = _CORPUS_FIXTURES / "teams-attributed-vtt" / "input.vtt"
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=vtt_path.read_bytes())
+
+    result = adapt_teams_vtt(
+        store,
+        source_artefact_id=artefact.artefact_id,
+        vtt_path=vtt_path,
+        declared_attendees=("Michael Bryan", "Joanne Olsen", "Sam Lintern"),
+    )
+
+    keys = [(turn.start_ms, turn.end_ms) for turn in result.turn_set.turns]
+    assert keys == sorted(keys)
+
+
+@_requires_corpus
+def test_adapt_teams_vtt_label_spans_resolve_to_the_turn_sets_own_cues(
+    tmp_path: Path,
+) -> None:
+    vtt_path = _CORPUS_FIXTURES / "teams-attributed-vtt" / "input.vtt"
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=vtt_path.read_bytes())
+
+    result = adapt_teams_vtt(
+        store,
+        source_artefact_id=artefact.artefact_id,
+        vtt_path=vtt_path,
+        declared_attendees=("Michael Bryan", "Joanne Olsen", "Sam Lintern"),
+    )
+
+    turn_segment_ids = {turn.source_segment_id for turn in result.turn_set.turns}
+    assert all(
+        span.source_segment_id in turn_segment_ids for span in result.label_set.spans
+    )
+
+
+# -- adapt_gemini_notes: synthetic edge cases ---------------------------------
+
+
+def test_adapt_gemini_notes_raises_without_a_no_transcript_statement(
+    tmp_path: Path,
+) -> None:
+    text = (
+        '---\nAttendees:\n  - "[[Alice]]"\n---\n\n'
+        "## Gemini summary\n\nsome summary text\n\n"
+        "## Transcript\n\nActual transcript content here.\n"
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=text.encode())
+
+    with pytest.raises(AdapterError, match="did not state"):
+        adapt_gemini_notes(
+            store, source_artefact_id=artefact.artefact_id, markdown_text=text
+        )
+
+
+def test_adapt_gemini_notes_raises_without_frontmatter_attendees(
+    tmp_path: Path,
+) -> None:
+    text = (
+        "## Gemini summary\n\nsome summary\n\n"
+        "## Transcript\n\nNo transcript was available for this meeting.\n"
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=text.encode())
+
+    with pytest.raises(AdapterError, match="Attendees"):
+        adapt_gemini_notes(
+            store, source_artefact_id=artefact.artefact_id, markdown_text=text
+        )
+
+
+def test_adapt_gemini_notes_raises_without_any_notes_sections(tmp_path: Path) -> None:
+    text = (
+        '---\nAttendees:\n  - "[[Alice]]"\n---\n\n'
+        "## Transcript\n\nNo transcript was available for this meeting.\n"
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=text.encode())
+
+    with pytest.raises(AdapterError, match="notes export"):
+        adapt_gemini_notes(
+            store, source_artefact_id=artefact.artefact_id, markdown_text=text
+        )
+
+
+# -- adapt_gemini_notes: real fixture quirk tests -----------------------------
+
+
+@_requires_corpus
+def test_adapt_gemini_notes_preserves_unresolved_speaker_labels_verbatim(
+    tmp_path: Path,
+) -> None:
+    text = (_CORPUS_FIXTURES / "gemini-notes-only" / "input.md").read_text(
+        encoding="utf-8"
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=text.encode("utf-8"))
+
+    result = adapt_gemini_notes(
+        store, source_artefact_id=artefact.artefact_id, markdown_text=text
+    )
+
+    all_text = " ".join(
+        section.text for component in result.notes for section in component.sections
+    )
+    assert "(Speaker)" in all_text
+    assert "(The group)" in all_text
+    # Neither unresolved marker becomes a participant identity.
+    display_names = {
+        participant.display_names[0] for participant in result.participants.participants
+    }
+    assert "(Speaker)" not in display_names
+    assert "(The group)" not in display_names
+
+
+@_requires_corpus
+def test_adapt_gemini_notes_builds_exactly_the_four_notes_kinds(tmp_path: Path) -> None:
+    text = (_CORPUS_FIXTURES / "gemini-notes-only" / "input.md").read_text(
+        encoding="utf-8"
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=text.encode("utf-8"))
+
+    result = adapt_gemini_notes(
+        store, source_artefact_id=artefact.artefact_id, markdown_text=text
+    )
+
+    kinds = {component.notes_kind.value for component in result.notes}
+    assert kinds == {
+        "provider-summary",
+        "provider-decisions",
+        "provider-actions",
+        "provider-details",
+    }
+    assert all(component.authored is False for component in result.notes)
+
+
+@_requires_corpus
+def test_adapt_gemini_notes_absence_declaration_captures_the_literal_statement(
+    tmp_path: Path,
+) -> None:
+    text = (_CORPUS_FIXTURES / "gemini-notes-only" / "input.md").read_text(
+        encoding="utf-8"
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=text.encode("utf-8"))
+
+    result = adapt_gemini_notes(
+        store, source_artefact_id=artefact.artefact_id, markdown_text=text
+    )
+
+    assert "No Gemini transcript was available" in result.absence_declaration.statement
+
+
+@_requires_corpus
+def test_adapt_gemini_notes_all_participants_stay_declared(tmp_path: Path) -> None:
+    """D2/eval-corpus §4: declared attendees must not automatically
+    become confirmed speakers -- there is no transcript evidence here
+    that could ever justify speaking-evidenced."""
+    text = (_CORPUS_FIXTURES / "gemini-notes-only" / "input.md").read_text(
+        encoding="utf-8"
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=text.encode("utf-8"))
+
+    result = adapt_gemini_notes(
+        store, source_artefact_id=artefact.artefact_id, markdown_text=text
+    )
+
+    assert len(result.participants.participants) == 7
+    assert all(
+        participant.status == ParticipantStatus.DECLARED
+        for participant in result.participants.participants
+    )
