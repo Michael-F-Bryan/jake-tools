@@ -23,6 +23,24 @@ already follows (see ``components.py``'s module docstring). Bringing
 these components into existence in the store (``store.add_component``)
 is still the only place their *identity* (``component_id``,
 ``content_hash``) is minted.
+
+Crash-window discipline: every adapter here is a short sequence of
+independent ``store.add_component`` calls (e.g. ``adapt_teams_vtt`` adds
+a turn set, then a label set, then a participant set). Each call is
+individually crash-safe (``BundleStore._write_json_exclusive``, M16); a
+crash between two of them simply leaves the earlier component(s) written
+and unreferenced by any revision -- harmless, since nothing downstream
+can observe a component until an ``assemble()`` call (which has its own,
+separately documented crash-window analysis) folds it into a revision.
+Unlike ``add_component``'s own dedup (which compares *content*), a
+retried adapter call is not itself deduplicated end to end: each retry
+mints fresh per-item IDs (``source_segment_id``, ``participant_id``)
+*before* calling ``add_component``, so those IDs become part of the
+body's hashed content and a retry's component bodies differ from the
+crashed attempt's -- the orphaned component(s) from the earlier attempt
+stay behind as harmless, unreferenced garbage (the same "retry may
+produce extra unreferenced records, never corruption" shape
+``assemble.py`` documents for revisions).
 """
 
 from __future__ import annotations
