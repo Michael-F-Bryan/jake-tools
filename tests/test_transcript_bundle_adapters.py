@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -7,14 +9,26 @@ from fixtures_bundle import registered_source_and_artefact
 
 from jake_tools.transcripts.bundle.adapters import (
     AdapterError,
+    FfprobeFailedError,
+    FfprobeNotFoundError,
     NoTurnsFoundError,
     TeamsSpeakerConfirmation,
     adapt_gemini_notes,
+    adapt_local_media,
+    adapt_obsidian_note,
     adapt_teams_vtt,
     adapt_untimed_transcript,
     parse_untimed_markdown_turns,
+    probe_audio_metadata,
 )
-from jake_tools.transcripts.bundle.components import ParticipantStatus, TrustClass
+from jake_tools.transcripts.bundle.components import (
+    DestinationComponent,
+    MediaRecordingComponent,
+    OwnedRegionState,
+    ParticipantStatus,
+    RecordingReferenceSetComponent,
+    TrustClass,
+)
 from jake_tools.transcripts.bundle.store import BundleStore
 from jake_tools.transcripts.models import SourceArtifact
 from jake_tools.transcripts.parse import parse_teams_vtt
@@ -655,3 +669,405 @@ def test_adapt_gemini_notes_all_participants_stay_declared(tmp_path: Path) -> No
         participant.status == ParticipantStatus.DECLARED
         for participant in result.participants.participants
     )
+
+
+# -- adapt_obsidian_note (Phase 3A) -----------------------------------------
+
+_NOTE_WITH_RECORDING = """---
+Date: "[[May 21, 2026]]"
+Attendees:
+  - "[[Michael Bryan]]"
+  - "[[Avalon Mann]]"
+---
+
+## Original notes
+
+- Goal: reduce the interest rate.
+
+## Recording
+
+![[meeting.m4a]]
+"""
+
+_NOTE_NO_RECORDING = """---
+Attendees:
+  - "[[Michael Bryan]]"
+---
+
+## Notes
+
+- Text only, no recording embed at all.
+"""
+
+_NOTE_NO_ATTENDEES = """## Notes
+
+- No frontmatter block at all.
+"""
+
+_NOTE_WITH_MARKERS = """---
+Attendees:
+  - "[[Michael Bryan]]"
+---
+
+<!-- jake-tools:transcript:begin bundle=bundle_xyz -->
+## Transcript
+
+Old content.
+<!-- jake-tools:transcript:end -->
+"""
+
+_NOTE_WITH_LEGACY_HEADINGS = """---
+Attendees:
+  - "[[Michael Bryan]]"
+---
+
+## Meeting Notes
+
+Some old auto-generated notes.
+"""
+
+
+def _note_with_recording(tmp_path: Path) -> tuple[Path, Path]:
+    note_path = tmp_path / "note.md"
+    note_path.write_text(_NOTE_WITH_RECORDING, encoding="utf-8")
+    recording_path = tmp_path / "meeting.m4a"
+    recording_path.write_bytes(b"not real audio, just needs to exist")
+    return note_path, recording_path
+
+
+def test_adapt_obsidian_note_extracts_destination_participants_and_references(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    note_path, recording_path = _note_with_recording(tmp_path)
+    artefact = registered_source_and_artefact(
+        store, content=note_path.read_bytes(), kind="obsidian-note"
+    )
+
+    result = adapt_obsidian_note(
+        store, note_artefact_id=artefact.artefact_id, note_path=note_path
+    )
+
+    assert isinstance(result.destination, DestinationComponent)
+    assert result.destination.vault_relative_path == str(note_path)
+    assert result.destination.owned_region_state == OwnedRegionState.NONE
+    assert [p.display_names[0] for p in result.participants.participants] == [
+        "Michael Bryan",
+        "Avalon Mann",
+    ]
+    assert result.reference_set is not None
+    assert isinstance(result.reference_set, RecordingReferenceSetComponent)
+    assert len(result.reference_set.references) == 1
+    assert result.reference_set.references[0].resolved_path == str(
+        recording_path.resolve()
+    )
+
+
+def test_adapt_obsidian_note_without_recordings_has_no_reference_set(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    note_path = tmp_path / "note.md"
+    note_path.write_text(_NOTE_NO_RECORDING, encoding="utf-8")
+    artefact = registered_source_and_artefact(
+        store, content=note_path.read_bytes(), kind="obsidian-note"
+    )
+
+    result = adapt_obsidian_note(
+        store, note_artefact_id=artefact.artefact_id, note_path=note_path
+    )
+
+    assert result.reference_set is None
+    assert len(result.participants.participants) == 1
+
+
+def test_adapt_obsidian_note_raises_without_frontmatter_attendees(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    note_path = tmp_path / "note.md"
+    note_path.write_text(_NOTE_NO_ATTENDEES, encoding="utf-8")
+    artefact = registered_source_and_artefact(
+        store, content=note_path.read_bytes(), kind="obsidian-note"
+    )
+
+    with pytest.raises(AdapterError, match="Attendees"):
+        adapt_obsidian_note(
+            store, note_artefact_id=artefact.artefact_id, note_path=note_path
+        )
+
+
+def test_adapt_obsidian_note_raises_when_the_recording_link_does_not_resolve(
+    tmp_path: Path,
+) -> None:
+    from jake_tools.transcripts.obsidian import RecordingResolutionError
+
+    store = _store(tmp_path)
+    note_path = tmp_path / "note.md"
+    note_path.write_text(_NOTE_WITH_RECORDING, encoding="utf-8")
+    # meeting.m4a deliberately not created next to the note.
+    artefact = registered_source_and_artefact(
+        store, content=note_path.read_bytes(), kind="obsidian-note"
+    )
+
+    with pytest.raises(RecordingResolutionError):
+        adapt_obsidian_note(
+            store, note_artefact_id=artefact.artefact_id, note_path=note_path
+        )
+
+
+def test_adapt_obsidian_note_is_idempotent_on_retry(tmp_path: Path) -> None:
+    """Crash-window discipline (adapters.py's own module docstring): a
+    retried adapter call over the *same* note content leaves at most
+    harmless, unreferenced extra records behind, never corruption --
+    the destination and reference-set components carry no per-item
+    minted IDs, so those two dedup byte-for-byte across retries; the
+    participant set does NOT (by the same documented design every
+    existing adapter already follows: a fresh `participant_id` is minted
+    per retry, so its body -- and therefore its component -- differs each
+    time, which is harmless orphaned-record churn, never a correctness
+    bug)."""
+    store = _store(tmp_path)
+    note_path, _recording_path = _note_with_recording(tmp_path)
+    artefact = registered_source_and_artefact(
+        store, content=note_path.read_bytes(), kind="obsidian-note"
+    )
+
+    first = adapt_obsidian_note(
+        store, note_artefact_id=artefact.artefact_id, note_path=note_path
+    )
+    second = adapt_obsidian_note(
+        store, note_artefact_id=artefact.artefact_id, note_path=note_path
+    )
+
+    assert first.destination.component_id == second.destination.component_id
+    assert first.reference_set is not None and second.reference_set is not None
+    assert first.reference_set.component_id == second.reference_set.component_id
+    assert first.participants.component_id != second.participants.component_id
+    assert [p.display_names for p in first.participants.participants] == [
+        p.display_names for p in second.participants.participants
+    ]
+
+
+@pytest.mark.parametrize(
+    ("note_text", "expected_state"),
+    [
+        (_NOTE_WITH_MARKERS, OwnedRegionState.MARKERS_PRESENT),
+        (_NOTE_WITH_LEGACY_HEADINGS, OwnedRegionState.LEGACY_HEADINGS),
+        (_NOTE_NO_RECORDING, OwnedRegionState.NONE),
+    ],
+)
+def test_adapt_obsidian_note_detects_owned_region_state(
+    tmp_path: Path, note_text: str, expected_state: OwnedRegionState
+) -> None:
+    """M13: detection only -- markers win outright; legacy generated
+    headings (merge.py:GENERATED_HEADINGS) are the migration signal;
+    neither means a first-ever write. Never writes anything itself."""
+    store = _store(tmp_path)
+    note_path = tmp_path / "note.md"
+    note_path.write_text(note_text, encoding="utf-8")
+    artefact = registered_source_and_artefact(
+        store, content=note_path.read_bytes(), kind="obsidian-note"
+    )
+    before = note_path.read_text(encoding="utf-8")
+
+    result = adapt_obsidian_note(
+        store, note_artefact_id=artefact.artefact_id, note_path=note_path
+    )
+
+    assert result.destination.owned_region_state == expected_state
+    assert (
+        note_path.read_text(encoding="utf-8") == before
+    )  # detection only, never writes
+
+
+@_requires_corpus
+def test_adapt_obsidian_note_over_the_real_single_recording_fixture(
+    tmp_path: Path,
+) -> None:
+    """The local-single-speaker-correction fixture's own shape: an embed
+    that must resolve, two declared attendees. Copies into a tmp working
+    dir first -- the vault (and this fixture) are read-only; the audio
+    is placed adjacent to the copied note so obsidian.py's own resolution
+    (same-directory candidate) finds it, exactly as a real vault's
+    Attachments-folder convention would."""
+    fixture = _CORPUS_FIXTURES / "local-single-speaker-correction"
+    note_path = tmp_path / "input-note.md"
+    note_path.write_bytes((fixture / "input-note.md").read_bytes())
+    recording_path = tmp_path / "meeting.m4a"
+    recording_path.write_bytes((fixture / "audio" / "meeting.m4a").read_bytes())
+
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(
+        store, content=note_path.read_bytes(), kind="obsidian-note"
+    )
+
+    result = adapt_obsidian_note(
+        store, note_artefact_id=artefact.artefact_id, note_path=note_path
+    )
+
+    assert [p.display_names[0] for p in result.participants.participants] == [
+        "Michael Bryan",
+        "Avalon Mann",
+    ]
+    assert result.reference_set is not None
+    assert result.reference_set.references[0].resolved_path == str(
+        recording_path.resolve()
+    )
+
+
+# -- probe_audio_metadata / adapt_local_media (Phase 3A) --------------------
+
+
+def _fake_ffprobe_json(
+    command: list[str], *, payload: str, returncode: int = 0
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        command, returncode=returncode, stdout=payload, stderr=""
+    )
+
+
+def test_probe_audio_metadata_parses_a_fake_ffprobe_stream(tmp_path: Path) -> None:
+    payload = (
+        '{"streams": [{"codec_type": "audio", "codec_name": "opus", '
+        '"sample_rate": "48000", "channels": 1, "duration": "12.5"}], '
+        '"format": {"duration": "12.5"}}'
+    )
+    audio_path = tmp_path / "clip.m4a"
+    audio_path.write_bytes(b"fake bytes")
+
+    result = probe_audio_metadata(
+        audio_path, run_command=lambda cmd: _fake_ffprobe_json(cmd, payload=payload)
+    )
+
+    assert result.duration_ms == 12_500
+    assert result.codec == "opus"
+    assert result.sample_rate_hz == 48000
+    assert result.channels == 1
+
+
+def test_probe_audio_metadata_raises_when_ffprobe_is_missing(tmp_path: Path) -> None:
+    def _missing(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("no ffprobe")
+
+    with pytest.raises(FfprobeNotFoundError):
+        probe_audio_metadata(tmp_path / "clip.m4a", run_command=_missing)
+
+
+def test_probe_audio_metadata_raises_when_ffprobe_exits_non_zero(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(FfprobeFailedError):
+        probe_audio_metadata(
+            tmp_path / "clip.m4a",
+            run_command=lambda cmd: _fake_ffprobe_json(cmd, payload="{}", returncode=1),
+        )
+
+
+def test_probe_audio_metadata_raises_with_no_audio_stream(tmp_path: Path) -> None:
+    payload = '{"streams": [{"codec_type": "video"}], "format": {"duration": "1.0"}}'
+    with pytest.raises(FfprobeFailedError, match="no audio stream"):
+        probe_audio_metadata(
+            tmp_path / "clip.m4a",
+            run_command=lambda cmd: _fake_ffprobe_json(cmd, payload=payload),
+        )
+
+
+def test_probe_audio_metadata_raises_on_non_positive_duration(tmp_path: Path) -> None:
+    payload = (
+        '{"streams": [{"codec_type": "audio", "codec_name": "opus", '
+        '"sample_rate": "48000", "channels": 1}], "format": {"duration": "0"}}'
+    )
+    with pytest.raises(FfprobeFailedError, match="non-positive"):
+        probe_audio_metadata(
+            tmp_path / "clip.m4a",
+            run_command=lambda cmd: _fake_ffprobe_json(cmd, payload=payload),
+        )
+
+
+_requires_ffmpeg = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg/ffprobe not installed (required by AGENTS.md's external tools)",
+)
+
+
+@_requires_ffmpeg
+def test_probe_audio_metadata_over_a_real_synthesized_wav(tmp_path: Path) -> None:
+    """A real subprocess, real ffprobe, real (synthesized, silent)
+    1-second audio file -- no fixture needed, no fake runner."""
+    audio_path = tmp_path / "silence.wav"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=mono",
+            "-t",
+            "1",
+            str(audio_path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    result = probe_audio_metadata(audio_path)
+
+    assert 900 <= result.duration_ms <= 1100
+    assert result.sample_rate_hz == 48000
+    assert result.channels == 1
+
+
+def test_adapt_local_media_canonicalises_the_media_path(tmp_path: Path) -> None:
+    payload = (
+        '{"streams": [{"codec_type": "audio", "codec_name": "opus", '
+        '"sample_rate": "48000", "channels": 1, "duration": "50.04"}], '
+        '"format": {"duration": "50.04"}}'
+    )
+    audio_path = tmp_path / "meeting.m4a"
+    audio_path.write_bytes(b"fake bytes")
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(
+        store, content=audio_path.read_bytes(), kind="audio"
+    )
+
+    result = adapt_local_media(
+        store,
+        source_artefact_id=artefact.artefact_id,
+        media_path=audio_path,
+        run_command=lambda cmd: _fake_ffprobe_json(cmd, payload=payload),
+    )
+
+    assert isinstance(result, MediaRecordingComponent)
+    assert result.media_path == str(audio_path.resolve())
+    assert result.duration_ms == 50_040
+    assert result.codec == "opus"
+
+
+def test_adapt_local_media_is_idempotent_on_retry(tmp_path: Path) -> None:
+    payload = (
+        '{"streams": [{"codec_type": "audio", "codec_name": "opus", '
+        '"sample_rate": "48000", "channels": 1, "duration": "10.0"}], '
+        '"format": {"duration": "10.0"}}'
+    )
+    audio_path = tmp_path / "meeting.m4a"
+    audio_path.write_bytes(b"fake bytes")
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(
+        store, content=audio_path.read_bytes(), kind="audio"
+    )
+
+    first = adapt_local_media(
+        store,
+        source_artefact_id=artefact.artefact_id,
+        media_path=audio_path,
+        run_command=lambda cmd: _fake_ffprobe_json(cmd, payload=payload),
+    )
+    second = adapt_local_media(
+        store,
+        source_artefact_id=artefact.artefact_id,
+        media_path=audio_path,
+        run_command=lambda cmd: _fake_ffprobe_json(cmd, payload=payload),
+    )
+
+    assert first.component_id == second.component_id

@@ -1,4 +1,4 @@
-"""Inference-free source adapters (Phase 2 slice).
+"""Inference-free source adapters (Phase 2 slice, extended in Phase 3A).
 
 Each adapter turns one already-ingested artefact's raw content into typed
 bundle-store components -- no ASR, no diarisation, no LLM calls
@@ -7,14 +7,18 @@ components, added to the store"; bringing them into the document is the
 separate M18 ``assemble`` operation (``assemble.py``) -- adapting a
 source alone never moves the head (M12).
 
-Two of the three adapters (:func:`adapt_untimed_transcript`,
+Two of the original three adapters (:func:`adapt_untimed_transcript`,
 :func:`adapt_gemini_notes`) are pure over their text input: no filesystem
 IO happens inside them, so they are testable with plain strings. The
 third (:func:`adapt_teams_vtt`) is the deliberate exception -- it reuses
 ``parse.py``'s existing ``parse_teams_vtt`` primitive rather than
 reimplementing VTT cue parsing (per the Phase 2 plan), and that function
 itself requires a real file path (``SourceArtifact.raw_text_path``), so
-this adapter does too.
+this adapter does too. Phase 3A adds two more, both genuinely filesystem-
+bound: :func:`adapt_obsidian_note` (reuses ``obsidian.py``'s note
+loading/link-resolution primitives -- imported, never reimplemented) and
+:func:`adapt_local_media` (a real ``ffprobe`` subprocess, injectable for
+tests).
 
 Every adapter mints its own per-item IDs (turn segment IDs, participant
 IDs) via :func:`.ids.mint_id` directly, before constructing a component
@@ -48,18 +52,25 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Iterable
+import subprocess
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..errors import TranscriptError
 from ..models import SourceArtifact
+from ..obsidian import extract_recording_links, load_source_note, resolve_recording_path
 from ..parse import parse_teams_vtt
 from .components import (
+    DestinationComponent,
+    DestinationComponentBody,
+    MediaRecordingComponent,
+    MediaRecordingComponentBody,
     NotesComponent,
     NotesComponentBody,
     NotesKind,
     NotesSectionBody,
+    OwnedRegionState,
     ParticipantDeclarationSource,
     ParticipantRecord,
     ParticipantSetComponent,
@@ -68,6 +79,9 @@ from .components import (
     ProviderLabelSetComponent,
     ProviderLabelSetComponentBody,
     ProviderLabelSpan,
+    RecordingReference,
+    RecordingReferenceSetComponent,
+    RecordingReferenceSetComponentBody,
     TimedTurn,
     TimedTurnSetComponent,
     TimedTurnSetComponentBody,
@@ -88,6 +102,16 @@ class AdapterError(TranscriptError):
 
 class NoTurnsFoundError(AdapterError):
     """A markdown/VTT input produced zero usable turns."""
+
+
+class FfprobeNotFoundError(AdapterError):
+    """``ffprobe`` is not installed / not on ``PATH`` (M11 needs it for
+    local-media duration/codec metadata)."""
+
+
+class FfprobeFailedError(AdapterError):
+    """``ffprobe`` ran but exited non-zero, or its output had no usable
+    audio stream/duration."""
 
 
 # -- (a) existing-untimed markdown -> untimed turn set + participants -------
@@ -620,3 +644,248 @@ def adapt_gemini_notes(
         absence_declaration=absence_declaration,
         participants=participants,
     )
+
+
+# -- (d) Obsidian note -> destination + recording references + participants -
+
+_OWNED_REGION_BEGIN_RE = re.compile(r"<!--\s*jake-tools:transcript:begin\b")
+_OWNED_REGION_END_RE = re.compile(r"<!--\s*jake-tools:transcript:end\s*-->")
+
+
+def _detect_owned_region_state(body: str) -> OwnedRegionState:
+    """M13: detection only, never writing. An explicit marker pair wins
+    outright; otherwise any of ``merge.py``'s ``GENERATED_HEADINGS`` means
+    this note carries the legacy (pre-marker) generated sections M13's
+    migration path describes; neither means a first-ever write.
+    """
+    # Imported lazily (not at module level) purely to keep this adapter's
+    # own import list free of a module (``merge.py``) whose own docstring
+    # is about rendering, not ingestion -- the one constant it needs here
+    # is GENERATED_HEADINGS, read-only, never modified.
+    from ..merge import GENERATED_HEADINGS
+
+    if _OWNED_REGION_BEGIN_RE.search(body) and _OWNED_REGION_END_RE.search(body):
+        return OwnedRegionState.MARKERS_PRESENT
+    if any(heading in body for heading in GENERATED_HEADINGS):
+        return OwnedRegionState.LEGACY_HEADINGS
+    return OwnedRegionState.NONE
+
+
+@dataclass(frozen=True)
+class ObsidianNoteAdaptation:
+    destination: DestinationComponent
+    participants: ParticipantSetComponent
+    reference_set: RecordingReferenceSetComponent | None = None
+
+
+def adapt_obsidian_note(
+    store: BundleStore,
+    *,
+    note_artefact_id: ArtefactId,
+    note_path: Path,
+) -> ObsidianNoteAdaptation:
+    """M3/M13/M19/M20: an Obsidian source note -- a destination component
+    (M13: target identity + owned-region detection, never a write), a
+    participant set from frontmatter Attendees (M19, reusing
+    ``obsidian.py``'s parser via :func:`~.obsidian.load_source_note`), and
+    a recording-reference set (M3) for every embed the note contains.
+
+    ``vault_relative_path`` is recorded as ``note_path`` exactly as
+    supplied -- resolving a *true* vault-relative path would require
+    knowing the vault root, which this slice deliberately does not
+    resolve (fixtures do not sit inside a real vault tree; a real
+    invocation's caller already knows the vault root and can pass a
+    pre-relativised path here if it wants one).
+
+    Reference order is note-embed (textual) order -- read directly via
+    :func:`~.obsidian.extract_recording_links`, *not*
+    ``load_source_note()``'s own ``SourceNote.recordings`` (which
+    re-sorts by file creation time for the older scribe-based recipe;
+    M6 wants the note's own textual order as the default combined-
+    timeline order). A reference alone never satisfies ``media.recording``
+    (M3) -- ingesting the referenced media itself is a separate
+    :func:`adapt_local_media` call; this adapter only records the
+    resolved path so the ``media.recording`` validator (``registry.py``)
+    can later match (or fail to match) it.
+
+    A note is not required to declare recordings (a text-only note is
+    legal), so ``reference_set`` is ``None`` when the note has none --
+    but frontmatter Attendees ARE required (M19 has nothing to declare a
+    participant set from otherwise).
+    """
+    source_note = load_source_note(note_path)
+    body = source_note.body
+
+    destination_body = DestinationComponentBody(
+        note_artefact_id=note_artefact_id,
+        vault_relative_path=str(note_path),
+        owned_region_state=_detect_owned_region_state(body),
+    )
+    destination = store.add_component(destination_body)
+    assert isinstance(destination, DestinationComponent)
+
+    reference_set: RecordingReferenceSetComponent | None = None
+    raw_links = extract_recording_links(body)
+    if raw_links:
+        reference_set_body = RecordingReferenceSetComponentBody(
+            note_artefact_id=note_artefact_id,
+            references=tuple(
+                RecordingReference(
+                    raw_link=raw_link,
+                    resolved_path=str(resolve_recording_path(note_path, raw_link)),
+                )
+                for raw_link in raw_links
+            ),
+        )
+        added_reference_set = store.add_component(reference_set_body)
+        assert isinstance(added_reference_set, RecordingReferenceSetComponent)
+        reference_set = added_reference_set
+
+    if not source_note.attendees:
+        raise AdapterError(
+            f"no frontmatter Attendees found in {note_path} -- M19 has nothing to "
+            "declare a participant set from."
+        )
+    participant_body = ParticipantSetComponentBody(
+        participants=tuple(
+            ParticipantRecord(
+                participant_id=mint_id("participant"),
+                declaration_source=ParticipantDeclarationSource.NOTE_FRONTMATTER,
+                declaration_evidence=(
+                    f"note frontmatter Attendees (artefact {note_artefact_id})"
+                ),
+                display_names=(attendee,),
+                status=ParticipantStatus.DECLARED,
+            )
+            for attendee in source_note.attendees
+        )
+    )
+    participants = store.add_component(participant_body)
+    assert isinstance(participants, ParticipantSetComponent)
+
+    return ObsidianNoteAdaptation(
+        destination=destination, participants=participants, reference_set=reference_set
+    )
+
+
+# -- (e) local media file -> ingested artefact + duration/codec metadata ----
+
+FFPROBE_COMMAND = "ffprobe"
+
+FfprobeRunner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
+
+
+def _default_ffprobe_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, capture_output=True, text=True, check=False)
+
+
+@dataclass(frozen=True)
+class AudioProbeResult:
+    duration_ms: int
+    codec: str
+    sample_rate_hz: int
+    channels: int
+
+
+def probe_audio_metadata(
+    audio_path: Path, *, run_command: FfprobeRunner = _default_ffprobe_runner
+) -> AudioProbeResult:
+    """M11: real, verified duration/codec/sample-rate/channel metadata for
+    one audio file via ``ffprobe`` -- never guessed, never defaulted from
+    a filename extension. ``run_command`` is the injectable subprocess
+    seam (real ``subprocess.run`` by default); tests fake this rather than
+    the parsing logic, so JSON-shape handling stays real.
+    """
+    command = [
+        FFPROBE_COMMAND,
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        str(audio_path),
+    ]
+    try:
+        result = run_command(command)
+    except FileNotFoundError as exc:
+        raise FfprobeNotFoundError(
+            f"{FFPROBE_COMMAND!r} executable not found on PATH -- required for "
+            "local-media ingest (M11 audio metadata)."
+        ) from exc
+    if result.returncode != 0:
+        raise FfprobeFailedError(
+            f"ffprobe failed for {audio_path}: {result.stderr or result.stdout}"
+        )
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise FfprobeFailedError(
+            f"ffprobe produced unparseable JSON for {audio_path}: {exc}"
+        ) from exc
+
+    audio_stream = next(
+        (
+            stream
+            for stream in payload.get("streams", [])
+            if stream.get("codec_type") == "audio"
+        ),
+        None,
+    )
+    if audio_stream is None:
+        raise FfprobeFailedError(f"no audio stream found in {audio_path}.")
+
+    raw_duration = payload.get("format", {}).get("duration") or audio_stream.get(
+        "duration"
+    )
+    try:
+        duration_ms = round(float(raw_duration) * 1000)
+    except (TypeError, ValueError) as exc:
+        raise FfprobeFailedError(
+            f"ffprobe reported no usable duration for {audio_path}."
+        ) from exc
+    if duration_ms <= 0:
+        raise FfprobeFailedError(
+            f"ffprobe reported a non-positive duration ({raw_duration!r}) for "
+            f"{audio_path}."
+        )
+
+    return AudioProbeResult(
+        duration_ms=duration_ms,
+        codec=str(audio_stream.get("codec_name") or "unknown"),
+        sample_rate_hz=int(audio_stream.get("sample_rate") or 0) or 1,
+        channels=int(audio_stream.get("channels") or 0) or 1,
+    )
+
+
+def adapt_local_media(
+    store: BundleStore,
+    *,
+    source_artefact_id: ArtefactId,
+    media_path: Path,
+    run_command: FfprobeRunner = _default_ffprobe_runner,
+) -> MediaRecordingComponent:
+    """M4/M11: turn an already-ingested local audio artefact into the
+    ``media.recording`` proof -- real ``ffprobe`` duration/codec/sample-
+    rate/channel metadata, never fabricated. ``media_path`` is canonicalised
+    via ``Path.resolve()`` before being stored -- the exact same
+    canonicalisation :func:`~.obsidian.resolve_recording_path` already
+    applies to a note's own recording references, which is what lets
+    :func:`_validate_media_recording` (``registry.py``) match the two by
+    plain string equality regardless of how this path was originally
+    spelled (relative, symlinked, ``..``-laden, ...).
+    """
+    resolved_media_path = Path(media_path).resolve()
+    probe = probe_audio_metadata(resolved_media_path, run_command=run_command)
+    body = MediaRecordingComponentBody(
+        source_artefact_id=source_artefact_id,
+        media_path=str(resolved_media_path),
+        duration_ms=probe.duration_ms,
+        codec=probe.codec,
+        sample_rate_hz=probe.sample_rate_hz,
+        channels=probe.channels,
+    )
+    component = store.add_component(body)
+    assert isinstance(component, MediaRecordingComponent)
+    return component
