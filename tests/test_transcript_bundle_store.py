@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -9,6 +10,16 @@ from pathlib import Path
 
 import pytest
 
+from jake_tools.transcripts.bundle.components import (
+    NotesComponentBody,
+    NotesKind,
+    NotesSection,
+    ParticipantDeclarationSource,
+    ParticipantRecord,
+    ParticipantSetComponentBody,
+    ParticipantStatus,
+)
+from jake_tools.transcripts.bundle.ids import mint_id
 from jake_tools.transcripts.bundle.records import (
     ArtefactRecord,
     Lease,
@@ -33,6 +44,8 @@ from jake_tools.transcripts.bundle.store import (
     RunNotAcquirableError,
     TakeOverRefusedError,
     UnknownArtefactError,
+    UnknownComponentError,
+    UnknownComponentKindError,
     UnknownRevisionError,
     UnknownRunError,
     UnknownSourceError,
@@ -63,6 +76,32 @@ def _dead_pid() -> int:
     process = subprocess.Popen([sys.executable, "-c", "pass"])
     process.wait()
     return process.pid
+
+
+def _notes_body(artefact_id: str, *, section_count: int = 1) -> NotesComponentBody:
+    return NotesComponentBody(
+        notes_kind=NotesKind.PROVIDER_SUMMARY,
+        source_artefact_id=artefact_id,
+        authored=False,
+        sections=tuple(
+            NotesSection(section_id=mint_id("seg"), title=f"Section {i}", text="text")
+            for i in range(section_count)
+        ),
+    )
+
+
+def _participant_body() -> ParticipantSetComponentBody:
+    return ParticipantSetComponentBody(
+        participants=(
+            ParticipantRecord(
+                participant_id=mint_id("participant"),
+                declaration_source=ParticipantDeclarationSource.OPERATOR,
+                declaration_evidence="cli: --participant 'Jake'",
+                display_names=("Jake",),
+                status=ParticipantStatus.DECLARED,
+            ),
+        )
+    )
 
 
 # -- bundle lifecycle ---------------------------------------------------------
@@ -467,6 +506,196 @@ def test_write_json_exclusive_never_leaves_a_torn_target_if_the_link_step_crashe
         path, revision, conflict_error=RecordIdCollisionError
     )
     assert path.exists()
+
+
+# -- components ----------------------------------------------------------
+
+
+def test_add_component_is_idempotent_for_identical_content(tmp_path: Path) -> None:
+    """M1: adding the same component content twice returns the existing
+    component -- content identity, not caller-supplied identity."""
+    store = _store(tmp_path)
+    source_id = _registered_source(store)
+    artefact = store.ingest_artefact(
+        source_id=source_id,
+        content=b"notes bytes",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/notes.md",
+    )
+    body = _notes_body(artefact.artefact_id)
+
+    first = store.add_component(body)
+    second = store.add_component(body)
+
+    assert first == second
+    assert len(list((store.root / "components").glob("*.json"))) == 1
+
+
+def test_add_component_with_different_content_mints_a_distinct_component(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    source_id = _registered_source(store)
+    artefact = store.ingest_artefact(
+        source_id=source_id,
+        content=b"notes bytes",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/notes.md",
+    )
+
+    one_section = store.add_component(
+        _notes_body(artefact.artefact_id, section_count=1)
+    )
+    two_sections = store.add_component(
+        _notes_body(artefact.artefact_id, section_count=2)
+    )
+
+    assert one_section.component_id != two_sections.component_id
+
+
+def test_load_component_raises_unknown_component_error_for_a_missing_id(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+
+    with pytest.raises(UnknownComponentError):
+        store.load_component(_bogus_id("component"))
+
+
+def test_load_component_raises_unknown_component_kind_error_for_an_unrecognised_kind(
+    tmp_path: Path,
+) -> None:
+    """M1: the component-kind discriminator is closed; a persisted
+    ``component_kind`` outside that set must fail closed, not be silently
+    skipped or guessed at."""
+    store = _store(tmp_path)
+    component_id = mint_id("component")
+    path = store.root / "components" / f"{component_id}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "component_kind": "some-future-kind-nobody-implemented",
+                "component_id": component_id,
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(UnknownComponentKindError):
+        store.load_component(component_id)
+
+
+def test_update_head_accepts_a_component_bearing_revision(tmp_path: Path) -> None:
+    """Component storage now exists (unlike the pre-component-storage
+    behaviour where any component_ids on a revision were rejected
+    outright): a revision whose component graph fully resolves moves the
+    head normally."""
+    store = _store(tmp_path)
+    source_id = _registered_source(store)
+    artefact = store.ingest_artefact(
+        source_id=source_id,
+        content=b"notes bytes",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/notes.md",
+    )
+    component = store.add_component(_notes_body(artefact.artefact_id))
+    revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        artefact_ids=(artefact.artefact_id,),
+        component_ids=(component.component_id,),
+    )
+    run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+
+    updated = store.update_head(run_id=run.run_id, revision_id=revision.revision_id)
+
+    assert updated.head_revision_id == revision.revision_id
+
+
+def test_update_head_refuses_a_revision_with_an_unresolvable_component_ref(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        component_ids=(_bogus_id("component"),),
+    )
+    run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+
+    with pytest.raises(UnresolvedClosureError):
+        store.update_head(run_id=run.run_id, revision_id=revision.revision_id)
+
+    assert store.load_manifest().head_revision_id is None
+
+
+def test_update_head_refuses_a_component_whose_input_artefact_is_outside_the_closure(
+    tmp_path: Path,
+) -> None:
+    """F1/M16 coherent-snapshot rule: a component's own declared input
+    refs must resolve *within* the revision's closure, not merely exist
+    somewhere else in the bundle. Here the artefact the notes component
+    was built from is real, but the revision never claims it -- the
+    component's reference to it is a dangling ref within this closure."""
+    store = _store(tmp_path)
+    source_id = _registered_source(store)
+    artefact = store.ingest_artefact(
+        source_id=source_id,
+        content=b"notes bytes",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/notes.md",
+    )
+    component = store.add_component(_notes_body(artefact.artefact_id))
+    revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        component_ids=(component.component_id,),  # artefact_ids deliberately omitted
+    )
+    run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+
+    with pytest.raises(UnresolvedClosureError):
+        store.update_head(run_id=run.run_id, revision_id=revision.revision_id)
+
+
+def test_resolve_revision_closure_resolves_components_across_ancestor_revisions(
+    tmp_path: Path,
+) -> None:
+    """A revision's component graph is the union of every ancestor's own
+    component_ids, not just the target revision's own -- mirroring how
+    artefact_ids already accumulate across the DAG."""
+    store = _store(tmp_path)
+    source_id = _registered_source(store)
+    artefact = store.ingest_artefact(
+        source_id=source_id,
+        content=b"notes bytes",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/notes.md",
+    )
+    notes_component = store.add_component(_notes_body(artefact.artefact_id))
+    root_revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        artefact_ids=(artefact.artefact_id,),
+        component_ids=(notes_component.component_id,),
+    )
+    participant_component = store.add_component(_participant_body())
+    child_revision = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(root_revision.revision_id,),
+        component_ids=(participant_component.component_id,),
+    )
+
+    closure = store.resolve_revision_closure(child_revision.revision_id)
+
+    assert set(closure.components) == {
+        notes_component.component_id,
+        participant_component.component_id,
+    }
 
 
 # -- transactional head -------------------------------------------------------

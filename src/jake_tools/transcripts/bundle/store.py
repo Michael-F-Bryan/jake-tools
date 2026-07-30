@@ -42,19 +42,27 @@ Two concerns are kept deliberately separate:
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import fcntl
 import hashlib
 import json
 import os
 import tempfile
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ..errors import TranscriptError
+from .components import (
+    ComponentBody,
+    ComponentKind,
+    ComponentRecord,
+    assemble_component_record,
+    component_input_refs,
+)
 from .ids import ArtefactId, ComponentId, RevisionId, RunId, SourceId, mint_id
 from .records import (
     DURABLE_RUN_STATES,
@@ -78,6 +86,7 @@ _SUBDIRECTORIES = (
     "blobs",
     "artefacts",
     "revisions",
+    "components",
     "runs",
     "attempts",
     "reviews",
@@ -128,6 +137,8 @@ _LEGAL_RUN_STATE_EDGES: dict[RunState, frozenset[RunState]] = {
 _ARTEFACT_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(ArtefactId)
 _REVISION_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(RevisionId)
 _RUN_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(RunId)
+_COMPONENT_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(ComponentId)
+_COMPONENT_RECORD_ADAPTER: TypeAdapter[ComponentRecord] = TypeAdapter(ComponentRecord)
 
 
 def _utc_now() -> datetime:
@@ -136,6 +147,19 @@ def _utc_now() -> datetime:
 
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _component_content_hash(model: BaseModel) -> str:
+    """M1: SHA-256 of a component's canonical JSON body.
+
+    Works uniformly on a ``*Body`` (no ``component_id``/``created_at`` to
+    begin with) and on a stored ``*Component`` record (excluded
+    explicitly) -- both hash to the same value for the same content, which
+    is what makes :meth:`BundleStore.add_component`'s dedup check correct.
+    """
+    payload = model.model_dump(mode="json", exclude={"component_id", "created_at"})
+    canonical = json.dumps(payload, sort_keys=True)
+    return _sha256_hex(canonical.encode("utf-8"))
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -152,12 +176,33 @@ def _pid_is_alive(pid: int) -> bool:
 def _no_op_capability_validator(revision: RevisionRecord) -> None:
     """Default ``validate_capabilities`` seam (M16).
 
-    Structural closure — revision/ancestor/artefact existence — is always
-    checked by :meth:`BundleStore.update_head`. This seam is where semantic
-    capability validation plugs in once the capability registry (M4)
-    exists; until then it is a deliberate no-op, not a stand-in
-    implementation of the registry.
+    Structural closure — revision/ancestor/artefact/component existence
+    and refs — is always checked by :meth:`BundleStore.update_head` via
+    :meth:`BundleStore._validate_structural_closure`. This seam is where
+    *semantic* capability validation plugs in; a caller wanting the
+    capability registry (M4) enforced on every head move passes
+    ``document.capability_validating_seam(root)`` explicitly as
+    ``validate_capabilities`` — this default stays a no-op rather than
+    silently assuming that wiring, since not every caller needs it (e.g. a
+    diagnostic script inspecting structural validity only).
     """
+
+
+@dataclasses.dataclass(frozen=True)
+class RevisionClosure:
+    """The result of resolving one revision's complete component graph (M16).
+
+    ``ancestors`` is the revision's own ancestor closure (keyed by
+    revision ID, including ``target`` itself); ``components`` is every
+    component reachable from any ancestor's ``component_ids``, resolved
+    and fail-closed-checked by :meth:`BundleStore._validate_structural_closure`.
+    Returned by :meth:`BundleStore.resolve_revision_closure`, the shared
+    entry point used by both ``update_head`` and the document projection.
+    """
+
+    target: RevisionRecord
+    ancestors: Mapping[RevisionId, RevisionRecord]
+    components: Mapping[ComponentId, ComponentRecord]
 
 
 class BundleStoreError(TranscriptError):
@@ -195,6 +240,17 @@ class UnknownRunError(BundleStoreError):
 
 class UnknownSourceError(BundleStoreError):
     pass
+
+
+class UnknownComponentError(BundleStoreError):
+    pass
+
+
+class UnknownComponentKindError(BundleStoreError):
+    """A persisted component's ``component_kind`` is outside v1's closed
+    set (M1). Fail-closed: an unrecognised kind is refused rather than
+    silently skipped or guessed at during closure resolution.
+    """
 
 
 class ArtefactMetadataConflictError(BundleStoreError):
@@ -316,6 +372,11 @@ class BundleStore:
 
     def _run_path(self, run_id: RunId) -> Path:
         return self._validated_record_path("runs", _RUN_ID_ADAPTER, run_id, kind="run")
+
+    def _component_path(self, component_id: ComponentId) -> Path:
+        return self._validated_record_path(
+            "components", _COMPONENT_ID_ADAPTER, component_id, kind="component"
+        )
 
     # -- locking and generic atomic IO ---------------------------------------
 
@@ -678,6 +739,72 @@ class BundleStore:
     def _candidate_artefact_ids(self) -> tuple[ArtefactId, ...]:
         return tuple(record.artefact_id for record in self._iter_artefacts())
 
+    # -- components -------------------------------------------------------
+
+    def _iter_components(self) -> Iterator[ComponentRecord]:
+        components_dir = self._root / "components"
+        if not components_dir.exists():
+            return
+        for path in sorted(components_dir.glob("*.json")):
+            yield _COMPONENT_RECORD_ADAPTER.validate_json(
+                path.read_text(encoding="utf-8")
+            )
+
+    def _find_existing_component(self, body: ComponentBody) -> ComponentRecord | None:
+        target_hash = _component_content_hash(body)
+        for record in self._iter_components():
+            if _component_content_hash(record) == target_hash:
+                return record
+        return None
+
+    def load_component(self, component_id: ComponentId) -> ComponentRecord:
+        """Load a stored component, typed by its kind (M1).
+
+        Raises :class:`UnknownComponentKindError` -- not a bare
+        ``ValidationError`` -- when the persisted ``component_kind`` does
+        not match any member of the closed v1 set (:class:`.components.
+        ComponentKind`): fail-closed rather than guessing at a shape for
+        data this code does not recognise.
+        """
+        path = self._component_path(component_id)
+        if not path.exists():
+            raise UnknownComponentError(f"component {component_id} does not exist.")
+        try:
+            return _COMPONENT_RECORD_ADAPTER.validate_json(
+                path.read_text(encoding="utf-8")
+            )
+        except ValidationError as exc:
+            raise UnknownComponentKindError(
+                f"component {component_id} does not match any known component kind "
+                f"(closed set: {[kind.value for kind in ComponentKind]})."
+            ) from exc
+
+    def add_component(self, body: ComponentBody) -> ComponentRecord:
+        """Content-identified component storage (M1).
+
+        ``body`` carries no ``component_id``/``created_at`` -- those are
+        minted here, never by the caller (M1: "IDs are minted by the store
+        at record creation"). Adding a body whose content already matches
+        a stored component is idempotent and returns the existing record
+        untouched, mirroring :meth:`ingest_artefact`'s dedup shape; the
+        dedup decision is a read-modify-write and runs under
+        :meth:`_locked` for the same reason that one does.
+        """
+        with self._locked():
+            existing = self._find_existing_component(body)
+            if existing is not None:
+                return existing
+
+            record = assemble_component_record(
+                body, component_id=mint_id("component"), created_at=_utc_now()
+            )
+            self._write_json_exclusive(
+                self._component_path(record.component_id),
+                record,
+                conflict_error=RecordIdCollisionError,
+            )
+            return record
+
     # -- revisions ----------------------------------------------------------
 
     def load_revision(self, revision_id: RevisionId) -> RevisionRecord:
@@ -724,38 +851,43 @@ class BundleStore:
 
     def _validate_structural_closure(
         self, revision_id: RevisionId
-    ) -> tuple[RevisionRecord, dict[RevisionId, RevisionRecord]]:
-        """M16: revision exists, every ancestor resolves, every artefact ref resolves.
+    ) -> tuple[
+        RevisionRecord,
+        dict[RevisionId, RevisionRecord],
+        dict[ComponentId, ComponentRecord],
+    ]:
+        """M16: revision exists, every ancestor resolves, every artefact and
+        component ref resolves *within the closure*.
 
-        Component refs are not resolvable yet — no component storage
-        exists in this phase (nothing mints components until a later
-        task) — so a revision carrying any is rejected outright rather
-        than silently accepted or half-checked; full capability validation
-        (of which component resolution is a part) is the injected
-        ``validate_capabilities`` seam's job once the registry exists.
+        A revision's component graph is the union of every ancestor's own
+        ``component_ids`` (components accumulate across the DAG the same
+        way ``artefact_ids`` do); each of those components is loaded
+        (fail-closed on an unknown kind, M1) and its own declared input
+        artefact/component refs (:func:`.components.component_input_refs`)
+        must themselves already be members of this same closure -- not
+        merely exist somewhere else in the bundle. This is the
+        coherent-snapshot rule (F1): a component embedded in one document
+        can never silently pull in evidence that a different revision
+        assembled.
 
-        Returns the target revision plus its full ancestor closure (keyed
-        by revision ID, including the target itself), so callers can also
-        check ancestry membership without re-walking the DAG.
+        Returns the target revision, its full ancestor closure (keyed by
+        revision ID, including the target itself), and every resolved
+        component (keyed by component ID).
         """
         target = self.load_revision(revision_id)
-        closure: dict[RevisionId, RevisionRecord] = {revision_id: target}
+        revision_closure: dict[RevisionId, RevisionRecord] = {revision_id: target}
         frontier = [revision_id]
         while frontier:
-            current = closure[frontier.pop()]
+            current = revision_closure[frontier.pop()]
             for parent_id in current.parent_revision_ids:
-                if parent_id in closure:
+                if parent_id in revision_closure:
                     continue
-                closure[parent_id] = self.load_revision(parent_id)
+                revision_closure[parent_id] = self.load_revision(parent_id)
                 frontier.append(parent_id)
 
-        for revision in closure.values():
-            if revision.component_ids:
-                raise UnresolvedClosureError(
-                    f"revision {revision.revision_id} references component ID(s) "
-                    f"{revision.component_ids!r}, but component storage does not exist "
-                    "yet (component ref resolution arrives with the capability registry)."
-                )
+        closure_artefact_ids: set[ArtefactId] = set()
+        closure_component_ids: set[ComponentId] = set()
+        for revision in revision_closure.values():
             missing_artefacts = [
                 artefact_id
                 for artefact_id in revision.artefact_ids
@@ -766,7 +898,84 @@ class BundleStore:
                     f"revision {revision.revision_id} references unresolved artefact "
                     f"ID(s): {missing_artefacts}"
                 )
-        return target, closure
+            closure_artefact_ids.update(revision.artefact_ids)
+            closure_component_ids.update(revision.component_ids)
+
+        resolved_components: dict[ComponentId, ComponentRecord] = {}
+        for component_id in closure_component_ids:
+            self._resolve_component_closure(
+                component_id,
+                closure_artefact_ids=closure_artefact_ids,
+                closure_component_ids=closure_component_ids,
+                resolved=resolved_components,
+            )
+        return target, revision_closure, resolved_components
+
+    def _resolve_component_closure(
+        self,
+        component_id: ComponentId,
+        *,
+        closure_artefact_ids: set[ArtefactId],
+        closure_component_ids: set[ComponentId],
+        resolved: dict[ComponentId, ComponentRecord],
+    ) -> None:
+        if component_id in resolved:
+            return
+        if not self._component_path(component_id).exists():
+            # Existence is a closure-resolution concern (like a missing
+            # artefact ref above): UnresolvedClosureError, not the more
+            # specific UnknownComponentError load_component raises for its
+            # own direct callers. An unrecognised *kind* on a component
+            # that does exist is still a distinct, fail-closed error --
+            # load_component below raises UnknownComponentKindError for it.
+            raise UnresolvedClosureError(
+                f"revision closure references unresolved component ID: {component_id}"
+            )
+        record = self.load_component(component_id)
+        resolved[component_id] = record
+
+        refs = component_input_refs(record)
+        missing_artefact_refs = [
+            artefact_id
+            for artefact_id in refs.artefact_ids
+            if artefact_id not in closure_artefact_ids
+        ]
+        if missing_artefact_refs:
+            raise UnresolvedClosureError(
+                f"component {component_id} references artefact ID(s) outside the "
+                f"revision's closure: {missing_artefact_refs}"
+            )
+        missing_component_refs = [
+            input_id
+            for input_id in refs.component_ids
+            if input_id not in closure_component_ids
+        ]
+        if missing_component_refs:
+            raise UnresolvedClosureError(
+                f"component {component_id} references component ID(s) outside the "
+                f"revision's closure: {missing_component_refs}"
+            )
+        for input_id in refs.component_ids:
+            self._resolve_component_closure(
+                input_id,
+                closure_artefact_ids=closure_artefact_ids,
+                closure_component_ids=closure_component_ids,
+                resolved=resolved,
+            )
+
+    def resolve_revision_closure(self, revision_id: RevisionId) -> RevisionClosure:
+        """Public entry point for :meth:`_validate_structural_closure` (M16).
+
+        The document projection (``document.py``) is the intended caller:
+        it needs the same "walk the ancestor DAG, resolve every component,
+        fail closed on anything dangling" logic that ``update_head`` uses
+        to gate the head pointer, so both share this one implementation
+        rather than two copies drifting apart.
+        """
+        target, ancestors, components = self._validate_structural_closure(revision_id)
+        return RevisionClosure(
+            target=target, ancestors=ancestors, components=components
+        )
 
     def update_head(self, *, run_id: RunId, revision_id: RevisionId) -> BundleManifest:
         """Move the head, transactionally, iff `run_id` holds the lease (M2, M18).
@@ -788,13 +997,15 @@ class BundleStore:
                     "only the lease-holding run may move the head."
                 )
 
-            target, closure = self._validate_structural_closure(revision_id)
+            target, revision_closure, _components = self._validate_structural_closure(
+                revision_id
+            )
             self._validate_capabilities(target)
 
             manifest = self.load_manifest()
             if (
                 manifest.head_revision_id is not None
-                and manifest.head_revision_id not in closure
+                and manifest.head_revision_id not in revision_closure
             ):
                 raise HeadNotAncestorError(
                     f"current head {manifest.head_revision_id} is not an ancestor of "
