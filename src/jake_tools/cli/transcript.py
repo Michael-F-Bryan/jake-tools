@@ -21,6 +21,7 @@ from .transcript_bundle import (
     resume_command,
     source_group,
     status_command,
+    transform_group,
     validate_command,
 )
 
@@ -63,6 +64,7 @@ transcript.add_command(inspect_command)
 transcript.add_command(validate_command)
 transcript.add_command(status_command)
 transcript.add_command(resume_command)
+transcript.add_command(transform_group)
 
 
 @transcript.command("teams-meeting")

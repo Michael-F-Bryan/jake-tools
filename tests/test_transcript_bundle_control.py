@@ -16,7 +16,11 @@ from pathlib import Path
 import pytest
 
 import jake_tools.transcripts.bundle.store as store_module
+from jake_tools.transcripts.bundle.assemble import assemble
 from jake_tools.transcripts.bundle.components import (
+    ArtefactSelection,
+    Disposition,
+    MediaRecordingComponentBody,
     NotesComponent,
     NotesComponentBody,
     NotesKind,
@@ -26,6 +30,7 @@ from jake_tools.transcripts.bundle.components import (
     ParticipantRecord,
     ParticipantSetComponentBody,
     ParticipantStatus,
+    TimelineCombinedComponent,
 )
 from jake_tools.transcripts.bundle.control import (
     DEFAULT_BUNDLES_ROOT,
@@ -39,10 +44,14 @@ from jake_tools.transcripts.bundle.control import (
     RunNotResumableError,
     capability_failures,
     create_bundle,
+    default_bundle_executors,
     ingest_source,
     inspect_bundle,
     project_document,
     resume_run,
+    run_bundle_operation,
+    run_timeline_transform,
+    run_transcribe_transform,
     status_bundle,
 )
 from jake_tools.transcripts.bundle.document import TranscriptDocumentV1
@@ -782,3 +791,167 @@ def test_resume_run_take_over_without_a_stale_lease_is_a_clean_error(
 
     with pytest.raises(NoTakeOverTargetError):
         resume_run(store, run_id=None, executors={}, take_over=True)
+
+
+# -- run_bundle_operation / default_bundle_executors (Phase 3A) -----------
+
+
+def test_run_bundle_operation_dispatches_and_completes(tmp_path: Path) -> None:
+    """The CLI's own "create + acquire + dispatch immediately" path
+    (`transform timeline`/`transform transcribe`) shares
+    `_run_executor_or_fail`'s success handling with `resume_run` --
+    no bespoke duplicate lease/state bookkeeping in the CLI layer."""
+    store = _store(tmp_path)
+
+    def fake_executor(
+        inner_store: BundleStore, inner_run: RunRecord
+    ) -> ExecutorOutcome:
+        return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
+
+    run = run_bundle_operation(
+        store, next_action=OperationRef(kind="widget"), executor=fake_executor
+    )
+
+    assert run.state == RunState.COMPLETED
+    assert store.load_lease() is None
+
+
+def test_run_bundle_operation_moves_a_failure_to_the_durable_failed_state(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+
+    def raising_executor(
+        inner_store: BundleStore, inner_run: RunRecord
+    ) -> ExecutorOutcome:
+        raise RuntimeError("synthetic executor failure")
+
+    with pytest.raises(ExecutorFailedError):
+        run_bundle_operation(
+            store, next_action=OperationRef(kind="widget"), executor=raising_executor
+        )
+
+    runs = [store.load_run(run_id) for run_id in store.load_manifest().run_ids]
+    (run,) = runs
+    assert run.state == RunState.FAILED
+    assert store.load_lease() is None
+    assert run.next_action is not None
+    assert "synthetic executor failure" in run.next_action.rationale
+
+
+def test_default_bundle_executors_registers_timeline_and_transcribe() -> None:
+    executors = default_bundle_executors()
+
+    assert set(executors) == {"timeline", "transcribe"}
+
+
+def test_run_timeline_transform_builds_and_moves_the_head(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    membership = store.register_source(
+        association=SourceAssociation.OPERATOR_ASSERTION, evidence="test"
+    )
+    artefact = store.ingest_artefact(
+        source_id=membership.source_id,
+        content=b"audio bytes",
+        kind="audio",
+        producer="test",
+        acquisition_locator="/tmp/a.wav",
+    )
+    media = store.add_component(
+        MediaRecordingComponentBody(
+            source_artefact_id=artefact.artefact_id,
+            media_path="/tmp/a.wav",
+            duration_ms=1000,
+            codec="opus",
+            sample_rate_hz=48000,
+            channels=1,
+        )
+    )
+    assemble_run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=assemble_run.run_id, pid=os.getpid())
+    assemble(
+        store,
+        run_id=assemble_run.run_id,
+        selections=(
+            ArtefactSelection(
+                artefact_id=artefact.artefact_id, dispositions=(Disposition.MEDIA,)
+            ),
+        ),
+        rationale="test",
+        component_ids=(media.component_id,),
+    )
+    store.release_lease(run_id=assemble_run.run_id, new_state=RunState.COMPLETED)
+
+    run = run_timeline_transform(store, order=(artefact.artefact_id,))
+
+    assert run.state == RunState.COMPLETED
+    head_revision_id = store.load_manifest().head_revision_id
+    assert head_revision_id is not None
+    document = project_document(store, revision_id=None)
+    assert isinstance(document, TranscriptDocumentV1)
+    assert any(
+        isinstance(component, TimelineCombinedComponent)
+        for component in document.components.values()
+    )
+
+
+def test_run_transcribe_transform_with_a_fake_subprocess_runner(tmp_path: Path) -> None:
+    """A thin smoke test at the control.py layer: the real fake-worker
+    contract round-trip lives in test_transcript_bundle_transcribe.py; this
+    just proves `run_transcribe_transform` threads `subprocess_runner`
+    through to `transcribe_media` and completes the run."""
+    store = _store(tmp_path)
+    membership = store.register_source(
+        association=SourceAssociation.OPERATOR_ASSERTION, evidence="test"
+    )
+    artefact = store.ingest_artefact(
+        source_id=membership.source_id,
+        content=b"audio bytes",
+        kind="audio",
+        producer="test",
+        acquisition_locator="/tmp/a.wav",
+    )
+    media = store.add_component(
+        MediaRecordingComponentBody(
+            source_artefact_id=artefact.artefact_id,
+            media_path="/tmp/a.wav",
+            duration_ms=1000,
+            codec="opus",
+            sample_rate_hz=48000,
+            channels=1,
+        )
+    )
+    assemble_run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=assemble_run.run_id, pid=os.getpid())
+    assemble(
+        store,
+        run_id=assemble_run.run_id,
+        selections=(
+            ArtefactSelection(
+                artefact_id=artefact.artefact_id, dispositions=(Disposition.MEDIA,)
+            ),
+        ),
+        rationale="test",
+        component_ids=(media.component_id,),
+    )
+    store.release_lease(run_id=assemble_run.run_id, new_state=RunState.COMPLETED)
+
+    # A runner that always fails to produce a response.json -- proves the
+    # seam was actually invoked (WorkerInvocationError, not a silent
+    # success) without needing a full fake worker here.
+    def failing_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command, returncode=1, stdout="", stderr="no worker"
+        )
+
+    with pytest.raises(ExecutorFailedError):
+        run_transcribe_transform(store, subprocess_runner=failing_runner)
+
+    runs = [store.load_run(run_id) for run_id in store.load_manifest().run_ids]
+    transcribe_runs = [
+        run
+        for run in runs
+        if run.next_action and "transcribe" in run.next_action.rationale
+    ]
+    assert transcribe_runs
+    assert transcribe_runs[-1].state == RunState.FAILED

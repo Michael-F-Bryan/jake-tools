@@ -1,16 +1,17 @@
 """CLI-level behaviour tests for the bundle control-plane commands
 (`transcript bundle create`, `source ingest`, `inspect`, `validate`,
-`status`, `resume`). Uses CliRunner with obj=AppContext(...) per
-AGENTS.md; every bundle is a real tmp-dir bundle -- no mocking of
-BundleStore. Orchestration-level edge cases live in
-test_transcript_bundle_control.py; this file exercises Click wiring,
---json/human parity, and exit codes.
+`status`, `resume`, `transform timeline`, `transform transcribe`). Uses
+CliRunner with obj=AppContext(...) per AGENTS.md; every bundle is a real
+tmp-dir bundle -- no mocking of BundleStore. Orchestration-level edge
+cases live in test_transcript_bundle_control.py; this file exercises
+Click wiring, --json/human parity, and exit codes.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,7 +22,11 @@ from click.testing import CliRunner
 import jake_tools.transcripts.bundle.store as store_module
 from jake_tools.cli import main
 from jake_tools.cli.context import AppContext
+from jake_tools.transcripts.bundle.assemble import assemble
 from jake_tools.transcripts.bundle.components import (
+    ArtefactSelection,
+    Disposition,
+    MediaRecordingComponentBody,
     NotesComponent,
     NotesComponentBody,
     NotesKind,
@@ -215,7 +220,7 @@ def test_create_ingest_inspect_round_trip_including_idempotent_reingest(
         "--bundle",
         str(bundle_dir),
         "--kind",
-        "obsidian-note",
+        "markdown",
         "--producer",
         "operator",
         str(input_file),
@@ -233,7 +238,7 @@ def test_create_ingest_inspect_round_trip_including_idempotent_reingest(
         "--bundle",
         str(bundle_dir),
         "--kind",
-        "obsidian-note",
+        "markdown",
         "--producer",
         "operator",
         "--source",
@@ -259,7 +264,7 @@ def test_source_ingest_json_carries_the_already_ingested_flag(tmp_path: Path) ->
         "--bundle",
         str(bundle_dir),
         "--kind",
-        "obsidian-note",
+        "markdown",
         "--producer",
         "operator",
         "--json",
@@ -340,7 +345,7 @@ def test_source_ingest_default_evidence_is_the_genuine_invocation(
         "--bundle",
         str(bundle_dir),
         "--kind",
-        "obsidian-note",
+        "markdown",
         "--producer",
         "operator",
         "--json",
@@ -352,7 +357,7 @@ def test_source_ingest_default_evidence_is_the_genuine_invocation(
     assert "--bundle" in evidence
     assert str(bundle_dir) in evidence
     assert "--json" in evidence
-    assert "--kind obsidian-note" in evidence
+    assert "--kind markdown" in evidence
     assert "--producer operator" in evidence
     assert str(input_file) in evidence
 
@@ -725,7 +730,7 @@ def test_inspect_json_and_human_output_carry_the_same_facts(tmp_path: Path) -> N
         "--bundle",
         str(bundle_dir),
         "--kind",
-        "obsidian-note",
+        "markdown",
         "--producer",
         "operator",
         str(input_file),
@@ -816,3 +821,246 @@ def test_resume_json_error_is_a_json_envelope(tmp_path: Path) -> None:
     assert result.exit_code == 1
     payload = json.loads(result.output)
     assert payload["error"]["type"] == "NotABundleError"
+
+
+# -- source ingest --kind obsidian-note|local-media (Phase 3A) --------------
+
+_NOTE_WITH_RECORDING = """---
+Attendees:
+  - "[[Michael Bryan]]"
+  - "[[Avalon Mann]]"
+---
+
+## Notes
+
+- A goal.
+
+## Recording
+
+![[meeting.m4a]]
+"""
+
+_requires_ffmpeg = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg/ffprobe not installed",
+)
+
+
+def test_source_ingest_obsidian_note_runs_the_note_adapter(tmp_path: Path) -> None:
+    bundle_dir = _create_bundle(tmp_path)
+    note_path = _write_file(tmp_path, "note.md", _NOTE_WITH_RECORDING)
+    (tmp_path / "meeting.m4a").write_bytes(b"not real audio, just needs to exist")
+
+    result = _invoke(
+        "source",
+        "ingest",
+        "--bundle",
+        str(bundle_dir),
+        "--kind",
+        "obsidian-note",
+        "--producer",
+        "operator",
+        "--json",
+        str(note_path),
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["destination_component_id"].startswith("component_")
+    assert payload["participants_component_id"].startswith("component_")
+    assert payload["reference_set_component_id"].startswith("component_")
+
+    human = _invoke(
+        "source",
+        "ingest",
+        "--bundle",
+        str(bundle_dir),
+        "--kind",
+        "obsidian-note",
+        "--producer",
+        "operator",
+        "--source",
+        payload["source_id"],
+        str(note_path),
+    )
+    assert "destination_component_id:" in human.output
+    assert "participants_component_id:" in human.output
+    assert "reference_set_component_id:" in human.output
+
+
+def test_source_ingest_obsidian_note_reports_a_clean_error_without_attendees(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = _create_bundle(tmp_path)
+    note_path = _write_file(
+        tmp_path, "note.md", "## Notes\n\n- no frontmatter at all.\n"
+    )
+
+    result = _invoke(
+        "source",
+        "ingest",
+        "--bundle",
+        str(bundle_dir),
+        "--kind",
+        "obsidian-note",
+        "--producer",
+        "operator",
+        "--json",
+        str(note_path),
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert "Attendees" in payload["error"]["message"]
+
+
+@_requires_ffmpeg
+def test_source_ingest_local_media_runs_the_ffprobe_adapter(tmp_path: Path) -> None:
+    bundle_dir = _create_bundle(tmp_path)
+    audio_path = tmp_path / "clip.wav"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=mono",
+            "-t",
+            "1",
+            str(audio_path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    result = _invoke(
+        "source",
+        "ingest",
+        "--bundle",
+        str(bundle_dir),
+        "--kind",
+        "local-media",
+        "--producer",
+        "operator",
+        "--json",
+        str(audio_path),
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["media_recording_component_id"].startswith("component_")
+    assert 900 <= payload["duration_ms"] <= 1100
+
+
+# -- transform timeline / transform transcribe (Phase 3A) -------------------
+
+
+def test_transform_group_help() -> None:
+    result = _invoke("transform", "--help")
+
+    assert result.exit_code == 0
+    assert "timeline" in result.output
+    assert "transcribe" in result.output
+
+
+def test_transform_timeline_help_documents_order() -> None:
+    result = _invoke("transform", "timeline", "--help")
+
+    assert result.exit_code == 0
+    assert "--order" in result.output
+
+
+def test_transform_transcribe_help_documents_force() -> None:
+    result = _invoke("transform", "transcribe", "--help")
+
+    assert result.exit_code == 0
+    assert "--force" in result.output
+
+
+def test_transform_timeline_reports_a_clean_error_without_an_assembled_document(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = _create_bundle(tmp_path)
+
+    result = _invoke("transform", "timeline", "--bundle", str(bundle_dir), "--json")
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    # run_timeline_transform dispatches through run_bundle_operation's
+    # shared executor machinery (control.py), which wraps any raised
+    # error as ExecutorFailedError and moves the run to the durable
+    # `failed` state (naming the real cause in its own message) -- never
+    # left stuck `running` with the lease held.
+    assert payload["error"]["type"] == "ExecutorFailedError"
+    assert "NoDocumentToTransformError" in payload["error"]["message"]
+
+
+def test_transform_transcribe_reports_a_clean_error_without_an_assembled_document(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = _create_bundle(tmp_path)
+
+    result = _invoke("transform", "transcribe", "--bundle", str(bundle_dir), "--json")
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["error"]["type"] == "ExecutorFailedError"
+    assert "NoDocumentToTranscribeError" in payload["error"]["message"]
+
+
+def test_transform_timeline_moves_the_head_and_reports_the_new_revision(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = _create_bundle(tmp_path)
+    store = BundleStore(bundle_dir)
+    membership = store.register_source(
+        association=SourceAssociation.OPERATOR_ASSERTION, evidence="cli test"
+    )
+    artefact = store.ingest_artefact(
+        source_id=membership.source_id,
+        content=b"audio bytes",
+        kind="audio",
+        producer="test",
+        acquisition_locator="/tmp/a.wav",
+    )
+    media = store.add_component(
+        MediaRecordingComponentBody(
+            source_artefact_id=artefact.artefact_id,
+            media_path="/tmp/a.wav",
+            duration_ms=1000,
+            codec="opus",
+            sample_rate_hz=48000,
+            channels=1,
+        )
+    )
+    run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+    assemble(
+        store,
+        run_id=run.run_id,
+        selections=(
+            ArtefactSelection(
+                artefact_id=artefact.artefact_id, dispositions=(Disposition.MEDIA,)
+            ),
+        ),
+        rationale="cli test",
+        component_ids=(media.component_id,),
+    )
+    store.release_lease(run_id=run.run_id, new_state=RunState.COMPLETED)
+    head_before = store.load_manifest().head_revision_id
+
+    result = _invoke(
+        "transform",
+        "timeline",
+        "--bundle",
+        str(bundle_dir),
+        "--order",
+        artefact.artefact_id,
+        "--json",
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["state"] == "completed"
+    assert payload["head_revision_id"] != head_before
+    assert store.load_lease() is None

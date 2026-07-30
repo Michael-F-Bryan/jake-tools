@@ -1,5 +1,6 @@
 """Bundle control-plane commands: ``bundle create``, ``source ingest``,
-``inspect``, ``validate``, ``status``, ``resume``.
+``inspect``, ``validate``, ``status``, ``resume``, ``transform timeline``,
+``transform transcribe``.
 
 Every callback here is thin: parse/validate options, call one
 ``jake_tools.transcripts.bundle.control`` function, render the typed
@@ -14,6 +15,7 @@ from typing import NoReturn
 
 import click
 
+from ..transcripts.bundle.adapters import adapt_local_media, adapt_obsidian_note
 from ..transcripts.bundle.control import (
     DEFAULT_BUNDLES_ROOT,
     BundleOverview,
@@ -23,15 +25,23 @@ from ..transcripts.bundle.control import (
     inspect_bundle,
     project_document,
     resume_run,
+    run_timeline_transform,
+    run_transcribe_transform,
     status_bundle,
 )
 from ..transcripts.bundle.control import create_bundle as _create_bundle
 from ..transcripts.bundle.document import TranscriptDocumentV1
-from ..transcripts.bundle.records import NoDocumentYet, SourceAssociation
+from ..transcripts.bundle.records import NoDocumentYet, RunRecord, SourceAssociation
 from ..transcripts.bundle.registry import CapabilityStatus
 from ..transcripts.bundle.store import BundleStore
 from ..transcripts.errors import TranscriptError
 from .context import app_context
+
+#: `--kind` values that trigger a typed adapter in addition to plain
+#: ingestion (source_ingest below) -- every other `--kind` value stays
+#: free-text metadata only, matching the original Phase 2 behaviour.
+_KIND_OBSIDIAN_NOTE = "obsidian-note"
+_KIND_LOCAL_MEDIA = "local-media"
 
 _bundle_option = click.option(
     "--bundle",
@@ -146,8 +156,10 @@ def _rendered_invocation(ctx: click.Context) -> str:
 @click.option(
     "--kind",
     required=True,
-    help="Free-text label for what this artefact is (e.g. obsidian-note, "
-    "recording, teams-transcript).",
+    help="What this artefact is. Free text for most sources (e.g. "
+    "teams-transcript), but 'obsidian-note' and 'local-media' additionally "
+    "trigger a typed adapter (destination/participants/recording-references, "
+    "or ffprobe-verified media metadata) alongside plain ingestion.",
 )
 @click.option(
     "--producer",
@@ -199,6 +211,16 @@ def source_ingest(
     one. Ingestion is idempotent: re-running the exact same command
     against the same source is a no-op that reports the existing
     artefact rather than duplicating it.
+
+    `--kind obsidian-note` additionally parses INPUT_FILE as an Obsidian
+    source note (destination component, participants from frontmatter
+    Attendees, recording references from embeds -- M3/M13/M19; a
+    reference alone never satisfies `media.recording`, ingest the
+    recording separately with `--kind local-media`). `--kind local-media`
+    additionally runs `ffprobe` over INPUT_FILE and records its
+    duration/codec/sample-rate/channels as the `media.recording` proof
+    (M4/M11). Both adapter calls are themselves idempotent (content-
+    addressed components), so re-running this command is always safe.
     """
     given = [
         flag
@@ -222,6 +244,7 @@ def source_ingest(
         evidence = _rendered_invocation(ctx)
 
     store = BundleStore(bundle_path)
+    adapter_summary: dict[str, object] = {}
     try:
         outcome = ingest_source(
             store,
@@ -233,6 +256,31 @@ def source_ingest(
             producer=producer,
             acquisition_locator=acquisition_locator,
         )
+        if kind == _KIND_OBSIDIAN_NOTE:
+            note_adaptation = adapt_obsidian_note(
+                store,
+                note_artefact_id=outcome.artefact.artefact_id,
+                note_path=input_file,
+            )
+            adapter_summary = {
+                "destination_component_id": note_adaptation.destination.component_id,
+                "participants_component_id": note_adaptation.participants.component_id,
+                "reference_set_component_id": (
+                    note_adaptation.reference_set.component_id
+                    if note_adaptation.reference_set is not None
+                    else None
+                ),
+            }
+        elif kind == _KIND_LOCAL_MEDIA:
+            media = adapt_local_media(
+                store,
+                source_artefact_id=outcome.artefact.artefact_id,
+                media_path=input_file,
+            )
+            adapter_summary = {
+                "media_recording_component_id": media.component_id,
+                "duration_ms": media.duration_ms,
+            }
     except TranscriptError as exc:
         _echo_error_and_exit(exc, as_json=as_json)
 
@@ -248,6 +296,7 @@ def source_ingest(
                     "kind": outcome.artefact.kind,
                     "producer": outcome.artefact.producer,
                     "already_ingested": outcome.already_ingested,
+                    **adapter_summary,
                 },
                 indent=2,
                 sort_keys=True,
@@ -259,6 +308,8 @@ def source_ingest(
         click.echo(f"already ingested, artefact_id {outcome.artefact.artefact_id}")
     else:
         click.echo(f"artefact_id: {outcome.artefact.artefact_id}")
+    for key, value in adapter_summary.items():
+        click.echo(f"{key}: {value}")
 
 
 # -- shared rendering helpers ----------------------------------------------
@@ -606,13 +657,15 @@ def resume_command(
 
     Never re-plans: the exact operation, input IDs, and config hash
     recorded when the run entered review_required/refused/failed are
-    replayed as-is. v1 ships no real transform executors -- resuming a
-    run whose next_action names an unimplemented operation kind is a
-    safe, explicit no-op: the error names the missing kind, and the run
-    is left exactly where it was, lease released, ready to resume again
-    once that transform exists. If the executor itself raises, the run
-    moves to `failed` (durable, resumable) with the exception recorded,
-    rather than being left stuck `running` with the lease held forever.
+    replayed as-is. `timeline` and `transcribe` (this bundle's own
+    transforms, see `transform timeline`/`transform transcribe`) have
+    real registered executors; resuming a run whose next_action names any
+    other, still-unimplemented operation kind is a safe, explicit no-op:
+    the error names the missing kind, and the run is left exactly where
+    it was, lease released, ready to resume again once that transform
+    exists. If the executor itself raises, the run moves to `failed`
+    (durable, resumable) with the exception recorded, rather than being
+    left stuck `running` with the lease held forever.
     """
     executors = app_context(ctx).bundle_executors
     store = BundleStore(bundle_path)
@@ -642,3 +695,102 @@ def resume_command(
     click.echo(f"state: {run.state.value}")
     if head_revision_id is not None:
         click.echo(f"head: {head_revision_id}")
+
+
+# -- transform: timeline / transcribe (M6 / M11) --------------------------
+
+
+@click.group("transform", help="Run bundle transforms (timeline, transcribe).")
+def transform_group() -> None:
+    pass
+
+
+def _echo_run_result(run: RunRecord, store: BundleStore, *, as_json: bool) -> None:
+    """Shared success rendering for `transform timeline`/`transform
+    transcribe` -- both are a fresh run dispatched immediately
+    (`run_bundle_operation`, ``control.py``), so both report the same
+    shape: run id, terminal state, and the bundle's head afterwards.
+    """
+    head_revision_id = store.load_manifest().head_revision_id
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "run_id": run.run_id,
+                    "state": run.state.value,
+                    "head_revision_id": head_revision_id,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+    click.echo(f"run_id: {run.run_id}")
+    click.echo(f"state: {run.state.value}")
+    if head_revision_id is not None:
+        click.echo(f"head: {head_revision_id}")
+
+
+@transform_group.command("timeline")
+@_bundle_option
+@click.option(
+    "--order",
+    default=None,
+    help="Comma-separated artefact IDs giving explicit member order (M6: "
+    '"explicit operator order"). Defaults to note-embed order, read from the '
+    "bundle's own recording-reference-set component.",
+)
+@_json_option
+def transform_timeline_command(
+    bundle_path: Path, order: str | None, as_json: bool
+) -> None:
+    """Build the M6 combined-timeline component over the bundle's media
+    members and move the head to a revision carrying it.
+
+    Requires an already-assembled document (`transform assemble` first).
+    Piecewise-maps each media member's own `[0, duration)` into a shared
+    combined timeline, sequential and non-overlapping (v1 policy) --
+    default member order is the note's own embed order; --order overrides
+    it explicitly. Refuses if no media member resolves (no explicit order
+    given and no note-embed reference resolved to ingested media).
+    """
+    store = BundleStore(bundle_path)
+    resolved_order = tuple(order.split(",")) if order else None
+    try:
+        run = run_timeline_transform(store, order=resolved_order)
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+    _echo_run_result(run, store, as_json=as_json)
+
+
+@transform_group.command("transcribe")
+@_bundle_option
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Re-invoke the worker even for media whose ASR/diarisation already "
+    "match this request's own fingerprint (M11). Recorded on the run's "
+    "rationale.",
+)
+@_json_option
+def transform_transcribe_command(bundle_path: Path, force: bool, as_json: bool) -> None:
+    """Invoke the pinned local inference worker (Parakeet ASR + Pyannote
+    Community-1 diarisation) over every media member and promote
+    inference.asr/inference.diarisation (M11).
+
+    Resume-by-hash: a media member whose ASR and diarisation already
+    match this request's own fingerprint (audio hash + declared model +
+    audio-preparation config, computed before the worker ever runs) is
+    never re-invoked -- pass --force to override anyway. Completed stages
+    promote even when a sibling stage fails (M11's partial-failure rule):
+    diarisation failing for one recording never blocks that recording's
+    own ASR capability, nor any other recording's. Requires local `uv`
+    and the `inference-worker/` project's own environment (its first
+    invocation may need to resolve model weights; see its own docs).
+    """
+    store = BundleStore(bundle_path)
+    try:
+        run = run_transcribe_transform(store, force=force)
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+    _echo_run_result(run, store, as_json=as_json)

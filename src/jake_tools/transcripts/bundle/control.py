@@ -17,10 +17,11 @@ import tempfile
 from collections import Counter
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from types import MappingProxyType
 
 from ..errors import TranscriptError
 from .document import TranscriptDocumentV1, project_head, project_revision
-from .ids import RevisionId
+from .ids import ArtefactId, RevisionId
 from .records import (
     DURABLE_RUN_STATES,
     BundleManifest,
@@ -34,6 +35,8 @@ from .records import (
 )
 from .registry import CapabilityKey, CapabilityStatus
 from .store import ArtefactRecord, BundleStore, UnknownSourceError
+from .timeline import transform_timeline
+from .transcribe import SubprocessRunner, default_subprocess_runner, transcribe_media
 
 #: M16 default bundle root, relative to the CLI's working directory --
 #: gitignored, overridable per command via ``--root``/``--bundle``.
@@ -663,4 +666,146 @@ def _resume_via_takeover(
 
     return _run_executor_or_fail(
         store, run, executors, on_missing_executor=_fail_on_missing_executor
+    )
+
+
+# -- transform: timeline / transcribe (M6 / M11) --------------------------
+
+
+def timeline_executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+    """Dispatches M6's timeline transform for `resume` (M2's executor
+    seam). Reads any explicit member order back from the run's own
+    recorded ``next_action.input_ids`` -- an empty tuple means "use the
+    transform's own note-embed default", exactly what
+    :func:`run_timeline_transform` records when no explicit order was
+    given.
+
+    Returns ``revision_id=None`` -- unlike a plain executor that only
+    *proposes* a revision, :func:`transform_timeline` already moved the
+    head itself (the same "the operation both appends and moves the
+    head" shape ``assemble()`` established); a second ``update_head``
+    from :func:`_apply_outcome` would be a redundant, harmless no-op
+    (the revision is already its own ancestor), so this simply omits it.
+    """
+    next_action = run.next_action
+    if next_action is None:
+        raise BundleControlError(f"run {run.run_id} has no next_action while running.")
+    order = next_action.input_ids or None
+    transform_timeline(store, run_id=run.run_id, order=order)
+    return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
+
+
+def transcribe_executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+    """Dispatches M11's transcribe transform for `resume` (M2's executor
+    seam). Always ``force=False`` -- resuming a crashed or interrupted
+    run must never silently redo already-completed work; ``--force`` is
+    only ever honoured on the CLI's direct, first-attempt path (see
+    :func:`run_transcribe_transform`'s own executor closure).
+
+    ``revision_id=None`` for the same reason :func:`timeline_executor`
+    returns it: :func:`transcribe_media` already moved the head itself
+    when it had a new revision to move to.
+    """
+    transcribe_media(store, run_id=run.run_id)
+    return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
+
+
+def default_bundle_executors() -> Mapping[str, BundleExecutor]:
+    """The production executor mapping (M2's resume seam): every
+    operation kind ``transform timeline``/``transform transcribe`` may
+    leave recorded as a durable run's ``next_action``. Wired as
+    ``AppContext.bundle_executors``'s own default
+    (``cli/context.py``) -- injected explicitly only by tests exercising
+    the dispatch mechanism itself.
+    """
+    return MappingProxyType(
+        {"timeline": timeline_executor, "transcribe": transcribe_executor}
+    )
+
+
+def run_bundle_operation(
+    store: BundleStore, *, next_action: OperationRef, executor: BundleExecutor
+) -> RunRecord:
+    """Create a fresh run, acquire its lease, and dispatch ``executor``
+    directly -- the CLI's "first attempt" path for `transform timeline`/
+    `transform transcribe`, sharing :func:`resume_run`'s own success/
+    failure/lease-release handling (:func:`_run_executor_or_fail`) so a
+    failure here leaves the run in exactly the same safe, durable,
+    resumable ``failed`` state a crashed `resume` would produce, rather
+    than a bespoke duplicate of that logic living in the CLI layer.
+    """
+    run = store.create_run(next_action=next_action)
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+    run = store.load_run(run.run_id)
+
+    def _fail_on_missing_executor(missing_next_action: OperationRef) -> RunRecord:
+        # Unreachable in practice: `executor` is supplied directly here,
+        # never looked up by kind, so the single-entry map below always
+        # resolves it. Kept only because `_run_executor_or_fail`'s shared
+        # dispatch shape always requires a "no executor" branch.
+        store.release_lease(
+            run_id=run.run_id,
+            new_state=RunState.FAILED,
+            next_action=missing_next_action,
+        )
+        raise NoExecutorRegisteredError(
+            f"no executor registered for operation kind {missing_next_action.kind!r}."
+        )
+
+    return _run_executor_or_fail(
+        store,
+        run,
+        {next_action.kind: executor},
+        on_missing_executor=_fail_on_missing_executor,
+    )
+
+
+def run_timeline_transform(
+    store: BundleStore, *, order: tuple[ArtefactId, ...] | None = None
+) -> RunRecord:
+    """CLI entry point for `transform timeline` (M6): create+acquire+
+    dispatch in one call. ``order`` is recorded on the run's own
+    ``next_action.input_ids`` so a later `resume` (if this crashes before
+    completing) replays the exact same member order (M2)."""
+    return run_bundle_operation(
+        store,
+        next_action=OperationRef(
+            kind="timeline",
+            input_ids=order or (),
+            rationale="transcript transform timeline",
+        ),
+        executor=timeline_executor,
+    )
+
+
+def run_transcribe_transform(
+    store: BundleStore,
+    *,
+    force: bool = False,
+    subprocess_runner: SubprocessRunner = default_subprocess_runner,
+) -> RunRecord:
+    """CLI entry point for `transform transcribe` (M11): create+acquire+
+    dispatch in one call. ``force`` and ``subprocess_runner`` are only
+    ever honoured on this direct path -- a later `resume` of a crashed
+    run always dispatches through the registered, force=False
+    :func:`transcribe_executor` instead (M2: resuming must never widen
+    what a crashed run was about to do).
+    """
+
+    def _executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+        # revision_id=None: transcribe_media() already moved the head
+        # itself when it had a new revision to move to (see
+        # transcribe_executor's own docstring for why).
+        transcribe_media(
+            store, run_id=run.run_id, force=force, subprocess_runner=subprocess_runner
+        )
+        return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
+
+    return run_bundle_operation(
+        store,
+        next_action=OperationRef(
+            kind="transcribe",
+            rationale=f"transcript transform transcribe (force={force})",
+        ),
+        executor=_executor,
     )
