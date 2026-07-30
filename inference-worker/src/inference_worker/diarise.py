@@ -113,6 +113,7 @@ def run_diarisation(
                 return _failed(
                     stage_config_hash,
                     started,
+                    wav_sha256,
                     "model-access-denied",
                     f"{PIPELINE_ID} is gated and the worker's Hugging Face "
                     f"credentials have not been granted access: {exc}",
@@ -124,6 +125,7 @@ def run_diarisation(
                 return _failed(
                     stage_config_hash,
                     started,
+                    wav_sha256,
                     "diarisation-failed",
                     f"Pipeline.from_pretrained({PIPELINE_ID!r}) returned None",
                     retryable=False,
@@ -137,6 +139,7 @@ def run_diarisation(
         return _failed(
             stage_config_hash,
             started,
+            wav_sha256,
             "timeout",
             str(exc),
             retryable=True,
@@ -147,6 +150,7 @@ def run_diarisation(
         return _failed(
             stage_config_hash,
             started,
+            wav_sha256,
             "diarisation-failed",
             f"{type(exc).__name__}: {exc}",
             retryable=False,
@@ -163,6 +167,7 @@ def run_diarisation(
         return _failed(
             stage_config_hash,
             started,
+            wav_sha256,
             "diarisation-failed",
             f"diarisation completed but no cached revision for {PIPELINE_ID!r} could be resolved locally",
             retryable=False,
@@ -184,6 +189,7 @@ def run_diarisation(
         return _failed(
             stage_config_hash,
             started,
+            wav_sha256,
             "diarisation-invalid-output",
             f"pyannote returned a segment with an invalid span: {exc}",
             retryable=False,
@@ -233,6 +239,7 @@ def _speaker_kwargs(constraints: SpeakerConstraints) -> dict[str, int]:
 def _failed(
     stage_config_hash: str,
     started: float,
+    input_audio_sha256: str,
     error_class: str,
     message: str,
     *,
@@ -243,6 +250,10 @@ def _failed(
     return DiarisationStageResult(
         status="failed",
         config_hash=stage_config_hash,
+        # The wav is already hashed by the time run_diarisation is ever
+        # called (prepare.py computed it) — a failure here is no reason
+        # to lose that provenance from the record.
+        input_audio_sha256=input_audio_sha256,
         model_provenance=model_provenance,
         observations=stage_observations(started),
         error=StageError(

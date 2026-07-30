@@ -168,7 +168,23 @@ class TimeSpan(BaseModel):
     spans (``start_ms == end_ms``) are valid and preserved as evidence —
     e.g. Parakeet's duration head structurally emits some zero-length
     tokens. A reversed span is a modelling error, not raw evidence, so it
-    raises rather than being silently accepted (M6)."""
+    raises rather than being silently accepted (M6).
+
+    This is deliberately the ONLY structural constraint enforced here:
+    per-token sanity (non-negative, not reversed), not cross-token
+    ordering or uniqueness within a list of them. Investigated on a real
+    28-minute recording: a single chunk's own parakeet decode emitted the
+    identical zero-length token three times in a row, confirmed by
+    decoding that one chunk in isolation — a genuine, if odd, thing the
+    model did, not a bug in this worker's merge. M6/M7's ruling: raw ASR/
+    diarisation output (what ships from this worker, in AsrOutput/
+    DiarisationOutput) must stay FAITHFUL to what the model actually
+    emitted — duplicates and all — because it's evidence, not a claim.
+    Strict monotonic ordering and duplicate-freedom belong to canonical
+    turn-set normalisation (a later Phase 3 transform that owns
+    deduplication with `dropped_as_duplicate` lineage per M7), not to
+    this worker. See asr.py's module docstring for the specific incident
+    that settled this."""
 
     start_ms: int = Field(ge=0)
     end_ms: int = Field(ge=0)
@@ -230,8 +246,16 @@ class AsrToken(TimeSpan):
 
 
 class AsrOutput(BaseModel):
+    # `tokens` is raw evidence (see TimeSpan's docstring): non-strictly
+    # ordered by (start_ms, end_ms) — ties/duplicates from the model's
+    # own decode are preserved, not deduplicated here.
     text: str
     tokens: list[AsrToken]
+    # Cut-point merge evidence: one boundary timestamp per adjacent
+    # chunk pair (empty if the audio fit in a single chunk, i.e. no
+    # chunking happened). Recorded so a merge decision is diagnosable
+    # from the artefact alone, not just from re-running the pipeline.
+    chunk_boundaries_ms: list[int] = Field(default_factory=list)
 
 
 class AsrStageResult(StageResultBase):
