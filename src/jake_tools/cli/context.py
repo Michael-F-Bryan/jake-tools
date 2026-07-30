@@ -17,7 +17,7 @@ import click
 from ..claude import AgentSpec, ClaudeAgent
 from ..clockify import CLOCKIFY_API_ROOT, ClockifyClient, ClockifyError
 from ..clockify_jira_sync import ClockifyInventoryClient, JiraInventoryClient
-from ..jira import AcliJiraClient
+from ..jira import JiraClient, JiraError
 from ..newsletters import NewsletterClient, NewsletterOperations
 
 AgentFactory = Callable[[AgentSpec], ClaudeAgent]
@@ -31,8 +31,17 @@ class ClockifyConfig:
     api_base_url: str = CLOCKIFY_API_ROOT
 
 
+@dataclass(frozen=True)
+class JiraConfig:
+    """Jira REST credentials, resolved once by the command boundary."""
+
+    base_url: str | None
+    email: str | None
+    api_token: str | None
+
+
 ClockifyClientFactory = Callable[[ClockifyConfig], ClockifyInventoryClient]
-JiraClientFactory = Callable[[], JiraInventoryClient]
+JiraClientFactory = Callable[[JiraConfig], JiraInventoryClient]
 NewsletterClientFactory = Callable[[], NewsletterOperations]
 
 
@@ -48,6 +57,25 @@ def _default_clockify_client_factory(config: ClockifyConfig) -> ClockifyInventor
     return ClockifyClient(api_key=config.api_key, base_url=config.api_base_url)
 
 
+def _default_jira_client_factory(config: JiraConfig) -> JiraInventoryClient:
+    if config.base_url is None or config.email is None or config.api_token is None:
+        missing = [
+            name
+            for name, value in (
+                ("JIRA_BASE_URL", config.base_url),
+                ("JIRA_EMAIL", config.email),
+                ("JIRA_API_TOKEN", config.api_token),
+            )
+            if value is None
+        ]
+        raise JiraError(f"Jira configuration is required. Set {', '.join(missing)}.")
+    return JiraClient(
+        base_url=config.base_url,
+        email=config.email,
+        api_token=config.api_token,
+    )
+
+
 @dataclass(frozen=True)
 class AppContext:
     """Factories for every real dependency a CLI command builds.
@@ -59,7 +87,7 @@ class AppContext:
 
     agent_factory: AgentFactory = _default_agent_factory
     clockify_client_factory: ClockifyClientFactory = _default_clockify_client_factory
-    jira_client_factory: JiraClientFactory = AcliJiraClient
+    jira_client_factory: JiraClientFactory = _default_jira_client_factory
     newsletter_client_factory: NewsletterClientFactory = NewsletterClient
     clockify_config: ClockifyConfig | None = None
 

@@ -1,17 +1,24 @@
 from __future__ import annotations
 
-import json
 import re
-import shlex
-import subprocess
-from collections.abc import Callable, Iterable
-from typing import Literal
+from collections.abc import Iterable
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+import requests
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+from .http import HttpSession
+
 JIRA_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 JIRA_PROJECT_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+$")
+JIRA_FIELDS: tuple[str, ...] = (
+    "summary",
+    "status",
+    "assignee",
+    "issuetype",
+    "parent",
+)
 
 # Jira's three built-in status categories. Every workflow status maps onto
 # exactly one of these regardless of how many custom statuses a project has.
@@ -46,43 +53,43 @@ class JiraIssue(BaseModel):
     parent_summary: str | None = Field(default=None, alias="parentSummary")
 
 
-class _AcliStatusCategory(BaseModel):
+class _RestStatusCategory(BaseModel):
     name: JiraStatusCategory
 
 
-class _AcliStatus(BaseModel):
+class _RestStatus(BaseModel):
     name: str
-    status_category: _AcliStatusCategory = Field(alias="statusCategory")
+    status_category: _RestStatusCategory = Field(alias="statusCategory")
 
 
-class _AcliNamedValue(BaseModel):
+class _RestNamedValue(BaseModel):
     name: str
 
 
-class _AcliAssignee(BaseModel):
+class _RestAssignee(BaseModel):
     display_name: str = Field(alias="displayName")
 
 
-class _AcliParentFields(BaseModel):
+class _RestParentFields(BaseModel):
     summary: str
 
 
-class _AcliParent(BaseModel):
+class _RestParent(BaseModel):
     key: str
-    fields: _AcliParentFields
+    fields: _RestParentFields
 
 
-class _AcliIssueFields(BaseModel):
+class _RestIssueFields(BaseModel):
     summary: str
-    status: _AcliStatus
-    assignee: _AcliAssignee | None = None
-    issue_type: _AcliNamedValue | None = Field(default=None, alias="issuetype")
-    parent: _AcliParent | None = None
+    status: _RestStatus
+    assignee: _RestAssignee | None = None
+    issue_type: _RestNamedValue = Field(alias="issuetype")
+    parent: _RestParent | None = None
 
 
-class _AcliIssue(BaseModel):
+class _RestIssue(BaseModel):
     key: str
-    fields: _AcliIssueFields
+    fields: _RestIssueFields
 
     def to_domain(self) -> JiraIssue:
         parent = self.fields.parent
@@ -94,19 +101,37 @@ class _AcliIssue(BaseModel):
             assignee=(
                 self.fields.assignee.display_name if self.fields.assignee else None
             ),
-            issueType=self.fields.issue_type.name if self.fields.issue_type else "",
+            issueType=self.fields.issue_type.name,
             parentKey=parent.key if parent else None,
             parentSummary=parent.fields.summary if parent else None,
         )
 
 
-def _run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, check=False, capture_output=True, text=True)
+class _RestSearchPage(BaseModel):
+    issues: list[_RestIssue]
+    next_page_token: str | None = Field(default=None, alias="nextPageToken")
 
 
-class AcliJiraClient:
-    def __init__(self, runner: CommandRunner | None = None) -> None:
-        self._runner = runner or _run_command
+class JiraClient:
+    _SEARCH_PATH = "/rest/api/3/search/jql"
+    _PAGE_SIZE = 100
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        email: str,
+        api_token: str,
+        session: HttpSession | None = None,
+    ) -> None:
+        self._base_url = self._normalise_base_url(base_url)
+        self._email = email.strip()
+        self._api_token = api_token.strip()
+        if not self._email:
+            raise JiraError("Jira email is required")
+        if not self._api_token:
+            raise JiraError("Jira API token is required")
+        self._session = session or requests.Session()
 
     def get_active_assigned_issues(self, project_key: str) -> list[JiraIssue]:
         project = self._normalise_project_key(project_key)
@@ -115,92 +140,109 @@ class AcliJiraClient:
             f"project = {project} AND assignee = currentUser() "
             f"AND status in ({statuses}) ORDER BY key"
         )
-        # One search call fetches everything the planner needs (issue type
-        # and parent), instead of a search followed by a per-result
-        # "workitem view" subprocess just to hydrate those two fields.
-        # assignee is omitted: the JQL already scopes to currentUser().
-        return self._search(jql, fields="key,summary,status,issuetype,parent")
+        return self._search(jql)
 
     def get_issue(self, key: str) -> JiraIssue:
-        return self._view(self._normalise_key(key))
-
-    def get_issues(self, keys: Iterable[str]) -> list[JiraIssue]:
-        normalised = sorted({self._normalise_key(key) for key in keys})
-        if not normalised:
-            return []
-
-        jql = f"key in ({','.join(normalised)}) ORDER BY key"
-        # Fetch every field JiraIssue declares so issue_type/parent_key
-        # aren't silent "not fetched" sentinels for planner logic that
-        # branches on them (e.g. Project / Phase detection).
-        return self._search(jql, fields="key,summary,status,assignee,issuetype,parent")
-
-    def _search(self, jql: str, *, fields: str) -> list[JiraIssue]:
-        payload = self._run_json(
-            [
-                "acli",
-                "jira",
-                "workitem",
-                "search",
-                "--jql",
-                jql,
-                "--fields",
-                fields,
-                "--json",
-                "--paginate",
-            ]
+        normalised = normalise_jira_key(key)
+        path = f"/rest/api/3/issue/{normalised}"
+        payload = self._request_json(
+            "GET",
+            path,
+            params={"fields": ",".join(JIRA_FIELDS)},
         )
         try:
-            issues = TypeAdapter(list[_AcliIssue]).validate_python(payload)
-        except ValidationError as exc:
-            raise JiraError(f"acli returned invalid Jira issue data: {exc}") from exc
-        return [issue.to_domain() for issue in issues]
-
-    def _view(self, key: str) -> JiraIssue:
-        payload = self._run_json(
-            [
-                "acli",
-                "jira",
-                "workitem",
-                "view",
-                key,
-                "--fields",
-                "*all",
-                "--json",
-            ]
-        )
-        try:
-            return _AcliIssue.model_validate(payload).to_domain()
+            return _RestIssue.model_validate(payload).to_domain()
         except ValidationError as exc:
             raise JiraError(
-                f"acli returned invalid Jira issue data for {key}: {exc}"
+                f"Jira returned invalid issue data for {normalised}: {exc}"
             ) from exc
 
-    def _run_json(self, command: list[str]) -> object:
-        command_text = shlex.join(command)
-        try:
-            result = self._runner(command)
-        except OSError as exc:
-            raise JiraError(f"Unable to run {command_text}: {exc}") from exc
+    def get_issues(self, keys: Iterable[str]) -> list[JiraIssue]:
+        normalised = sorted({normalise_jira_key(key) for key in keys})
+        if not normalised:
+            return []
+        return self._search(f"key in ({','.join(normalised)}) ORDER BY key")
 
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+    def _search(self, jql: str) -> list[JiraIssue]:
+        issues: list[JiraIssue] = []
+        next_page_token: str | None = None
+        while True:
+            payload: dict[str, object] = {
+                "jql": jql,
+                "fields": list(JIRA_FIELDS),
+                "maxResults": self._PAGE_SIZE,
+            }
+            if next_page_token is not None:
+                payload["nextPageToken"] = next_page_token
+
+            data = self._request_json("POST", self._SEARCH_PATH, payload=payload)
+            try:
+                page = _RestSearchPage.model_validate(data)
+            except ValidationError as exc:
+                raise JiraError(f"Jira returned invalid search data: {exc}") from exc
+
+            issues.extend(issue.to_domain() for issue in page.issues)
+            if page.next_page_token is None:
+                return issues
+            next_page_token = page.next_page_token
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: dict[str, object] | None = None,
+        params: dict[str, object] | None = None,
+    ) -> object:
+        request_kwargs: dict[str, Any] = {
+            "auth": (self._email, self._api_token),
+            "headers": {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            "timeout": 30,
+        }
+        if payload is not None:
+            request_kwargs["json"] = payload
+        if params is not None:
+            request_kwargs["params"] = params
+
+        try:
+            response = self._session.request(
+                method,
+                f"{self._base_url}{path}",
+                **request_kwargs,
+            )
+        except requests.RequestException as exc:
+            raise JiraError(f"Jira request failed for {method} {path}: {exc}") from exc
+
+        if response.status_code >= 400:
+            body = str(response.text)[:500]
             raise JiraError(
-                f"acli command failed ({result.returncode}): {command_text}: {detail}"
+                f"Jira request failed for {method} {path}: "
+                f"{response.status_code} {response.reason}\n{body}"
             )
 
         try:
-            return json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            output = result.stdout[:500]
+            return response.json()
+        except ValueError as exc:
+            body = str(response.text)[:500]
             raise JiraError(
-                f"acli returned invalid JSON for {command_text}: {exc}; "
-                f"stdout={output!r}"
+                f"Jira returned invalid JSON for {method} {path}: {exc}; "
+                f"response={body!r}"
             ) from exc
 
     @staticmethod
-    def _normalise_key(key: str) -> str:
-        return normalise_jira_key(key)
+    def _normalise_base_url(base_url: str) -> str:
+        normalised = base_url.strip().rstrip("/")
+        if not normalised:
+            raise JiraError("Jira base URL is required")
+        if "://" not in normalised:
+            normalised = f"https://{normalised}"
+        parsed = urlsplit(normalised)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise JiraError(f"Invalid Jira base URL: {base_url!r}")
+        return normalised
 
     @staticmethod
     def _normalise_project_key(key: str) -> str:

@@ -6,7 +6,7 @@ import json
 from click.testing import CliRunner
 
 from jake_tools.cli.clockify import clockify
-from jake_tools.cli.context import AppContext, ClockifyConfig
+from jake_tools.cli.context import AppContext, ClockifyConfig, JiraConfig
 from jake_tools.clockify import (
     CLOCKIFY_API_ROOT,
     ClockifyClientRecord,
@@ -316,7 +316,7 @@ class FakeJiraSyncClockifyClient:
         return self.task
 
 
-class FakeAcliJiraClient:
+class FakeJiraClient:
     def get_active_assigned_issues(self, project_key: str) -> list[JiraIssue]:
         return []
 
@@ -361,7 +361,7 @@ def install_sync_fakes() -> tuple[FakeJiraSyncClockifyClient, AppContext]:
     )
     app = AppContext(
         clockify_client_factory=lambda _config: client,
-        jira_client_factory=FakeAcliJiraClient,
+        jira_client_factory=lambda _config: FakeJiraClient(),
     )
     return client, app
 
@@ -405,6 +405,37 @@ def test_jira_sync_defaults_to_json_dry_run() -> None:
         }
     ]
     assert client.operations == []
+
+
+def test_jira_sync_resolves_typed_jira_config_from_environment() -> None:
+    client, app = install_sync_fakes()
+    captured: list[JiraConfig] = []
+
+    def jira_factory(config: JiraConfig) -> FakeJiraClient:
+        captured.append(config)
+        return FakeJiraClient()
+
+    app = dataclasses.replace(app, jira_client_factory=jira_factory)
+    result = CliRunner().invoke(
+        clockify,
+        ["--api-key", "test-key", "jira-sync", "--json"],
+        obj=app,
+        env={
+            "JIRA_BASE_URL": "sunfishrobotics.atlassian.net",
+            "JIRA_EMAIL": "michael@example.test",
+            "JIRA_API_TOKEN": "secret-token",
+        },
+    )
+
+    assert result.exit_code == 0
+    assert client.operations == []
+    assert captured == [
+        JiraConfig(
+            base_url="sunfishrobotics.atlassian.net",
+            email="michael@example.test",
+            api_token="secret-token",
+        )
+    ]
 
 
 def test_jira_sync_human_dry_run_is_concise() -> None:
@@ -473,7 +504,7 @@ def test_jira_sync_can_target_issue_assigned_to_someone_else() -> None:
     assert client.operations == []
 
 
-class EmptyAcliJiraClient:
+class EmptyJiraClient:
     def get_active_assigned_issues(self, project_key: str) -> list[JiraIssue]:
         return []
 
@@ -484,7 +515,7 @@ class EmptyAcliJiraClient:
         raise AssertionError("not expected")
 
 
-class FailingAcliJiraClient:
+class FailingJiraClient:
     def get_active_assigned_issues(self, project_key: str) -> list[JiraIssue]:
         raise JiraError("Jira unavailable")
 
@@ -513,7 +544,9 @@ class DuplicateTaskClockifyClient(FakeJiraSyncClockifyClient):
 
 def test_jira_sync_reports_when_no_changes_are_required() -> None:
     _client, app = install_sync_fakes()
-    app = dataclasses.replace(app, jira_client_factory=EmptyAcliJiraClient)
+    app = dataclasses.replace(
+        app, jira_client_factory=lambda _config: EmptyJiraClient()
+    )
     runner = CliRunner()
 
     result = runner.invoke(
@@ -536,7 +569,7 @@ def test_jira_sync_reports_conflicts_as_json_and_exits_nonzero() -> None:
     )
     app = AppContext(
         clockify_client_factory=lambda _config: client,
-        jira_client_factory=FakeAcliJiraClient,
+        jira_client_factory=lambda _config: FakeJiraClient(),
     )
     runner = CliRunner()
 
@@ -556,7 +589,9 @@ def test_jira_sync_reports_conflicts_as_json_and_exits_nonzero() -> None:
 
 def test_jira_sync_reports_backend_errors_without_polluting_json() -> None:
     _client, app = install_sync_fakes()
-    app = dataclasses.replace(app, jira_client_factory=FailingAcliJiraClient)
+    app = dataclasses.replace(
+        app, jira_client_factory=lambda _config: FailingJiraClient()
+    )
     runner = CliRunner()
 
     result = runner.invoke(

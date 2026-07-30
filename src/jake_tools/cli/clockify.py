@@ -21,7 +21,7 @@ from ..clockify_jira_sync import (
     prepare_jira_sync,
 )
 from ..jira import JiraError
-from .context import ClockifyConfig, app_context
+from .context import ClockifyConfig, JiraConfig, app_context
 
 
 @click.group()
@@ -84,6 +84,24 @@ def jira_name(key: str, summary: str, kind: str, as_json: bool) -> None:
 
 @clockify.command("jira-sync")
 @click.option(
+    "--jira-base-url",
+    envvar="JIRA_BASE_URL",
+    default=None,
+    help="Jira site URL or hostname. Defaults to JIRA_BASE_URL.",
+)
+@click.option(
+    "--jira-email",
+    envvar="JIRA_EMAIL",
+    default=None,
+    help="Atlassian account email. Defaults to JIRA_EMAIL.",
+)
+@click.option(
+    "--jira-api-token",
+    envvar="JIRA_API_TOKEN",
+    default=None,
+    help="Atlassian API token. Defaults to JIRA_API_TOKEN.",
+)
+@click.option(
     "--apply/--dry-run",
     "apply_changes",
     default=False,
@@ -114,6 +132,9 @@ def jira_name(key: str, summary: str, kind: str, as_json: bool) -> None:
 @click.pass_context
 def jira_sync(
     ctx: click.Context,
+    jira_base_url: str | None,
+    jira_email: str | None,
+    jira_api_token: str | None,
     apply_changes: bool,
     as_json: bool,
     jira_project: str,
@@ -130,9 +151,16 @@ def jira_sync(
     try:
         app = app_context(ctx)
         clockify_api = _client_from_context(ctx)
+        jira_api = app.jira_client_factory(
+            JiraConfig(
+                base_url=jira_base_url,
+                email=jira_email,
+                api_token=jira_api_token,
+            )
+        )
         snapshot = prepare_jira_sync(
             clockify=clockify_api,
-            jira=app.jira_client_factory(),
+            jira=jira_api,
             jira_project=jira_project,
             clockify_client=clockify_client,
             issue_keys=issue_keys,

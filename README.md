@@ -113,8 +113,10 @@ if the re-read does not match the planned name, status, or Jira project note.
 
 The command requires:
 
-- an authenticated `acli` session for Jira
+- Jira REST credentials via `JIRA_BASE_URL`, `JIRA_EMAIL`, and
+  `JIRA_API_TOKEN`, or their corresponding `jira-sync` options
 - `CLOCKIFY_API_KEY`, or the Clockify group-level `--api-key` option
 
-For unattended runs, inject `CLOCKIFY_API_KEY` through the scheduler's secret
-environment. Do not depend on an interactive 1Password unlock in cron.
+For unattended runs, inject these values through the scheduler's secret
+environment or resolve `op://` references with `op run`. Do not persist the API
+tokens or depend on an interactive 1Password unlock in cron.
