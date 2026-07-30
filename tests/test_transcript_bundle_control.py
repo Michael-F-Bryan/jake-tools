@@ -22,17 +22,23 @@ from jake_tools.transcripts.bundle.components import (
     NotesKind,
     NotesSection,
     NotesSectionBody,
+    ParticipantDeclarationSource,
+    ParticipantRecord,
+    ParticipantSetComponentBody,
+    ParticipantStatus,
 )
 from jake_tools.transcripts.bundle.control import (
     DEFAULT_BUNDLES_ROOT,
     AmbiguousResumeTargetError,
+    BundleStagingError,
+    ExecutorFailedError,
     ExecutorOutcome,
     NoExecutorRegisteredError,
     NoResumableRunError,
+    NoTakeOverTargetError,
     RunNotResumableError,
+    capability_failures,
     create_bundle,
-    default_operator_assertion_evidence,
-    failed_members,
     ingest_source,
     inspect_bundle,
     project_document,
@@ -48,7 +54,7 @@ from jake_tools.transcripts.bundle.records import (
     RunState,
     SourceAssociation,
 )
-from jake_tools.transcripts.bundle.registry import CapabilityKey
+from jake_tools.transcripts.bundle.registry import CapabilityKey, CapabilityStatus
 from jake_tools.transcripts.bundle.store import BundleStore, UnknownSourceError
 
 
@@ -64,6 +70,20 @@ def _notes_body(artefact_id: str) -> NotesComponentBody:
         source_artefact_id=artefact_id,
         authored=False,
         sections=(NotesSectionBody(title="T", text="text"),),
+    )
+
+
+def _participant_body(name: str) -> ParticipantSetComponentBody:
+    return ParticipantSetComponentBody(
+        participants=(
+            ParticipantRecord(
+                participant_id=mint_id("participant"),
+                declaration_source=ParticipantDeclarationSource.OPERATOR,
+                declaration_evidence=f"cli: --participant '{name}'",
+                display_names=(name,),
+                status=ParticipantStatus.DECLARED,
+            ),
+        )
     )
 
 
@@ -156,6 +176,23 @@ def test_create_bundle_twice_produces_two_distinct_bundles(tmp_path: Path) -> No
     assert len(list(root.iterdir())) == 2
 
 
+def test_create_bundle_removes_the_staging_directory_on_rename_failure(
+    tmp_path: Path,
+) -> None:
+    """MINOR 1 (adversarial review): a rename failure must not leave the
+    staged `.bundle-creating-*` directory behind with nothing pointing
+    at it -- it is removed, and the failure surfaces as a typed error."""
+    root = tmp_path / "bundles"
+
+    def failing_rename(_src: Path, _dst: Path) -> None:
+        raise OSError("simulated rename failure")
+
+    with pytest.raises(BundleStagingError, match="simulated rename failure"):
+        create_bundle(root, rename=failing_rename)
+
+    assert list(root.iterdir()) == []
+
+
 # -- source ingest --------------------------------------------------------
 
 
@@ -163,8 +200,8 @@ def test_ingest_source_registers_a_new_operator_assertion_source_by_default(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
-    evidence = default_operator_assertion_evidence(
-        kind="notes", producer="op", acquisition_locator="/tmp/x.md"
+    evidence = (
+        "transcript source ingest --bundle X --kind notes --producer op /tmp/x.md"
     )
 
     outcome = ingest_source(
@@ -324,17 +361,17 @@ def test_project_document_no_document_yet_is_a_clean_state_not_an_error(
     assert document.candidate_artefact_ids == ()
 
 
-def test_failed_members_is_empty_for_a_valid_head(tmp_path: Path) -> None:
+def test_capability_failures_is_empty_for_a_valid_head(tmp_path: Path) -> None:
     store = _store(tmp_path)
     _bundle_with_valid_head(store)
 
     document = project_document(store, revision_id=None)
 
     assert isinstance(document, TranscriptDocumentV1)
-    assert failed_members(document) == ()
+    assert capability_failures(document) == ()
 
 
-def test_failed_members_reports_a_genuinely_broken_member(tmp_path: Path) -> None:
+def test_capability_failures_reports_a_genuinely_broken_member(tmp_path: Path) -> None:
     """Mirrors test_transcript_bundle_document.py's own duplicate-section-id
     scenario, but *without* ever calling update_head -- validate's
     --revision path is exactly for inspecting a revision that never
@@ -386,11 +423,56 @@ def test_failed_members_reports_a_genuinely_broken_member(tmp_path: Path) -> Non
     document = project_document(store, revision_id=revision.revision_id)
 
     assert isinstance(document, TranscriptDocumentV1)
-    failures = failed_members(document)
+    failures = capability_failures(document)
     assert len(failures) == 1
     assert failures[0].capability == CapabilityKey.NOTES_PROVIDER
     assert failures[0].member_id == broken.component_id
     # This revision never went through update_head -- it is not the head.
+    assert store.load_manifest().head_revision_id is None
+
+
+def test_capability_failures_reports_a_one_cardinality_top_level_failure(
+    tmp_path: Path,
+) -> None:
+    """BLOCKER 2 (adversarial review): `participants.declared` is a
+    one-cardinality key -- its registry validator returns a top-level
+    `failed` status with an EMPTY `members` tuple when more than one
+    candidate participant-set component is present. A scan limited to
+    `record.members` never sees this; `capability_failures` must catch
+    it via the top-level status too."""
+    store = _store(tmp_path)
+    membership = store.register_source(
+        association=SourceAssociation.OPERATOR_ASSERTION, evidence="cli"
+    )
+    artefact = store.ingest_artefact(
+        source_id=membership.source_id,
+        content=b"x",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/x",
+    )
+    first = store.add_component(_participant_body("Jake"))
+    second = store.add_component(_participant_body("Not Jake"))
+    revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        artefact_ids=(artefact.artefact_id,),
+        component_ids=(first.component_id, second.component_id),
+    )
+
+    document = project_document(store, revision_id=revision.revision_id)
+
+    assert isinstance(document, TranscriptDocumentV1)
+    record = document.capabilities[CapabilityKey.PARTICIPANTS_DECLARED]
+    assert record.status == CapabilityStatus.FAILED
+    assert record.members == ()  # nothing for a members-only scan to find
+
+    failures = capability_failures(document)
+    assert len(failures) == 1
+    assert failures[0].capability == CapabilityKey.PARTICIPANTS_DECLARED
+    assert failures[0].member_id is None
+    assert failures[0].detail != ""
+    # Never went through update_head -- a one-cardinality failure like
+    # this is blocked from ever becoming head in the first place.
     assert store.load_manifest().head_revision_id is None
 
 
@@ -565,3 +647,138 @@ def test_resume_run_aborts_safely_for_an_unregistered_operation_kind(
     assert after.next_action.kind == "some-unimplemented-op"
     assert store.load_lease() is None
     assert store.load_manifest().head_revision_id is None
+
+
+def test_resume_run_executor_exception_moves_to_failed_and_retry_succeeds(
+    tmp_path: Path,
+) -> None:
+    """BLOCKER 1 (adversarial review): an executor that raises must not
+    leave the run stuck `running` with the lease held (permanently
+    unresumable -- RunNotResumableError forever). It moves to `failed`
+    (durable, resumable) with the exception recorded and the *same*
+    next_action preserved, so a second resume retries the identical
+    recorded action and can succeed."""
+    store = _store(tmp_path)
+    membership = store.register_source(
+        association=SourceAssociation.OPERATOR_ASSERTION, evidence="cli"
+    )
+    artefact = store.ingest_artefact(
+        source_id=membership.source_id,
+        content=b"notes",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/n.md",
+    )
+    run = _durable_run(store, kind="transcribe")
+
+    def raising_executor(
+        _inner_store: BundleStore, _inner_run: RunRecord
+    ) -> ExecutorOutcome:
+        raise RuntimeError("boom")
+
+    with pytest.raises(ExecutorFailedError, match="boom"):
+        resume_run(store, run_id=run.run_id, executors={"transcribe": raising_executor})
+
+    crashed = store.load_run(run.run_id)
+    assert crashed.state == RunState.FAILED
+    assert crashed.next_action is not None
+    assert crashed.next_action.kind == "transcribe"
+    assert crashed.next_action.input_ids == ()
+    assert "boom" in crashed.next_action.rationale
+    assert "RuntimeError" in crashed.next_action.rationale
+    assert store.load_lease() is None
+    assert store.load_manifest().head_revision_id is None
+
+    def succeeding_executor(
+        inner_store: BundleStore, inner_run: RunRecord
+    ) -> ExecutorOutcome:
+        component = inner_store.add_component(_notes_body(artefact.artefact_id))
+        revision = inner_store.append_revision(
+            operation=inner_run.next_action or OperationRef(kind="transcribe"),
+            artefact_ids=(artefact.artefact_id,),
+            component_ids=(component.component_id,),
+        )
+        return ExecutorOutcome(
+            state=RunState.COMPLETED, revision_id=revision.revision_id
+        )
+
+    result = resume_run(
+        store, run_id=run.run_id, executors={"transcribe": succeeding_executor}
+    )
+
+    assert result.state == RunState.COMPLETED
+    assert store.load_manifest().head_revision_id is not None
+    assert store.load_lease() is None
+
+
+def test_resume_run_take_over_recovers_a_crashed_run(tmp_path: Path) -> None:
+    """BLOCKER 1's --take-over half: a lease held by a dead PID on a run
+    stuck `running` (its process was killed mid-dispatch) is the true
+    crash case M2 reserves --take-over for. It creates a new run
+    (`takeover_of_run_id` naming the stale one), never rewrites the
+    stale run's own record, and dispatches the stale next_action."""
+    store = _store(tmp_path)
+    membership = store.register_source(
+        association=SourceAssociation.OPERATOR_ASSERTION, evidence="cli"
+    )
+    artefact = store.ingest_artefact(
+        source_id=membership.source_id,
+        content=b"notes",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/n.md",
+    )
+    crashed = store.create_run(
+        next_action=OperationRef(kind="transcribe", input_ids=(artefact.artefact_id,))
+    )
+    store.acquire_lease(run_id=crashed.run_id, pid=_dead_pid())
+
+    def fake_executor(
+        inner_store: BundleStore, inner_run: RunRecord
+    ) -> ExecutorOutcome:
+        component = inner_store.add_component(_notes_body(artefact.artefact_id))
+        revision = inner_store.append_revision(
+            operation=inner_run.next_action or OperationRef(kind="transcribe"),
+            artefact_ids=(artefact.artefact_id,),
+            component_ids=(component.component_id,),
+        )
+        return ExecutorOutcome(
+            state=RunState.COMPLETED, revision_id=revision.revision_id
+        )
+
+    result = resume_run(
+        store, run_id=None, executors={"transcribe": fake_executor}, take_over=True
+    )
+
+    assert result.state == RunState.COMPLETED
+    assert result.takeover_of_run_id == crashed.run_id
+    assert result.run_id != crashed.run_id
+    assert store.load_manifest().head_revision_id is not None
+    assert store.load_lease() is None
+    # M2: "a run never edits another run's record" -- the stale run's own
+    # record stays exactly as the crash left it.
+    stale_after = store.load_run(crashed.run_id)
+    assert stale_after.state == RunState.RUNNING
+
+
+def test_resume_run_without_take_over_names_the_flag_for_a_crashed_run(
+    tmp_path: Path,
+) -> None:
+    """Without --take-over, a run stuck `running` under a dead-PID lease
+    gets the existing diagnosable refusal -- and it names --take-over,
+    so an operator staring at `status` output knows the recovery path."""
+    store = _store(tmp_path)
+    run = store.create_run(next_action=OperationRef(kind="transcribe"))
+    store.acquire_lease(run_id=run.run_id, pid=_dead_pid())
+
+    with pytest.raises(RunNotResumableError, match="--take-over"):
+        resume_run(store, run_id=run.run_id, executors={})
+
+
+def test_resume_run_take_over_without_a_stale_lease_is_a_clean_error(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+
+    with pytest.raises(NoTakeOverTargetError):
+        resume_run(store, run_id=None, executors={}, take_over=True)

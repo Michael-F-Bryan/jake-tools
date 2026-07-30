@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import NoReturn
 
 import click
 
@@ -17,8 +18,7 @@ from ..transcripts.bundle.control import (
     DEFAULT_BUNDLES_ROOT,
     BundleOverview,
     BundleStatus,
-    default_operator_assertion_evidence,
-    failed_members,
+    capability_failures,
     ingest_source,
     inspect_bundle,
     project_document,
@@ -43,6 +43,26 @@ _bundle_option = click.option(
 _json_option = click.option(
     "--json", "as_json", is_flag=True, help="Emit machine-readable JSON."
 )
+
+
+def _echo_error_and_exit(exc: TranscriptError, *, as_json: bool) -> NoReturn:
+    """The one error boundary every command's ``except TranscriptError``
+    goes through: a clean one-line message (Click's own shape) for
+    humans, or a stable JSON error object on stdout when ``--json`` was
+    requested, with the same nonzero exit code. ``--json`` must never
+    silently fall back to Click's plain-text error format once the
+    operator asked for machine-readable output.
+    """
+    if as_json:
+        click.echo(
+            json.dumps(
+                {"error": {"type": type(exc).__name__, "message": str(exc)}},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        raise SystemExit(1) from exc
+    raise click.ClickException(str(exc)) from exc
 
 
 # -- bundle create ------------------------------------------------------------
@@ -71,7 +91,7 @@ def bundle_create(root: Path | None, as_json: bool) -> None:
     try:
         created = _create_bundle(root)
     except TranscriptError as exc:
-        raise click.ClickException(str(exc)) from exc
+        _echo_error_and_exit(exc, as_json=as_json)
 
     if as_json:
         click.echo(
@@ -97,6 +117,28 @@ def bundle_create(root: Path | None, as_json: bool) -> None:
 @click.group("source", help="Register and ingest bundle sources.")
 def source_group() -> None:
     pass
+
+
+def _rendered_invocation(ctx: click.Context) -> str:
+    """The genuine command line that produced this invocation (M3:
+    "naming inputs on the command line IS the operator assertion ...
+    recorded as such"), reconstructed from Click's own parsed parameters
+    for *this* command -- every option/argument Click accepted, not a
+    hand-picked subset that silently goes stale the next time a flag is
+    added (the earlier version dropped --bundle/--json and hardcoded the
+    command name; this cannot drift the same way).
+    """
+    parts = [ctx.command_path]
+    for parameter in ctx.command.params:
+        value = ctx.params.get(parameter.name) if parameter.name else None
+        if value is None or value is False:
+            continue
+        if isinstance(parameter, click.Argument):
+            parts.append(str(value))
+            continue
+        flag = parameter.opts[0]
+        parts.append(flag if value is True else f"{flag} {value}")
+    return " ".join(parts)
 
 
 @source_group.command("ingest")
@@ -134,7 +176,9 @@ def source_group() -> None:
 @click.argument(
     "input_file", type=click.Path(exists=True, dir_okay=False, path_type=Path)
 )
+@click.pass_context
 def source_ingest(
+    ctx: click.Context,
     bundle_path: Path,
     kind: str,
     producer: str,
@@ -149,11 +193,12 @@ def source_ingest(
     Without --source/--provider-id/--note-embed, this registers a brand
     new source with association `operator-assertion`: naming INPUT_FILE
     on this command line *is* the assertion that it belongs to --bundle
-    (M3) -- recorded verbatim, never inferred from title, date, or
-    filename similarity. --source reuses an existing source's membership
-    instead of registering a new one. Ingestion is idempotent: re-running
-    the exact same command against the same source is a no-op that
-    reports the existing artefact rather than duplicating it.
+    (M3), and the evidence recorded is the genuine invocation -- every
+    flag actually supplied, not a hand-picked reconstruction. --source
+    reuses an existing source's membership instead of registering a new
+    one. Ingestion is idempotent: re-running the exact same command
+    against the same source is a no-op that reports the existing
+    artefact rather than duplicating it.
     """
     given = [
         flag
@@ -174,9 +219,7 @@ def source_ingest(
         association, evidence = SourceAssociation.NOTE_EMBED, note_embed
     else:
         association = SourceAssociation.OPERATOR_ASSERTION
-        evidence = default_operator_assertion_evidence(
-            kind=kind, producer=producer, acquisition_locator=acquisition_locator
-        )
+        evidence = _rendered_invocation(ctx)
 
     store = BundleStore(bundle_path)
     try:
@@ -191,7 +234,7 @@ def source_ingest(
             acquisition_locator=acquisition_locator,
         )
     except TranscriptError as exc:
-        raise click.ClickException(str(exc)) from exc
+        _echo_error_and_exit(exc, as_json=as_json)
 
     if as_json:
         click.echo(
@@ -365,7 +408,7 @@ def inspect_command(bundle_path: Path, as_json: bool) -> None:
     try:
         overview = inspect_bundle(store)
     except TranscriptError as exc:
-        raise click.ClickException(str(exc)) from exc
+        _echo_error_and_exit(exc, as_json=as_json)
 
     if as_json:
         click.echo(json.dumps(_overview_payload(overview), indent=2, sort_keys=True))
@@ -392,18 +435,23 @@ def validate_command(
     """Project the head (or --revision) and report per-capability status.
 
     A bundle with no assembly revision yet is a clean report ("no
-    document yet"), never an error. Exits 1 if any capability member has
-    genuinely failed validation (M4); a merely absent or
-    not-available-from-source member never fails the command.
+    document yet"), never an error. Exits 1 if any capability has
+    genuinely failed validation (M4) -- a many-cardinality key's failed
+    member, or a one-cardinality key's own failed top-level status (which
+    has no members, e.g. more than one participants.declared candidate).
+    A merely absent or not-available-from-source status never fails the
+    command.
     """
     store = BundleStore(bundle_path)
     try:
         document = project_document(store, revision_id=revision_id)
     except TranscriptError as exc:
-        raise click.ClickException(str(exc)) from exc
+        _echo_error_and_exit(exc, as_json=as_json)
 
     failures = (
-        failed_members(document) if isinstance(document, TranscriptDocumentV1) else ()
+        capability_failures(document)
+        if isinstance(document, TranscriptDocumentV1)
+        else ()
     )
 
     if as_json:
@@ -413,7 +461,7 @@ def validate_command(
                     "bundle_id": document.bundle_id,
                     "document": _document_state_payload(document),
                     "capabilities": _capabilities_payload(document),
-                    "failed_members": [
+                    "capability_failures": [
                         {
                             "capability": failure.capability.value,
                             "member_id": failure.member_id,
@@ -433,12 +481,14 @@ def validate_command(
         _echo_capabilities(document)
         if failures:
             click.echo("")
-            click.echo(f"failed members ({len(failures)}):")
+            click.echo(f"failed capabilities ({len(failures)}):")
             for failure in failures:
-                click.echo(
-                    f"  {failure.capability.value} / {failure.member_id}: "
-                    f"{failure.detail}"
+                label = (
+                    f"{failure.capability.value} / {failure.member_id}"
+                    if failure.member_id is not None
+                    else failure.capability.value
                 )
+                click.echo(f"  {label}: {failure.detail}")
 
     if failures:
         ctx.exit(1)
@@ -506,13 +556,14 @@ def status_command(bundle_path: Path, as_json: bool) -> None:
     A run in review_required/refused/failed is durable and resumable
     (`transcript resume`). The lease, when held, names the run currently
     allowed to move the head, plus whether its holding process is still
-    alive -- a dead holder is a crash, not an active operation.
+    alive -- a dead holder is a crash, not an active operation (see
+    `transcript resume --take-over`).
     """
     store = BundleStore(bundle_path)
     try:
         status = status_bundle(store)
     except TranscriptError as exc:
-        raise click.ClickException(str(exc)) from exc
+        _echo_error_and_exit(exc, as_json=as_json)
 
     if as_json:
         click.echo(json.dumps(_status_payload(status), indent=2, sort_keys=True))
@@ -529,12 +580,26 @@ def status_command(bundle_path: Path, as_json: bool) -> None:
     "--run",
     "run_id",
     default=None,
-    help="Run to resume. Defaults to the single resumable run, if unambiguous.",
+    help="Run to resume. Defaults to the single resumable run, if unambiguous. "
+    "With --take-over, defaults to the run currently holding the lease.",
+)
+@click.option(
+    "--take-over",
+    "take_over",
+    is_flag=True,
+    help="Recover a crashed run: a lease held by a dead process on a run stuck "
+    "'running' (its process was killed mid-dispatch and never released the "
+    "lease itself). Without this flag, that state is a diagnosable refusal "
+    "naming this flag -- never silently retried.",
 )
 @_json_option
 @click.pass_context
 def resume_command(
-    ctx: click.Context, bundle_path: Path, run_id: str | None, as_json: bool
+    ctx: click.Context,
+    bundle_path: Path,
+    run_id: str | None,
+    take_over: bool,
+    as_json: bool,
 ) -> None:
     """Re-acquire a durable-state run's lease and dispatch its recorded
     next_action (M2).
@@ -545,14 +610,16 @@ def resume_command(
     run whose next_action names an unimplemented operation kind is a
     safe, explicit no-op: the error names the missing kind, and the run
     is left exactly where it was, lease released, ready to resume again
-    once that transform exists.
+    once that transform exists. If the executor itself raises, the run
+    moves to `failed` (durable, resumable) with the exception recorded,
+    rather than being left stuck `running` with the lease held forever.
     """
     executors = app_context(ctx).bundle_executors
     store = BundleStore(bundle_path)
     try:
-        run = resume_run(store, run_id=run_id, executors=executors)
+        run = resume_run(store, run_id=run_id, executors=executors, take_over=take_over)
     except TranscriptError as exc:
-        raise click.ClickException(str(exc)) from exc
+        _echo_error_and_exit(exc, as_json=as_json)
 
     head_revision_id = store.load_manifest().head_revision_id
     if as_json:

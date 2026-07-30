@@ -15,6 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 import jake_tools.transcripts.bundle.store as store_module
@@ -26,6 +27,10 @@ from jake_tools.transcripts.bundle.components import (
     NotesKind,
     NotesSection,
     NotesSectionBody,
+    ParticipantDeclarationSource,
+    ParticipantRecord,
+    ParticipantSetComponentBody,
+    ParticipantStatus,
 )
 from jake_tools.transcripts.bundle.control import ExecutorOutcome
 from jake_tools.transcripts.bundle.ids import mint_id
@@ -59,6 +64,20 @@ def _notes_body(artefact_id: str) -> NotesComponentBody:
         source_artefact_id=artefact_id,
         authored=False,
         sections=(NotesSectionBody(title="T", text="text"),),
+    )
+
+
+def _participant_body(name: str) -> ParticipantSetComponentBody:
+    return ParticipantSetComponentBody(
+        participants=(
+            ParticipantRecord(
+                participant_id=mint_id("participant"),
+                declaration_source=ParticipantDeclarationSource.OPERATOR,
+                declaration_evidence=f"cli: --participant '{name}'",
+                display_names=(name,),
+                status=ParticipantStatus.DECLARED,
+            ),
+        )
     )
 
 
@@ -171,6 +190,14 @@ def test_source_ingest_help_states_the_m3_invariant() -> None:
     for option in ("--bundle", "--kind", "--producer", "--source", "--provider-id"):
         assert option in result.output
     assert "operator-assertion" in result.output
+
+
+def test_resume_help_documents_take_over() -> None:
+    result = _invoke("resume", "--help")
+
+    assert result.exit_code == 0
+    assert "--take-over" in result.output
+    assert "--run" in result.output
 
 
 # -- create -> ingest -> inspect round trip --------------------------------
@@ -297,6 +324,39 @@ def test_source_ingest_provider_id_records_that_association(tmp_path: Path) -> N
     assert payload["evidence"] == "evt-123"
 
 
+def test_source_ingest_default_evidence_is_the_genuine_invocation(
+    tmp_path: Path,
+) -> None:
+    """MINOR 2 (adversarial review): the default operator-assertion
+    evidence must be the genuine invocation -- every flag actually
+    supplied -- not a hand-picked reconstruction that silently drops
+    ones like --bundle/--json."""
+    bundle_dir = _create_bundle(tmp_path)
+    input_file = _write_file(tmp_path, "note.md", "hello")
+
+    result = _invoke(
+        "source",
+        "ingest",
+        "--bundle",
+        str(bundle_dir),
+        "--kind",
+        "obsidian-note",
+        "--producer",
+        "operator",
+        "--json",
+        str(input_file),
+    )
+
+    assert result.exit_code == 0, result.output
+    evidence = json.loads(result.output)["evidence"]
+    assert "--bundle" in evidence
+    assert str(bundle_dir) in evidence
+    assert "--json" in evidence
+    assert "--kind obsidian-note" in evidence
+    assert "--producer operator" in evidence
+    assert str(input_file) in evidence
+
+
 def test_inspect_reports_typed_store_errors_as_a_clean_one_liner(
     tmp_path: Path,
 ) -> None:
@@ -338,7 +398,7 @@ def test_validate_on_no_document_yet_is_a_clean_report_not_an_error(
     assert "head: no document yet" in result.output
 
 
-def test_validate_on_a_valid_head_exits_zero_with_no_failed_members(
+def test_validate_on_a_valid_head_exits_zero_with_no_failed_capabilities(
     tmp_path: Path,
 ) -> None:
     bundle_dir = _create_bundle(tmp_path)
@@ -349,7 +409,7 @@ def test_validate_on_a_valid_head_exits_zero_with_no_failed_members(
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["failed_members"] == []
+    assert payload["capability_failures"] == []
     assert payload["capabilities"]["notes.provider"]["status"] == "present-validated"
 
 
@@ -361,8 +421,58 @@ def test_validate_exits_1_on_a_failed_member(tmp_path: Path) -> None:
     result = _invoke("validate", "--bundle", str(bundle_dir), "--revision", revision_id)
 
     assert result.exit_code == 1
-    assert "failed members (1):" in result.output
+    assert "failed capabilities (1):" in result.output
     assert broken_component_id in result.output
+
+
+def test_validate_exits_1_on_a_one_cardinality_top_level_failure(
+    tmp_path: Path,
+) -> None:
+    """BLOCKER 2 (adversarial review), end to end: two participant-set
+    components on one revision make `participants.declared` (a
+    one-cardinality key) fail at the top level, with no members at all.
+    `validate` must exit 1 in both human and --json modes -- not exit 0
+    while printing "failed" in the capability table."""
+    bundle_dir = _create_bundle(tmp_path)
+    store = BundleStore(bundle_dir)
+    membership = store.register_source(
+        association=SourceAssociation.OPERATOR_ASSERTION, evidence="cli"
+    )
+    artefact = store.ingest_artefact(
+        source_id=membership.source_id,
+        content=b"x",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/x",
+    )
+    first = store.add_component(_participant_body("Jake"))
+    second = store.add_component(_participant_body("Not Jake"))
+    revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        artefact_ids=(artefact.artefact_id,),
+        component_ids=(first.component_id, second.component_id),
+    )
+
+    human = _invoke(
+        "validate", "--bundle", str(bundle_dir), "--revision", revision.revision_id
+    )
+    machine = _invoke(
+        "validate",
+        "--bundle",
+        str(bundle_dir),
+        "--revision",
+        revision.revision_id,
+        "--json",
+    )
+
+    assert human.exit_code == 1
+    assert "participants.declared" in human.output
+    assert machine.exit_code == 1
+    payload = json.loads(machine.output)
+    failures = payload["capability_failures"]
+    assert len(failures) == 1
+    assert failures[0]["capability"] == "participants.declared"
+    assert failures[0]["member_id"] is None
 
 
 # -- status ------------------------------------------------------------
@@ -486,6 +596,126 @@ def test_resume_with_no_resumable_run_is_a_clean_error(tmp_path: Path) -> None:
     assert "no run in this bundle is in a durable state" in result.output
 
 
+def test_resume_executor_exception_moves_to_failed_and_retry_succeeds(
+    tmp_path: Path,
+) -> None:
+    """BLOCKER 1 (adversarial review), end to end: a crashing executor
+    must not leave the run stuck `running` with the lease held. The
+    --json error is a JSON envelope (MAJOR), the run is `failed`
+    (durable, resumable), and a second resume with a working executor
+    for the same kind succeeds -- proving the same recorded next_action
+    survives the crash."""
+    bundle_dir = _create_bundle(tmp_path)
+    store = BundleStore(bundle_dir)
+    membership = store.register_source(
+        association=SourceAssociation.OPERATOR_ASSERTION, evidence="cli"
+    )
+    artefact = store.ingest_artefact(
+        source_id=membership.source_id,
+        content=b"notes",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/n.md",
+    )
+    run = store.create_run(next_action=OperationRef(kind="transcribe"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+    store.release_lease(
+        run_id=run.run_id,
+        new_state=RunState.REVIEW_REQUIRED,
+        next_action=run.next_action,
+    )
+
+    def raising_executor(_inner_store: BundleStore, _inner_run) -> ExecutorOutcome:
+        raise RuntimeError("boom")
+
+    crashing_app = AppContext(bundle_executors={"transcribe": raising_executor})
+    crash_result = _invoke(
+        "resume", "--bundle", str(bundle_dir), "--json", obj=crashing_app
+    )
+
+    assert crash_result.exit_code == 1
+    payload = json.loads(crash_result.output)
+    assert payload["error"]["type"] == "ExecutorFailedError"
+    assert "boom" in payload["error"]["message"]
+
+    after_crash = store.load_run(run.run_id)
+    assert after_crash.state == RunState.FAILED
+    assert store.load_lease() is None
+
+    def succeeding_executor(inner_store: BundleStore, inner_run) -> ExecutorOutcome:
+        component = inner_store.add_component(_notes_body(artefact.artefact_id))
+        revision = inner_store.append_revision(
+            operation=inner_run.next_action,
+            artefact_ids=(artefact.artefact_id,),
+            component_ids=(component.component_id,),
+        )
+        return ExecutorOutcome(
+            state=RunState.COMPLETED, revision_id=revision.revision_id
+        )
+
+    retry_app = AppContext(bundle_executors={"transcribe": succeeding_executor})
+    retry_result = _invoke(
+        "resume", "--bundle", str(bundle_dir), "--json", obj=retry_app
+    )
+
+    assert retry_result.exit_code == 0, retry_result.output
+    assert json.loads(retry_result.output)["state"] == "completed"
+
+
+def test_resume_take_over_recovers_a_crashed_run(tmp_path: Path) -> None:
+    """BLOCKER 1's --take-over half, end to end: a subprocess that
+    acquires the lease and exits hard simulates the true crash case (a
+    dead PID still holding the lease on a `running` run). Without
+    --take-over, resume gives the existing diagnosable refusal naming
+    the flag; with it, the crashed run is recovered via a fresh run
+    record."""
+    bundle_dir = _create_bundle(tmp_path)
+    store = BundleStore(bundle_dir)
+    membership = store.register_source(
+        association=SourceAssociation.OPERATOR_ASSERTION, evidence="cli"
+    )
+    artefact = store.ingest_artefact(
+        source_id=membership.source_id,
+        content=b"notes",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/n.md",
+    )
+    crashed = store.create_run(
+        next_action=OperationRef(kind="transcribe", input_ids=(artefact.artefact_id,))
+    )
+    store.acquire_lease(run_id=crashed.run_id, pid=_dead_pid())
+
+    def fake_executor(inner_store: BundleStore, inner_run) -> ExecutorOutcome:
+        component = inner_store.add_component(_notes_body(artefact.artefact_id))
+        revision = inner_store.append_revision(
+            operation=inner_run.next_action,
+            artefact_ids=(artefact.artefact_id,),
+            component_ids=(component.component_id,),
+        )
+        return ExecutorOutcome(
+            state=RunState.COMPLETED, revision_id=revision.revision_id
+        )
+
+    app = AppContext(bundle_executors={"transcribe": fake_executor})
+
+    without_flag = _invoke(
+        "resume", "--bundle", str(bundle_dir), "--run", crashed.run_id, obj=app
+    )
+    assert without_flag.exit_code == 1
+    assert "--take-over" in without_flag.output
+
+    with_flag = _invoke(
+        "resume", "--bundle", str(bundle_dir), "--take-over", "--json", obj=app
+    )
+
+    assert with_flag.exit_code == 0, with_flag.output
+    payload = json.loads(with_flag.output)
+    assert payload["state"] == "completed"
+    assert payload["head_revision_id"] is not None
+    assert store.load_lease() is None
+
+
 def test_inspect_json_and_human_output_carry_the_same_facts(tmp_path: Path) -> None:
     bundle_dir = _create_bundle(tmp_path)
     input_file = _write_file(tmp_path, "note.md", "hello")
@@ -512,3 +742,77 @@ def test_inspect_json_and_human_output_carry_the_same_facts(tmp_path: Path) -> N
     assert payload["sources"][0]["source_id"] in human.output
     assert len(payload["artefact_ids"]) == 1
     assert payload["artefact_ids"][0] in human.output
+
+
+# -- MAJOR: --json error envelopes on every command's typed-error path ------
+
+
+def test_bundle_create_json_error_is_a_json_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing_rename(_src: Path, _dst: Path) -> None:
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(os, "rename", failing_rename)
+
+    result = _invoke("bundle", "create", "--root", str(tmp_path), "--json")
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    payload = json.loads(result.output)
+    assert payload["error"]["type"] == "BundleStagingError"
+    assert "simulated rename failure" in payload["error"]["message"]
+
+
+def test_source_ingest_json_error_is_a_json_envelope(tmp_path: Path) -> None:
+    input_file = _write_file(tmp_path, "note.md", "x")
+
+    result = _invoke(
+        "source",
+        "ingest",
+        "--bundle",
+        str(tmp_path / "does-not-exist"),
+        "--kind",
+        "k",
+        "--producer",
+        "p",
+        "--json",
+        str(input_file),
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["error"]["type"] == "NotABundleError"
+    assert "not a bundle" in payload["error"]["message"]
+
+
+def test_inspect_json_error_is_a_json_envelope(tmp_path: Path) -> None:
+    result = _invoke("inspect", "--bundle", str(tmp_path / "does-not-exist"), "--json")
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["error"]["type"] == "NotABundleError"
+
+
+def test_validate_json_error_is_a_json_envelope(tmp_path: Path) -> None:
+    result = _invoke("validate", "--bundle", str(tmp_path / "does-not-exist"), "--json")
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["error"]["type"] == "NotABundleError"
+
+
+def test_status_json_error_is_a_json_envelope(tmp_path: Path) -> None:
+    result = _invoke("status", "--bundle", str(tmp_path / "does-not-exist"), "--json")
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["error"]["type"] == "NotABundleError"
+
+
+def test_resume_json_error_is_a_json_envelope(tmp_path: Path) -> None:
+    result = _invoke("resume", "--bundle", str(tmp_path / "does-not-exist"), "--json")
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["error"]["type"] == "NotABundleError"
