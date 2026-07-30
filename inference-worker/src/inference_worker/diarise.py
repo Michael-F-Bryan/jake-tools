@@ -24,26 +24,32 @@ from inference_worker.models import (
     StageError,
 )
 from inference_worker.provenance import (
+    best_effort_package_version,
     config_hash,
     local_model_revision,
-    package_version,
     stage_observations,
 )
 from inference_worker.timeouts import StageTimeoutError, enforce_timeout
 
-# B1: pyannote-audio 4.0.7 enables OpenTelemetry metrics BY DEFAULT
+# B1/N2: pyannote-audio 4.0.7 enables OpenTelemetry metrics BY DEFAULT
 # (pyannote/audio/telemetry/metrics.py sets PYANNOTE_METRICS_ENABLED=true
 # at import time if unset) and sends recording duration + the requested
 # min/max/exact speaker constraints + a per-process session UUID to
 # https://otel.pyannote.ai/v1/traces on every pipeline call — with the
 # OpenTelemetry logger forced to CRITICAL, so a blocked/failed export is
 # invisible. That's undeclared egress of source-derived metadata from a
-# worker M15 requires to run local-only. This must be set before
-# pyannote.audio is imported anywhere below (it's only ever imported
-# lazily, inside run_diarisation) so our value wins pyannote's own
-# "set default if unset" race. Do not remove this without also verifying
+# worker M15 requires to run local-only, and the corpus this worker
+# processes carries its own privacy rules. This is a hard assignment, not
+# `os.environ.setdefault` — an *inherited* PYANNOTE_METRICS_ENABLED=true
+# in the ambient shell/CI environment reinstated the telemetry beacon in
+# a verified test (the DNS target reappeared) when this used setdefault.
+# The worker's own choice must win regardless of what the environment it
+# was launched from happens to already have set; opt-in-via-environment
+# is deliberately not honoured here. Must still run before pyannote.audio
+# is imported anywhere below (it's only ever imported lazily, inside
+# run_diarisation). Do not remove this without also verifying
 # pyannote-audio has actually turned telemetry off by default upstream.
-os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
+os.environ["PYANNOTE_METRICS_ENABLED"] = "false"
 
 PIPELINE_ID = "pyannote/speaker-diarization-community-1"
 
@@ -52,13 +58,16 @@ def diarisation_stage_config_hash(constraints: SpeakerConstraints) -> str:
     # M2: fold in the resolved model revision + package versions, not just
     # the compile-time PIPELINE_ID constant — two runs against different
     # cached revisions must hash differently for M11/M12 hash-keyed reuse
-    # to be sound.
+    # to be sound. N3: best-effort, not strict package_version() — this
+    # runs before run_diarisation's own try block even starts, so a
+    # package missing on some platform must not raise here and degrade a
+    # per-stage failure into a whole-run worker-internal-error.
     return config_hash(
         {
             "pipeline_id": PIPELINE_ID,
             "model_revision": local_model_revision(PIPELINE_ID) or "unresolved",
-            "pyannote-audio": package_version("pyannote-audio"),
-            "torch": package_version("torch"),
+            "pyannote-audio": best_effort_package_version("pyannote-audio"),
+            "torch": best_effort_package_version("torch"),
             **constraints.model_dump(),
         }
     )
@@ -75,8 +84,8 @@ def _model_provenance() -> ModelProvenance | None:
     return ModelProvenance(
         identity=ModelIdentity(name=PIPELINE_ID, version=revision),
         package_versions={
-            "pyannote-audio": package_version("pyannote-audio"),
-            "torch": package_version("torch"),
+            "pyannote-audio": best_effort_package_version("pyannote-audio"),
+            "torch": best_effort_package_version("torch"),
         },
     )
 
@@ -109,7 +118,7 @@ def run_diarisation(
                     f"credentials have not been granted access: {exc}",
                     retryable=True,
                     model_provenance=_model_provenance(),
-                    retained_artefacts=[str(wav_path)],
+                    retained_artefacts=[wav_path.name],
                 )
             if pipeline is None:
                 return _failed(
@@ -119,7 +128,7 @@ def run_diarisation(
                     f"Pipeline.from_pretrained({PIPELINE_ID!r}) returned None",
                     retryable=False,
                     model_provenance=_model_provenance(),
-                    retained_artefacts=[str(wav_path)],
+                    retained_artefacts=[wav_path.name],
                 )
             device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
             pipeline.to(device)
@@ -132,7 +141,7 @@ def run_diarisation(
             str(exc),
             retryable=True,
             model_provenance=_model_provenance(),
-            retained_artefacts=[str(wav_path)],
+            retained_artefacts=[wav_path.name],
         )
     except Exception as exc:
         return _failed(
@@ -142,7 +151,7 @@ def run_diarisation(
             f"{type(exc).__name__}: {exc}",
             retryable=False,
             model_provenance=_model_provenance(),
-            retained_artefacts=[str(wav_path)],
+            retained_artefacts=[wav_path.name],
         )
 
     # A successful call means the pipeline just loaded (and, if this was
@@ -157,7 +166,7 @@ def run_diarisation(
             "diarisation-failed",
             f"diarisation completed but no cached revision for {PIPELINE_ID!r} could be resolved locally",
             retryable=False,
-            retained_artefacts=[str(wav_path)],
+            retained_artefacts=[wav_path.name],
         )
 
     # Community-1 returns a DiarizeOutput (speaker_diarization /
@@ -179,7 +188,7 @@ def run_diarisation(
             f"pyannote returned a segment with an invalid span: {exc}",
             retryable=False,
             model_provenance=model_provenance,
-            retained_artefacts=[str(wav_path)],
+            retained_artefacts=[wav_path.name],
         )
 
     return DiarisationStageResult(

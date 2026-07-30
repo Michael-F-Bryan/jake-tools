@@ -18,7 +18,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from inference_worker.models import RuntimeProvenance, StageObservations
+from inference_worker.models import (
+    ModelProvenance,
+    RuntimeProvenance,
+    StageObservations,
+)
 
 _HASH_CHUNK_SIZE = 1 << 20  # 1 MiB
 _ML_DISTRIBUTIONS = ("parakeet-mlx", "mlx", "pyannote-audio", "torch")
@@ -97,7 +101,7 @@ def stage_observations(started: float) -> StageObservations:
     )
 
 
-def _best_effort_package_version(distribution_name: str) -> str:
+def best_effort_package_version(distribution_name: str) -> str:
     try:
         return package_version(distribution_name)
     except importlib.metadata.PackageNotFoundError as exc:
@@ -123,9 +127,9 @@ def observed_runtime_provenance(lockfile_path: Path) -> RuntimeProvenance:
     return RuntimeProvenance(
         python_version=platform.python_version(),
         ml_framework_versions={
-            name: _best_effort_package_version(name) for name in _ML_DISTRIBUTIONS
+            name: best_effort_package_version(name) for name in _ML_DISTRIBUTIONS
         },
-        worker_package_version=_best_effort_package_version("inference-worker"),
+        worker_package_version=best_effort_package_version("inference-worker"),
         dependency_lockfile_sha256=_best_effort_lockfile_sha256(lockfile_path),
     )
 
@@ -157,3 +161,19 @@ def compute_runtime_delta(
                 f"declared={declared_version} observed={observed_version}"
             )
     return delta
+
+
+def compute_model_revision_delta(
+    field_name: str, declared_version: str, observed: ModelProvenance | None
+) -> dict[str, str]:
+    """N4: a declared model *version* is deliberately not enforced (unlike
+    the model *name* — see __main__._refuse_unpinned_models; callers may
+    not pin an exact revision) but silently accepting a mismatch without
+    recording it would hide real drift. Folds into the same delta shape
+    as compute_runtime_delta. No entry when nothing was actually observed
+    (the stage never ran, or never resolved a revision)."""
+    if observed is None or declared_version == observed.identity.version:
+        return {}
+    return {
+        field_name: f"declared={declared_version} observed={observed.identity.version}"
+    }

@@ -44,6 +44,25 @@ def test_diarisation_stage_config_hash_folds_in_the_resolved_model_revision():
     assert hash_with_revision != hash_without_revision
 
 
+def test_diarisation_stage_config_hash_survives_a_missing_package(monkeypatch):
+    """N3: diarisation_stage_config_hash() runs before run_diarisation's
+    own try block even starts — a strict package_version() call here
+    would raise PackageNotFoundError and degrade a per-stage failure into
+    a whole-run worker-internal-error. Simulates a genuinely missing
+    package by making the real importlib.metadata.version lookup fail,
+    the actual boundary a missing package would hit."""
+    import importlib.metadata
+
+    def _always_raise(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", _always_raise)
+
+    result = diarisation_stage_config_hash(SpeakerConstraints())
+
+    assert len(result) == 64  # a real sha256 hex digest — it didn't raise
+
+
 def test_run_diarisation_reports_timeout_and_still_carries_model_provenance():
     result = run_diarisation(
         Path("does-not-need-to-exist.wav"),
@@ -69,15 +88,17 @@ def test_run_diarisation_reports_timeout_and_still_carries_model_provenance():
 def test_run_diarisation_retains_the_wav_on_failure():
     """M5: retained_artefacts is the flagship partial-failure record — a
     failed diarisation stage must name the prepared wav that still
-    survives it, not leave the field dead/empty."""
-    wav_path = Path("some/prepared.wav")
+    survives it, not leave the field dead/empty. N5: as a bare filename
+    relative to the out-dir, consistent with ArtefactRef's filenames —
+    not the absolute path the stage was actually called with."""
+    wav_path = Path("some/out-dir/prepared.wav")
 
     result = run_diarisation(
         wav_path, "a" * 64, SpeakerConstraints(), duration_ms=1000, timeout_s=0.0001
     )
 
     assert result.error is not None
-    assert result.error.retained_artefacts == [str(wav_path)]
+    assert result.error.retained_artefacts == ["prepared.wav"]
 
 
 def test_speaker_kwargs_maps_exact_to_num_speakers():

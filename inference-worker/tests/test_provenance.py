@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from inference_worker.models import RuntimeProvenance
+from inference_worker.models import ModelIdentity, ModelProvenance, RuntimeProvenance
 from inference_worker.provenance import (
+    best_effort_package_version,
+    compute_model_revision_delta,
     compute_runtime_delta,
     config_hash,
     local_model_revision,
@@ -47,6 +49,21 @@ def test_package_version_raises_for_unknown_distribution():
 
     with pytest.raises(PackageNotFoundError):
         package_version("definitely-not-a-real-package-xyz")
+
+
+def test_best_effort_package_version_degrades_instead_of_raising():
+    """N3: the config-hash functions in asr.py/diarise.py call this, not
+    the strict package_version() — on a platform where a package is
+    genuinely absent (e.g. mlx on non-Apple-Silicon Linux), this must
+    degrade to a marked string, never raise before a stage's own try
+    block even starts."""
+    result = best_effort_package_version("definitely-not-a-real-package-xyz")
+
+    assert result.startswith("unresolved:")
+
+
+def test_best_effort_package_version_resolves_a_real_installed_package():
+    assert best_effort_package_version("pydantic") == package_version("pydantic")
 
 
 # --- B4 / M1: local-cache-only model revision resolution ----------------
@@ -159,3 +176,40 @@ def test_compute_runtime_delta_reports_mismatched_fields_only():
     assert delta["ml_framework_versions.torch"] == "declared=2.12.0 observed=2.13.0"
     assert "worker_package_version" not in delta
     assert "dependency_lockfile_sha256" not in delta
+
+
+# --- N4: declared vs observed model revision delta -----------------------
+
+
+def _provenance(version: str) -> ModelProvenance:
+    return ModelProvenance(
+        identity=ModelIdentity(name="some/model", version=version),
+        package_versions={},
+    )
+
+
+def test_compute_model_revision_delta_is_empty_when_versions_match():
+    assert (
+        compute_model_revision_delta(
+            "asr_model.version", "abc123", _provenance("abc123")
+        )
+        == {}
+    )
+
+
+def test_compute_model_revision_delta_reports_a_mismatch():
+    delta = compute_model_revision_delta(
+        "asr_model.version", "deadbeefdeadbeef", _provenance("abc123")
+    )
+
+    assert delta == {"asr_model.version": "declared=deadbeefdeadbeef observed=abc123"}
+
+
+def test_compute_model_revision_delta_is_empty_when_nothing_was_observed():
+    """No entry when the stage never ran (or never resolved a revision) —
+    that's a different, already-visible condition (the stage's own
+    status), not a version mismatch to report."""
+    assert (
+        compute_model_revision_delta("asr_model.version", "deadbeefdeadbeef", None)
+        == {}
+    )

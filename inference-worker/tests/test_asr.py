@@ -30,6 +30,26 @@ def test_asr_stage_config_hash_folds_in_the_resolved_model_revision():
     assert hash_with_revision != hash_without_revision
 
 
+def test_asr_stage_config_hash_survives_a_missing_package(monkeypatch):
+    """N3: asr_stage_config_hash() runs before run_asr's own try block
+    even starts — on a platform where a package is genuinely absent (e.g.
+    mlx on non-Apple-Silicon Linux), a strict package_version() call here
+    would raise PackageNotFoundError and degrade a per-stage failure into
+    a whole-run worker-internal-error. Simulates that by making the real
+    importlib.metadata.version lookup fail, the actual boundary a missing
+    package would hit — not a patch of this module's own code."""
+    import importlib.metadata
+
+    def _always_raise(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", _always_raise)
+
+    result = asr_stage_config_hash()
+
+    assert len(result) == 64  # a real sha256 hex digest — it didn't raise
+
+
 def test_run_asr_reports_timeout_and_still_carries_model_provenance():
     result = run_asr(Path("does-not-need-to-exist.wav"), "a" * 64, timeout_s=0.0001)
 
@@ -46,13 +66,15 @@ def test_run_asr_reports_timeout_and_still_carries_model_provenance():
 def test_run_asr_retains_the_wav_on_failure():
     """M5: retained_artefacts is the flagship partial-failure record — a
     failed ASR stage must name the prepared wav that still survives it,
-    not leave the field dead/empty."""
-    wav_path = Path("some/prepared.wav")
+    not leave the field dead/empty. N5: as a bare filename relative to
+    the out-dir, consistent with ArtefactRef's filenames — not the
+    absolute path the stage was actually called with."""
+    wav_path = Path("some/out-dir/prepared.wav")
 
     result = run_asr(wav_path, "a" * 64, timeout_s=0.0001)
 
     assert result.error is not None
-    assert result.error.retained_artefacts == [str(wav_path)]
+    assert result.error.retained_artefacts == ["prepared.wav"]
 
 
 # --- M6: span validation on raw ASR output -------------------------------

@@ -19,9 +19,9 @@ from inference_worker.models import (
     StageError,
 )
 from inference_worker.provenance import (
+    best_effort_package_version,
     config_hash,
     local_model_revision,
-    package_version,
     stage_observations,
 )
 from inference_worker.timeouts import StageTimeoutError, enforce_timeout
@@ -33,13 +33,17 @@ def asr_stage_config_hash() -> str:
     # M2: fold in the resolved model revision + package versions, not just
     # the compile-time MODEL_ID constant — two runs against different
     # cached revisions must hash differently for M11/M12 hash-keyed reuse
-    # to be sound.
+    # to be sound. N3: best-effort, not strict package_version() — this
+    # runs before run_asr's own try block even starts, so a package
+    # missing on some platform (e.g. mlx on non-Apple-Silicon) must not
+    # raise here and degrade a per-stage failure into a whole-run
+    # worker-internal-error.
     return config_hash(
         {
             "model_id": MODEL_ID,
             "model_revision": local_model_revision(MODEL_ID) or "unresolved",
-            "parakeet-mlx": package_version("parakeet-mlx"),
-            "mlx": package_version("mlx"),
+            "parakeet-mlx": best_effort_package_version("parakeet-mlx"),
+            "mlx": best_effort_package_version("mlx"),
         }
     )
 
@@ -53,8 +57,8 @@ def _model_provenance() -> ModelProvenance | None:
     return ModelProvenance(
         identity=ModelIdentity(name=MODEL_ID, version=revision),
         package_versions={
-            "parakeet-mlx": package_version("parakeet-mlx"),
-            "mlx": package_version("mlx"),
+            "parakeet-mlx": best_effort_package_version("parakeet-mlx"),
+            "mlx": best_effort_package_version("mlx"),
         },
     )
 
@@ -95,7 +99,7 @@ def run_asr(wav_path: Path, wav_sha256: str, timeout_s: float) -> AsrStageResult
             str(exc),
             retryable=True,
             model_provenance=_model_provenance(),
-            retained_artefacts=[str(wav_path)],
+            retained_artefacts=[wav_path.name],
         )
     except Exception as exc:
         return _failed(
@@ -105,7 +109,7 @@ def run_asr(wav_path: Path, wav_sha256: str, timeout_s: float) -> AsrStageResult
             f"{type(exc).__name__}: {exc}",
             retryable=False,
             model_provenance=_model_provenance(),
-            retained_artefacts=[str(wav_path)],
+            retained_artefacts=[wav_path.name],
         )
 
     # A successful transcribe means `from_pretrained` just loaded (and, if
@@ -121,7 +125,7 @@ def run_asr(wav_path: Path, wav_sha256: str, timeout_s: float) -> AsrStageResult
             "asr-failed",
             f"transcription completed but no cached revision for {MODEL_ID!r} could be resolved locally",
             retryable=False,
-            retained_artefacts=[str(wav_path)],
+            retained_artefacts=[wav_path.name],
         )
 
     try:
@@ -138,7 +142,7 @@ def run_asr(wav_path: Path, wav_sha256: str, timeout_s: float) -> AsrStageResult
             f"parakeet returned a token with an invalid span: {exc}",
             retryable=False,
             model_provenance=model_provenance,
-            retained_artefacts=[str(wav_path)],
+            retained_artefacts=[wav_path.name],
         )
 
     return AsrStageResult(

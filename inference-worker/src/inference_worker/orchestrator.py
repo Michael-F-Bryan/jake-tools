@@ -37,11 +37,13 @@ from inference_worker.models import (
 )
 from inference_worker.prepare import prepare_audio
 from inference_worker.provenance import (
+    compute_model_revision_delta,
     compute_runtime_delta,
     observed_runtime_provenance,
     sha256_file,
 )
 
+RESPONSE_FILENAME = "response.json"
 ASR_FILENAME = "asr.json"
 DIARISATION_FILENAME = "diarisation.json"
 
@@ -66,6 +68,14 @@ def run_inference(
     asr_fn: AsrFn = run_asr,
     diarise_fn: DiariseFn = run_diarisation,
 ) -> InferenceResponse:
+    # N1: a manifest describing a DIFFERENT run's artefacts is worse than
+    # no manifest at all — a caller trusting a stale response.json's
+    # `status: completed` would consume a different recording's ASR
+    # output. Remove any leftover response.json up front so a crash
+    # anywhere after this point (including partway through the artefact
+    # writes below) leaves an honest "nothing here yet", never a lie.
+    (out_dir / RESPONSE_FILENAME).unlink(missing_ok=True)
+
     prepare_result = prepare_fn(
         Path(request.audio.path),
         out_dir,
@@ -98,6 +108,24 @@ def run_inference(
     )
     observed_runtime = observed_runtime_provenance(lockfile_path)
 
+    # N4: the model *name* mismatch is refused at the CLI boundary
+    # (__main__._refuse_unpinned_models) — a *version* mismatch is not
+    # enforced (callers may not pin an exact revision) but must still be
+    # visible, folded into the same delta record as the runtime delta.
+    delta = compute_runtime_delta(request.runtime_provenance, observed_runtime)
+    delta.update(
+        compute_model_revision_delta(
+            "asr_model.version", request.asr_model.version, asr_result.model_provenance
+        )
+    )
+    delta.update(
+        compute_model_revision_delta(
+            "diarisation_model.version",
+            request.diarisation_model.version,
+            diarisation_result.model_provenance,
+        )
+    )
+
     return InferenceResponse(
         request_id=request.request_id,
         audio=request.audio,
@@ -105,9 +133,7 @@ def run_inference(
         asr=asr_ref,
         diarisation=diarisation_ref,
         runtime=observed_runtime,
-        runtime_provenance_delta=compute_runtime_delta(
-            request.runtime_provenance, observed_runtime
-        ),
+        runtime_provenance_delta=delta,
     )
 
 
@@ -120,6 +146,9 @@ def worker_internal_error_response(
     still emits a valid, honestly labelled response instead of losing the
     whole run (and any already-completed stage work) to an unhandled
     traceback bubbling out of the CLI."""
+    # N1: same reasoning as run_inference's own unlink — a stale
+    # response.json must not survive whatever just went wrong.
+    (out_dir / RESPONSE_FILENAME).unlink(missing_ok=True)
     error = StageError(
         error_class="worker-internal-error",
         message=f"{type(exc).__name__}: {exc}",

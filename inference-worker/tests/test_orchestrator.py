@@ -15,11 +15,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from inference_worker import asr, diarise
 from inference_worker.models import (
     AsrOutput,
     AsrStageResult,
     AudioPreparationConfig,
+    DiarisationOutput,
     DiarisationStageResult,
+    ModelIdentity,
+    ModelProvenance,
     PrepareStageResult,
     SpeakerConstraints,
     StageError,
@@ -28,6 +34,7 @@ from inference_worker.models import (
 from inference_worker.orchestrator import (
     ASR_FILENAME,
     DIARISATION_FILENAME,
+    RESPONSE_FILENAME,
     run_inference,
     worker_internal_error_response,
 )
@@ -61,9 +68,10 @@ def _fake_gated_diarisation(
             error_class="model-access-denied",
             message="pyannote/speaker-diarization-community-1 is gated",
             retryable=True,
-            # Mirrors run_diarisation's own behaviour (M5): the prepared
-            # wav it was given always survives a diarisation failure.
-            retained_artefacts=[str(wav_path)],
+            # Mirrors run_diarisation's own behaviour (M5, N5): the
+            # prepared wav it was given always survives a diarisation
+            # failure, named as a bare filename relative to the out-dir.
+            retained_artefacts=[Path(wav_path).name],
         ),
     )
 
@@ -259,7 +267,10 @@ def test_diarisation_failure_retains_the_completed_asr_artefact_ref(
     retained = diarisation_artefact["error"]["retained_artefacts"]
     assert ASR_FILENAME in retained
     assert response.prepare.output is not None
-    assert response.prepare.output.path in retained
+    # N5: bare filename relative to the out-dir, consistent with
+    # ArtefactRef's filenames — not the absolute prepared-wav path.
+    assert Path(response.prepare.output.path).name in retained
+    assert all(not p.startswith("/") for p in retained)
 
 
 # --- B3: the worker-internal-error safety net -----------------------------
@@ -286,3 +297,151 @@ def test_worker_internal_error_response_is_valid_and_writes_artefacts(
     asr_artefact = _read_artefact(out_dir, response.asr.filename)
     assert asr_artefact["error"]["error_class"] == "worker-internal-error"
     assert "boom" in asr_artefact["error"]["message"]
+
+
+# --- N1: response.json is never a stale manifest for a different run -----
+
+
+def test_a_crashed_run_leaves_no_stale_response_json_behind(
+    request_factory, sine_wav_factory, tmp_path
+):
+    """N1: response.json + the artefacts it points at must be atomic AS A
+    SET, not just individually. Seed the out-dir with a prior valid
+    response.json, then crash partway through this run (after prepare's
+    real artefact write, inside a faked asr_fn) — the stale manifest must
+    be gone afterwards (it would otherwise describe THIS run's mismatched
+    artefacts), while whatever this run did manage to produce survives:
+    the honest state is "no manifest yet", never a lying one."""
+    wav = sine_wav_factory(tmp_path / "source.wav")
+    request = request_factory(audio_path=wav)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / RESPONSE_FILENAME).write_text(
+        '{"stale": "manifest from a previous run"}'
+    )
+
+    def _crashing_asr(*args, **kwargs):
+        raise RuntimeError("simulated crash mid-run")
+
+    with pytest.raises(RuntimeError):
+        run_inference(
+            request,
+            out_dir,
+            lockfile_path=Path("uv.lock"),
+            asr_fn=_crashing_asr,
+            diarise_fn=_fake_gated_diarisation,
+        )
+
+    assert not (out_dir / RESPONSE_FILENAME).exists()
+    assert (
+        out_dir / "prepared.wav"
+    ).exists()  # prepare's own artefact: the honest state
+
+
+# --- N4: a declared model *version* mismatch is not refused, but visible -
+
+
+def _fake_completed_asr_with_provenance(
+    wav_path: Path, wav_sha256: str, timeout_s: float
+) -> AsrStageResult:
+    return AsrStageResult(
+        status="completed",
+        config_hash="fake-asr-config",
+        input_audio_sha256=wav_sha256,
+        observations=StageObservations(wall_time_ms=1),
+        model_provenance=ModelProvenance(
+            identity=ModelIdentity(
+                name=asr.MODEL_ID, version="real-observed-asr-revision"
+            ),
+            package_versions={"parakeet-mlx": "0.5.2", "mlx": "0.32.0"},
+        ),
+        output=AsrOutput(text="hi", tokens=[]),
+    )
+
+
+def _fake_completed_diarisation_with_provenance(
+    wav_path,
+    wav_sha256,
+    constraints: SpeakerConstraints,
+    duration_ms: int,
+    timeout_s: float,
+) -> DiarisationStageResult:
+    return DiarisationStageResult(
+        status="completed",
+        config_hash="fake-diar-config",
+        input_audio_sha256=wav_sha256,
+        observations=StageObservations(wall_time_ms=1),
+        model_provenance=ModelProvenance(
+            identity=ModelIdentity(
+                name=diarise.PIPELINE_ID, version="real-observed-diarisation-revision"
+            ),
+            package_versions={"pyannote-audio": "4.0.7", "torch": "2.13.0"},
+        ),
+        output=DiarisationOutput(segments=[]),
+    )
+
+
+def test_declared_model_version_mismatch_completes_and_appears_in_the_delta(
+    request_factory, sine_wav_factory, tmp_path
+):
+    """N4: _refuse_unpinned_models only checks the model *name* — a
+    declared version like "deadbeefdeadbeef" (callers may not pin an
+    exact revision) must not be refused, but the mismatch against what
+    actually ran must still be visible, not silently dropped."""
+    wav = sine_wav_factory(tmp_path / "source.wav")
+    request = request_factory(audio_path=wav)
+    request = request.model_copy(
+        update={
+            "asr_model": request.asr_model.model_copy(
+                update={"version": "deadbeefdeadbeef"}
+            ),
+            "diarisation_model": request.diarisation_model.model_copy(
+                update={"version": "deadbeefdeadbeef"}
+            ),
+        }
+    )
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    response = run_inference(
+        request,
+        out_dir,
+        lockfile_path=Path("uv.lock"),
+        asr_fn=_fake_completed_asr_with_provenance,
+        diarise_fn=_fake_completed_diarisation_with_provenance,
+    )
+
+    assert response.asr.status == "completed"
+    assert response.diarisation.status == "completed"
+    assert response.runtime_provenance_delta["asr_model.version"] == (
+        "declared=deadbeefdeadbeef observed=real-observed-asr-revision"
+    )
+    assert response.runtime_provenance_delta["diarisation_model.version"] == (
+        "declared=deadbeefdeadbeef observed=real-observed-diarisation-revision"
+    )
+
+
+def test_matching_declared_model_version_leaves_no_delta_entry(
+    request_factory, sine_wav_factory, tmp_path
+):
+    wav = sine_wav_factory(tmp_path / "source.wav")
+    request = request_factory(audio_path=wav)
+    request = request.model_copy(
+        update={
+            "asr_model": request.asr_model.model_copy(
+                update={"version": "real-observed-asr-revision"}
+            ),
+        }
+    )
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    response = run_inference(
+        request,
+        out_dir,
+        lockfile_path=Path("uv.lock"),
+        asr_fn=_fake_completed_asr_with_provenance,
+        diarise_fn=_fake_gated_diarisation,
+    )
+
+    assert "asr_model.version" not in response.runtime_provenance_delta

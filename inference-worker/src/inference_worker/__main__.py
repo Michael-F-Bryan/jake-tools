@@ -20,6 +20,7 @@ from inference_worker import asr, diarise
 from inference_worker.atomic_io import atomic_write_text
 from inference_worker.models import InferenceRequest, InferenceResponse
 from inference_worker.orchestrator import (
+    RESPONSE_FILENAME,
     RunInferenceFn,
     run_inference,
     worker_internal_error_response,
@@ -27,7 +28,6 @@ from inference_worker.orchestrator import (
 from inference_worker.provenance import sha256_file
 
 _LOCKFILE_NAME = "uv.lock"
-_RESPONSE_FILENAME = "response.json"
 
 
 class ContractError(Exception):
@@ -80,11 +80,11 @@ def _write_response(out_dir: Path, response: InferenceResponse) -> bool:
     # response.json.
     try:
         atomic_write_text(
-            out_dir / _RESPONSE_FILENAME, response.model_dump_json(indent=2)
+            out_dir / RESPONSE_FILENAME, response.model_dump_json(indent=2)
         )
     except OSError as exc:
         print(
-            f"inference-worker: cannot write {_RESPONSE_FILENAME}: {exc}",
+            f"inference-worker: cannot write {RESPONSE_FILENAME}: {exc}",
             file=sys.stderr,
         )
         return False
