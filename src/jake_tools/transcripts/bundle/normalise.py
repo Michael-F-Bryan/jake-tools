@@ -30,14 +30,16 @@ invalidated rather than silently carried onto different turns (M8).
 The token -> turn rule
 ----------------------
 Each raw token is assigned to the diarisation segment it overlaps most
-(ties resolve to the *preceding* segment, M7). Consecutive tokens sharing
-a segment form one turn -- grouping by segment rather than by cluster is
-what keeps two speakers' near-simultaneous utterances distinct, and keeps
-two consecutive utterances from one speaker separate until an explicit
-same-speaker adjacent merge (M9 polish) decides otherwise. Tokens no
-segment covers are grouped into their own turns and reported as
-unattributed: a turn with no voice evidence is honest, and M8's ladder
-resolves it at rung 8 rather than by guessing a neighbour's speaker.
+(ties resolve to the *preceding* segment, M7), and every token assigned
+to one segment becomes one turn. Grouping by *segment* -- not by cluster,
+and not by adjacency in the time-ordered token stream -- is what keeps two
+people talking across each other as two overlapping turns (D4) instead of
+four interleaved fragments, and what keeps two consecutive utterances from
+one speaker separate until an explicit same-speaker adjacent merge (M9
+polish) decides otherwise. Tokens no segment covers are grouped by time
+proximity and reported as unattributed: a turn with no voice evidence is
+honest, and M8's ladder resolves it at rung 8 rather than by guessing a
+neighbour's speaker.
 """
 
 from __future__ import annotations
@@ -157,7 +159,13 @@ def _sha256_hex(data: bytes) -> str:
 
 def _config_hash() -> str:
     return _sha256_hex(
-        json.dumps({"normaliser_version": NORMALISER_VERSION}, sort_keys=True).encode()
+        json.dumps(
+            {
+                "normaliser_version": NORMALISER_VERSION,
+                "unattributed_gap_ms": UNATTRIBUTED_GAP_MS,
+            },
+            sort_keys=True,
+        ).encode()
     )
 
 
@@ -266,53 +274,97 @@ class _DraftTurn:
 UNATTRIBUTED_SPEAKER_LABEL = "unattributed"
 
 
+#: How far apart two *unattributed* tokens may be and still belong to one
+#: turn. Only reached where diarisation covered nothing, so there is no
+#: voice evidence to group by; without a bound, one recording's stray
+#: tokens would collapse into a single turn spanning the whole meeting.
+#: Participates in the ledger's config hash, like every other tunable.
+UNATTRIBUTED_GAP_MS = 2_000
+
+
+def _build_draft(
+    group: Sequence[RawToken],
+    *,
+    cluster_id: ClusterId | None,
+    speaker_label: str,
+) -> _DraftTurn | None:
+    text = "".join(token.text for token in group).strip()
+    start_ms = group[0].start_ms
+    end_ms = max(token.end_ms for token in group)
+    if not text or end_ms <= start_ms:
+        return None
+    return _DraftTurn(
+        source_artefact_id=group[0].source_artefact_id,
+        source_segment_id=group[0].source_segment_id,
+        cluster_id=cluster_id,
+        speaker_label=speaker_label,
+        text=text,
+        start_ms=start_ms,
+        end_ms=end_ms,
+    )
+
+
 def _group_tokens_into_turns(
     tokens: Sequence[RawToken],
     assignments: Sequence[int | None],
     segments: Sequence[WireDiarisationSegment],
     cluster_ids_by_label: Mapping[str, ClusterId],
 ) -> tuple[_DraftTurn, ...]:
-    """Group consecutive tokens sharing a diarisation segment into turns.
+    """Group tokens into turns, one turn per diarisation segment.
 
-    The group key is the *segment index*, not the cluster: two adjacent
-    segments from the same speaker stay two turns (merging them is an
-    explicit M9 polish decision with its own lineage, never an accident of
-    normalisation), and a short interjection between two of one speaker's
-    segments cannot be swallowed by the surrounding speech.
+    The group key is the *segment index*, not the cluster and not
+    adjacency in the time-ordered token stream. Both alternatives are
+    wrong on real audio:
+
+    - grouping by cluster would merge two consecutive utterances from one
+      speaker, and an adjacent same-speaker merge is an explicit M9
+      polish decision with its own lineage, never an accident here;
+    - grouping by adjacency shatters a turn whenever speech overlaps --
+      two people talking across each other interleave in the sorted token
+      stream, and the corpus's simultaneous 00:58 utterances are exactly
+      that case. Overlapping turns are representable (D4), so the right
+      answer is two whole turns that overlap in time, not four fragments.
+
+    Tokens no segment covers have no voice evidence to group by, so they
+    are grouped by time proximity (:data:`UNATTRIBUTED_GAP_MS`) and
+    reported as unattributed.
     """
-    turns: list[_DraftTurn] = []
-    group_start = 0
-    while group_start < len(tokens):
-        group_end = group_start + 1
-        while (
-            group_end < len(tokens)
-            and assignments[group_end] == assignments[group_start]
-        ):
-            group_end += 1
-        group = tokens[group_start:group_end]
-        segment_index = assignments[group_start]
+    by_segment: dict[int, list[RawToken]] = {}
+    unassigned: list[RawToken] = []
+    for token, segment_index in zip(tokens, assignments, strict=True):
         if segment_index is None:
-            cluster_id, speaker_label = None, UNATTRIBUTED_SPEAKER_LABEL
+            unassigned.append(token)
         else:
-            raw_label = segments[segment_index].speaker_label
-            cluster_id, speaker_label = cluster_ids_by_label[raw_label], raw_label
-        text = "".join(token.text for token in group).strip()
-        start_ms = group[0].start_ms
-        end_ms = max(token.end_ms for token in group)
-        if text and end_ms > start_ms:
-            turns.append(
-                _DraftTurn(
-                    source_artefact_id=group[0].source_artefact_id,
-                    source_segment_id=group[0].source_segment_id,
-                    cluster_id=cluster_id,
-                    speaker_label=speaker_label,
-                    text=text,
-                    start_ms=start_ms,
-                    end_ms=end_ms,
-                )
+            by_segment.setdefault(segment_index, []).append(token)
+
+    drafts: list[_DraftTurn] = []
+    for segment_index, group in by_segment.items():
+        raw_label = segments[segment_index].speaker_label
+        draft = _build_draft(
+            group,
+            cluster_id=cluster_ids_by_label[raw_label],
+            speaker_label=raw_label,
+        )
+        if draft is not None:
+            drafts.append(draft)
+
+    run: list[RawToken] = []
+    for token in unassigned:
+        if run and token.start_ms - run[-1].end_ms > UNATTRIBUTED_GAP_MS:
+            draft = _build_draft(
+                run, cluster_id=None, speaker_label=UNATTRIBUTED_SPEAKER_LABEL
             )
-        group_start = group_end
-    return tuple(turns)
+            if draft is not None:
+                drafts.append(draft)
+            run = []
+        run.append(token)
+    if run:
+        draft = _build_draft(
+            run, cluster_id=None, speaker_label=UNATTRIBUTED_SPEAKER_LABEL
+        )
+        if draft is not None:
+            drafts.append(draft)
+    return tuple(sorted(drafts, key=lambda draft: (draft.start_ms, draft.end_ms)))
 
 
 def _combined_offsets(

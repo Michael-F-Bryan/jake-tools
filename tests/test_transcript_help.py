@@ -22,19 +22,12 @@ def test_transcript_help_exposes_only_operator_tasks() -> None:
     # "source" was reserved here for a since-superseded internal design; the
     # bundle-store control plane (Phase 2) makes `transcript source ingest`
     # a genuinely public command (ADVERSARIAL-REVIEW §4.1), so it is no
-    # longer in this "must stay hidden" list -- "transform" is the same
-    # story for Phase 3A's `transform timeline`/`transform transcribe`
-    # (see test_transcript_bundle_cli.py for both groups' own --help
-    # coverage).
-    for internal_group in (
-        "schema",
-        "parse",
-        "stage",
-        "render",
-        "note",
-        "verify",
-        "recipe",
-    ):
+    # longer in this "must stay hidden" list. "transform", "review",
+    # "render", "apply", and "recipe" are the same story for Phase 3B/3C:
+    # the review checkpoint, the render, the note write, and the composed
+    # path are all operator tasks a human genuinely runs (see
+    # test_transcript_bundle_cli.py for their own --help coverage).
+    for internal_group in ("schema", "parse", "stage", "note", "verify"):
         assert f"\n  {internal_group}" not in result.output
 
 

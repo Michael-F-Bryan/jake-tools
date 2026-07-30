@@ -15,16 +15,28 @@ from typing import NoReturn
 
 import click
 
+from ..claude import ClaudeAgent
 from ..transcripts.bundle.adapters import adapt_local_media, adapt_obsidian_note
+from ..transcripts.bundle.apply import apply_render
+from ..transcripts.bundle.components import TextEditMode
 from ..transcripts.bundle.control import (
     DEFAULT_BUNDLES_ROOT,
     BundleOverview,
     BundleStatus,
+    bundle_executors_with_agent,
     capability_failures,
     ingest_source,
     inspect_bundle,
     project_document,
+    render_document,
     resume_run,
+    run_chapter_transform,
+    run_minutes_transform,
+    run_normalise_transform,
+    run_obsidian_recording_recipe,
+    run_review_apply,
+    run_speakers_propose,
+    run_text_transform,
     run_timeline_transform,
     run_transcribe_transform,
     status_bundle,
@@ -33,9 +45,11 @@ from ..transcripts.bundle.control import create_bundle as _create_bundle
 from ..transcripts.bundle.document import TranscriptDocumentV1
 from ..transcripts.bundle.records import NoDocumentYet, RunRecord, SourceAssociation
 from ..transcripts.bundle.registry import CapabilityStatus
+from ..transcripts.bundle.review import export_review_pack
 from ..transcripts.bundle.store import BundleStore
 from ..transcripts.errors import TranscriptError
 from .context import app_context
+from .options import agent, coro
 
 #: `--kind` values that trigger a typed adapter in addition to plain
 #: ingestion (source_ingest below) -- every other `--kind` value stays
@@ -644,9 +658,11 @@ def status_command(bundle_path: Path, as_json: bool) -> None:
     "naming this flag -- never silently retried.",
 )
 @_json_option
+@agent
 @click.pass_context
 def resume_command(
     ctx: click.Context,
+    claude_agent: ClaudeAgent,
     bundle_path: Path,
     run_id: str | None,
     take_over: bool,
@@ -667,7 +683,14 @@ def resume_command(
     (durable, resumable) with the exception recorded, rather than being
     left stuck `running` with the lease held forever.
     """
-    executors = app_context(ctx).bundle_executors
+    # An injected mapping (tests, diagnostics) wins for the kinds it
+    # defines; the agent-bound kinds fill the gaps, so a run waiting at
+    # the review checkpoint with next_action=products can actually be
+    # resumed here without every caller having to assemble the mapping.
+    executors = dict(
+        bundle_executors_with_agent(claude_agent, model=claude_agent.defaults.model)
+    )
+    executors.update(app_context(ctx).bundle_executors)
     store = BundleStore(bundle_path)
     try:
         run = resume_run(store, run_id=run_id, executors=executors, take_over=take_over)
@@ -700,7 +723,11 @@ def resume_command(
 # -- transform: timeline / transcribe (M6 / M11) --------------------------
 
 
-@click.group("transform", help="Run bundle transforms (timeline, transcribe).")
+@click.group(
+    "transform",
+    help="Run bundle transforms (timeline, transcribe, normalise, "
+    "speakers-propose, text, chapter, minutes).",
+)
 def transform_group() -> None:
     pass
 
@@ -794,3 +821,525 @@ def transform_transcribe_command(bundle_path: Path, force: bool, as_json: bool) 
     except TranscriptError as exc:
         _echo_error_and_exit(exc, as_json=as_json)
     _echo_run_result(run, store, as_json=as_json)
+
+
+@transform_group.command("normalise")
+@_bundle_option
+@_json_option
+def transform_normalise_command(bundle_path: Path, as_json: bool) -> None:
+    """Turn raw ASR and diarisation evidence into canonical timed turns
+    (M7), with machine voice clusters and full drop lineage.
+
+    Needs a combined timeline (`transform timeline`) and at least one
+    completed ASR result (`transform transcribe`). Raw artefacts are never
+    rewritten -- zero-length and duplicate tokens are legal evidence there
+    and are removed from the *canonical* set with a recorded reason. Voice
+    clusters are recorded as clusters, never as people; assigning them is
+    the review step's job and nothing here does it.
+
+    Re-running supersedes the previous canonical set. That mints fresh
+    turn IDs, so an applied review bound to the old inventory is correctly
+    invalidated rather than carried onto different turns.
+    """
+    store = BundleStore(bundle_path)
+    try:
+        run = run_normalise_transform(store)
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+    _echo_run_result(run, store, as_json=as_json)
+
+
+@transform_group.command("speakers-propose")
+@_bundle_option
+@click.option(
+    "--no-stop-for-review",
+    "stop_for_review",
+    flag_value=False,
+    default=True,
+    help="Do not enter review_required after proposing. Proposals still never "
+    "satisfy the meeting-note speaker gate, so this skips only the durable "
+    "checkpoint -- it never publishes an unreviewed attribution.",
+)
+@_json_option
+@agent
+@coro
+async def transform_speakers_propose_command(
+    claude_agent: ClaudeAgent,
+    bundle_path: Path,
+    stop_for_review: bool,
+    as_json: bool,
+) -> None:
+    """Propose a participant for each machine voice cluster (M8 rung 7),
+    then stop at the durable review checkpoint.
+
+    A proposal is evidence for a human, never an assignment: a bare
+    machine hypothesis can never render into a meeting note (M5). The run
+    ends in `review_required` with its lease released, so you can export a
+    pack (`review export`), decide each cluster -- "unclear speaker" is a
+    perfectly good decision -- apply it (`review apply`), and `resume`,
+    without repeating ingest, transcription, or normalisation.
+    """
+    store = BundleStore(bundle_path)
+    try:
+        run = await run_speakers_propose(
+            store,
+            agent=claude_agent,
+            model=claude_agent.defaults.model,
+            stop_for_review=stop_for_review,
+        )
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+    _echo_run_result(run, store, as_json=as_json)
+
+
+@transform_group.command("text")
+@_bundle_option
+@click.option(
+    "--mode",
+    type=click.Choice([mode.value for mode in TextEditMode]),
+    required=True,
+    help="correct: fix mis-transcriptions only. polish: readability only "
+    "(filler, stutters, punctuation). They are separate passes with separate "
+    "provenance, and correct should run first.",
+)
+@click.option(
+    "--context",
+    "context_note",
+    default="",
+    help="One line of meeting context for the stage (subject, organisation).",
+)
+@_json_option
+@agent
+@coro
+async def transform_text_command(
+    claude_agent: ClaudeAgent,
+    bundle_path: Path,
+    mode: str,
+    context_note: str,
+    as_json: bool,
+) -> None:
+    """Rewrite canonical turn text (M9) -- and nothing else.
+
+    Timings, source lineage, and turn IDs are re-attached from the input
+    turns, so a text pass can never move a turn, change a speaker, or
+    invent an editorial node. Every difference is accounted for in a
+    ledger entry, and the pass is refused outright if it fails the
+    retention and fidelity gates.
+
+    Because turn IDs survive, running this *after* a speaker review does
+    not invalidate the review.
+    """
+    store = BundleStore(bundle_path)
+    try:
+        outcome = await run_text_transform(
+            store,
+            mode=TextEditMode(mode),
+            agent=claude_agent,
+            model=claude_agent.defaults.model,
+            context_note=context_note,
+        )
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+
+    payload = {
+        "revision_id": outcome.revision.revision_id,
+        "mode": mode,
+        "changed_turns": outcome.changed_turn_count,
+        "dropped_turns": outcome.dropped_turn_count,
+        "ledger_component_id": outcome.ledger.component_id,
+    }
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    for key, value in payload.items():
+        click.echo(f"{key}: {value}")
+
+
+@transform_group.command("chapter")
+@_bundle_option
+@click.option("--context", "context_note", default="", help="Meeting context line.")
+@_json_option
+@agent
+@coro
+async def transform_chapter_command(
+    claude_agent: ClaudeAgent, bundle_path: Path, context_note: str, as_json: bool
+) -> None:
+    """Divide the canonical turn sequence into chapters (M10).
+
+    Coverage is exact by construction: the returned boundaries are
+    projected back onto the real ordered sequence, so every turn lands in
+    exactly one chapter and the capability refuses to validate if it
+    does not.
+    """
+    store = BundleStore(bundle_path)
+    try:
+        outcome = await run_chapter_transform(
+            store,
+            agent=claude_agent,
+            model=claude_agent.defaults.model,
+            context_note=context_note,
+        )
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+
+    payload = {
+        "revision_id": outcome.revision.revision_id,
+        "chapters": [
+            {"title": chapter.title, "start_ms": chapter.start_ms}
+            for chapter in outcome.chapters.chapters
+        ],
+    }
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    click.echo(f"revision_id: {outcome.revision.revision_id}")
+    for chapter in outcome.chapters.chapters:
+        click.echo(f"  {chapter.start_ms:>9}ms  {chapter.title}")
+
+
+@transform_group.command("minutes")
+@_bundle_option
+@click.option("--context", "context_note", default="", help="Meeting context line.")
+@_json_option
+@agent
+@coro
+async def transform_minutes_command(
+    claude_agent: ClaudeAgent, bundle_path: Path, context_note: str, as_json: bool
+) -> None:
+    """Derive evidence-linked minutes (M10).
+
+    Every finding cites the turns or notes sections it came from; an
+    uncited finding is dropped before storage and refused again at render
+    time. Owners come only from participant records -- a name mentioned in
+    passing never becomes an assignee.
+    """
+    store = BundleStore(bundle_path)
+    try:
+        outcome = await run_minutes_transform(
+            store,
+            agent=claude_agent,
+            model=claude_agent.defaults.model,
+            context_note=context_note,
+        )
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+
+    payload = {
+        "revision_id": outcome.revision.revision_id,
+        "summary": outcome.minutes.summary.text,
+        "findings": [
+            {"kind": finding.kind.value, "text": finding.text}
+            for finding in outcome.minutes.findings
+        ],
+        "dropped_unsourced_findings": list(outcome.dropped_unsourced_findings),
+    }
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    click.echo(f"revision_id: {outcome.revision.revision_id}")
+    click.echo(f"summary: {outcome.minutes.summary.text}")
+    for finding in outcome.minutes.findings:
+        click.echo(f"  [{finding.kind.value}] {finding.text}")
+    for dropped in outcome.dropped_unsourced_findings:
+        click.echo(f"  DROPPED (unsourced): {dropped}")
+
+
+# -- review: export / apply (M8) --------------------------------------------
+
+
+@click.group("review", help="Export and apply the speaker review pack (M8).")
+def review_group() -> None:
+    pass
+
+
+@review_group.command("export")
+@_bundle_option
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Where to write the review pack JSON.",
+)
+@_json_option
+def review_export_command(bundle_path: Path, out_path: Path, as_json: bool) -> None:
+    """Write a review pack bound to this bundle's current head.
+
+    The pack lists every voice cluster (plus any turn no cluster covers),
+    the machine's proposal for each, and the full transcript. Fill in
+    `reviewer` and add one entry to `decisions` per item, then
+    `review apply` it. Leaving an item out is a partial review -- recorded
+    honestly and rendered as "Unclear speaker", never guessed.
+
+    Exporting reads only; it takes no lease and changes nothing.
+    """
+    store = BundleStore(bundle_path)
+    try:
+        written = export_review_pack(store, destination=out_path)
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+
+    if as_json:
+        click.echo(json.dumps({"pack": str(written)}, indent=2, sort_keys=True))
+        return
+    click.echo(f"pack: {written}")
+
+
+@review_group.command("apply")
+@_bundle_option
+@_json_option
+@click.argument(
+    "pack_path", type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+def review_apply_command(bundle_path: Path, as_json: bool, pack_path: Path) -> None:
+    """Apply a filled review pack (M8).
+
+    Refuses a pack whose bound revision or turn/cluster inventory no
+    longer matches the head -- re-export rather than applying decisions to
+    turns the reviewer never saw. Applying the same pack twice is a no-op
+    that returns the first application's revision. A second, differing
+    review against the same input revision is rejected in v1.
+    """
+    store = BundleStore(bundle_path)
+    try:
+        outcome = run_review_apply(store, pack_path=pack_path)
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+
+    payload = {
+        "review_id": outcome.review.review_id,
+        "result_revision_id": outcome.review.result_revision_id,
+        "already_applied": outcome.already_applied,
+        "addressed_items": outcome.addressed_item_count,
+        "total_items": outcome.total_item_count,
+    }
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    for key, value in payload.items():
+        click.echo(f"{key}: {value}")
+
+
+# -- render / apply (M17 / M13) ---------------------------------------------
+
+
+@click.command("render")
+@_bundle_option
+@click.option(
+    "--revision",
+    "revision_id",
+    default=None,
+    help="Render this revision instead of the current head.",
+)
+@click.option(
+    "--no-transcript",
+    "include_transcript",
+    flag_value=False,
+    default=True,
+    help="Render meeting notes and chapters only, omitting the transcript body.",
+)
+@click.option(
+    "--out",
+    "out_path",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Also write the rendered markdown here (it is always stored in the "
+    "bundle regardless).",
+)
+@_json_option
+def render_command(
+    bundle_path: Path,
+    revision_id: str | None,
+    include_transcript: bool,
+    out_path: Path | None,
+    as_json: bool,
+) -> None:
+    """Render the DUM-C meeting note for one revision (M17).
+
+    Pure and byte-deterministic: the same revision rendered twice produces
+    the same bytes. Refuses if any turn would publish an unreviewed
+    speaker attribution (M5), or if the profile's required chapters or
+    minutes are missing or did not validate.
+
+    This writes nothing into the note. `apply` does that, separately.
+    """
+    store = BundleStore(bundle_path)
+    try:
+        record = render_document(
+            store, revision_id=revision_id, include_transcript=include_transcript
+        )
+        body = store.load_render_output(record.render_id).decode("utf-8")
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+
+    if out_path is not None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(body, encoding="utf-8")
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "render_id": record.render_id,
+                    "revision_id": record.revision_id,
+                    "output_sha256": record.output_sha256,
+                    "out": str(out_path) if out_path else None,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+    click.echo(f"render_id: {record.render_id}")
+    click.echo(f"revision_id: {record.revision_id}")
+    click.echo(f"output_sha256: {record.output_sha256}")
+    if out_path is not None:
+        click.echo(f"out: {out_path}")
+
+
+@click.command("apply")
+@_bundle_option
+@click.option("--render", "render_id", required=True, help="Render to apply.")
+@click.option(
+    "--target",
+    "target_path",
+    required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Note to write. Use a copy while evaluating -- never the vault original.",
+)
+@click.option(
+    "--allow-stale-render",
+    is_flag=True,
+    help="Apply a render of a revision that is no longer the head. Recorded on "
+    "the apply record.",
+)
+@click.option(
+    "--adopt-edited-region",
+    is_flag=True,
+    help="Authorise adopting legacy generated sections that have authored content "
+    "between them. Without this the migration fails closed. Recorded.",
+)
+@_json_option
+def apply_command(
+    bundle_path: Path,
+    render_id: str,
+    target_path: Path,
+    allow_stale_render: bool,
+    adopt_edited_region: bool,
+    as_json: bool,
+) -> None:
+    """Write a render into its note's owned region (M13).
+
+    Everything outside the `<!-- jake-tools:transcript:begin/end -->`
+    markers is preserved byte for byte, including authored content *below*
+    the generated sections -- the specific thing the legacy merge path
+    truncated. A note that predates the markers has its legacy
+    `## Meeting Notes` / `## Chapters` / `## Transcript` sections adopted,
+    failing closed if authored content sits between them.
+
+    Refuses before writing if the note changed since the render was
+    computed, or if the render is of a superseded revision. The write is
+    atomic and read back before it is reported as verified.
+    """
+    store = BundleStore(bundle_path)
+    try:
+        outcome = apply_render(
+            store,
+            render_id=render_id,
+            target_path=target_path,
+            allow_stale_render=allow_stale_render,
+            adopt_edited_region=adopt_edited_region,
+        )
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+
+    payload = {
+        "apply_id": outcome.record.apply_id,
+        "state": outcome.record.state.value,
+        "target": outcome.record.target_path,
+        "written": outcome.written,
+        "unchanged": outcome.unchanged,
+        "migrated_legacy_headings": outcome.record.migrated_legacy_headings,
+    }
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    for key, value in payload.items():
+        click.echo(f"{key}: {value}")
+
+
+# -- recipe (the composed path) ---------------------------------------------
+
+
+@click.group("recipe", help="Composed transcript paths.")
+def recipe_group() -> None:
+    pass
+
+
+@recipe_group.command("obsidian-recording")
+@_bundle_option
+@click.option("--context", "context_note", default="", help="Meeting context line.")
+@click.option(
+    "--no-stop-for-review",
+    "stop_for_review",
+    flag_value=False,
+    default=True,
+    help="Run straight through to the products without stopping for review. The "
+    "speaker gate still applies, so this only succeeds once a review is applied.",
+)
+@_json_option
+@agent
+@coro
+async def recipe_obsidian_recording_command(
+    claude_agent: ClaudeAgent,
+    bundle_path: Path,
+    context_note: str,
+    stop_for_review: bool,
+    as_json: bool,
+) -> None:
+    """Run an already-ingested Obsidian note's recordings all the way to a
+    polished, chaptered transcript and meeting notes.
+
+    Timeline, transcription, normalisation, and speaker proposal, then a
+    stop at the durable review checkpoint. Each step is skipped when its
+    output already exists, so re-running after a speaker correction never
+    re-runs acquisition or ASR.
+
+    After `review apply`, either re-run this command or `resume` the
+    waiting run to build the corrected and polished transcript, chapters,
+    minutes, and the render. Writing the note is a separate, explicit
+    `apply`.
+    """
+    store = BundleStore(bundle_path)
+    try:
+        outcome = await run_obsidian_recording_recipe(
+            store,
+            agent=claude_agent,
+            model=claude_agent.defaults.model,
+            context_note=context_note,
+            stop_for_review=stop_for_review,
+        )
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+
+    payload: dict[str, object] = {
+        "run_id": outcome.run.run_id,
+        "state": outcome.run.state.value,
+        "stopped_for_review": outcome.stopped_for_review,
+        "head_revision_id": store.load_manifest().head_revision_id,
+    }
+    if outcome.products is not None:
+        payload["render_id"] = outcome.products.render.render_id
+        payload["output_sha256"] = outcome.products.render.output_sha256
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    for key, value in payload.items():
+        click.echo(f"{key}: {value}")
+    if outcome.stopped_for_review:
+        click.echo("")
+        click.echo(
+            "Stopped for speaker review. Next: `transcript review export --bundle "
+            f"{bundle_path} --out review.json`, fill it in, then `transcript review "
+            f"apply --bundle {bundle_path} review.json` and re-run this command."
+        )

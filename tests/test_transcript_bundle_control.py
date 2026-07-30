@@ -839,10 +839,16 @@ def test_run_bundle_operation_moves_a_failure_to_the_durable_failed_state(
     assert "synthetic executor failure" in run.next_action.rationale
 
 
-def test_default_bundle_executors_registers_timeline_and_transcribe() -> None:
+def test_default_bundle_executors_registers_the_model_free_transforms() -> None:
+    """The default mapping covers every operation `resume` can dispatch
+    without a ClaudeAgent. The LLM-backed kinds (speakers-propose,
+    products) are added by `bundle_executors_with_agent` at the point a
+    command already holds an agent -- they cannot live here, because
+    cli/context.py builds this mapping as a module-level default long
+    before --model has been resolved."""
     executors = default_bundle_executors()
 
-    assert set(executors) == {"timeline", "transcribe"}
+    assert set(executors) == {"timeline", "transcribe", "normalise"}
 
 
 def test_run_timeline_transform_builds_and_moves_the_head(tmp_path: Path) -> None:

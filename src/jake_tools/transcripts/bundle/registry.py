@@ -34,22 +34,26 @@ from ..errors import TranscriptError
 from .assignment import (
     AssignmentCoverage,
     assignment_coverage,
+    canonical_turn_set,
     canonical_turns,
     effective_assignments,
 )
 from .components import (
     AsrResultComponent,
+    ChapterSetComponent,
     ClusterDecision,
     ComponentRecord,
     DiarisationResultComponent,
     MachineAttributionSetComponent,
     MediaRecordingComponent,
+    MinutesComponent,
     NotesComponent,
     ParticipantSetComponent,
     ProviderLabelSetComponent,
     RecordingReferenceSetComponent,
     SpeakerReviewComponent,
     TextEditLedgerComponent,
+    TextEditMode,
     TextEditOperation,
     TimedTurnSetComponent,
     TimelineCombinedComponent,
@@ -1115,6 +1119,233 @@ def _validate_speakers_human_confirmed(context: ValidationContext) -> Capability
     )
 
 
+# -- real validators: text.corrected / text.polished (M9) --------------------
+
+
+def _make_text_validator(
+    *, key: CapabilityKey, mode: TextEditMode
+) -> CapabilityValidatorFn:
+    """M9: "a ledger that does not account for the full diff fails
+    validation".
+
+    Present-validated requires a ledger for this mode whose declared
+    output turn set *is* the live canonical set, and whose entries account
+    for every live turn exactly once. That is what makes the capability a
+    proof rather than a label: a stage cannot claim ``text.polished`` by
+    writing a ledger about turns that are no longer there.
+    """
+
+    def _validate(context: ValidationContext) -> CapabilityRecord:
+        ledgers = [
+            component
+            for component in context.components.values()
+            if isinstance(component, TextEditLedgerComponent) and component.mode == mode
+        ]
+        if not ledgers:
+            return CapabilityRecord(
+                key=key,
+                status=CapabilityStatus.ABSENT,
+                validator_version=_VALIDATOR_VERSION,
+            )
+        turn_set = canonical_turn_set(context.components)
+        if turn_set is None:
+            return CapabilityRecord(
+                key=key,
+                status=CapabilityStatus.FAILED,
+                component_ids=tuple(ledger.component_id for ledger in ledgers),
+                validator_version=_VALIDATOR_VERSION,
+                failure_detail=(
+                    "a text-edit ledger exists but no single canonical timed turn "
+                    "set does, so the ledger describes nothing this document has"
+                ),
+            )
+        current = [
+            ledger
+            for ledger in ledgers
+            if ledger.output_turn_set_component_id == turn_set.component_id
+        ]
+        if not current:
+            return CapabilityRecord(
+                key=key,
+                status=CapabilityStatus.ABSENT,
+                component_ids=tuple(ledger.component_id for ledger in ledgers),
+                validator_version=_VALIDATOR_VERSION,
+                failure_detail=(
+                    "every ledger for this mode describes an earlier turn set; a "
+                    "later pass has since replaced it, so this proof is stale rather "
+                    "than current"
+                ),
+            )
+        ledger = current[-1]
+        live_turn_ids = {turn.turn_id for turn in turn_set.turns}
+        accounted = {
+            turn_id for entry in ledger.entries for turn_id in entry.output_turn_ids
+        }
+        unaccounted = sorted(live_turn_ids - accounted)
+        if unaccounted:
+            return CapabilityRecord(
+                key=key,
+                status=CapabilityStatus.FAILED,
+                component_ids=(ledger.component_id,),
+                validator_version=_VALIDATOR_VERSION,
+                failure_detail=(
+                    f"ledger does not account for {len(unaccounted)} live turn(s): "
+                    f"{unaccounted[:5]}"
+                ),
+            )
+        return CapabilityRecord(
+            key=key,
+            status=CapabilityStatus.PRESENT_VALIDATED,
+            component_ids=(ledger.component_id,),
+            coverage=(
+                f"entries={len(ledger.entries)}",
+                f"turns={len(live_turn_ids)}",
+            ),
+            input_revision_ids=(context.revision_id,),
+            provenance_classes=(ledger.editor,),
+            validator_version=_VALIDATOR_VERSION,
+        )
+
+    return _validate
+
+
+# -- real validators: chapters / minutes (M10) -------------------------------
+
+
+def _validate_chapters(context: ValidationContext) -> CapabilityRecord:
+    """M4: "exact coverage of the ordered turn sequence".
+
+    Exact means exact: the chapters' concatenated turn IDs must equal the
+    canonical sequence, in order. A partition that merely covers the same
+    *set* would let a chapter claim turns that appear elsewhere in the
+    transcript, which is how a navigable table of contents quietly stops
+    matching the thing it navigates.
+    """
+    chapter_set, failure = _single_component(
+        context, ChapterSetComponent, label=CapabilityKey.CHAPTERS.value
+    )
+    if failure is not None:
+        return failure
+    assert chapter_set is not None
+
+    turns = canonical_turns(context.components)
+    if not turns:
+        return CapabilityRecord(
+            key=CapabilityKey.CHAPTERS,
+            status=CapabilityStatus.FAILED,
+            component_ids=(chapter_set.component_id,),
+            validator_version=_VALIDATOR_VERSION,
+            failure_detail=(
+                "a chapter set exists but there is no single canonical timed turn "
+                "sequence for it to cover"
+            ),
+        )
+    covered = [
+        turn_id for chapter in chapter_set.chapters for turn_id in chapter.turn_ids
+    ]
+    expected = [turn.turn_id for turn in turns]
+    if covered != expected:
+        return CapabilityRecord(
+            key=CapabilityKey.CHAPTERS,
+            status=CapabilityStatus.FAILED,
+            component_ids=(chapter_set.component_id,),
+            validator_version=_VALIDATOR_VERSION,
+            failure_detail=(
+                f"chapters cover {len(covered)} turn slot(s) but the canonical "
+                f"sequence has {len(expected)}, or they are not in the same order"
+            ),
+        )
+    return CapabilityRecord(
+        key=CapabilityKey.CHAPTERS,
+        status=CapabilityStatus.PRESENT_VALIDATED,
+        component_ids=(chapter_set.component_id,),
+        coverage=(
+            f"chapters={len(chapter_set.chapters)}",
+            f"turns={len(expected)}",
+        ),
+        input_revision_ids=(context.revision_id,),
+        validator_version=_VALIDATOR_VERSION,
+    )
+
+
+def _validate_minutes(context: ValidationContext) -> CapabilityRecord:
+    """M4/M10: "evidence-linked findings only".
+
+    Checks each ref actually resolves: turn IDs against the canonical
+    sequence (plus M7-accounted drops), notes section IDs against the M20
+    notes components, and owners against participant records (F21). The
+    component type already guarantees *some* ref exists on every claim;
+    this is where "some ref" has to mean "a ref to something real".
+    """
+    minutes, failure = _single_component(
+        context, MinutesComponent, label=CapabilityKey.MINUTES.value
+    )
+    if failure is not None:
+        return failure
+    assert minutes is not None
+
+    live_turn_ids = {
+        turn.turn_id for turn in canonical_turns(context.components)
+    } | _dropped_turn_ids(context.components)
+    live_section_ids = {
+        section.section_id
+        for component in context.components.values()
+        if isinstance(component, NotesComponent)
+        for section in component.sections
+    }
+    live_participant_ids = {
+        participant.participant_id
+        for component in context.components.values()
+        if isinstance(component, ParticipantSetComponent)
+        for participant in component.participants
+    }
+    problems: list[str] = []
+    for claim in (minutes.summary, *minutes.findings):
+        problems.extend(
+            f"turn {turn_id}"
+            for turn_id in claim.evidence_turn_ids
+            if turn_id not in live_turn_ids
+        )
+        problems.extend(
+            f"section {section_id}"
+            for section_id in claim.evidence_section_ids
+            if section_id not in live_section_ids
+        )
+    problems.extend(
+        f"owner {finding.owner_participant_id}"
+        for finding in minutes.findings
+        if finding.owner_participant_id is not None
+        and finding.owner_participant_id not in live_participant_ids
+    )
+    if problems:
+        return CapabilityRecord(
+            key=CapabilityKey.MINUTES,
+            status=CapabilityStatus.FAILED,
+            component_ids=(minutes.component_id,),
+            validator_version=_VALIDATOR_VERSION,
+            failure_detail=(
+                f"minutes cite {len(problems)} ref(s) that do not resolve in this "
+                f"document: {sorted(set(problems))[:5]}"
+            ),
+        )
+    return CapabilityRecord(
+        key=CapabilityKey.MINUTES,
+        status=CapabilityStatus.PRESENT_VALIDATED,
+        component_ids=(minutes.component_id,),
+        coverage=(f"findings={len(minutes.findings)}",),
+        input_revision_ids=(context.revision_id,),
+        provenance_classes=tuple(
+            sorted(
+                {
+                    claim.claim_status.value
+                    for claim in (minutes.summary, *minutes.findings)
+                }
+            )
+        ),
+        validator_version=_VALIDATOR_VERSION,
+    )
+
+
 # -- stub validator: every other key -----------------------------------------
 
 
@@ -1275,12 +1506,38 @@ def _build_registry() -> dict[CapabilityKey, RegistryEntry]:
         implemented=True,
     )
 
+    entries[CapabilityKey.TEXT_CORRECTED] = RegistryEntry(
+        key=CapabilityKey.TEXT_CORRECTED,
+        cardinality=cardinality_of(CapabilityKey.TEXT_CORRECTED),
+        validator=_make_text_validator(
+            key=CapabilityKey.TEXT_CORRECTED, mode=TextEditMode.CORRECT
+        ),
+        implemented=True,
+    )
+    entries[CapabilityKey.TEXT_POLISHED] = RegistryEntry(
+        key=CapabilityKey.TEXT_POLISHED,
+        cardinality=cardinality_of(CapabilityKey.TEXT_POLISHED),
+        validator=_make_text_validator(
+            key=CapabilityKey.TEXT_POLISHED, mode=TextEditMode.POLISH
+        ),
+        implemented=True,
+    )
+    entries[CapabilityKey.MINUTES] = RegistryEntry(
+        key=CapabilityKey.MINUTES,
+        cardinality=cardinality_of(CapabilityKey.MINUTES),
+        validator=_validate_minutes,
+        implemented=True,
+    )
+
     # M4: the one sanctioned prerequisite -- chapters unavailable without a
     # validated timed turn set (D6). Data only in this phase: no validator
     # (real or stub) for either key inspects `prerequisite_statuses` yet.
-    entries[CapabilityKey.CHAPTERS] = dataclasses.replace(
-        entries[CapabilityKey.CHAPTERS],
+    entries[CapabilityKey.CHAPTERS] = RegistryEntry(
+        key=CapabilityKey.CHAPTERS,
+        cardinality=cardinality_of(CapabilityKey.CHAPTERS),
+        validator=_validate_chapters,
         prerequisites=(CapabilityKey.TRANSCRIPT_TIMED,),
+        implemented=True,
     )
     _check_prerequisite_ordering(entries)
     return entries

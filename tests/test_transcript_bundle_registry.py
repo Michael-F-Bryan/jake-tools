@@ -312,6 +312,10 @@ _IMPLEMENTED_KEYS = {
     CapabilityKey.SPEAKERS_MACHINE_CLUSTERED,
     CapabilityKey.SPEAKERS_HUMAN_REVIEWED,
     CapabilityKey.SPEAKERS_HUMAN_CONFIRMED,
+    CapabilityKey.TEXT_CORRECTED,
+    CapabilityKey.TEXT_POLISHED,
+    CapabilityKey.CHAPTERS,
+    CapabilityKey.MINUTES,
 }
 
 
@@ -343,16 +347,18 @@ def test_stub_validator_cannot_be_made_to_emit_present_validated() -> None:
     injection) to swap in a deliberately-lying validator for one key,
     rather than mutating the shared module-level REGISTRY."""
 
+    stub_key = CapabilityKey.SPEAKERS_PROVIDER_ATTRIBUTED
+
     def _lying_stub(context: ValidationContext) -> CapabilityRecord:
         return CapabilityRecord(
-            key=CapabilityKey.CHAPTERS,
+            key=stub_key,
             status=CapabilityStatus.PRESENT_VALIDATED,
             validator_version="v1",
         )
 
     lying_registry = dict(REGISTRY)
-    lying_registry[CapabilityKey.CHAPTERS] = dataclasses.replace(
-        REGISTRY[CapabilityKey.CHAPTERS], validator=_lying_stub
+    lying_registry[stub_key] = dataclasses.replace(
+        REGISTRY[stub_key], validator=_lying_stub
     )
 
     with pytest.raises(StubEmittedPresentValidatedError):
@@ -689,11 +695,10 @@ def test_transcript_capability_fails_with_two_conflicting_absence_declarations()
 
 
 def test_chapters_prerequisite_is_satisfied_once_transcript_timed_validates() -> None:
-    """Now that transcript.timed has a real validator, the M4 prerequisite
-    wiring (chapters -> transcript.timed) is exercised end to end: a
-    present-validated timed turn set does not, by itself, make the still-
-    stub chapters key present-validated (no real chapters validator exists
-    yet) -- it stays not-attempted, honestly."""
+    """The M4 prerequisite wiring (chapters -> transcript.timed), end to
+    end: a present-validated timed turn set satisfies the precondition but
+    proves nothing by itself -- with no chapter set in the closure,
+    chapters is honestly absent, not present-validated."""
     component = _timed_turn_set_component()
 
     results = validate(mint_id("rev"), {component.component_id: component})
@@ -702,7 +707,7 @@ def test_chapters_prerequisite_is_satisfied_once_transcript_timed_validates() ->
         results[CapabilityKey.TRANSCRIPT_TIMED].status
         == CapabilityStatus.PRESENT_VALIDATED
     )
-    assert results[CapabilityKey.CHAPTERS].status == CapabilityStatus.NOT_ATTEMPTED
+    assert results[CapabilityKey.CHAPTERS].status == CapabilityStatus.ABSENT
 
 
 # -- speakers.provider-labels (M5, evidence only) ----------------------------

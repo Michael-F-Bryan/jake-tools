@@ -194,6 +194,12 @@ class SpeakerContext:
     hypothesis_by_cluster: Mapping[ClusterId, SpeakerHypothesis]
     participants: Mapping[ParticipantId, ParticipantRecord]
 
+    def assignment_for(self, turn: TimedTurn) -> EffectiveAssignment:
+        """:func:`effective_assignment` bound to this context -- the shape
+        every caller that already holds a context wants, so none of them
+        has to re-import the free function to ask the obvious question."""
+        return effective_assignment(turn, self)
+
     @classmethod
     def from_components(cls, components: ComponentMap) -> SpeakerContext:
         turn_decisions: dict[TurnId, TurnDecision] = {}

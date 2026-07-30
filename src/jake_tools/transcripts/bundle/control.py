@@ -10,31 +10,62 @@ locking: it is plain orchestration over ``store``/``document``/
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import json
 import os
 import shutil
 import tempfile
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 
 from ..errors import TranscriptError
+from ..stages import StructuredAgent
+from .components import (
+    SpeakerHypothesisSetComponent,
+    SpeakerReviewComponent,
+    TextEditMode,
+    TimedTurnSetComponent,
+    TimelineCombinedComponent,
+)
 from .document import TranscriptDocumentV1, project_head, project_revision
-from .ids import ArtefactId, RevisionId
+from .ids import ArtefactId, RevisionId, RunId, mint_id
+from .normalise import normalise_transcript
+from .products import (
+    ChapterOutcome,
+    MinutesOutcome,
+    transform_chapters,
+    transform_minutes,
+)
 from .records import (
     DURABLE_RUN_STATES,
     BundleManifest,
     Lease,
     NoDocumentYet,
     OperationRef,
+    RenderRecord,
     RunRecord,
     RunState,
     SourceAssociation,
     SourceMembershipRecord,
 )
 from .registry import CapabilityKey, CapabilityStatus
+from .render import (
+    DUMC_VARIANT,
+    MEETING_NOTE_PROFILE,
+    MEETING_NOTE_PROFILE_VERSION,
+    RENDERER_VERSION,
+    destination_of,
+    render_meeting_note,
+    template_sha256,
+)
+from .review import ApplyReviewOutcome, apply_review
+from .speakers import propose_speakers
 from .store import ArtefactRecord, BundleStore, UnknownSourceError
+from .text import TextTransformOutcome, transform_text
 from .timeline import transform_timeline
 from .transcribe import SubprocessRunner, default_subprocess_runner, transcribe_media
 
@@ -426,6 +457,7 @@ class ExecutorOutcome:
 
 
 BundleExecutor = Callable[[BundleStore, RunRecord], ExecutorOutcome]
+AsyncBundleExecutor = Callable[[BundleStore, RunRecord], Awaitable[ExecutorOutcome]]
 
 
 def _single_resumable_run(store: BundleStore, manifest: BundleManifest) -> str:
@@ -710,6 +742,14 @@ def transcribe_executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
     return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
 
 
+def normalise_executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+    """Dispatches M7's normalisation for `resume`. Like the timeline and
+    transcribe executors, :func:`normalise_transcript` already moved the
+    head itself, so no second ``update_head`` is proposed here."""
+    normalise_transcript(store, run_id=run.run_id)
+    return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
+
+
 def default_bundle_executors() -> Mapping[str, BundleExecutor]:
     """The production executor mapping (M2's resume seam): every
     operation kind ``transform timeline``/``transform transcribe`` may
@@ -719,8 +759,536 @@ def default_bundle_executors() -> Mapping[str, BundleExecutor]:
     the dispatch mechanism itself.
     """
     return MappingProxyType(
-        {"timeline": timeline_executor, "transcribe": transcribe_executor}
+        {
+            "timeline": timeline_executor,
+            "transcribe": transcribe_executor,
+            "normalise": normalise_executor,
+        }
     )
+
+
+def bundle_executors_with_agent(
+    agent: StructuredAgent, *, model: str, context_note: str = ""
+) -> Mapping[str, BundleExecutor]:
+    """The production executor mapping plus the LLM-backed operations.
+
+    ``speakers-propose`` and ``products`` need a ``ClaudeAgent``, which
+    :func:`default_bundle_executors` has no way to build (it is imported by
+    ``cli/context.py``'s own module-level default, long before any command
+    has resolved ``--model``). Binding them here, at the point where a
+    command already holds an agent, keeps the LLM seam out of the default
+    mapping while still letting `resume` dispatch a durable run recorded
+    against either kind.
+
+    ``asyncio.run`` appears here because M2's executor seam is
+    synchronous and `resume` is a synchronous command; the async
+    orchestration functions below are called directly (never through this
+    mapping) by the commands that are already inside an event loop.
+    """
+    executors = dict(default_bundle_executors())
+
+    def _propose(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+        asyncio.run(
+            propose_speakers(store, run_id=run.run_id, agent=agent, model=model)
+        )
+        return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
+
+    def _products(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+        asyncio.run(
+            build_products(
+                store,
+                run_id=run.run_id,
+                agent=agent,
+                model=model,
+                context_note=context_note,
+            )
+        )
+        return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
+
+    executors["speakers-propose"] = _propose
+    executors["products"] = _products
+    return MappingProxyType(executors)
+
+
+async def run_async_bundle_operation(
+    store: BundleStore, *, next_action: OperationRef, executor: AsyncBundleExecutor
+) -> RunRecord:
+    """:func:`run_bundle_operation` for the LLM-backed transforms.
+
+    A deliberate near-duplicate of the synchronous path: the only
+    difference is ``await executor(...)``, and the alternative -- driving
+    the sync path with ``asyncio.run`` from inside a command that is
+    already in an event loop -- does not work at all. Failure handling is
+    kept identical on purpose, so a crashed async transform lands in
+    exactly the same durable, resumable ``failed`` state a crashed
+    synchronous one does.
+    """
+    run = store.create_run(next_action=next_action)
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+    run = store.load_run(run.run_id)
+    try:
+        outcome = await executor(store, run)
+    except Exception as exc:
+        store.release_lease(
+            run_id=run.run_id,
+            new_state=RunState.FAILED,
+            next_action=_annotate_failure(next_action, exc),
+        )
+        raise ExecutorFailedError(
+            f"executor for operation kind {next_action.kind!r} raised "
+            f"{type(exc).__name__}: {exc}; run {run.run_id} moved to 'failed' "
+            "(resumable -- the same next_action will be retried)."
+        ) from exc
+    return _apply_outcome(store, run.run_id, outcome)
+
+
+def run_normalise_transform(store: BundleStore) -> RunRecord:
+    """CLI entry point for `transform normalise` (M7)."""
+    return run_bundle_operation(
+        store,
+        next_action=OperationRef(
+            kind="normalise", rationale="transcript transform normalise"
+        ),
+        executor=normalise_executor,
+    )
+
+
+async def run_speakers_propose(
+    store: BundleStore,
+    *,
+    agent: StructuredAgent,
+    model: str,
+    stop_for_review: bool = True,
+    context_note: str = "",
+) -> RunRecord:
+    """M8: propose speakers, then stop at the durable review checkpoint.
+
+    ``stop_for_review=True`` is the whole point of the overhaul: the run
+    ends in ``review_required`` with the lease *released* and a recorded
+    ``next_action`` of ``products``, so the operator can walk away, export
+    a pack, decide the speakers at their leisure, apply it, and `resume`
+    -- on another day, from another shell -- without repeating any of the
+    stable upstream work.
+    """
+
+    async def _executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+        await propose_speakers(store, run_id=run.run_id, agent=agent, model=model)
+        if not stop_for_review:
+            return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
+        return ExecutorOutcome(
+            state=RunState.REVIEW_REQUIRED,
+            next_action=OperationRef(
+                kind="products",
+                config_hash=None,
+                rationale=(
+                    "speaker hypotheses are proposals only (M8 rung 7); export a "
+                    "review pack, decide each cluster, apply it, then resume to "
+                    "build the polished transcript, chapters, and minutes"
+                ),
+            ),
+        )
+
+    return await run_async_bundle_operation(
+        store,
+        next_action=OperationRef(
+            kind="speakers-propose", rationale="transcript speakers propose"
+        ),
+        executor=_executor,
+    )
+
+
+def run_review_apply(store: BundleStore, *, pack_path: Path) -> ApplyReviewOutcome:
+    """M8: apply a filled review pack under its own run.
+
+    A separate run from the one waiting in ``review_required``: that run
+    released its lease precisely so this could happen later, and M2 allows
+    exactly one *active* run, not one run per bundle lifetime. Re-applying
+    an already-applied pack takes no lease at all -- it is a read that
+    returns the first application's revision.
+    """
+    if store.find_review(_pack_review_id(pack_path)) is not None:
+        return apply_review(store, run_id="", pack_path=pack_path)
+
+    outcome: list[ApplyReviewOutcome] = []
+
+    def _executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+        outcome.append(apply_review(store, run_id=run.run_id, pack_path=pack_path))
+        return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
+
+    run_bundle_operation(
+        store,
+        next_action=OperationRef(
+            kind="review-apply",
+            input_ids=(str(pack_path),),
+            rationale="apply a filled speaker review pack (M8)",
+        ),
+        executor=_executor,
+    )
+    return outcome[0]
+
+
+def _pack_review_id(pack_path: Path) -> str:
+    """The pack's own ``review_id``, for the pre-lease idempotency check.
+
+    Read directly rather than through :func:`apply_review` so an
+    already-applied pack never even creates a run: a no-op that leaves a
+    run record behind is not a no-op an operator would recognise.
+    Malformed packs return a sentinel and fall through to
+    :func:`apply_review`, which produces the real, specific error.
+    """
+    try:
+        return str(json.loads(pack_path.read_text(encoding="utf-8"))["review_id"])
+    except OSError, ValueError, KeyError, TypeError:
+        return "review_00000000-0000-7000-8000-000000000000"
+
+
+async def _run_single_product_stage[T](
+    store: BundleStore,
+    *,
+    kind: str,
+    rationale: str,
+    stage: Callable[[RunId], Awaitable[T]],
+) -> T:
+    """Run one LLM-backed transform under its own run and lease (M2).
+
+    The three single-stage CLI entry points below differ only in which
+    coroutine they await, so the run/lease/failure bookkeeping lives here
+    once rather than three times -- and a failure in any of them lands in
+    the same durable, resumable ``failed`` state.
+    """
+    produced: list[T] = []
+
+    async def _executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+        produced.append(await stage(run.run_id))
+        return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
+
+    await run_async_bundle_operation(
+        store,
+        next_action=OperationRef(kind=kind, rationale=rationale),
+        executor=_executor,
+    )
+    return produced[0]
+
+
+async def run_text_transform(
+    store: BundleStore,
+    *,
+    mode: TextEditMode,
+    agent: StructuredAgent,
+    model: str,
+    context_note: str = "",
+) -> TextTransformOutcome:
+    """CLI entry point for `transform text --mode correct|polish` (M9)."""
+    return await _run_single_product_stage(
+        store,
+        kind=f"text-{mode.value}",
+        rationale=f"transcript transform text --mode {mode.value}",
+        stage=lambda run_id: transform_text(
+            store,
+            run_id=run_id,
+            mode=mode,
+            agent=agent,
+            model=model,
+            context_note=context_note,
+        ),
+    )
+
+
+async def run_chapter_transform(
+    store: BundleStore,
+    *,
+    agent: StructuredAgent,
+    model: str,
+    context_note: str = "",
+) -> ChapterOutcome:
+    """CLI entry point for `transform chapter` (M10)."""
+    return await _run_single_product_stage(
+        store,
+        kind="chapter",
+        rationale="transcript transform chapter",
+        stage=lambda run_id: transform_chapters(
+            store,
+            run_id=run_id,
+            agent=agent,
+            model=model,
+            context_note=context_note,
+        ),
+    )
+
+
+async def run_minutes_transform(
+    store: BundleStore,
+    *,
+    agent: StructuredAgent,
+    model: str,
+    context_note: str = "",
+) -> MinutesOutcome:
+    """CLI entry point for `transform minutes` (M10)."""
+    return await _run_single_product_stage(
+        store,
+        kind="minutes",
+        rationale="transcript transform minutes",
+        stage=lambda run_id: transform_minutes(
+            store,
+            run_id=run_id,
+            agent=agent,
+            model=model,
+            context_note=context_note,
+        ),
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class ProductsOutcome:
+    """Everything one `products` pass produced, for reporting."""
+
+    corrected: TextTransformOutcome | None
+    polished: TextTransformOutcome | None
+    chapters: ChapterOutcome
+    minutes: MinutesOutcome
+    render: RenderRecord
+    render_body: str
+
+
+async def build_products(
+    store: BundleStore,
+    *,
+    run_id: RunId,
+    agent: StructuredAgent,
+    model: str,
+    context_note: str = "",
+    correct: bool = True,
+    polish: bool = True,
+    include_transcript: bool = True,
+) -> ProductsOutcome:
+    """M9/M10/M17: correct, polish, chapter, minute, and render.
+
+    Ordered deliberately. Correction runs before polish so the polish pass
+    reads already-correct names; both run before chaptering and minuting so
+    those stages quote the text a reader will actually see; rendering runs
+    last, over a head that already carries everything. Each step appends
+    its own revision, so a failure part-way leaves the completed steps
+    durable and the run resumable rather than discarding the lot.
+    """
+    corrected = (
+        await transform_text(
+            store,
+            run_id=run_id,
+            mode=TextEditMode.CORRECT,
+            agent=agent,
+            model=model,
+            context_note=context_note,
+        )
+        if correct
+        else None
+    )
+    polished = (
+        await transform_text(
+            store,
+            run_id=run_id,
+            mode=TextEditMode.POLISH,
+            agent=agent,
+            model=model,
+            context_note=context_note,
+        )
+        if polish
+        else None
+    )
+    chapters = await transform_chapters(
+        store, run_id=run_id, agent=agent, model=model, context_note=context_note
+    )
+    minutes = await transform_minutes(
+        store, run_id=run_id, agent=agent, model=model, context_note=context_note
+    )
+    render = render_document(store, include_transcript=include_transcript)
+    return ProductsOutcome(
+        corrected=corrected,
+        polished=polished,
+        chapters=chapters,
+        minutes=minutes,
+        render=render,
+        render_body=store.load_render_output(render.render_id).decode("utf-8"),
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class RecipeOutcome:
+    """What one `recipe run obsidian-recording` invocation reached.
+
+    ``review_required`` is a *success*, not a failure: it is the durable
+    checkpoint the whole overhaul exists for. ``products`` is only present
+    when the run got past it (because a review was already applied, or
+    because the operator explicitly opted out of stopping).
+    """
+
+    run: RunRecord
+    stopped_for_review: bool
+    products: ProductsOutcome | None
+
+
+async def run_obsidian_recording_recipe(
+    store: BundleStore,
+    *,
+    agent: StructuredAgent,
+    model: str,
+    context_note: str = "",
+    stop_for_review: bool = True,
+    subprocess_runner: SubprocessRunner = default_subprocess_runner,
+) -> RecipeOutcome:
+    """The composed path for an Obsidian note with one or more recordings.
+
+    Assumes ingestion and assembly already happened (`source ingest`,
+    which is where the operator asserts what belongs to this bundle, M3).
+    From there: timeline -> transcribe -> normalise -> propose -> stop.
+
+    Every step is skipped when its output already exists, so re-running
+    after a review costs nothing upstream -- that is the corpus's
+    "regeneration after a speaker correction must not rerun acquisition or
+    ASR" requirement, satisfied by asking the document what it already has
+    rather than by a cache.
+    """
+    document = project_head(store)
+    if isinstance(document, NoDocumentYet):
+        raise BundleControlError(
+            "this bundle has no assembled document yet; ingest the note and its "
+            "recordings first (`source ingest --kind obsidian-note|local-media`)."
+        )
+    if not document.components_of(TimelineCombinedComponent):
+        run_timeline_transform(store)
+    if document.capability_status(CapabilityKey.INFERENCE_ASR) != (
+        CapabilityStatus.PRESENT_VALIDATED
+    ):
+        run_transcribe_transform(store, subprocess_runner=subprocess_runner)
+    if not project_head_components(store, TimedTurnSetComponent):
+        run_normalise_transform(store)
+
+    reviewed = bool(project_head_components(store, SpeakerReviewComponent))
+    if not reviewed:
+        if not project_head_components(store, SpeakerHypothesisSetComponent):
+            run = await run_speakers_propose(
+                store,
+                agent=agent,
+                model=model,
+                stop_for_review=stop_for_review,
+                context_note=context_note,
+            )
+            if stop_for_review:
+                return RecipeOutcome(run=run, stopped_for_review=True, products=None)
+        elif stop_for_review:
+            return RecipeOutcome(
+                run=_review_required_run(store),
+                stopped_for_review=True,
+                products=None,
+            )
+
+    products: list[ProductsOutcome] = []
+
+    async def _executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+        products.append(
+            await build_products(
+                store,
+                run_id=run.run_id,
+                agent=agent,
+                model=model,
+                context_note=context_note,
+            )
+        )
+        return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
+
+    run = await run_async_bundle_operation(
+        store,
+        next_action=OperationRef(
+            kind="products",
+            rationale="polished transcript, chapters, minutes, and render",
+        ),
+        executor=_executor,
+    )
+    return RecipeOutcome(run=run, stopped_for_review=False, products=products[0])
+
+
+def _review_required_run(store: BundleStore) -> RunRecord:
+    """The run already waiting at the review checkpoint.
+
+    Reached when hypotheses exist but no review has been applied: the
+    recipe must report the *existing* durable run rather than creating a
+    second one that proposes again, which would mint fresh hypotheses and
+    invalidate a pack the operator may already be filling in.
+    """
+    manifest = store.load_manifest()
+    waiting = [
+        run
+        for run in (store.load_run(run_id) for run_id in manifest.run_ids)
+        if run.state == RunState.REVIEW_REQUIRED
+    ]
+    if not waiting:
+        raise BundleControlError(
+            "speaker hypotheses exist but no review has been applied and no run is "
+            "waiting at the review checkpoint; apply a review pack, or re-run "
+            "`transform speakers-propose` to create the checkpoint again."
+        )
+    return waiting[-1]
+
+
+def project_head_components[T](store: BundleStore, kind: type[T]) -> tuple[T, ...]:
+    """Components of ``kind`` in the *current* head -- re-read, not cached.
+
+    The recipe moves the head between steps, so every "has this already
+    happened?" question must look at the head as it is now; a projection
+    captured at the top would answer about a document three revisions old.
+    """
+    document = project_head(store)
+    if isinstance(document, NoDocumentYet):
+        return ()
+    return document.components_of(kind)  # pyright: ignore[reportArgumentType, reportReturnType]
+
+
+def render_document(
+    store: BundleStore,
+    *,
+    revision_id: str | None = None,
+    include_transcript: bool = True,
+    timezone: str = "Australia/Perth",
+    locale: str = "en-AU",
+) -> RenderRecord:
+    """M17: render one revision and store the record plus its bytes.
+
+    Every field M17 requires for a complete render identity is recorded,
+    including the destination snapshot the apply step later checks the
+    target against (M13). Rendering never moves the head and takes no
+    lease: it is pure, and a render of a superseded revision is a
+    perfectly legitimate thing to have -- applying one is what needs a
+    deliberate override.
+    """
+    document = project_document(store, revision_id=revision_id)
+    if isinstance(document, NoDocumentYet):
+        raise BundleControlError(
+            "this bundle has no assembled document yet (M18: run `transform "
+            "assemble` first)."
+        )
+    result = render_meeting_note(document, include_transcript=include_transcript)
+    destination = destination_of(document)
+    record = RenderRecord(
+        render_id=mint_id("render"),
+        bundle_id=document.bundle_id,
+        revision_id=document.revision_id,
+        profile=MEETING_NOTE_PROFILE,
+        profile_version=MEETING_NOTE_PROFILE_VERSION,
+        renderer_version=RENDERER_VERSION,
+        template_sha256=template_sha256(),
+        parameters={
+            "variant": DUMC_VARIANT,
+            "timezone": timezone,
+            "locale": locale,
+            "include_transcript": str(include_transcript).lower(),
+        },
+        destination_snapshot_artefact_id=(
+            None if destination is None else destination.note_artefact_id
+        ),
+        input_capability_keys=result.input_capability_keys,
+        output_sha256=result.sha256,
+        created_at=datetime.now(UTC),
+    )
+    return store.add_render(record, output=result.body.encode("utf-8"))
 
 
 def run_bundle_operation(

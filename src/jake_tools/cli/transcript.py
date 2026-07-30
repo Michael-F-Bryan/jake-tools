@@ -16,9 +16,13 @@ from ..transcripts.teams_recipe import run_teams_meeting_recipe
 from ..transcripts.youtube_recipe import run_youtube_source_notes_recipe
 from .options import agent, coro
 from .transcript_bundle import (
+    apply_command,
     bundle_group,
     inspect_command,
+    recipe_group,
+    render_command,
     resume_command,
+    review_group,
     source_group,
     status_command,
     transform_group,
@@ -65,6 +69,10 @@ transcript.add_command(validate_command)
 transcript.add_command(status_command)
 transcript.add_command(resume_command)
 transcript.add_command(transform_group)
+transcript.add_command(review_group)
+transcript.add_command(render_command)
+transcript.add_command(apply_command)
+transcript.add_command(recipe_group)
 
 
 @transcript.command("teams-meeting")
