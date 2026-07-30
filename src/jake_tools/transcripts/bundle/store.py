@@ -87,6 +87,22 @@ _SUBDIRECTORIES = (
 
 _LOCK_FILENAME = ".store.lock"
 
+# Lock-nesting depths per thread, keyed by resolved bundle root. Module
+# level (not per instance) so a callback that constructs its OWN
+# BundleStore for the same root -- the natural shape for a
+# validate_capabilities implementation, which receives no store handle --
+# nests instead of self-deadlocking on the flock.
+_LOCK_DEPTHS = threading.local()
+
+
+def _lock_depths() -> dict[str, int]:
+    depths = getattr(_LOCK_DEPTHS, "by_root", None)
+    if depths is None:
+        depths = {}
+        _LOCK_DEPTHS.by_root = depths
+    return depths
+
+
 _ACQUIRABLE_RUN_STATES = (RunState.CREATED, *DURABLE_RUN_STATES)
 
 # M2's legal state edges, keyed by the *current* state. Enforced generically
@@ -252,7 +268,6 @@ class BundleStore:
         self._replace = replace
         self._link = link
         self._validate_capabilities = validate_capabilities
-        self._lock_state = threading.local()
 
     @property
     def root(self) -> Path:
@@ -315,7 +330,9 @@ class BundleStore:
         processes both deciding an artefact needs a fresh record). This is
         a single advisory ``flock`` per bundle for exactly that.
 
-        Reentrant per thread via a depth counter: a callback invoked while
+        Reentrant per thread via a module-level depth registry keyed by
+        resolved bundle root (so nesting works across distinct BundleStore
+        instances for the same bundle): a callback invoked while
         the lock is held (chiefly ``validate_capabilities``, whose whole
         purpose is to host the future capability registry, which *will*
         resolve components through other store methods) can call back into
@@ -326,27 +343,29 @@ class BundleStore:
         independently even within one process, so re-opening the lock file
         does not see this thread's own hold as "mine". Only the outermost
         call actually touches the filesystem lock; nested calls just track
-        depth. Does not require ``root`` to exist beforehand -- refuses
-        with `NotABundleError` instead of creating it as a side effect.
+        depth. Requires ``root`` to already exist -- refuses with
+        `NotABundleError` rather than creating it as a side effect.
         """
-        depth = getattr(self._lock_state, "depth", 0)
+        lock_key = str(self._root.resolve())
+        depths = _lock_depths()
+        depth = depths.get(lock_key, 0)
         if depth > 0:
-            self._lock_state.depth = depth + 1
+            depths[lock_key] = depth + 1
             try:
                 yield
             finally:
-                self._lock_state.depth = depth
+                depths[lock_key] = depth
             return
 
         if not self._root.is_dir():
             raise NotABundleError(f"{self._root} is not a bundle (no manifest.json).")
         with open(self._root / _LOCK_FILENAME, "a+") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            self._lock_state.depth = 1
+            depths[lock_key] = 1
             try:
                 yield
             finally:
-                self._lock_state.depth = depth
+                depths.pop(lock_key, None)
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _fsync_directory(self, directory: Path) -> None:

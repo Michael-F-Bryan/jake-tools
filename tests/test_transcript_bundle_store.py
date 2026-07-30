@@ -629,6 +629,43 @@ def test_capability_validator_can_call_back_into_a_locking_store_method(
     assert len(store.load_manifest().source_memberships) == 1
 
 
+def test_capability_validator_with_its_own_store_instance_does_not_deadlock(
+    tmp_path: Path,
+) -> None:
+    """The reentrancy depth is keyed by resolved bundle root at module
+    level, not per BundleStore instance: a validate_capabilities callback
+    receives only the revision (no store handle), so constructing its OWN
+    BundleStore for the same root is its natural shape -- and with
+    instance-scoped depth that fresh instance re-entered at depth 0 and
+    deadlocked on the flock the calling thread already held."""
+    completed = threading.Event()
+
+    def validator(revision: RevisionRecord) -> None:
+        own_store = BundleStore(tmp_path / "bundle")
+        own_store.register_source(
+            association=SourceAssociation.OPERATOR_ASSERTION, evidence="from validator"
+        )
+
+    store = BundleStore(tmp_path / "bundle", validate_capabilities=validator)
+    store.create_bundle()
+    revision = store.append_revision(operation=OperationRef(kind="assemble"))
+    run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+
+    def run_update_head() -> None:
+        store.update_head(run_id=run.run_id, revision_id=revision.revision_id)
+        completed.set()
+
+    thread = threading.Thread(target=run_update_head, daemon=True)
+    thread.start()
+    thread.join(timeout=5.0)
+
+    assert completed.is_set(), (
+        "update_head did not complete -- cross-instance _locked deadlock"
+    )
+    assert len(store.load_manifest().source_memberships) == 1
+
+
 # -- leases -----------------------------------------------------------------
 
 
