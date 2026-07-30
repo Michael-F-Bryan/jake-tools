@@ -249,19 +249,47 @@ def adapt_teams_vtt(
     source = SourceArtifact(kind="msgraph-teams", raw_text_path=vtt_path)
     parsed = parse_teams_vtt(source)
 
-    proxy_config_hash = _hash_proxy_config(room_proxy_display_names)
-    confirmed_display_names = {
-        confirmation.participant_display_name for confirmation in speaker_confirmations
-    }
-
     cues = sorted(
         parsed.turns,
         key=lambda turn: (round(turn.start * 1000), round(turn.end * 1000)),
     )
 
+    # M19/F14: a confirmation is honoured only when its raw_label is
+    # something the VTT actually said -- a typo'd or fabricated raw_label
+    # must never silently promote a declared attendee to speaking-
+    # evidenced (adversarial review MAJOR: a confirmation naming a raw
+    # label absent from every cue previously still marked its attendee
+    # speaking-evidenced). Checked up front, before any component is
+    # built, so a bad confirmation fails the whole call rather than
+    # partially applying.
+    observed_labels = {cue.speaker for cue in cues}
+    unknown_raw_labels = sorted(
+        {
+            confirmation.raw_label
+            for confirmation in speaker_confirmations
+            if confirmation.raw_label not in observed_labels
+        }
+    )
+    if unknown_raw_labels:
+        raise AdapterError(
+            "speaker confirmation(s) name raw_label(s) that do not appear in "
+            f"this VTT's cues: {unknown_raw_labels} -- available raw labels: "
+            f"{sorted(observed_labels)}."
+        )
+
+    proxy_config_hash = _hash_proxy_config(room_proxy_display_names)
+    confirmed_display_names = {
+        confirmation.participant_display_name for confirmation in speaker_confirmations
+    }
+    confirmed_raw_labels = {
+        confirmation.raw_label for confirmation in speaker_confirmations
+    }
+    declared_attendee_set = set(declared_attendees)
+
     turns: list[TimedTurn] = []
     spans: list[ProviderLabelSpan] = []
     warnings: list[str] = []
+    unmapped_labels: set[str] = set()
     for cue in cues:
         start_ms = round(cue.start * 1000)
         end_ms = round(cue.end * 1000)
@@ -295,9 +323,24 @@ def adapt_teams_vtt(
                 trust_class=trust_class,
             )
         )
+        if (
+            cue.speaker not in confirmed_raw_labels
+            and cue.speaker not in declared_attendee_set
+        ):
+            unmapped_labels.add(cue.speaker)
 
     if not turns:
         raise NoTurnsFoundError(f"no usable (non-zero-length) cues in {vtt_path}")
+
+    # MINOR (adversarial review): a real speaker with no roster entry and
+    # no confirmation is correctly preserved as unattributed evidence
+    # (no fabricated participant) -- but that should not be silent.
+    for label in sorted(unmapped_labels):
+        warnings.append(
+            f"raw VTT speaker label {label!r} matches no declared attendee and "
+            "has no speaker confirmation -- preserved as unattributed provider-"
+            "label evidence only; no participant record represents them."
+        )
 
     turn_set_body = TimedTurnSetComponentBody(
         source_artefact_id=source_artefact_id, turns=tuple(turns)
@@ -358,6 +401,39 @@ _SECTION_KIND: dict[str, NotesKind] = {
     "Action items": NotesKind.PROVIDER_ACTIONS,
     "Details": NotesKind.PROVIDER_DETAILS,
 }
+
+
+def _extract_absence_statement(section: str) -> tuple[str, str]:
+    """Locate the sentence stating no transcript was available inside a
+    ``## Transcript`` section, returning ``(that sentence, the section
+    with it removed)``.
+
+    Only the matched sentence is ever stored as
+    :class:`~.components.TranscriptAbsenceDeclaration`'s ``statement``
+    (adversarial-review MINOR: storing the whole section previously
+    glued any turn-shaped fake transcript content sharing the section
+    into that evidence field). The remainder preserves the section's
+    original layout (blank lines and all) so paragraph-shaped content in
+    it -- e.g. a fabricated ``**Speaker:** text`` turn -- is still
+    detectable by :func:`parse_untimed_markdown_turns` in the caller.
+    Returns ``("", section)`` unchanged when the phrase is not found.
+    """
+    match = _NO_TRANSCRIPT_RE.search(section)
+    if match is None:
+        return "", section
+
+    start = match.start()
+    while start > 0 and section[start - 1] not in ".!?\n":
+        start -= 1
+    end = match.end()
+    while end < len(section) and section[end] not in ".!?":
+        end += 1
+    if end < len(section):
+        end += 1  # include the terminating punctuation
+
+    statement = section[start:end].strip().strip("_").strip()
+    remainder = (section[:start] + section[end:]).strip()
+    return statement, remainder
 
 
 def _split_markdown_sections(body: str) -> dict[str, str]:
@@ -495,14 +571,26 @@ def adapt_gemini_notes(
         )
 
     transcript_section = sections.get("Transcript", "").strip()
-    if not transcript_section or not _NO_TRANSCRIPT_RE.search(transcript_section):
+    statement, remainder = (
+        _extract_absence_statement(transcript_section)
+        if transcript_section
+        else ("", "")
+    )
+    if not statement:
         raise AdapterError(
             "the '## Transcript' section did not state that no transcript was "
             "available -- adapt_gemini_notes only handles the notes-only case "
             "(D2); a populated transcript section needs a different adapter."
         )
+    if remainder and parse_untimed_markdown_turns(remainder):
+        raise AdapterError(
+            "the '## Transcript' section states no transcript was available but "
+            "also contains turn-shaped ('**Speaker:** text') content alongside "
+            "it -- ambiguous evidence; refusing rather than silently discarding "
+            "or embedding it into the absence declaration."
+        )
     absence_body = TranscriptAbsenceDeclarationBody(
-        source_artefact_id=source_artefact_id, statement=transcript_section
+        source_artefact_id=source_artefact_id, statement=statement
     )
     absence_declaration = store.add_component(absence_body)
     assert isinstance(absence_declaration, TranscriptAbsenceDeclaration)

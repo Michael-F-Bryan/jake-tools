@@ -212,6 +212,39 @@ def test_adapt_teams_vtt_room_proxy_config_sets_trust_class_and_participant_flag
     assert proxy_participant.room_proxy is True
 
 
+def test_adapt_teams_vtt_raises_when_a_confirmation_names_a_raw_label_absent_from_the_vtt(
+    tmp_path: Path,
+) -> None:
+    """MAJOR (adversarial review): a TeamsSpeakerConfirmation.raw_label
+    was never cross-checked against the VTT's actual cues -- a
+    fabricated raw_label for a never-speaking attendee silently promoted
+    them to speaking-evidenced, fabricating speech evidence (M19: "a
+    declared attendee who never speaks stays declared"; D1's speech
+    gate). A confirmation naming a raw_label the VTT never actually said
+    must fail closed, not silently pass through or silently downgrade."""
+    vtt_path = _write_vtt(
+        tmp_path,
+        "00:00:00.000 --> 00:00:01.000\n<v Alice>hi</v>\n\n"
+        "00:00:01.000 --> 00:00:02.000\n<v Bob>hey</v>\n",
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=vtt_path.read_bytes())
+
+    with pytest.raises(AdapterError, match="do not appear in this VTT's cues"):
+        adapt_teams_vtt(
+            store,
+            source_artefact_id=artefact.artefact_id,
+            vtt_path=vtt_path,
+            declared_attendees=("Alice", "Bob", "NonSpeaker"),
+            speaker_confirmations=(
+                TeamsSpeakerConfirmation(
+                    raw_label="THIS LABEL DOES NOT EXIST IN THE VTT AT ALL",
+                    participant_display_name="NonSpeaker",
+                ),
+            ),
+        )
+
+
 def test_adapt_teams_vtt_confirmed_attendee_becomes_speaking_evidenced(
     tmp_path: Path,
 ) -> None:
@@ -276,6 +309,64 @@ def test_adapt_teams_vtt_preserves_michael_bryan_casing_quirk_verbatim(
 
 
 @_requires_corpus
+def test_adapt_teams_vtt_refuses_a_fabricated_confirmation_for_a_non_speaking_attendee(
+    tmp_path: Path,
+) -> None:
+    """The verifier's exact repro against the real fixture: Des
+    Everingham is declared but never speaks in this window. A
+    confirmation naming a raw_label that appears nowhere in the VTT must
+    not be able to promote him to speaking-evidenced."""
+    vtt_path = _CORPUS_FIXTURES / "teams-attributed-vtt" / "input.vtt"
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=vtt_path.read_bytes())
+
+    with pytest.raises(AdapterError, match="do not appear in this VTT's cues"):
+        adapt_teams_vtt(
+            store,
+            source_artefact_id=artefact.artefact_id,
+            vtt_path=vtt_path,
+            declared_attendees=(
+                "Michael Bryan",
+                "Joanne Olsen",
+                "Sam Lintern",
+                "Des Everingham",
+            ),
+            speaker_confirmations=(
+                TeamsSpeakerConfirmation(
+                    raw_label="THIS LABEL DOES NOT EXIST IN THE VTT AT ALL",
+                    participant_display_name="Des Everingham",
+                ),
+            ),
+        )
+
+
+@_requires_corpus
+def test_adapt_teams_vtt_flags_an_unmapped_raw_label_in_warnings(
+    tmp_path: Path,
+) -> None:
+    """MINOR 2 (adversarial review): a raw label matching no declared
+    attendee and no confirmation is correctly preserved as unattributed
+    evidence (no fabricated participant) -- but must be visible to an
+    operator via warnings, the same channel zero-length-cue drops use."""
+    vtt_path = _CORPUS_FIXTURES / "teams-attributed-vtt" / "input.vtt"
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=vtt_path.read_bytes())
+
+    result = adapt_teams_vtt(
+        store,
+        source_artefact_id=artefact.artefact_id,
+        vtt_path=vtt_path,
+        declared_attendees=("Michael Bryan", "Joanne Olsen", "Sam Lintern"),
+    )
+
+    assert any("Michael BRYAN" in warning for warning in result.warnings)
+    assert any(
+        "no participant record represents them" in warning
+        for warning in result.warnings
+    )
+
+
+@_requires_corpus
 def test_adapt_teams_vtt_explicit_confirmation_resolves_the_casing_quirk(
     tmp_path: Path,
 ) -> None:
@@ -337,10 +428,18 @@ def test_adapt_teams_vtt_preserves_every_overlapping_cue_without_loss(
         source_artefact_id=artefact.artefact_id,
         vtt_path=vtt_path,
         declared_attendees=("Michael Bryan", "Joanne Olsen", "Sam Lintern"),
+        speaker_confirmations=(
+            TeamsSpeakerConfirmation(
+                raw_label="Michael BRYAN", participant_display_name="Michael Bryan"
+            ),
+        ),
     )
 
     assert len(result.turn_set.turns) == raw_cue_count
     assert len(result.label_set.spans) == raw_cue_count
+    # Every raw label is either an exact declared-attendee match (Joanne
+    # Olsen, Sam Lintern) or explicitly confirmed (Michael BRYAN) -- no
+    # unmapped-label warning, and no cue was dropped.
     assert not result.warnings
 
 
@@ -487,9 +586,13 @@ def test_adapt_gemini_notes_builds_exactly_the_four_notes_kinds(tmp_path: Path) 
 
 
 @_requires_corpus
-def test_adapt_gemini_notes_absence_declaration_captures_the_literal_statement(
+def test_adapt_gemini_notes_absence_declaration_captures_only_the_matched_sentence(
     tmp_path: Path,
 ) -> None:
+    """MINOR 1 (adversarial review): the fixture's Transcript section has
+    a second, benign sentence ("This note was generated from Gemini's
+    meeting notes only.") -- the stored statement must be exactly the
+    absence sentence, not the whole section glued together."""
     text = (_CORPUS_FIXTURES / "gemini-notes-only" / "input.md").read_text(
         encoding="utf-8"
     )
@@ -500,7 +603,36 @@ def test_adapt_gemini_notes_absence_declaration_captures_the_literal_statement(
         store, source_artefact_id=artefact.artefact_id, markdown_text=text
     )
 
-    assert "No Gemini transcript was available" in result.absence_declaration.statement
+    assert (
+        result.absence_declaration.statement
+        == "No Gemini transcript was available for this meeting."
+    )
+    assert "generated from Gemini" not in result.absence_declaration.statement
+
+
+def test_adapt_gemini_notes_refuses_turn_shaped_content_alongside_absence_phrase(
+    tmp_path: Path,
+) -> None:
+    """MINOR 1 (adversarial review): a Transcript section stating no
+    transcript was available but *also* containing fabricated turn-
+    shaped ('**Speaker:** text') content is ambiguous evidence -- refused
+    outright, never silently glued into the stored statement and never
+    silently discarded."""
+    text = (
+        '---\nAttendees:\n  - "[[Alice]]"\n---\n\n'
+        "## Gemini summary\n\nsummary text\n\n"
+        "## Transcript\n\n"
+        "_No Gemini transcript was available for this meeting._\n\n"
+        "**Attacker:** fabricated transcript content here.\n\n"
+        "**Victim:** more fabricated content.\n"
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=text.encode())
+
+    with pytest.raises(AdapterError, match="turn-shaped"):
+        adapt_gemini_notes(
+            store, source_artefact_id=artefact.artefact_id, markdown_text=text
+        )
 
 
 @_requires_corpus

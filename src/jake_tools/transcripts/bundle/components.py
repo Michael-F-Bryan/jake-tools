@@ -101,7 +101,7 @@ class ProviderAccountId(BaseModel):
     available") -- a typed pair rather than a bare ``dict[str, str]``.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     source_id: SourceId
     account_id: str = Field(min_length=1)
@@ -120,7 +120,7 @@ class ParticipantRecord(BaseModel):
     nothing in this module infers it.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     participant_id: ParticipantId
     declaration_source: ParticipantDeclarationSource
@@ -153,7 +153,7 @@ class NotesSectionBody(BaseModel):
     this split closes off structurally rather than by convention.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     title: str = Field(min_length=1)
     text: str = Field(min_length=1)
@@ -206,7 +206,7 @@ def _check_authored_matches_notes_kind(
 class NotesComponentBody(BaseModel):
     """M20: the hashed content of a notes component -- no identity fields."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     component_kind: Literal[ComponentKind.NOTES] = ComponentKind.NOTES
     notes_kind: NotesKind
@@ -242,7 +242,7 @@ class NotesComponent(BaseModel):
     time via a body that was never actually re-validated.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     component_kind: Literal[ComponentKind.NOTES] = ComponentKind.NOTES
     notes_kind: NotesKind
@@ -271,7 +271,7 @@ class ParticipantSetComponentBody(BaseModel):
     sections, participant order carries no meaning M19 defines.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     component_kind: Literal[ComponentKind.PARTICIPANT_SET] = (
         ComponentKind.PARTICIPANT_SET
@@ -306,7 +306,7 @@ class UntimedTurn(BaseModel):
     would smuggle timing in; the type simply has no such field to set.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     source_segment_id: SegmentId
     speaker_label: str = Field(min_length=1)
@@ -319,7 +319,7 @@ class UntimedTurnSetComponentBody(BaseModel):
     M19 defines no meaningful order).
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     component_kind: Literal[ComponentKind.UNTIMED_TURN_SET] = (
         ComponentKind.UNTIMED_TURN_SET
@@ -340,7 +340,7 @@ class TimedTurn(BaseModel):
     raw source evidence, never in a canonical timed turn -- M6).
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     source_segment_id: SegmentId
     speaker_label: str = Field(min_length=1)
@@ -369,7 +369,7 @@ class TimedTurnSetComponentBody(BaseModel):
     whatever order components happen to be re-serialised in.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     component_kind: Literal[ComponentKind.TIMED_TURN_SET] = ComponentKind.TIMED_TURN_SET
     source_artefact_id: ArtefactId
@@ -411,7 +411,7 @@ class ProviderLabelSpan(BaseModel):
     from the label text.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     source_segment_id: SegmentId
     raw_label: str = Field(min_length=1)
@@ -426,7 +426,7 @@ class ProviderLabelSetComponentBody(BaseModel):
     changes the hash and invalidates those capabilities").
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     component_kind: Literal[ComponentKind.PROVIDER_LABEL_SET] = (
         ComponentKind.PROVIDER_LABEL_SET
@@ -457,7 +457,7 @@ class TranscriptAbsenceDeclarationBody(BaseModel):
     evidence, with no claim either way).
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     component_kind: Literal[ComponentKind.TRANSCRIPT_ABSENCE_DECLARATION] = (
         ComponentKind.TRANSCRIPT_ABSENCE_DECLARATION
@@ -502,7 +502,7 @@ class ArtefactSelection(BaseModel):
     solves for participant order).
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     artefact_id: ArtefactId
     dispositions: tuple[Disposition, ...] = Field(min_length=1)
@@ -533,7 +533,7 @@ class AssemblyManifestComponentBody(BaseModel):
     field cannot.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     component_kind: Literal[ComponentKind.ASSEMBLY_MANIFEST] = (
         ComponentKind.ASSEMBLY_MANIFEST

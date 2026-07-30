@@ -469,6 +469,12 @@ def _run_teams_vtt_canary() -> CanaryVerdict:
     statuses_by_name = {
         p.display_names[0]: p.status.value for p in adaptation.participants.participants
     }
+    dropped_zero_length_cues = sum(
+        1 for warning in adaptation.warnings if "zero-length" in warning
+    )
+    unmapped_label_warnings = sum(
+        1 for warning in adaptation.warnings if "no participant record" in warning
+    )
     counts = {
         "timed turns": len(adaptation.turn_set.turns),
         "provider label spans": len(adaptation.label_set.spans),
@@ -476,7 +482,8 @@ def _run_teams_vtt_canary() -> CanaryVerdict:
         "speaking-evidenced attendees": sum(
             1 for status in statuses_by_name.values() if status == "speaking-evidenced"
         ),
-        "dropped zero-length cues": len(adaptation.warnings),
+        "dropped zero-length cues": dropped_zero_length_cues,
+        "unmapped speaker label warnings": unmapped_label_warnings,
     }
     dimension_notes = {
         "Source integrity": (
@@ -540,6 +547,9 @@ def test_canary_teams_attributed_vtt() -> None:
     assert verdict.counts["declared attendees"] == 4
     assert verdict.counts["speaking-evidenced attendees"] == 3
     assert verdict.counts["dropped zero-length cues"] == 0
+    # Every real raw label (Michael BRYAN, Joanne Olsen, Sam Lintern) is
+    # explicitly confirmed in this canary -- no unmapped-label warning.
+    assert verdict.counts["unmapped speaker label warnings"] == 0
     assert verdict.pre_hashes == verdict.post_hashes
 
 

@@ -368,6 +368,43 @@ def test_untimed_turn_carries_no_timing_fields() -> None:
     assert not hasattr(turn, "end_ms")
 
 
+def test_untimed_turn_rejects_an_unknown_field_instead_of_silently_dropping_it() -> (
+    None
+):
+    """MINOR 3 (adversarial review): extra="forbid" on every component/
+    body/turn model -- a caller passing start_ms to an UntimedTurn must
+    fail loudly, not silently construct a timing-free turn as if nothing
+    were wrong. Fail-closed beats silent-ignore."""
+    with pytest.raises(ValidationError, match="start_ms"):
+        UntimedTurn(
+            source_segment_id=mint_id("seg"),
+            speaker_label="A",
+            text="hi",
+            start_ms=100,  # pyright: ignore[reportCallIssue]
+        )
+
+
+def test_notes_section_body_rejects_an_unknown_field() -> None:
+    with pytest.raises(ValidationError):
+        NotesSectionBody(
+            title="T",
+            text="x",
+            section_id=mint_id("seg"),  # pyright: ignore[reportCallIssue]
+        )
+
+
+def test_participant_record_rejects_an_unknown_field() -> None:
+    with pytest.raises(ValidationError):
+        ParticipantRecord(
+            participant_id=mint_id("participant"),
+            declaration_source=ParticipantDeclarationSource.OPERATOR,
+            declaration_evidence="test",
+            display_names=("A",),
+            status=ParticipantStatus.DECLARED,
+            unexpected_field="surprise",  # pyright: ignore[reportCallIssue]
+        )
+
+
 def test_untimed_turn_set_body_preserves_supplied_import_order() -> None:
     """M6: untimed turn sets are never reordered."""
     turns = tuple(
