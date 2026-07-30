@@ -307,6 +307,23 @@ def test_inspect_reports_typed_store_errors_as_a_clean_one_liner(
     assert "not a bundle" in result.output
 
 
+def test_inspect_reports_revision_count_and_heads_once_a_head_exists(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = _create_bundle(tmp_path)
+    store = BundleStore(bundle_dir)
+    _artefact_id, revision_id = _valid_head(store)
+
+    human = _invoke("inspect", "--bundle", str(bundle_dir))
+    machine = _invoke("inspect", "--bundle", str(bundle_dir), "--json")
+
+    assert human.exit_code == 0
+    assert f"revisions: 1 (heads: {revision_id})" in human.output
+    payload = json.loads(machine.output)
+    assert payload["revision_count"] == 1
+    assert payload["heads"] == [revision_id]
+
+
 # -- validate ------------------------------------------------------------
 
 

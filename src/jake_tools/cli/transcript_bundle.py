@@ -247,6 +247,17 @@ def _capabilities_payload(
     }
 
 
+def _heads(document: TranscriptDocumentV1 | NoDocumentYet) -> tuple[str, ...]:
+    """v1's single-head bundles (D3 defers richer branching) mean this is
+    always zero or one revision ID; kept plural to match the "revisions
+    (count + heads)" fact `inspect` reports as one unit, and to stay
+    correct if a later phase ever allows more than one.
+    """
+    if isinstance(document, NoDocumentYet):
+        return ()
+    return (document.revision_id,)
+
+
 def _echo_head(document: TranscriptDocumentV1 | NoDocumentYet) -> None:
     if isinstance(document, NoDocumentYet):
         count = len(document.candidate_artefact_ids)
@@ -286,6 +297,7 @@ def _overview_payload(overview: BundleOverview) -> dict[str, object]:
         ],
         "artefact_ids": list(overview.artefact_ids),
         "revision_count": overview.revision_count,
+        "heads": list(_heads(overview.document)),
         "runs": [
             {
                 "run_id": run.run_id,
@@ -319,7 +331,9 @@ def _echo_overview(overview: BundleOverview) -> None:
     for artefact_id in overview.artefact_ids:
         click.echo(f"  {artefact_id}")
     click.echo("")
-    click.echo(f"revisions: {overview.revision_count}")
+    heads = _heads(overview.document)
+    heads_suffix = f" (heads: {', '.join(heads)})" if heads else ""
+    click.echo(f"revisions: {overview.revision_count}{heads_suffix}")
     click.echo("")
     click.echo(f"runs ({len(overview.runs)}):")
     for run in overview.runs:
