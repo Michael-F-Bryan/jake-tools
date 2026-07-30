@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import jake_tools.transcripts.bundle.store as store_module
 from jake_tools.transcripts.bundle.components import (
     NotesComponent,
     NotesComponentBody,
@@ -397,12 +398,27 @@ def test_update_head_blocks_on_a_many_key_with_a_genuinely_failed_member(
             NotesSection(section_id=shared_id, title="B", text="b"),
         ),
         component_id=mint_id("component"),
-        content_hash="0" * 64,
+        content_hash=store_module._component_content_hash(
+            # A placeholder content_hash value has no bearing on the
+            # recomputed hash (MINOR C strips it entirely) -- any instance
+            # of the intended content computes the real one.
+            NotesComponentBody(
+                notes_kind=NotesKind.PROVIDER_SUMMARY,
+                source_artefact_id=artefact.artefact_id,
+                authored=False,
+                sections=(
+                    NotesSectionBody(title="A", text="a"),
+                    NotesSectionBody(title="B", text="b"),
+                ),
+            )
+        ),
         created_at=good.created_at,
     )
     # Write the deliberately-broken record directly (bypassing
     # add_component's normal minting path -- this simulates a corrupted
-    # or adversarially-crafted component file).
+    # or adversarially-crafted component file, but with a *correct*
+    # content_hash: MINOR C's own on-load hash verification must not be
+    # what blocks this revision, its many-key member validation must).
     (store.root / "components" / f"{broken_body_record.component_id}.json").write_text(
         broken_body_record.model_dump_json(), encoding="utf-8"
     )

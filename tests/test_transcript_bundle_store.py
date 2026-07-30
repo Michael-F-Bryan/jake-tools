@@ -677,6 +677,48 @@ def test_add_component_dedup_reads_the_persisted_hash_without_rehashing(
     assert call_count == 1
 
 
+def test_component_content_hash_of_a_body_equals_hash_of_its_stored_record(
+    tmp_path: Path,
+) -> None:
+    """MINOR C: hash(body) == hash(record) -- a stored NotesComponent is
+    not a NotesComponentBody subclass, so this must hold by reconstruction
+    (component_as_body), not merely by field-name filtering, or every
+    future content-hash-based integrity check silently disagrees with
+    itself for notes specifically."""
+    store = _store(tmp_path)
+    source_id = _registered_source(store)
+    artefact = store.ingest_artefact(
+        source_id=source_id,
+        content=b"notes bytes",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/notes.md",
+    )
+    body = _notes_body(artefact.artefact_id)
+
+    record = store.add_component(body)
+
+    assert store_module._component_content_hash(body) == record.content_hash
+    assert store_module._component_content_hash(
+        body
+    ) == store_module._component_content_hash(record)
+
+
+def test_load_component_refuses_a_tampered_content_hash(tmp_path: Path) -> None:
+    """MINOR C: content_hash is verified on load, not just written once
+    and trusted forever -- a hand-edited component file (same shape,
+    different content, stale hash) fails closed, naming the file."""
+    store = _store(tmp_path)
+    participant_component = store.add_component(_participant_body("Original"))
+    path = store.root / "components" / f"{participant_component.component_id}.json"
+    tampered = json.loads(path.read_text(encoding="utf-8"))
+    tampered["participants"][0]["display_names"] = ["Tampered Name"]
+    path.write_text(json.dumps(tampered), encoding="utf-8")
+
+    with pytest.raises(InvalidComponentFileError, match=str(path)):
+        store.load_component(participant_component.component_id)
+
+
 def test_update_head_accepts_a_component_bearing_revision(tmp_path: Path) -> None:
     """Component storage now exists (unlike the pre-component-storage
     behaviour where any component_ids on a revision were rejected
@@ -961,6 +1003,178 @@ def test_update_head_accepts_a_correction_revision_and_moves_the_head(
     updated = store.update_head(run_id=run.run_id, revision_id=correction.revision_id)
 
     assert updated.head_revision_id == correction.revision_id
+
+
+# -- M21 delta round: MAJOR A (resurrection) / MINOR B (diamonds) -----------
+
+
+def test_update_head_refuses_re_carrying_a_superseded_id_on_a_one_key(
+    tmp_path: Path,
+) -> None:
+    """MAJOR A, the verifier's exact one-key scenario: a later revision
+    that re-derives the exact content of an already-superseded component
+    (add_component's content-dedup returns the same, retracted
+    component_id) must not resurrect it -- retraction stays retracted."""
+    store = _store(tmp_path)
+    wrong_body = _participant_body("Wrong Name")
+    old_component = store.add_component(wrong_body)
+    root_revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        component_ids=(old_component.component_id,),
+    )
+    new_component = store.add_component(_participant_body("Correct Name"))
+    correction = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(root_revision.revision_id,),
+        component_ids=(new_component.component_id,),
+        superseded_component_ids=(old_component.component_id,),
+    )
+    # Re-deriving the exact same (superseded) content dedupes to the same
+    # component_id -- an entirely ordinary path, not a crafted attack.
+    resurrected = store.add_component(wrong_body)
+    assert resurrected.component_id == old_component.component_id
+    resurrection_revision = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(correction.revision_id,),
+        component_ids=(resurrected.component_id,),
+    )
+    run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+
+    with pytest.raises(InvalidSupersessionError, match="already superseded"):
+        store.update_head(
+            run_id=run.run_id, revision_id=resurrection_revision.revision_id
+        )
+
+
+def test_update_head_refuses_re_carrying_a_superseded_id_on_a_many_key(
+    tmp_path: Path,
+) -> None:
+    """MAJOR A, the verifier's exact many-key scenario: a retracted notes
+    component must not come back as a present-validated member."""
+    store = _store(tmp_path)
+    source_id = _registered_source(store)
+    artefact = store.ingest_artefact(
+        source_id=source_id,
+        content=b"notes bytes",
+        kind="notes",
+        producer="test",
+        acquisition_locator="/tmp/notes.md",
+    )
+    old_body = _notes_body(artefact.artefact_id)
+    old_component = store.add_component(old_body)
+    root_revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        artefact_ids=(artefact.artefact_id,),
+        component_ids=(old_component.component_id,),
+    )
+    new_component = store.add_component(
+        _notes_body(artefact.artefact_id, section_count=2)
+    )
+    correction = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(root_revision.revision_id,),
+        artefact_ids=(artefact.artefact_id,),
+        component_ids=(new_component.component_id,),
+        superseded_component_ids=(old_component.component_id,),
+    )
+    resurrected = store.add_component(old_body)
+    assert resurrected.component_id == old_component.component_id
+    resurrection_revision = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(correction.revision_id,),
+        artefact_ids=(artefact.artefact_id,),
+        component_ids=(resurrected.component_id,),
+    )
+    run = store.create_run(next_action=OperationRef(kind="assemble"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+
+    with pytest.raises(InvalidSupersessionError, match="already superseded"):
+        store.update_head(
+            run_id=run.run_id, revision_id=resurrection_revision.revision_id
+        )
+
+
+def test_resolve_revision_closure_diamond_one_branch_supersedes(
+    tmp_path: Path,
+) -> None:
+    """MINOR B: a diamond where only one branch supersedes the shared
+    ancestor's component -- the merge's closure is both branches' own
+    new components, with the superseded one excluded. The sibling branch
+    that never touched it must not be affected by the other branch's
+    supersession."""
+    store = _store(tmp_path)
+    root_component = store.add_component(_participant_body("Root"))
+    root_revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        component_ids=(root_component.component_id,),
+    )
+    branch_a_component = store.add_component(_participant_body("Branch A"))
+    branch_a = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(root_revision.revision_id,),
+        component_ids=(branch_a_component.component_id,),
+        superseded_component_ids=(root_component.component_id,),
+    )
+    branch_b_component = store.add_component(_participant_body("Branch B"))
+    branch_b = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(root_revision.revision_id,),
+        component_ids=(branch_b_component.component_id,),
+    )
+    merge = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(branch_a.revision_id, branch_b.revision_id),
+    )
+
+    closure = store.resolve_revision_closure(merge.revision_id)
+
+    assert set(closure.components) == {
+        branch_a_component.component_id,
+        branch_b_component.component_id,
+    }
+
+
+def test_resolve_revision_closure_diamond_both_branches_supersede_the_same_id(
+    tmp_path: Path,
+) -> None:
+    """MINOR B: both branches independently superseding the *same* shared
+    ancestor's component is legal under M21's flat formula -- the ID is
+    subtracted once; the closure is exactly the two branches' own new
+    components. (The old per-branch-running-set algorithm refused this
+    with a factually wrong "absent from ancestors' closure" message.)"""
+    store = _store(tmp_path)
+    root_component = store.add_component(_participant_body("Root"))
+    root_revision = store.append_revision(
+        operation=OperationRef(kind="assemble"),
+        component_ids=(root_component.component_id,),
+    )
+    branch_a_component = store.add_component(_participant_body("Branch A"))
+    branch_a = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(root_revision.revision_id,),
+        component_ids=(branch_a_component.component_id,),
+        superseded_component_ids=(root_component.component_id,),
+    )
+    branch_b_component = store.add_component(_participant_body("Branch B"))
+    branch_b = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(root_revision.revision_id,),
+        component_ids=(branch_b_component.component_id,),
+        superseded_component_ids=(root_component.component_id,),
+    )
+    merge = store.append_revision(
+        operation=OperationRef(kind="review-apply"),
+        parent_revision_ids=(branch_a.revision_id, branch_b.revision_id),
+    )
+
+    closure = store.resolve_revision_closure(merge.revision_id)
+
+    assert set(closure.components) == {
+        branch_a_component.component_id,
+        branch_b_component.component_id,
+    }
+    assert root_component.component_id not in closure.components
 
 
 # -- transactional head -------------------------------------------------------

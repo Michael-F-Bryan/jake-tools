@@ -182,10 +182,10 @@ class NotesComponent(BaseModel):
     both models are frozen at runtime (pyright's
     ``reportIncompatibleVariableOverride``) -- duplicating the shared
     fields here avoids fighting that rather than suppressing it. Content
-    identity is still computed correctly (:func:`component_body_type` /
-    :meth:`.store.BundleStore.add_component`'s hashing) because that goes
-    by matching field *names* against :class:`NotesComponentBody`, not by
-    Python inheritance. Loaded directly from disk (not always built via
+    identity is still computed correctly (:func:`component_as_body`
+    reconstructs the exact :class:`NotesComponentBody` this hashes as,
+    section IDs stripped) rather than by relying on Python inheritance.
+    Loaded directly from disk (not always built via
     :func:`assemble_component_record`), so it re-runs the same
     authored/notes_kind check independently -- a hand-edited or corrupted
     on-disk record must fail closed here too, not just at construction
@@ -279,31 +279,50 @@ def component_input_refs(
             return ComponentInputRefs(artefact_ids=(), component_ids=())
 
 
-def component_body_type(
+def component_as_body(
     component: NotesComponentBody
     | NotesComponent
     | ParticipantSetComponentBody
     | ParticipantSetComponent,
-) -> type[NotesComponentBody | ParticipantSetComponentBody]:
-    """The ``*Body`` type backing a component's content identity.
+) -> NotesComponentBody | ParticipantSetComponentBody:
+    """The exact ``*Body`` a component's content hashes as (MINOR C).
 
-    Accepts either a bare ``*Body`` (returned as-is) or a stored
-    ``*Component`` record (mapped to its base ``*Body``). Participant-set
-    records are an ordinary subclass of their body, so matching on the
-    ``*Body`` type alone already covers both via ``isinstance``; notes
-    records are *not* a subclass of their body (see :class:`NotesComponent`),
-    so they need their own explicit case.
+    A bare ``*Body`` is returned unchanged. A stored ``*Component`` record
+    is *reconstructed* field by field into its ``*Body`` -- not filtered
+    by top-level field name (``model_dump(include=...)``), because that
+    would still include store-minted identity nested *inside* an included
+    field: ``NotesComponent.sections`` holds :class:`NotesSection` entries
+    carrying each section's own minted ``section_id``, invisible to a
+    field-name filter that only looks at the component's own top-level
+    keys. Reconstructing drops it explicitly, so
+    ``hash(component_as_body(record)) == hash(body)`` for the same
+    content, which is what makes :meth:`.store.BundleStore.
+    add_component`'s dedup check -- and :meth:`.store.BundleStore.
+    load_component`'s content_hash verification -- correct.
 
-    Used by :meth:`.store.BundleStore` to hash exactly the fields the
-    corresponding ``*Body`` declares (``model_dump(include=...)``) instead
-    of an ``exclude={"component_id", "created_at", ...}`` list that a
-    future identity-only field could silently slip past.
+    The subclass cases (:class:`NotesComponent`, :class:`ParticipantSetComponent`)
+    are matched *before* their base ``*Body`` cases: ``ParticipantSetComponent``
+    **is** a ``ParticipantSetComponentBody`` (ordinary subclass), so a
+    base-first match would silently return the full record, identity
+    fields and all.
     """
     match component:
-        case NotesComponentBody() | NotesComponent():
-            return NotesComponentBody
+        case NotesComponent():
+            return NotesComponentBody(
+                notes_kind=component.notes_kind,
+                source_artefact_id=component.source_artefact_id,
+                authored=component.authored,
+                sections=tuple(
+                    NotesSectionBody(title=section.title, text=section.text)
+                    for section in component.sections
+                ),
+            )
+        case NotesComponentBody():
+            return component
+        case ParticipantSetComponent():
+            return ParticipantSetComponentBody(participants=component.participants)
         case ParticipantSetComponentBody():
-            return ParticipantSetComponentBody
+            return component
 
 
 def assemble_component_record(

@@ -61,7 +61,7 @@ from .components import (
     ComponentKind,
     ComponentRecord,
     assemble_component_record,
-    component_body_type,
+    component_as_body,
     component_input_refs,
 )
 from .ids import ArtefactId, ComponentId, RevisionId, RunId, SourceId, mint_id
@@ -153,21 +153,21 @@ def _sha256_hex(data: bytes) -> str:
 def _component_content_hash(model: ComponentBody | ComponentRecord) -> str:
     """M1: SHA-256 of a component's canonical JSON body.
 
-    Works uniformly on a ``*Body`` (dumped as-is: it declares no identity
-    fields to begin with) and on a stored ``*Component`` record (dumped
-    via ``include=`` restricted to exactly its ``*Body`` type's own field
-    names, via :func:`.components.component_body_type`) -- both hash to
-    the same value for the same content, which is what makes
-    :meth:`BundleStore.add_component`'s dedup check correct. Deliberately
-    an inclusion list keyed off the ``*Body`` type rather than an
-    ``exclude={"component_id", "created_at", ...}`` list: a future
-    identity-only field added to a ``*Component`` subclass is excluded
-    automatically (it is not part of its ``*Body``), never silently
-    folded into the content hash because someone forgot to extend an
-    exclusion set.
+    Always hashes :func:`.components.component_as_body`'s *reconstruction*
+    of ``model`` -- for a bare ``*Body`` that is ``model`` itself; for a
+    stored ``*Component`` record it is rebuilt field by field with every
+    store-minted identity field dropped, including ones nested *inside* a
+    field (MINOR C: ``NotesComponent.sections`` each carry their own
+    minted ``section_id``, invisible to a top-level ``include=``/``exclude=``
+    filter). This is what makes ``hash(body) == hash(record)`` for the
+    same content -- a field-name filter alone got this wrong for notes
+    once ``NotesComponent`` stopped being a ``NotesComponentBody``
+    subclass -- and is what makes :meth:`BundleStore.add_component`'s
+    dedup check and :meth:`BundleStore.load_component`'s content_hash
+    verification both correct.
     """
-    body_type = component_body_type(model)
-    payload = model.model_dump(mode="json", include=set(body_type.model_fields))
+    body = component_as_body(model)
+    payload = body.model_dump(mode="json")
     canonical = json.dumps(payload, sort_keys=True)
     return _sha256_hex(canonical.encode("utf-8"))
 
@@ -280,16 +280,19 @@ class UnknownComponentKindError(BundleStoreError):
 
 
 class InvalidComponentFileError(BundleStoreError):
-    """A component file on disk does not parse as any known component.
+    """A component file on disk is not trustworthy content.
 
-    Distinct from :class:`UnknownComponentKindError` (a syntactically
-    valid record with an unrecognised ``component_kind``): this is a file
-    that fails validation outright (corrupt JSON, missing required
-    fields). Raised by :meth:`BundleStore._iter_components` naming the
+    Two distinct causes, both distinct from :class:`UnknownComponentKindError`
+    (a syntactically valid record with an unrecognised ``component_kind``):
+    a file that fails validation outright (corrupt JSON, missing required
+    fields) -- raised by :meth:`BundleStore._iter_components`, naming the
     offending path, so one bad file fails closed for that file's own
     resolution rather than silently poisoning every future
     :meth:`BundleStore.add_component` dedup scan with an opaque
-    ``ValidationError``.
+    ``ValidationError`` -- and a file whose stored ``content_hash`` does
+    not match its own recomputed content (MINOR C) -- raised by
+    :meth:`BundleStore.load_component`, naming the path, so a hand-edited
+    or corrupted component is never trusted just because it parses.
     """
 
 
@@ -859,19 +862,27 @@ class BundleStore:
         return None
 
     def load_component(self, component_id: ComponentId) -> ComponentRecord:
-        """Load a stored component, typed by its kind (M1).
+        """Load a stored component, typed by its kind (M1), with its
+        content_hash verified against its own recomputed content (MINOR C).
 
         Raises :class:`UnknownComponentKindError` -- not a bare
         ``ValidationError`` -- when the persisted ``component_kind`` does
         not match any member of the closed v1 set (:class:`.components.
         ComponentKind`): fail-closed rather than guessing at a shape for
-        data this code does not recognise.
+        data this code does not recognise. Raises
+        :class:`InvalidComponentFileError`, naming the file, when the
+        stored ``content_hash`` does not match the hash recomputed from
+        the record's own content -- a hand-edited or otherwise tampered
+        component file must never be trusted just because it happens to
+        parse. This is the read path every closure resolution goes
+        through (:meth:`_resolve_component_closure`), so every consumer
+        of a document projection inherits this guarantee.
         """
         path = self._component_path(component_id)
         if not path.exists():
             raise UnknownComponentError(f"component {component_id} does not exist.")
         try:
-            return _COMPONENT_RECORD_ADAPTER.validate_json(
+            record = _COMPONENT_RECORD_ADAPTER.validate_json(
                 path.read_text(encoding="utf-8")
             )
         except ValidationError as exc:
@@ -879,6 +890,15 @@ class BundleStore:
                 f"component {component_id} does not match any known component kind "
                 f"(closed set: {[kind.value for kind in ComponentKind]})."
             ) from exc
+        expected_hash = _component_content_hash(record)
+        if record.content_hash != expected_hash:
+            raise InvalidComponentFileError(
+                f"component file {path} has a content_hash that does not match its "
+                f"own content (stored {record.content_hash!r}, recomputed "
+                f"{expected_hash!r}) -- the file may have been hand-edited or "
+                "corrupted."
+            )
+        return record
 
     def add_component(self, body: ComponentBody) -> ComponentRecord:
         """Content-identified component storage (M1).
@@ -1041,66 +1061,126 @@ class BundleStore:
             )
         return target, revision_closure, resolved_components
 
+    def _ancestor_revision_ids(
+        self,
+        revision_id: RevisionId,
+        revision_closure: Mapping[RevisionId, RevisionRecord],
+    ) -> set[RevisionId]:
+        """``revision_id``'s transitive ancestors within ``revision_closure``,
+        excluding ``revision_id`` itself."""
+        ancestors: set[RevisionId] = set()
+        frontier = [revision_id]
+        while frontier:
+            current = revision_closure[frontier.pop()]
+            for parent_id in current.parent_revision_ids:
+                if parent_id not in ancestors:
+                    ancestors.add(parent_id)
+                    frontier.append(parent_id)
+        return ancestors
+
+    def _ancestors_flat_state(
+        self,
+        revision_id: RevisionId,
+        revision_closure: Mapping[RevisionId, RevisionRecord],
+    ) -> tuple[set[ComponentId], set[ComponentId]]:
+        """The flat union of ``component_ids``/``superseded_component_ids``
+        across ``revision_id``'s own transitive ancestors (M21's
+        "ancestors' closure" inputs, scoped to exactly this revision's
+        lineage -- never a sibling branch's, and never the whole target's
+        closure)."""
+        components: set[ComponentId] = set()
+        superseded: set[ComponentId] = set()
+        for ancestor_id in self._ancestor_revision_ids(revision_id, revision_closure):
+            ancestor = revision_closure[ancestor_id]
+            components.update(ancestor.component_ids)
+            superseded.update(ancestor.superseded_component_ids)
+        return components, superseded
+
     def _resolve_live_component_ids(
         self,
         target_id: RevisionId,
         revision_closure: Mapping[RevisionId, RevisionRecord],
     ) -> set[ComponentId]:
-        """M21: the live component ID set after supersession, plus the
-        per-revision validation M21 requires.
+        """M21's flat formula, literally: ``union(component_ids) -
+        union(superseded_component_ids)`` over the whole ancestor set --
+        plus the per-revision validation M21 requires, each check scoped
+        to that revision's own ancestors (not a running set shared across
+        sibling branches, and not the whole closure indiscriminately).
 
-        Walks the ancestor closure in topological (root-first) order --
-        a revision only after every revision it recursively descends from
-        via ``parent_revision_ids`` -- maintaining one running "live so
-        far" set. For each revision, that running set (before applying
-        the revision's *own* contribution) is exactly its ancestors'
-        closure: M21 requires that every ID the revision supersedes is a
-        member of that set (superseding an ID no ancestor ever
-        contributed, or one already superseded earlier, is refused), and
-        that it does not also carry an ID it supersedes in the same
-        breath. This walk computes the same result as M21's flat
-        "union(component_ids) - union(superseded_component_ids)" formula
-        for the single-parent revision chains this store produces today
-        (D3 defers branching semantics); a true multi-parent *merge*
-        revision would need per-branch tracking so one branch's
-        supersession is never validated against an unrelated sibling
-        branch's contributions -- out of scope until merge revisions
-        exist.
+        Three passes:
+
+        1. **The flat closure itself.** One pass over every revision in
+           ``revision_closure`` accumulates ``all_components`` and
+           ``all_superseded``; the result is their set difference. This is
+           the literal M21 formula -- order-independent, and correct for a
+           diamond where two sibling branches both supersede the *same*
+           ID (a legal, unremarkable case under this formula: the ID is
+           superseded once, from either branch's perspective, and both
+           branches' own new components survive).
+        2. **Resurrection guard.** No revision may *carry* (in its own
+           ``component_ids``) an ID that any of *its own ancestors*
+           superseded -- re-deriving retracted content (a very ordinary
+           path: ``add_component``'s content-dedup returns the exact same
+           ``component_id`` for byte-identical content) must not silently
+           bring it back. Scoped per-revision to that revision's own
+           ancestors (:meth:`_ancestors_flat_state`) rather than the
+           target's whole closure indiscriminately -- the revision that
+           *originally* introduced a component predates any supersession
+           of it and must never be flagged for carrying its own original
+           contribution, and a sibling branch that never superseded
+           anything must never be flagged for a *different* branch's
+           supersession.
+        3. **Per-revision supersession validity.** Unchanged from before,
+           but likewise scoped to each revision's own ancestors: it may
+           not supersede an ID absent from its ancestors' closure
+           (components minus superseded, restricted to that lineage), and
+           it may not both carry and supersede the same ID itself.
+
+        A true multi-parent *merge* revision is handled correctly by all
+        three passes (verified by the diamond tests); D3 still defers
+        richer branching semantics generally, not this.
         """
-        order: list[RevisionRecord] = []
-        visited: set[RevisionId] = set()
+        all_components: set[ComponentId] = set()
+        all_superseded: set[ComponentId] = set()
+        superseded_by: dict[ComponentId, RevisionId] = {}
+        for revision in revision_closure.values():
+            all_components.update(revision.component_ids)
+            for component_id in revision.superseded_component_ids:
+                all_superseded.add(component_id)
+                superseded_by.setdefault(component_id, revision.revision_id)
 
-        def visit(rev_id: RevisionId) -> None:
-            if rev_id in visited:
-                return
-            visited.add(rev_id)
-            revision = revision_closure[rev_id]
-            for parent_id in revision.parent_revision_ids:
-                visit(parent_id)
-            order.append(revision)
+        for revision in revision_closure.values():
+            _ancestors_components, ancestors_superseded = self._ancestors_flat_state(
+                revision.revision_id, revision_closure
+            )
 
-        visit(target_id)
+            resurrected = set(revision.component_ids) & ancestors_superseded
+            if resurrected:
+                raise InvalidSupersessionError(
+                    f"revision {revision.revision_id} carries component ID(s) "
+                    "already superseded by its own ancestor(s): "
+                    f"{ {cid: superseded_by[cid] for cid in sorted(resurrected)} }"
+                )
 
-        live: set[ComponentId] = set()
-        for revision in order:
-            own_components = set(revision.component_ids)
             own_superseded = set(revision.superseded_component_ids)
-
-            unresolved_supersessions = own_superseded - live
+            if not own_superseded:
+                continue
+            ancestors_closure = _ancestors_components - ancestors_superseded
+            unresolved_supersessions = own_superseded - ancestors_closure
             if unresolved_supersessions:
                 raise InvalidSupersessionError(
                     f"revision {revision.revision_id} supersedes component ID(s) "
                     f"absent from its ancestors' closure: "
                     f"{sorted(unresolved_supersessions)}"
                 )
-            self_superseding = own_superseded & own_components
+            self_superseding = own_superseded & set(revision.component_ids)
             if self_superseding:
                 raise InvalidSupersessionError(
                     f"revision {revision.revision_id} both carries and supersedes "
                     f"component ID(s): {sorted(self_superseding)}"
                 )
-            live = (live | own_components) - own_superseded
-        return live
+
+        return all_components - all_superseded
 
     def _resolve_component_closure(
         self,

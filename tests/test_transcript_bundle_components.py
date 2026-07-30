@@ -20,7 +20,7 @@ from jake_tools.transcripts.bundle.components import (
     ParticipantSetComponentBody,
     ParticipantStatus,
     assemble_component_record,
-    component_body_type,
+    component_as_body,
     component_input_refs,
 )
 from jake_tools.transcripts.bundle.ids import mint_id
@@ -238,7 +238,7 @@ def test_participant_set_component_body_is_order_independent() -> None:
     )
 
 
-# -- assemble_component_record / component_input_refs / component_body_type --
+# -- assemble_component_record / component_input_refs / component_as_body ----
 
 
 def test_assemble_component_record_attaches_identity_and_mints_section_ids() -> None:
@@ -312,13 +312,28 @@ def test_component_input_refs_for_a_participant_set_has_no_refs() -> None:
     )
 
 
-def test_component_body_type_maps_records_back_to_their_body_type() -> None:
-    notes_record = _assemble_notes(_notes_body())
-    participant_record = _assemble_participants(
-        ParticipantSetComponentBody(participants=(_participant(),))
-    )
+def test_component_as_body_maps_records_back_to_their_equivalent_body() -> None:
+    """MINOR C: hash(body) == hash(component_as_body(record)) requires the
+    reconstruction to be a genuine equal Body, not merely the right type --
+    including notes sections, whose minted section_id must be stripped."""
+    notes_body = _notes_body()
+    notes_record = _assemble_notes(notes_body)
+    participant_body = ParticipantSetComponentBody(participants=(_participant(),))
+    participant_record = _assemble_participants(participant_body)
 
-    assert component_body_type(notes_record) is NotesComponentBody
-    assert component_body_type(participant_record) is ParticipantSetComponentBody
-    # Bare bodies map to themselves.
-    assert component_body_type(_notes_body()) is NotesComponentBody
+    assert component_as_body(notes_record) == notes_body
+    assert component_as_body(participant_record) == participant_body
+    # Bare bodies map to themselves (identity, not just equality).
+    assert component_as_body(notes_body) is notes_body
+    assert component_as_body(participant_body) is participant_body
+
+
+def test_component_as_body_strips_each_section_id_not_just_the_component_id() -> None:
+    """A field-name include=/exclude= filter would miss this: section_id
+    lives nested inside `sections`, not at the component's own top level."""
+    record = _assemble_notes(_notes_body(section_count=2))
+
+    reconstructed = component_as_body(record)
+
+    assert isinstance(reconstructed, NotesComponentBody)
+    assert not any(hasattr(section, "section_id") for section in reconstructed.sections)
