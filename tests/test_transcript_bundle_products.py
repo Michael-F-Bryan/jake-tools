@@ -44,6 +44,12 @@ from jake_tools.transcripts.bundle.products import (
 )
 from jake_tools.transcripts.bundle.registry import CapabilityKey, CapabilityStatus
 from jake_tools.transcripts.bundle.store import BundleStore
+from jake_tools.transcripts.bundle.text import (
+    _WINDOW_EXEMPT_GATE_IDS,
+    UnfaithfulEditError,
+    _gate_or_refuse,
+)
+from jake_tools.transcripts.models import TranscriptArtifact, TranscriptTurn
 
 _RECORDING = Recording(
     name="meeting.m4a",
@@ -363,6 +369,84 @@ def test_a_window_that_fails_its_gate_names_itself(tmp_path: Path) -> None:
                 window_turns=2,
             )
         )
+
+
+def _drop_turn(store: BundleStore, index: int):
+    """A polish payload that empties one turn, addressed by its position
+    in whichever window the stage is currently asking about."""
+    texts = _turns(store)
+    target = texts[index - 1]
+
+    def _payload(prompt: str) -> dict[str, Any] | None:
+        if "Polish these transcript turns" not in prompt:
+            return None
+        window = [text for text in texts if f'"text": "{text}"' in prompt]
+        return {
+            "turns": [
+                {
+                    "index": position,
+                    "text": "" if text == target else text,
+                    "removal_reasons": ["filler"] if text == target else [],
+                }
+                for position, text in enumerate(window, start=1)
+            ]
+        }
+
+    return _payload
+
+
+def test_a_filler_turn_at_a_window_edge_may_still_be_dropped(
+    tmp_path: Path,
+) -> None:
+    """The coverage gate asks whether the transform still spans the same
+    stretch of time -- a transcript-level question. A window is an
+    arbitrary slice, so its edge turns are usually interior to the
+    transcript, and refusing to drop one would make a turn undroppable for
+    no reason but where the cut happened to fall."""
+    store = _normalised(tmp_path)
+    filler_id = _turn_ids(store)[2]  # "Um yeah", last turn of window 1
+
+    asyncio.run(
+        run_text_transform(
+            store,
+            mode=TextEditMode.POLISH,
+            agent=stage_agent(StagePlan(override=_drop_turn(store, 3))),
+            model="fixture-model",
+            window_turns=3,
+        )
+    )
+
+    assert filler_id not in _turn_ids(store)
+
+
+def test_truncating_the_transcript_is_still_refused() -> None:
+    """The other half of the exemption. Skipping coverage per window would
+    be a hole if nothing else checked it, so the assembled gate -- which
+    runs with no exemptions -- still refuses a transform that cut the
+    transcript's own first turn."""
+    # The opening turn is short, so dropping it is a small enough share of
+    # the words to clear the retention gate -- isolating the coverage gate,
+    # which is the one under test.
+    before = TranscriptArtifact(
+        turns=[
+            TranscriptTurn(start=0.0, end=2.0, speaker="SPEAKER_00", text="right"),
+            TranscriptTurn(
+                start=3.0,
+                end=5.0,
+                speaker="SPEAKER_00",
+                text="so the plan is that we review the autonomy options and then "
+                "report back on Friday with a recommendation for the team",
+            ),
+        ]
+    )
+    after = TranscriptArtifact(turns=before.turns[1:])
+
+    _gate_or_refuse(
+        before, after, mode=TextEditMode.POLISH, exempt_gate_ids=_WINDOW_EXEMPT_GATE_IDS
+    )
+
+    with pytest.raises(UnfaithfulEditError, match="turns.coverage-preserved"):
+        _gate_or_refuse(before, after, mode=TextEditMode.POLISH)
 
 
 def test_a_text_pass_makes_its_own_capability_real(tmp_path: Path) -> None:

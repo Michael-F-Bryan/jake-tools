@@ -407,12 +407,30 @@ def _windows(count: int, size: int) -> tuple[tuple[int, int], ...]:
     )
 
 
+#: ``turns.coverage-preserved`` asks whether the transform still spans
+#: the same stretch of time -- it compares the first turn's start and the
+#: last turn's end. That is a property of the *transcript*, and a window
+#: is an arbitrary slice of one: a filler turn that happens to sit at a
+#: window edge is interior to the transcript, so dropping it is exactly
+#: what polish is for, and only the window's own span moves. Thirteen
+#: windows mean twenty-six such edges, and the real 51-minute meeting hit
+#: one on its fourth window.
+#:
+#: So the per-window gate skips it and the assembled gate -- which runs
+#: over the whole before/after pair regardless -- enforces it. Nothing is
+#: unchecked: a polish that truncated the real start or end of the
+#: transcript still fails, just at the point where the question is
+#: meaningful.
+_WINDOW_EXEMPT_GATE_IDS = frozenset({"turns.coverage-preserved"})
+
+
 def _gate_or_refuse(
     before: TranscriptArtifact,
     after: TranscriptArtifact,
     *,
     mode: TextEditMode,
     where: str = "",
+    exempt_gate_ids: frozenset[str] = frozenset(),
 ) -> None:
     """Run both M9 validators over the before/after pair.
 
@@ -424,10 +442,11 @@ def _gate_or_refuse(
     """
     suffix = f" ({where})" if where else ""
     report = verify_turns(before, after, affected_paths=[])
-    if report.failed_gate_ids:
+    failed = [gate for gate in report.failed_gate_ids if gate not in exempt_gate_ids]
+    if failed:
         raise UnfaithfulEditError(
             f"the {mode.value} pass failed M9's verification gates{suffix}: "
-            + ", ".join(report.failed_gate_ids)
+            + ", ".join(failed)
         )
     try:
         ensure_polish_preserves_content(before.turns, after.turns)
@@ -505,6 +524,7 @@ async def transform_text(
             _as_legacy_artifact(window_kept, speaker_context),
             mode=mode,
             where=where,
+            exempt_gate_ids=_WINDOW_EXEMPT_GATE_IDS,
         )
         kept += window_kept
         entries += window_entries
