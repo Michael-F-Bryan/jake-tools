@@ -99,9 +99,20 @@ def _config_hash(payload: Mapping[str, object]) -> str:
 
 
 class ProposedChapter(BaseModel):
+    """One chapter, identified by the *ordinal* of the turn it starts at.
+
+    An ordinal rather than a ``turn_id``: chaptering a real meeting means
+    choosing boundaries among hundreds of turns, and asking a model to
+    reproduce a uuid7 exactly for each one is a coin flip it loses often
+    enough to collapse a 37-minute meeting into a single chapter. A small
+    integer is unambiguous and cannot be mis-transcribed. Auditability is
+    unaffected -- the stored chapter still cites turn IDs, this module
+    just resolves them itself.
+    """
+
     title: str
     summary: str = ""
-    first_turn_id: str
+    first_turn_index: int = Field(ge=0)
 
 
 class ChapterPlanPayload(BaseModel):
@@ -115,9 +126,10 @@ Divide this meeting transcript into chapters at the points where the topic
 genuinely changes. A chapter is a stretch of conversation about one thing; it
 is not a fixed-length slice and not a paragraph.
 
-Return, for each chapter, the turn_id where it *starts*. The first chapter must
-start at the very first turn. Chapters are contiguous and cover the whole
-transcript, so the boundaries you give are the only thing that defines them.
+Return, for each chapter, the `index` of the turn where it *starts* (the numbers
+in the transcript below). The first chapter must start at index 0. Chapters are
+contiguous and cover the whole transcript, so the boundaries you give are the
+only thing that defines them.
 
 Aim for chapters a reader would actually navigate by: roughly one every few
 minutes of conversation, fewer if the meeting stayed on one subject. Do not
@@ -130,9 +142,10 @@ carry claims from, anything outside them.
 
 Rules:
 - Return JSON only.
-- Every `first_turn_id` must be one of the turn IDs below, and they must be in
-  transcript order.
-- Never invent a turn_id.
+- Every `first_turn_index` must be an index shown below, in ascending order.
+- If the transcript is too garbled to identify topics confidently, still divide
+  it at the clearest shifts you can see rather than returning one chapter --
+  a reader navigating a long recording needs somewhere to jump to.
 
 Meeting context:
 {{ context }}
@@ -152,9 +165,9 @@ Return corrected JSON that fixes this issue.
 
 
 def project_chapter_boundaries(
-    turns: Sequence[TimedTurn], first_turn_ids: Sequence[str]
+    turns: Sequence[TimedTurn], first_turn_indices: Sequence[int]
 ) -> tuple[tuple[int, int], ...]:
-    """Turn a list of chapter-start turn IDs into an exact partition.
+    """Turn a list of chapter-start turn ordinals into an exact partition.
 
     Returns half-open ``(start_index, end_index)`` pairs covering every
     turn exactly once, in order. The first chapter always starts at index
@@ -163,24 +176,22 @@ def project_chapter_boundaries(
     canonical turn to be in exactly one chapter. Duplicate or
     out-of-order boundaries are refused rather than silently sorted: they
     mean the plan does not describe this transcript.
+
+    An index outside the sequence is *ignored* rather than fatal (a turn a
+    later polish pass legitimately dropped shifts everything after it);
+    coverage stays exact whichever boundaries survive, because the
+    partition is derived from them rather than trusted, and the caller
+    reports how many were ignored.
     """
     if not turns:
         raise NoCanonicalTurnsError("cannot chapter an empty turn sequence.")
-    index_by_turn_id = {turn.turn_id: index for index, turn in enumerate(turns)}
-    # A boundary naming a turn that is not in this set is *ignored*, not
-    # fatal. Chaptering a long meeting means asking a model to echo
-    # hundreds of uuid7s exactly, and a turn a polish pass legitimately
-    # dropped is no longer canonical either. Neither is a reason to lose
-    # the whole plan: coverage stays exact whichever boundaries survive,
-    # because the partition is derived from them rather than trusted, and
-    # the caller reports how many were ignored.
-    known = [turn_id for turn_id in first_turn_ids if turn_id in index_by_turn_id]
-    if first_turn_ids and not known:
+    known = [index for index in first_turn_indices if 0 <= index < len(turns)]
+    if first_turn_indices and not known:
         raise InvalidChapterPlanError(
-            "no chapter boundary names a canonical turn of this transcript; the "
-            "plan does not describe this document at all."
+            "no chapter boundary falls inside this transcript; the plan does not "
+            "describe this document at all."
         )
-    indices = [index_by_turn_id[turn_id] for turn_id in known]
+    indices = list(known)
     if indices != sorted(indices):
         raise InvalidChapterPlanError(
             "chapter boundaries are not in transcript order; the plan does not "
@@ -232,14 +243,13 @@ async def transform_chapters(
         agent,
         ChapterPrompt(
             context=context_note,
-            turns=_turn_payload(turns, speaker_context),
+            turns=_indexed_turn_payload(turns, speaker_context),
         ),
         max_attempts=max_attempts,
     )
-    proposed_ids = [chapter.first_turn_id for chapter in payload.chapters]
-    ranges = project_chapter_boundaries(turns, proposed_ids)
-    known_ids = {turn.turn_id for turn in turns}
-    ignored = sum(1 for turn_id in proposed_ids if turn_id not in known_ids)
+    proposed = [chapter.first_turn_index for chapter in payload.chapters]
+    ranges = project_chapter_boundaries(turns, proposed)
+    ignored = sum(1 for index in proposed if not 0 <= index < len(turns))
     titles = _titles_for_ranges(payload.chapters, ranges, turns)
     chapters = tuple(
         ChapterRecord(
@@ -290,10 +300,10 @@ def _titles_for_ranges(
     ``Opening`` title rather than borrowing the next chapter's, which
     would misdescribe it.
     """
-    by_first_turn = {chapter.first_turn_id: chapter for chapter in proposed}
+    by_first_index = {chapter.first_turn_index: chapter for chapter in proposed}
     titles: list[tuple[str, str]] = []
     for start, _end in ranges:
-        chapter = by_first_turn.get(turns[start].turn_id)
+        chapter = by_first_index.get(start)
         if chapter is None:
             titles.append(("Opening", ""))
         else:
@@ -540,6 +550,26 @@ def _notes_payload(document: TranscriptDocumentV1) -> list[dict[str, object]]:
         }
         for notes in document.components_of(NotesComponent)
         for section in notes.sections
+    ]
+
+
+def _indexed_turn_payload(
+    turns: Sequence[TimedTurn], context: SpeakerContext
+) -> list[dict[str, object]]:
+    """The chapter stage's view: an ordinal per turn, no IDs.
+
+    Omitting ``turn_id`` entirely is deliberate -- there is nothing the
+    stage could correctly do with one, and leaving it out removes both the
+    temptation to echo it and a large chunk of prompt for a long meeting.
+    """
+    return [
+        {
+            "index": index,
+            "speaker": speaker_display_name(context.assignment_for(turn), context),
+            "start_ms": turn.start_ms,
+            "text": turn.text,
+        }
+        for index, turn in enumerate(turns)
     ]
 
 

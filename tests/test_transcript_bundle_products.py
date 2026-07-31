@@ -334,9 +334,8 @@ def test_polish_after_correct_leaves_one_canonical_turn_set(tmp_path: Path) -> N
 
 def test_chapter_boundaries_project_onto_an_exact_partition() -> None:
     turns = tuple(_fake_turn(index) for index in range(5))
-    ids = [turn.turn_id for turn in turns]
 
-    ranges = project_chapter_boundaries(turns, [ids[0], ids[2]])
+    ranges = project_chapter_boundaries(turns, [0, 2])
 
     assert ranges == ((0, 2), (2, 5))
 
@@ -347,7 +346,7 @@ def test_a_plan_that_forgets_the_first_turn_still_covers_it() -> None:
     coverage gap at the front of the transcript."""
     turns = tuple(_fake_turn(index) for index in range(4))
 
-    ranges = project_chapter_boundaries(turns, [turns[2].turn_id])
+    ranges = project_chapter_boundaries(turns, [2])
 
     assert ranges == ((0, 2), (2, 4))
 
@@ -356,24 +355,17 @@ def test_out_of_order_chapter_boundaries_are_refused() -> None:
     turns = tuple(_fake_turn(index) for index in range(4))
 
     with pytest.raises(InvalidChapterPlanError, match="order"):
-        project_chapter_boundaries(turns, [turns[2].turn_id, turns[1].turn_id])
+        project_chapter_boundaries(turns, [2, 1])
 
 
 def test_an_unknown_boundary_is_ignored_but_the_rest_still_partition() -> None:
-    """Chaptering a long meeting means asking a model to echo hundreds of
-    uuid7s exactly, and a turn a polish pass dropped is no longer
-    canonical. Losing the whole plan over one bad ID is worse than losing
-    that one boundary -- coverage stays exact either way."""
+    """A turn a later polish pass dropped shifts every ordinal after it, so
+    a boundary can fall outside the sequence. Losing the whole plan over
+    one is worse than losing that one boundary -- coverage stays exact
+    either way, because the partition is derived from what survived."""
     turns = tuple(_fake_turn(index) for index in range(4))
 
-    ranges = project_chapter_boundaries(
-        turns,
-        [
-            turns[0].turn_id,
-            "turn_019fb000-0000-7000-8000-000000000000",
-            turns[2].turn_id,
-        ],
-    )
+    ranges = project_chapter_boundaries(turns, [0, 99, 2])
 
     assert ranges == ((0, 2), (2, 4))
 
@@ -384,7 +376,7 @@ def test_a_plan_where_no_boundary_is_canonical_is_refused() -> None:
     turns = tuple(_fake_turn(index) for index in range(3))
 
     with pytest.raises(InvalidChapterPlanError, match="does not describe"):
-        project_chapter_boundaries(turns, ["turn_019fb000-0000-7000-8000-000000000000"])
+        project_chapter_boundaries(turns, [99])
 
 
 def test_chaptering_covers_every_canonical_turn_exactly_once(

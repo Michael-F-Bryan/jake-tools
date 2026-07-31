@@ -105,7 +105,7 @@ def _turns_from_prompt(prompt: str) -> list[dict[str, Any]]:
                         isinstance(parsed, list)
                         and parsed
                         and isinstance(parsed[0], dict)
-                        and "turn_id" in parsed[0]
+                        and ("turn_id" in parsed[0] or "index" in parsed[0])
                     ):
                         return parsed
                     break
@@ -126,16 +126,17 @@ def _text_payload(prompt: str, transform: Callable[[str], str]) -> dict[str, Any
 
 
 def _chapter_payload(prompt: str, plan: StagePlan) -> dict[str, Any]:
-    turns = _unique(_TURN_ID_RE, prompt)
+    """The chapter stage sees ordinals, not turn IDs -- so does this."""
+    turn_count = len(_turns_from_prompt(prompt))
     return {
         "chapters": [
             {
                 "title": f"Chapter {position + 1}",
                 "summary": "What this stretch of the conversation covered.",
-                "first_turn_id": turns[index],
+                "first_turn_index": index,
             }
             for position, index in enumerate(plan.chapter_starts)
-            if index < len(turns)
+            if index < turn_count
         ]
     }
 
