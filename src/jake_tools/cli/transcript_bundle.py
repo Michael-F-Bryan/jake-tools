@@ -1100,8 +1100,14 @@ def review_export_command(bundle_path: Path, out_path: Path, as_json: bool) -> N
     The pack lists every voice cluster (plus any turn no cluster covers),
     the machine's proposal for each, and the full transcript. Fill in
     `reviewer` and add one entry to `decisions` per item, then
-    `review apply` it. Leaving an item out is a partial review -- recorded
-    honestly and rendered as "Unclear speaker", never guessed.
+    `review apply` it.
+
+    Leaving an item out is a partial review, recorded honestly -- but an
+    undecided turn does not satisfy the meeting-note speaker gate. Set
+    `remaining` to "unclear-speaker" to record every item you did not
+    decide as an explicit unclear-speaker decision. There is deliberately
+    no way to bulk-assign a person: that would be a guess wearing your
+    name.
 
     Exporting reads only; it takes no lease and changes nothing.
     """

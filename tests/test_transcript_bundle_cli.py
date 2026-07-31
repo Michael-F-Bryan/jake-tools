@@ -1064,3 +1064,47 @@ def test_transform_timeline_moves_the_head_and_reports_the_new_revision(
     assert payload["state"] == "completed"
     assert payload["head_revision_id"] != head_before
     assert store.load_lease() is None
+
+
+# -- Phase 3B/3C command surface -------------------------------------------
+
+
+def test_every_phase3_command_is_reachable_and_documents_its_refusals() -> None:
+    """The new commands are operator-facing, so their --help has to say
+    what they refuse and why -- these are the commands a human reaches for
+    when a run stopped and they need to know what to do next."""
+    for path, must_mention in (
+        (("transform", "assemble"), "kind"),
+        (("transform", "normalise"), "canonical"),
+        (("transform", "speakers-propose"), "review_required"),
+        (("transform", "text"), "--mode"),
+        (("transform", "chapter"), "exact"),
+        (("transform", "minutes"), "evidence"),
+        (("review", "export"), "unclear"),
+        (("review", "apply"), "Refuses"),
+        (("render",), "Refuses"),
+        (("apply",), "byte for byte"),
+        (("recipe", "obsidian-recording"), "review"),
+    ):
+        result = CliRunner().invoke(main, ["transcript", *path, "--help"])
+
+        assert result.exit_code == 0, f"{path}: {result.output}"
+        assert must_mention in result.output, f"{path} --help omits {must_mention!r}"
+
+
+def test_the_llm_backed_commands_expose_the_model_and_effort_flags() -> None:
+    """AGENTS.md: every command that calls the LLM takes --model/--effort
+    through the shared decorator, so an injected agent factory still sees
+    what the operator asked for."""
+    for path in (
+        ("transform", "speakers-propose"),
+        ("transform", "text"),
+        ("transform", "chapter"),
+        ("transform", "minutes"),
+        ("recipe", "obsidian-recording"),
+        ("resume",),
+    ):
+        result = CliRunner().invoke(main, ["transcript", *path, "--help"])
+
+        assert "--model" in result.output, path
+        assert "--effort" in result.output, path
