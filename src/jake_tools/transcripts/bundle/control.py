@@ -1204,32 +1204,43 @@ async def build_products(
     those stages quote the text a reader will actually see; rendering runs
     last, over a head that already carries everything. Each step appends
     its own revision, so a failure part-way leaves the completed steps
-    durable and the run resumable rather than discarding the lot.
+    durable and the run resumable rather than discarding the lot -- and a
+    resumed run skips the text passes whose proofs the head already
+    carries rather than redoing them over their own output.
     """
-    corrected = (
-        await transform_text(
+
+    async def _text_pass(mode: TextEditMode) -> TextTransformOutcome | None:
+        """Run one text pass, unless the head already carries its proof.
+
+        A resumed `products` run replays from the top (M2: resume executes
+        the recorded next_action, it never re-plans), so a pass that
+        already landed would otherwise run a second time over its own
+        output -- re-polishing polished text, which is both wasted model
+        spend and a real way to fail the fidelity gates on a diff that has
+        nothing left to remove.
+        """
+        key = (
+            CapabilityKey.TEXT_CORRECTED
+            if mode == TextEditMode.CORRECT
+            else CapabilityKey.TEXT_POLISHED
+        )
+        document = project_head(store)
+        if (
+            not isinstance(document, NoDocumentYet)
+            and document.capability_status(key) == CapabilityStatus.PRESENT_VALIDATED
+        ):
+            return None
+        return await transform_text(
             store,
             run_id=run_id,
-            mode=TextEditMode.CORRECT,
+            mode=mode,
             agent=agent,
             model=model,
             context_note=context_note,
         )
-        if correct
-        else None
-    )
-    polished = (
-        await transform_text(
-            store,
-            run_id=run_id,
-            mode=TextEditMode.POLISH,
-            agent=agent,
-            model=model,
-            context_note=context_note,
-        )
-        if polish
-        else None
-    )
+
+    corrected = await _text_pass(TextEditMode.CORRECT) if correct else None
+    polished = await _text_pass(TextEditMode.POLISH) if polish else None
     chapters = await transform_chapters(
         store, run_id=run_id, agent=agent, model=model, context_note=context_note
     )

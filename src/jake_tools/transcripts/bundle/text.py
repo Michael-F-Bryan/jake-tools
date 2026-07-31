@@ -250,7 +250,15 @@ def _as_legacy_artifact(
             TranscriptTurn(
                 start=turn.start_ms / 1000.0,
                 end=turn.end_ms / 1000.0,
-                speaker=speaker_display_name(context.assignment_for(turn), context),
+                # The raw machine label, not the resolved display name.
+                # These gates ask structural questions ("are two adjacent
+                # turns the same speaker saying the same thing?"), and
+                # once a review resolves several voices to "Unclear
+                # speaker" the display name stops distinguishing them --
+                # two different people overlapping on "Yeah" would read as
+                # one speaker duplicating themselves. The cluster label
+                # keeps voices distinct, which is what the gate assumes.
+                speaker=turn.speaker_label,
                 text=turn.text,
             )
             for turn in turns
