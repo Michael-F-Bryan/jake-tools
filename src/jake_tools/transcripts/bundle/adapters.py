@@ -61,6 +61,7 @@ from ..errors import TranscriptError
 from ..models import SourceArtifact
 from ..obsidian import extract_recording_links, load_source_note, resolve_recording_path
 from ..parse import parse_teams_vtt
+from .attendees import ExternalParticipant
 from .components import (
     DestinationComponent,
     DestinationComponentBody,
@@ -693,7 +694,7 @@ def adapt_obsidian_note(
     *,
     note_artefact_id: ArtefactId,
     note_path: Path,
-    operator_participants: Sequence[str] = (),
+    extra_participants: Sequence[ExternalParticipant] = (),
 ) -> ObsidianNoteAdaptation:
     """M3/M13/M19/M20: an Obsidian source note -- a destination component
     (M13: target identity + owned-region detection, never a write), a
@@ -725,16 +726,16 @@ def adapt_obsidian_note(
     from otherwise and every speaker the review step can choose comes from
     it.
 
-    ``operator_participants`` is the second sanctioned route to that set
-    (M19's ``operator`` declaration source). Plenty of real notes name
-    their people in the body as wikilinks rather than in a frontmatter
-    ``Attendees`` list -- and picking names out of body wikilinks is
-    exactly the inference M19 forbids, since ``[[On-road Driving]]`` and
-    ``[[Michael Bryan]]`` are indistinguishable to a parser. Naming them
-    on the command line is an operator assertion (M3's pattern) and is
-    recorded as one. Supplying both is legal: frontmatter attendees and
-    operator-declared ones merge, deduplicated by display name, each
-    keeping its own provenance.
+    ``extra_participants`` carries the other two routes to that set --
+    operator-declared (M19) and note-inferred (M22) -- each already
+    labelled with its own provenance, because an operator assertion and a
+    model's guess are different claims and must stay different records.
+    This adapter never *performs* inference: it stays inference-free (see
+    the module docstring), and the M22 stage runs at the control-plane
+    boundary where every other model call lives.
+
+    Frontmatter wins on a name collision: an explicit `Attendees` list is
+    a declaration and beats both an operator repeating it and a guess.
     """
     source_note = load_source_note(note_path)
     body = source_note.body
@@ -779,28 +780,25 @@ def adapt_obsidian_note(
                 status=ParticipantStatus.DECLARED,
             )
         )
-    for name in operator_participants:
-        if name in seen_names:
+    for participant in extra_participants:
+        if participant.display_name in seen_names:
             continue
-        seen_names.add(name)
+        seen_names.add(participant.display_name)
         declared.append(
             ParticipantRecord(
                 participant_id=mint_id("participant"),
-                declaration_source=ParticipantDeclarationSource.OPERATOR,
-                declaration_evidence=(
-                    f"declared on the command line for {note_path.name}"
-                ),
-                display_names=(name,),
+                declaration_source=participant.declaration_source,
+                declaration_evidence=participant.declaration_evidence,
+                display_names=(participant.display_name,),
                 status=ParticipantStatus.DECLARED,
             )
         )
     if not declared:
         raise AdapterError(
             f"no participants for {note_path}: the note has no frontmatter "
-            "Attendees and none were declared with --participant. M19 has nothing "
-            "to declare a participant set from, and body wikilinks are not a "
-            "substitute -- '[[On-road Driving]]' and '[[Michael Bryan]]' look the "
-            "same to a parser."
+            "Attendees, none were declared with --participant, and inference "
+            "found no name the note actually supports. M19 has nothing to declare "
+            "a participant set from."
         )
     participant_body = ParticipantSetComponentBody(participants=tuple(declared))
     participants = store.add_component(participant_body)

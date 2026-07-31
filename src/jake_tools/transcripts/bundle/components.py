@@ -89,12 +89,22 @@ class TrustClass(StrEnum):
 
 
 class ParticipantDeclarationSource(StrEnum):
-    """M19: how a participant record was declared -- never inferred."""
+    """M19/M22: how a participant record came to exist.
+
+    ``note-inferred`` (M22) is a model's reading of the note, and is kept
+    as a *distinct* value rather than folded into ``operator``: recording
+    a guess as an operator assertion would be a lie about exactly the
+    field M19 exists to protect. It is admissible only because inferring
+    who was *present* is not inferring who *said what* -- M8's ladder
+    still requires a reviewed decision before any turn carries a name, so
+    an inferred attendee can never become an attribution on its own.
+    """
 
     CALENDAR = "calendar"
     TEAMS_ROSTER = "teams-roster"
     NOTE_FRONTMATTER = "note-frontmatter"
     OPERATOR = "operator"
+    NOTE_INFERRED = "note-inferred"
 
 
 class ParticipantStatus(StrEnum):

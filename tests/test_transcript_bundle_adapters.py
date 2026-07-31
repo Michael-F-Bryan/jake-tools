@@ -21,6 +21,7 @@ from jake_tools.transcripts.bundle.adapters import (
     parse_untimed_markdown_turns,
     probe_audio_metadata,
 )
+from jake_tools.transcripts.bundle.attendees import operator_participants
 from jake_tools.transcripts.bundle.components import (
     DestinationComponent,
     MediaRecordingComponent,
@@ -1094,7 +1095,7 @@ def test_operator_declared_participants_stand_in_for_missing_frontmatter(
         store,
         note_artefact_id=artefact.artefact_id,
         note_path=note,
-        operator_participants=("Steven Crawford", "Matt Lavender"),
+        extra_participants=operator_participants(("Steven Crawford", "Matt Lavender")),
     )
 
     participants = adaptation.participants.participants
@@ -1140,7 +1141,7 @@ def test_frontmatter_and_operator_participants_merge_keeping_provenance(
         store,
         note_artefact_id=artefact.artefact_id,
         note_path=note,
-        operator_participants=("Michael Bryan", "Steven Crawford"),
+        extra_participants=operator_participants(("Michael Bryan", "Steven Crawford")),
     )
 
     by_name = {

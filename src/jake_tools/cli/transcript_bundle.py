@@ -18,6 +18,7 @@ import click
 from ..claude import ClaudeAgent
 from ..transcripts.bundle.adapters import adapt_local_media, adapt_obsidian_note
 from ..transcripts.bundle.apply import apply_render
+from ..transcripts.bundle.attendees import infer_attendees, operator_participants
 from ..transcripts.bundle.components import TextEditMode
 from ..transcripts.bundle.control import (
     DEFAULT_BUNDLES_ROOT,
@@ -49,6 +50,7 @@ from ..transcripts.bundle.registry import CapabilityStatus
 from ..transcripts.bundle.review import export_review_pack
 from ..transcripts.bundle.store import BundleStore
 from ..transcripts.errors import TranscriptError
+from ..transcripts.obsidian import load_source_note
 from .context import app_context
 from .options import agent, coro
 
@@ -156,12 +158,21 @@ def _rendered_invocation(ctx: click.Context) -> str:
     parts = [ctx.command_path]
     for parameter in ctx.command.params:
         value = ctx.params.get(parameter.name) if parameter.name else None
-        if value is None or value is False:
+        if value is None or value is False or value == ():
             continue
         if isinstance(parameter, click.Argument):
             parts.append(str(value))
             continue
+        # A parameter still sitting at its default was not typed, so
+        # recording it would misdescribe the assertion -- and for an
+        # inverted flag like --no-infer-attendees (default True) it would
+        # claim the operator asked for the *opposite* of what happened.
+        if value == parameter.default:
+            continue
         flag = parameter.opts[0]
+        if isinstance(value, tuple):
+            parts.extend(f"{flag} {item}" for item in value)
+            continue
         parts.append(flag if value is True else f"{flag} {value}")
     return " ".join(parts)
 
@@ -203,19 +214,29 @@ def _rendered_invocation(ctx: click.Context) -> str:
     "--participant",
     "participants",
     multiple=True,
-    help="Declare a meeting participant by display name (repeatable). Use this "
-    "when the note names its people in the body rather than in a frontmatter "
-    "Attendees list -- naming them here is the operator assertion (M19), and "
-    "body wikilinks are never guessed at. Only meaningful with "
+    help="Declare a meeting participant by display name (repeatable). Naming "
+    "them here is the operator assertion (M19). Only meaningful with "
     "--kind obsidian-note.",
+)
+@click.option(
+    "--no-infer-attendees",
+    "infer_attendees_enabled",
+    flag_value=False,
+    default=True,
+    help="Do not fall back to inferring attendees from the note when it has "
+    "neither frontmatter Attendees nor --participant. Ingest then refuses such "
+    "a note outright rather than guessing.",
 )
 @_json_option
 @click.argument(
     "input_file", type=click.Path(exists=True, dir_okay=False, path_type=Path)
 )
+@agent
+@coro
 @click.pass_context
-def source_ingest(
+async def source_ingest(
     ctx: click.Context,
+    claude_agent: ClaudeAgent,
     bundle_path: Path,
     kind: str,
     producer: str,
@@ -223,6 +244,7 @@ def source_ingest(
     provider_id: str | None,
     note_embed: str | None,
     participants: tuple[str, ...],
+    infer_attendees_enabled: bool,
     as_json: bool,
     input_file: Path,
 ) -> None:
@@ -238,10 +260,17 @@ def source_ingest(
     against the same source is a no-op that reports the existing
     artefact rather than duplicating it.
 
+    Attendees resolve in order: frontmatter `Attendees` first, then
+    --participant, then -- only if neither exists -- a bounded model pass
+    over the note and its filename (M22), which returns nobody it cannot
+    quote the note for. Inferred names are recorded as inferred, never as
+    your assertion, and still cannot attribute a single spoken turn: M8
+    requires a reviewed decision for that. Pass --no-infer-attendees to
+    refuse instead of guessing.
+
     `--kind obsidian-note` additionally parses INPUT_FILE as an Obsidian
-    source note (destination component, participants from frontmatter
-    Attendees and/or --participant, recording references from embeds --
-    M3/M13/M19; a
+    source note (destination component, participants, recording references
+    from embeds -- M3/M13/M19; a
     reference alone never satisfies `media.recording`, ingest the
     recording separately with `--kind local-media`). `--kind local-media`
     additionally runs `ffprobe` over INPUT_FILE and records its
@@ -272,6 +301,7 @@ def source_ingest(
 
     store = BundleStore(bundle_path)
     adapter_summary: dict[str, object] = {}
+    note_text = input_file.read_text(encoding="utf-8", errors="replace")
     try:
         outcome = ingest_source(
             store,
@@ -284,15 +314,31 @@ def source_ingest(
             acquisition_locator=acquisition_locator,
         )
         if kind == _KIND_OBSIDIAN_NOTE:
+            declared = operator_participants(participants)
+            if (
+                infer_attendees_enabled
+                and not declared
+                and not _has_frontmatter_attendees(input_file)
+            ):
+                declared = await infer_attendees(
+                    claude_agent, note_path=input_file, note_text=note_text
+                )
             note_adaptation = adapt_obsidian_note(
                 store,
                 note_artefact_id=outcome.artefact.artefact_id,
                 note_path=input_file,
-                operator_participants=participants,
+                extra_participants=declared,
             )
             adapter_summary = {
                 "destination_component_id": note_adaptation.destination.component_id,
                 "participants_component_id": note_adaptation.participants.component_id,
+                "participants": [
+                    {
+                        "display_name": participant.display_names[0],
+                        "declaration_source": participant.declaration_source.value,
+                    }
+                    for participant in note_adaptation.participants.participants
+                ],
                 "reference_set_component_id": (
                     note_adaptation.reference_set.component_id
                     if note_adaptation.reference_set is not None
@@ -338,6 +384,17 @@ def source_ingest(
         click.echo(f"artefact_id: {outcome.artefact.artefact_id}")
     for key, value in adapter_summary.items():
         click.echo(f"{key}: {value}")
+
+
+def _has_frontmatter_attendees(note_path: Path) -> bool:
+    """Does the note declare attendees itself?
+
+    Read directly rather than inferred from the adapter's failure, because
+    the ordering M22 fixes -- frontmatter first, always -- has to be
+    decidable *before* the model stage runs, not after it has already
+    spent a call.
+    """
+    return bool(load_source_note(note_path).attendees)
 
 
 # -- shared rendering helpers ----------------------------------------------
