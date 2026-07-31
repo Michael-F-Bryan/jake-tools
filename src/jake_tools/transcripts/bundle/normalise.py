@@ -30,16 +30,15 @@ invalidated rather than silently carried onto different turns (M8).
 The token -> turn rule
 ----------------------
 Each raw token is assigned to the diarisation segment it overlaps most
-(ties resolve to the *preceding* segment, M7), and every token assigned
-to one segment becomes one turn. Grouping by *segment* -- not by cluster,
-and not by adjacency in the time-ordered token stream -- is what keeps two
-people talking across each other as two overlapping turns (D4) instead of
-four interleaved fragments, and what keeps two consecutive utterances from
-one speaker separate until an explicit same-speaker adjacent merge (M9
-polish) decides otherwise. Tokens no segment covers are grouped by time
-proximity and reported as unattributed: a turn with no voice evidence is
-honest, and M8's ladder resolves it at rung 8 rather than by guessing a
-neighbour's speaker.
+(ties resolve to the *preceding* segment, M7). Turns are then one per
+*voice*, split at that voice's own pauses -- grouping per cluster keeps two
+people talking across each other as two whole overlapping turns (D4)
+rather than interleaved fragments, and splitting on pauses rather than on
+diarisation segments keeps a spoken sentence in one piece (pyannote
+segments a sentence at sub-second breaths). Tokens no segment covers are
+grouped by time proximity and reported as unattributed: a turn with no
+voice evidence is honest, and M8's ladder resolves it at rung 8 rather
+than by guessing a neighbour's speaker.
 """
 
 from __future__ import annotations
@@ -162,6 +161,7 @@ def _config_hash() -> str:
         json.dumps(
             {
                 "normaliser_version": NORMALISER_VERSION,
+                "turn_gap_ms": TURN_GAP_MS,
                 "unattributed_gap_ms": UNATTRIBUTED_GAP_MS,
             },
             sort_keys=True,
@@ -274,6 +274,12 @@ class _DraftTurn:
 UNATTRIBUTED_SPEAKER_LABEL = "unattributed"
 
 
+#: How long a pause inside one voice's speech starts a new turn. Chosen
+#: as an utterance boundary a listener would hear as one: shorter and a
+#: single sentence splits at its natural mid-breath, longer and two
+#: separate remarks fuse. Participates in the ledger's config hash.
+TURN_GAP_MS = 1_200
+
 #: How far apart two *unattributed* tokens may be and still belong to one
 #: turn. Only reached where diarisation covered nothing, so there is no
 #: voice evidence to group by; without a bound, one recording's stray
@@ -304,61 +310,70 @@ def _build_draft(
     )
 
 
+def _split_runs(tokens: Sequence[RawToken], *, gap_ms: int) -> list[list[RawToken]]:
+    """Split one voice's tokens into utterances at its own pauses."""
+    runs: list[list[RawToken]] = []
+    current: list[RawToken] = []
+    for token in tokens:
+        if current and token.start_ms - max(t.end_ms for t in current) > gap_ms:
+            runs.append(current)
+            current = []
+        current.append(token)
+    if current:
+        runs.append(current)
+    return runs
+
+
 def _group_tokens_into_turns(
     tokens: Sequence[RawToken],
     assignments: Sequence[int | None],
     segments: Sequence[WireDiarisationSegment],
     cluster_ids_by_label: Mapping[str, ClusterId],
 ) -> tuple[_DraftTurn, ...]:
-    """Group tokens into turns, one turn per diarisation segment.
+    """Group tokens into turns: one turn per *voice*, split at its pauses.
 
-    The group key is the *segment index*, not the cluster and not
-    adjacency in the time-ordered token stream. Both alternatives are
-    wrong on real audio:
+    Two rules that both had to be learned from real audio rather than
+    from the contract:
 
-    - grouping by cluster would merge two consecutive utterances from one
-      speaker, and an adjacent same-speaker merge is an explicit M9
-      polish decision with its own lineage, never an accident here;
-    - grouping by adjacency shatters a turn whenever speech overlaps --
-      two people talking across each other interleave in the sorted token
-      stream, and the corpus's simultaneous 00:58 utterances are exactly
-      that case. Overlapping turns are representable (D4), so the right
-      answer is two whole turns that overlap in time, not four fragments.
+    - **Group by cluster, not by diarisation segment.** Pyannote splits a
+      single spoken sentence into several segments at sub-second pauses,
+      so one-turn-per-segment produced 908 turns from a 37-minute meeting
+      -- turns reading ``of``, ``Ross``, ``,``. A turn is an utterance, and
+      a segment is not.
+    - **Group per cluster, not by adjacency in the merged token stream.**
+      When two people talk across each other their tokens interleave, so
+      adjacency-based grouping shatters both sentences into fragments.
+      Grouping each cluster's own tokens independently keeps both whole
+      and lets them overlap in time, which is what D4 says concurrent
+      speech is.
 
-    Tokens no segment covers have no voice evidence to group by, so they
-    are grouped by time proximity (:data:`UNATTRIBUTED_GAP_MS`) and
-    reported as unattributed.
+    Within one cluster, a gap longer than :data:`TURN_GAP_MS` starts a new
+    turn -- that is an utterance boundary, not an editorial merge, so it
+    is not the M9 same-speaker adjacent merge M7 reserves for polish.
+    Tokens no segment covers have no voice to group by and are grouped by
+    time proximity alone (:data:`UNATTRIBUTED_GAP_MS`).
     """
-    by_segment: dict[int, list[RawToken]] = {}
+    by_cluster: dict[ClusterId, list[RawToken]] = {}
+    labels: dict[ClusterId, str] = {}
     unassigned: list[RawToken] = []
     for token, segment_index in zip(tokens, assignments, strict=True):
         if segment_index is None:
             unassigned.append(token)
-        else:
-            by_segment.setdefault(segment_index, []).append(token)
+            continue
+        raw_label = segments[segment_index].speaker_label
+        cluster_id = cluster_ids_by_label[raw_label]
+        labels[cluster_id] = raw_label
+        by_cluster.setdefault(cluster_id, []).append(token)
 
     drafts: list[_DraftTurn] = []
-    for segment_index, group in by_segment.items():
-        raw_label = segments[segment_index].speaker_label
-        draft = _build_draft(
-            group,
-            cluster_id=cluster_ids_by_label[raw_label],
-            speaker_label=raw_label,
-        )
-        if draft is not None:
-            drafts.append(draft)
-
-    run: list[RawToken] = []
-    for token in unassigned:
-        if run and token.start_ms - run[-1].end_ms > UNATTRIBUTED_GAP_MS:
+    for cluster_id, cluster_tokens in by_cluster.items():
+        for run in _split_runs(cluster_tokens, gap_ms=TURN_GAP_MS):
             draft = _build_draft(
-                run, cluster_id=None, speaker_label=UNATTRIBUTED_SPEAKER_LABEL
+                run, cluster_id=cluster_id, speaker_label=labels[cluster_id]
             )
             if draft is not None:
                 drafts.append(draft)
-            run = []
-        run.append(token)
-    if run:
+    for run in _split_runs(unassigned, gap_ms=UNATTRIBUTED_GAP_MS):
         draft = _build_draft(
             run, cluster_id=None, speaker_label=UNATTRIBUTED_SPEAKER_LABEL
         )
@@ -625,6 +640,16 @@ def normalise_transcript(store: BundleStore, *, run_id: RunId) -> NormaliseOutco
     new_component_ids = [turn_set.component_id, ledger.component_id]
     if attribution is not None:
         new_component_ids.append(attribution.component_id)
+    # Components are content-identified (M1), so a re-run that produced
+    # byte-identical content for one of them (the ledger, typically: same
+    # sources, same config, no drops) gets the *same* component back. That
+    # component is reused, not superseded -- carrying and superseding one
+    # ID in a single revision is an invalid supersession claim (M21).
+    superseded = tuple(
+        component_id
+        for component_id in _superseded_component_ids(document)
+        if component_id not in new_component_ids
+    )
     revision = store.append_revision(
         operation=OperationRef(
             kind="normalise",
@@ -639,7 +664,7 @@ def normalise_transcript(store: BundleStore, *, run_id: RunId) -> NormaliseOutco
         ),
         parent_revision_ids=(document.revision_id,),
         component_ids=tuple(new_component_ids),
-        superseded_component_ids=_superseded_component_ids(document),
+        superseded_component_ids=superseded,
     )
     store.update_head(run_id=run_id, revision_id=revision.revision_id)
 

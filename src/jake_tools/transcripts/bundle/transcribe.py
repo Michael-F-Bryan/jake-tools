@@ -102,6 +102,20 @@ class WorkerInvocationError(TranscribeError):
     docstring for what that covers)."""
 
 
+class MissingStageArtefactError(TranscribeError):
+    """The response referenced a stage artefact file that is not there.
+
+    A typed failure rather than a bare ``OSError``: the worker's response
+    and the files it names disagreeing is a contract violation worth
+    naming, and one that a caller might legitimately want to retry.
+    """
+
+
+class StageResultNotCompletedError(TranscribeError):
+    """A stage artefact reports a non-completed status while the response
+    referenced it as completed."""
+
+
 class WorkerResponseHashMismatchError(TranscribeError):
     """A hash the worker's own response declared does not match the
     actual bytes on disk (M11: "hash verification")."""
@@ -271,7 +285,13 @@ def _ingest_stage_result(
     (the caller batches every media member's components into one
     ``append_revision`` call, mirroring ``assemble()``'s shape)."""
     path = out_dir / filename
-    content = path.read_bytes()
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise MissingStageArtefactError(
+            f"the worker's response declared {filename} as a completed stage "
+            f"artefact, but it could not be read at {path}: {exc}"
+        ) from exc
     actual_hash = _sha256_hex(content)
     if actual_hash != artefact_ref.sha256:
         raise WorkerResponseHashMismatchError(
@@ -279,6 +299,18 @@ def _ingest_stage_result(
             f"hash (declared {artefact_ref.sha256}, actual {actual_hash})."
         )
     stage_result = WireStageResult.model_validate_json(content)
+    # Callers only reach here for a stage the response reported as
+    # completed, so this can only fire if the response's own ArtefactRef
+    # and the stage file it points at disagree. Checked here rather than
+    # trusted, because promoting a failed stage's artefact would create a
+    # component -- and therefore an `inference.*` capability -- for work
+    # that did not succeed (M11).
+    if stage_result.status != "completed":
+        raise StageResultNotCompletedError(
+            f"{filename} reports status {stage_result.status!r}, but the response "
+            "referenced it as a completed stage; refusing to promote a failed "
+            "stage's output as evidence."
+        )
 
     ingested = store.ingest_artefact(
         source_id=source_id,

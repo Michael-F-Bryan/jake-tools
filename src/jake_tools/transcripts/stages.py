@@ -232,9 +232,18 @@ def _turns_word_count(turns: list[TranscriptTurn]) -> int:
     return sum(len(_CONTENT_WORD_RE.findall(turn.text)) for turn in turns)
 
 
-def _ensure_polish_preserves_content(
+def ensure_polish_preserves_content(
     source_turns: list[TranscriptTurn], polished_turns: list[TranscriptTurn]
 ) -> None:
+    """Refuse a polish that cut more content than M9 allows.
+
+    Public because it is one of the two M9 validators the bundle engine
+    reuses (``bundle/text.py``): ``verify_turns`` checks structure --
+    ordering, span coverage, speakers -- and this checks that the words
+    are still there. A polish can satisfy every structural gate while
+    replacing each turn with a single character, which is exactly the
+    failure this catches.
+    """
     source_words = _turns_word_count(source_turns)
     if source_words == 0:
         return
@@ -265,7 +274,7 @@ async def run_polish_stage(
         max_attempts=max_attempts,
     )
     _ensure_no_forbidden_output(payload.turns)
-    _ensure_polish_preserves_content(transcript.turns, payload.turns)
+    ensure_polish_preserves_content(transcript.turns, payload.turns)
 
     same_structure = len(payload.turns) == len(transcript.turns) and all(
         (source.start, source.end, source.speaker)

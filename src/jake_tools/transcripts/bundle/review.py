@@ -211,13 +211,18 @@ def build_review_pack(document: TranscriptDocumentV1) -> dict[str, Any]:
             list(_cluster_ids(document))
         ),
         "reviewer": "",
+        "remaining": None,
         "instructions": (
             "Fill in `reviewer`, then add one entry to `decisions` for each item in "
             "`items`. Each decision is {scope, kind, target..., participant_id, "
             "rationale}. scope is one of turn|source-range|cluster|provider-label; "
             "kind is assign (with participant_id) or unclear-speaker (without). "
-            "Leaving an item out is a partial review, which is recorded honestly "
-            f"and renders as '{UNCLEAR_SPEAKER_LABEL}' -- it is never guessed."
+            "Leaving an item out is a partial review, recorded honestly and "
+            f"rendered as '{UNCLEAR_SPEAKER_LABEL}' -- but an undecided turn does "
+            "not satisfy the meeting-note speaker gate. Set `remaining` to "
+            f"'{REMAINING_UNCLEAR}' to record every item you did not decide as an "
+            "explicit unclear-speaker decision; there is deliberately no way to "
+            "bulk-assign a person."
         ),
         "participants": [
             {
@@ -327,6 +332,67 @@ def _decision_from_entry(entry: dict[str, Any]) -> ReviewDecision:
             )
 
 
+#: The pack field a reviewer sets to say "I considered the rest and they
+#: are genuinely unclear". Only this one value is accepted -- there is no
+#: bulk *assignment* affordance, because "assign the remainder to Michael"
+#: is a guess wearing a reviewer's name, while "the remainder are unclear"
+#: is the honest statement the M8 ladder already has a decision kind for.
+REMAINING_UNCLEAR = "unclear-speaker"
+
+
+def _expand_remaining_unclear(
+    pack: dict[str, Any], decided: tuple[ReviewDecision, ...]
+) -> tuple[ReviewDecision, ...]:
+    """Turn ``"remaining": "unclear-speaker"`` into explicit decisions.
+
+    Real diarisation on real room audio routinely leaves hundreds of
+    turns with no voice evidence. Deciding each by hand is not review, it
+    is data entry -- and without a decision those turns resolve at rung 8
+    (``no-evidence``), which does not satisfy the meeting-note gate, so
+    the note simply cannot be rendered.
+
+    This closes that gap without weakening anything: each remaining item
+    becomes a *real, stored* ``unclear-speaker`` decision at its own
+    scope, indistinguishable from one typed by hand, and every one of
+    them renders as "Unclear speaker" with a visible count. What it
+    cannot do is assign anybody -- the only accepted value is
+    ``unclear-speaker``.
+    """
+    remaining = pack.get("remaining")
+    if remaining is None:
+        return ()
+    if remaining != REMAINING_UNCLEAR:
+        raise InvalidReviewPackError(
+            f"`remaining` is {remaining!r}; the only accepted value is "
+            f"{REMAINING_UNCLEAR!r}. Bulk-assigning a participant to every "
+            "undecided item would be a guess recorded as a human decision."
+        )
+    addressed = _addressed_item_ids(decided)
+    expanded: list[ReviewDecision] = []
+    for item in pack.get("items", []):
+        item_id = str(item.get("item_id", ""))
+        if not item_id or item_id in addressed:
+            continue
+        rationale = "not individually decided; recorded as unclear (bulk)"
+        if item.get("kind") == "cluster":
+            expanded.append(
+                ClusterDecision(
+                    kind=ReviewDecisionKind.UNCLEAR_SPEAKER,
+                    cluster_id=item_id,
+                    rationale=rationale,
+                )
+            )
+        else:
+            expanded.append(
+                TurnDecision(
+                    kind=ReviewDecisionKind.UNCLEAR_SPEAKER,
+                    turn_id=item_id,
+                    rationale=rationale,
+                )
+            )
+    return tuple(expanded)
+
+
 def _read_binding(pack: dict[str, Any]) -> ReviewPackBinding:
     version = pack.get("pack_schema_version")
     if version != PACK_SCHEMA_VERSION:
@@ -406,18 +472,35 @@ class ApplyReviewOutcome:
     total_item_count: int
 
 
-def apply_review(
-    store: BundleStore, *, run_id: RunId, pack_path: Path
-) -> ApplyReviewOutcome:
-    """M8: apply a filled review pack, appending one revision.
+@dataclass(frozen=True)
+class PreparedReview:
+    """A validated review, ready to commit -- nothing written yet.
 
-    Checks, in order, before anything is written: the pack is readable and
-    this build's schema; the review has not already been applied (returns
-    the first application's revision if it has); no *different* review has
-    applied against the same input revision; the pack's bound revision is
-    still the head; the turn and cluster inventories still hash the same;
-    every decision names something that exists. Only then does the
-    decision set become a component and a revision.
+    Splitting validation from commitment is what lets a refusal (stale
+    pack, anonymous reviewer, invented cluster) surface as *itself*
+    instead of as an executor crash that drags a run into ``failed``: the
+    caller validates first, and only creates a run when there is genuine
+    work to record.
+    """
+
+    body: SpeakerReviewComponentBody
+    document: TranscriptDocumentV1
+    pack_sha256: str
+
+
+def prepare_review_application(
+    store: BundleStore, *, pack_path: Path
+) -> ReviewRecord | PreparedReview:
+    """Validate a filled pack against the current head, writing nothing.
+
+    Returns the existing :class:`~.records.ReviewRecord` when this review
+    has already been applied (M8's idempotency), or a
+    :class:`PreparedReview` when it is new and valid. Checks, in order:
+    the pack is readable and this build's schema; the review has not
+    already been applied; no *different* review has applied against the
+    same input revision; the pack's bound revision is still the head; the
+    turn and cluster inventories still hash the same; the reviewer is
+    named; every decision names something that exists.
     """
     try:
         pack: dict[str, Any] = json.loads(pack_path.read_text(encoding="utf-8"))
@@ -430,14 +513,7 @@ def apply_review(
 
     existing = store.find_review(binding.review_id)
     if existing is not None:
-        return ApplyReviewOutcome(
-            review=existing,
-            revision=None,
-            component=None,
-            already_applied=True,
-            addressed_item_count=0,
-            total_item_count=0,
-        )
+        return existing
     competing = next(
         (
             record
@@ -490,6 +566,7 @@ def apply_review(
             "review with no decisions."
         )
     decisions = tuple(_decision_from_entry(entry) for entry in entries)
+    decisions += _expand_remaining_unclear(pack, decisions)
     _check_targets_exist(decisions, document)
 
     reviewer = str(pack.get("reviewer") or "").strip()
@@ -502,23 +579,41 @@ def apply_review(
         str(item["item_id"]) for item in pack.get("items", []) if "item_id" in item
     )
 
-    body = SpeakerReviewComponentBody(
-        review_id=binding.review_id,
-        input_revision_id=binding.input_revision_id,
-        turn_inventory_hash=actual_turn_hash,
-        cluster_inventory_hash=actual_cluster_hash,
-        pack_schema_version=PACK_SCHEMA_VERSION,
-        reviewer=reviewer,
-        pack_item_ids=pack_item_ids,
-        decisions=decisions,
+    return PreparedReview(
+        body=SpeakerReviewComponentBody(
+            review_id=binding.review_id,
+            input_revision_id=binding.input_revision_id,
+            turn_inventory_hash=actual_turn_hash,
+            cluster_inventory_hash=actual_cluster_hash,
+            pack_schema_version=PACK_SCHEMA_VERSION,
+            reviewer=reviewer,
+            pack_item_ids=pack_item_ids,
+            decisions=decisions,
+        ),
+        document=document,
+        pack_sha256=pack_sha256,
     )
+
+
+def commit_review(
+    store: BundleStore, *, run_id: RunId, prepared: PreparedReview
+) -> ApplyReviewOutcome:
+    """Append the validated review's component, revision, and record.
+
+    Called only with the lease held, and only after
+    :func:`prepare_review_application` has already refused everything
+    refusable -- so the three writes here are the whole of the mutation,
+    in one place.
+    """
+    body = prepared.body
+    document = prepared.document
     component = store.add_component(body)
     assert isinstance(component, SpeakerReviewComponent)
     revision = store.append_revision(
         operation=OperationRef(
             kind="review-apply",
-            input_ids=(binding.review_id, binding.input_revision_id),
-            rationale=f"speaker review applied by {reviewer} (M8)",
+            input_ids=(body.review_id, body.input_revision_id),
+            rationale=f"speaker review applied by {body.reviewer} (M8)",
         ),
         parent_revision_ids=(document.revision_id,),
         component_ids=(component.component_id,),
@@ -530,26 +625,48 @@ def apply_review(
     store.update_head(run_id=run_id, revision_id=revision.revision_id)
     review = store.add_review(
         ReviewRecord(
-            review_id=binding.review_id,
+            review_id=body.review_id,
             bundle_id=document.bundle_id,
-            input_revision_id=binding.input_revision_id,
+            input_revision_id=body.input_revision_id,
             result_revision_id=revision.revision_id,
             decision_component_id=component.component_id,
             pack_schema_version=PACK_SCHEMA_VERSION,
-            pack_sha256=pack_sha256,
-            reviewer=reviewer,
+            pack_sha256=prepared.pack_sha256,
+            reviewer=body.reviewer,
             created_at=revision.created_at,
         )
     )
-    addressed = _addressed_item_ids(decisions)
+    addressed = _addressed_item_ids(body.decisions)
     return ApplyReviewOutcome(
         review=review,
         revision=revision,
         component=component,
         already_applied=False,
-        addressed_item_count=len(addressed.intersection(pack_item_ids)),
-        total_item_count=len(pack_item_ids),
+        addressed_item_count=len(addressed.intersection(body.pack_item_ids)),
+        total_item_count=len(body.pack_item_ids),
     )
+
+
+def apply_review(
+    store: BundleStore, *, run_id: RunId, pack_path: Path
+) -> ApplyReviewOutcome:
+    """Validate and commit a filled review pack in one call.
+
+    The convenience shape for callers that already hold a lease.
+    ``control.run_review_apply`` uses the two halves separately so a
+    refusal never costs a run.
+    """
+    prepared = prepare_review_application(store, pack_path=pack_path)
+    if isinstance(prepared, ReviewRecord):
+        return ApplyReviewOutcome(
+            review=prepared,
+            revision=None,
+            component=None,
+            already_applied=True,
+            addressed_item_count=0,
+            total_item_count=0,
+        )
+    return commit_review(store, run_id=run_id, prepared=prepared)
 
 
 def _addressed_item_ids(decisions: tuple[ReviewDecision, ...]) -> set[str]:

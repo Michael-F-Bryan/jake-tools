@@ -30,10 +30,11 @@ prompt:
 - ``turn_id``, ``start_ms``, ``end_ms``, ``speaker_label``,
   ``source_segment_id`` and ``source_artefact_id`` are re-attached from
   the *input* turn, so a model that tried to change them simply cannot;
-- ``verify.py``'s retention/fidelity gates run over the before/after
-  pair as the validators behind ``text.corrected``/``text.polished``;
-- a polish pass that cut more than ``verify``'s content-retention
-  threshold allows is refused, not published.
+- both existing M9 validators run over the before/after pair:
+  ``verify.py``'s structural gates (ordering, span coverage, speakers
+  still represented) and ``stages.py``'s content-retention gate. Neither
+  alone is enough -- a pass that replaced every turn with one character
+  satisfies every structural check and is not a transcript.
 """
 
 from __future__ import annotations
@@ -48,7 +49,12 @@ from pydantic import BaseModel, Field
 from ...claude import Reply
 from ...prompting import StructuredPrompt
 from ..models import TranscriptArtifact, TranscriptTurn
-from ..stages import StructuredAgent, run_structured_with_retries
+from ..stages import (
+    StagePrimitiveError,
+    StructuredAgent,
+    ensure_polish_preserves_content,
+    run_structured_with_retries,
+)
 from ..verify import verify_turns
 from .assignment import (
     SpeakerContext,
@@ -346,12 +352,26 @@ def _build_edited_turns(
 def _gate_or_refuse(
     before: TranscriptArtifact, after: TranscriptArtifact, *, mode: TextEditMode
 ) -> None:
+    """Run both M9 validators over the before/after pair.
+
+    ``verify_turns`` checks structure (ordering, span coverage, speakers
+    still represented, no adjacent duplicates); ``ensure_polish_preserves_content``
+    checks that the words survived. Both are needed: a pass that replaced
+    every turn with a single character satisfies every structural check
+    and is still not a transcript.
+    """
     report = verify_turns(before, after, affected_paths=[])
     if report.failed_gate_ids:
         raise UnfaithfulEditError(
             f"the {mode.value} pass failed M9's verification gates: "
             + ", ".join(report.failed_gate_ids)
         )
+    try:
+        ensure_polish_preserves_content(before.turns, after.turns)
+    except StagePrimitiveError as exc:
+        raise UnfaithfulEditError(
+            f"the {mode.value} pass failed M9's content-retention gate: {exc}"
+        ) from exc
 
 
 async def transform_text(

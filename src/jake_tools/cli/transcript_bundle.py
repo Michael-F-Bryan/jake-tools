@@ -30,6 +30,7 @@ from ..transcripts.bundle.control import (
     project_document,
     render_document,
     resume_run,
+    run_assemble_transform,
     run_chapter_transform,
     run_minutes_transform,
     run_normalise_transform,
@@ -756,6 +757,37 @@ def _echo_run_result(run: RunRecord, store: BundleStore, *, as_json: bool) -> No
     click.echo(f"state: {run.state.value}")
     if head_revision_id is not None:
         click.echo(f"head: {head_revision_id}")
+
+
+@transform_group.command("assemble")
+@_bundle_option
+@click.option(
+    "--rationale",
+    default="",
+    help="Why these sources belong in this document (recorded on the revision).",
+)
+@_json_option
+def transform_assemble_command(
+    bundle_path: Path, rationale: str, as_json: bool
+) -> None:
+    """Bring every ingested candidate into the document (M18).
+
+    Ingesting a source creates a *candidate*; nothing downstream can see
+    it until an assembly revision selects it. This selects every
+    unassembled artefact, taking each one's role from the `--kind` you
+    declared at ingest -- obsidian-note becomes the destination and the
+    notes carrier, local-media becomes media, and anything unrecognised
+    becomes evidence-only rather than being guessed at.
+
+    Safe to re-run after ingesting more sources: already-assembled
+    artefacts and components are left alone.
+    """
+    store = BundleStore(bundle_path)
+    try:
+        run = run_assemble_transform(store)
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+    _echo_run_result(run, store, as_json=as_json)
 
 
 @transform_group.command("timeline")

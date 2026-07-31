@@ -167,12 +167,20 @@ def project_chapter_boundaries(
     if not turns:
         raise NoCanonicalTurnsError("cannot chapter an empty turn sequence.")
     index_by_turn_id = {turn.turn_id: index for index, turn in enumerate(turns)}
-    unknown = [turn_id for turn_id in first_turn_ids if turn_id not in index_by_turn_id]
-    if unknown:
+    # A boundary naming a turn that is not in this set is *ignored*, not
+    # fatal. Chaptering a long meeting means asking a model to echo
+    # hundreds of uuid7s exactly, and a turn a polish pass legitimately
+    # dropped is no longer canonical either. Neither is a reason to lose
+    # the whole plan: coverage stays exact whichever boundaries survive,
+    # because the partition is derived from them rather than trusted, and
+    # the caller reports how many were ignored.
+    known = [turn_id for turn_id in first_turn_ids if turn_id in index_by_turn_id]
+    if first_turn_ids and not known:
         raise InvalidChapterPlanError(
-            f"chapter plan names turn ID(s) that are not canonical turns: {unknown}."
+            "no chapter boundary names a canonical turn of this transcript; the "
+            "plan does not describe this document at all."
         )
-    indices = [index_by_turn_id[turn_id] for turn_id in first_turn_ids]
+    indices = [index_by_turn_id[turn_id] for turn_id in known]
     if indices != sorted(indices):
         raise InvalidChapterPlanError(
             "chapter boundaries are not in transcript order; the plan does not "
@@ -196,6 +204,10 @@ class ChapterOutcome:
     revision: RevisionRecord
     chapters: ChapterSetComponent
     reply: Reply
+    ignored_boundary_count: int = 0
+    """Boundaries the plan named that are not canonical turns. Reported
+    rather than swallowed: a plan that mostly missed is a signal about the
+    stage, even though the coverage it produced is still exact."""
 
 
 async def transform_chapters(
@@ -224,9 +236,10 @@ async def transform_chapters(
         ),
         max_attempts=max_attempts,
     )
-    ranges = project_chapter_boundaries(
-        turns, [chapter.first_turn_id for chapter in payload.chapters]
-    )
+    proposed_ids = [chapter.first_turn_id for chapter in payload.chapters]
+    ranges = project_chapter_boundaries(turns, proposed_ids)
+    known_ids = {turn.turn_id for turn in turns}
+    ignored = sum(1 for turn_id in proposed_ids if turn_id not in known_ids)
     titles = _titles_for_ranges(payload.chapters, ranges, turns)
     chapters = tuple(
         ChapterRecord(
@@ -257,7 +270,12 @@ async def transform_chapters(
         ),
     )
     store.update_head(run_id=run_id, revision_id=revision.revision_id)
-    return ChapterOutcome(revision=revision, chapters=component, reply=reply)
+    return ChapterOutcome(
+        revision=revision,
+        chapters=component,
+        reply=reply,
+        ignored_boundary_count=ignored,
+    )
 
 
 def _titles_for_ranges(

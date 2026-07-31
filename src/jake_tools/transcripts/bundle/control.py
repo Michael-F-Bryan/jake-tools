@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import json
 import os
 import shutil
 import tempfile
@@ -24,12 +23,17 @@ from types import MappingProxyType
 
 from ..errors import TranscriptError
 from ..stages import StructuredAgent
+from .assemble import assemble
 from .components import (
+    ArtefactSelection,
+    ComponentId,
+    Disposition,
     SpeakerHypothesisSetComponent,
     SpeakerReviewComponent,
     TextEditMode,
     TimedTurnSetComponent,
     TimelineCombinedComponent,
+    component_input_refs,
 )
 from .document import TranscriptDocumentV1, project_head, project_revision
 from .ids import ArtefactId, RevisionId, RunId, mint_id
@@ -47,6 +51,8 @@ from .records import (
     NoDocumentYet,
     OperationRef,
     RenderRecord,
+    ReviewRecord,
+    RevisionRecord,
     RunRecord,
     RunState,
     SourceAssociation,
@@ -62,7 +68,11 @@ from .render import (
     render_meeting_note,
     template_sha256,
 )
-from .review import ApplyReviewOutcome, apply_review
+from .review import (
+    ApplyReviewOutcome,
+    commit_review,
+    prepare_review_application,
+)
 from .speakers import propose_speakers
 from .store import ArtefactRecord, BundleStore, UnknownSourceError
 from .text import TextTransformOutcome, transform_text
@@ -742,6 +752,135 @@ def transcribe_executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
     return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
 
 
+#: How ``transform assemble`` reads an ingested artefact's role from the
+#: ``--kind`` the operator declared at ingest (M3: naming the input on the
+#: command line *is* the assertion). Anything not listed is
+#: ``evidence-only`` -- present in the document and cited by nothing,
+#: which is the honest default for a source whose role was never stated.
+_DISPOSITIONS_BY_KIND: Mapping[str, tuple[Disposition, ...]] = MappingProxyType(
+    {
+        "obsidian-note": (Disposition.DESTINATION, Disposition.NOTES),
+        "local-media": (Disposition.MEDIA,),
+        "audio": (Disposition.MEDIA,),
+        "markdown": (Disposition.SELECTED_TRANSCRIPT,),
+        "vtt": (Disposition.SELECTED_TRANSCRIPT,),
+        "teams-transcript": (Disposition.SELECTED_TRANSCRIPT,),
+        "gemini-notes": (Disposition.NOTES,),
+    }
+)
+
+
+def _unassembled_components(
+    store: BundleStore, *, selected_artefact_ids: frozenset[str]
+) -> tuple[ComponentId, ...]:
+    """The adapter-produced components these artefacts brought with them.
+
+    A component qualifies when every artefact it declares as an input is
+    one this assembly is selecting -- that is exactly M16's coherent-
+    snapshot rule stated forwards: a component may only enter a document
+    alongside the evidence it was derived from. Components already in the
+    head's closure are left alone, so re-assembling after a second ingest
+    adds the new ones without duplicating the old.
+    """
+    head = project_head(store)
+    already_present = (
+        frozenset() if isinstance(head, NoDocumentYet) else frozenset(head.components)
+    )
+    selected: list[ComponentId] = []
+    for component in store.iter_components():
+        if component.component_id in already_present:
+            continue
+        refs = component_input_refs(component)
+        if refs.artefact_ids and not set(refs.artefact_ids) <= selected_artefact_ids:
+            continue
+        selected.append(component.component_id)
+    return tuple(sorted(selected))
+
+
+def assemble_candidates(
+    store: BundleStore, *, run_id: RunId, rationale: str = ""
+) -> RevisionRecord:
+    """M18: bring every ingested candidate into the document.
+
+    Dispositions come from each artefact's declared ``kind``
+    (:data:`_DISPOSITIONS_BY_KIND`), never inferred from filenames or
+    content -- M3 forbids association by resemblance, and the ``--kind``
+    the operator typed at ingest is the assertion this reads back.
+    """
+    head = store.document_head()
+    if isinstance(head, NoDocumentYet):
+        candidate_ids = head.candidate_artefact_ids
+    else:
+        closure = store.resolve_revision_closure(head.revision_id)
+        assembled = {
+            artefact_id
+            for revision in closure.ancestors.values()
+            for artefact_id in revision.artefact_ids
+        }
+        candidate_ids = tuple(
+            artefact.artefact_id
+            for artefact in _iter_bundle_artefacts(store)
+            if artefact.artefact_id not in assembled
+        )
+    if not candidate_ids:
+        raise BundleControlError(
+            "there are no unassembled artefacts in this bundle; ingest a source "
+            "first (`source ingest`)."
+        )
+    selections = tuple(
+        ArtefactSelection(
+            artefact_id=artefact_id,
+            dispositions=_DISPOSITIONS_BY_KIND.get(
+                store.load_artefact(artefact_id).kind, (Disposition.EVIDENCE_ONLY,)
+            ),
+        )
+        for artefact_id in candidate_ids
+    )
+    return assemble(
+        store,
+        run_id=run_id,
+        selections=selections,
+        rationale=rationale
+        or "assemble every ingested candidate, dispositions from declared kinds (M18)",
+        component_ids=_unassembled_components(
+            store, selected_artefact_ids=frozenset(candidate_ids)
+        ),
+    )
+
+
+def _iter_bundle_artefacts(store: BundleStore):
+    """Every artefact record in the bundle, assembled or not.
+
+    Only reached on a re-assembly (the bundle already has a head, so
+    ``NoDocumentYet``'s candidate list is gone -- open item 1 in the
+    handoff). Reads the store's own artefact directory through its public
+    loader rather than reaching into private state.
+    """
+    directory = store.root / "artefacts"
+    if not directory.is_dir():
+        return
+    for path in sorted(directory.glob("artefact_*.json")):
+        yield store.load_artefact(path.stem)
+
+
+def assemble_executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+    """Dispatches M18's assembly for `resume`. ``assemble()`` moves the
+    head itself, so no second ``update_head`` is proposed here."""
+    assemble_candidates(store, run_id=run.run_id)
+    return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
+
+
+def run_assemble_transform(store: BundleStore) -> RunRecord:
+    """CLI entry point for `transform assemble` (M18)."""
+    return run_bundle_operation(
+        store,
+        next_action=OperationRef(
+            kind="assemble", rationale="transcript transform assemble"
+        ),
+        executor=assemble_executor,
+    )
+
+
 def normalise_executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
     """Dispatches M7's normalisation for `resume`. Like the timeline and
     transcribe executors, :func:`normalise_transcript` already moved the
@@ -760,6 +899,7 @@ def default_bundle_executors() -> Mapping[str, BundleExecutor]:
     """
     return MappingProxyType(
         {
+            "assemble": assemble_executor,
             "timeline": timeline_executor,
             "transcribe": transcribe_executor,
             "normalise": normalise_executor,
@@ -902,17 +1042,28 @@ def run_review_apply(store: BundleStore, *, pack_path: Path) -> ApplyReviewOutco
 
     A separate run from the one waiting in ``review_required``: that run
     released its lease precisely so this could happen later, and M2 allows
-    exactly one *active* run, not one run per bundle lifetime. Re-applying
-    an already-applied pack takes no lease at all -- it is a read that
-    returns the first application's revision.
+    exactly one *active* run, not one run per bundle lifetime.
+
+    Validation happens *before* the run exists, so a refusal -- a stale
+    pack, an anonymous reviewer, a decision naming an invented cluster --
+    surfaces as that specific error and leaves no failed run behind.
+    Re-applying an already-applied pack takes no lease at all.
     """
-    if store.find_review(_pack_review_id(pack_path)) is not None:
-        return apply_review(store, run_id="", pack_path=pack_path)
+    prepared = prepare_review_application(store, pack_path=pack_path)
+    if isinstance(prepared, ReviewRecord):
+        return ApplyReviewOutcome(
+            review=prepared,
+            revision=None,
+            component=None,
+            already_applied=True,
+            addressed_item_count=0,
+            total_item_count=0,
+        )
 
     outcome: list[ApplyReviewOutcome] = []
 
     def _executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
-        outcome.append(apply_review(store, run_id=run.run_id, pack_path=pack_path))
+        outcome.append(commit_review(store, run_id=run.run_id, prepared=prepared))
         return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
 
     run_bundle_operation(
@@ -925,21 +1076,6 @@ def run_review_apply(store: BundleStore, *, pack_path: Path) -> ApplyReviewOutco
         executor=_executor,
     )
     return outcome[0]
-
-
-def _pack_review_id(pack_path: Path) -> str:
-    """The pack's own ``review_id``, for the pre-lease idempotency check.
-
-    Read directly rather than through :func:`apply_review` so an
-    already-applied pack never even creates a run: a no-op that leaves a
-    run record behind is not a no-op an operator would recognise.
-    Malformed packs return a sentinel and fall through to
-    :func:`apply_review`, which produces the real, specific error.
-    """
-    try:
-        return str(json.loads(pack_path.read_text(encoding="utf-8"))["review_id"])
-    except OSError, ValueError, KeyError, TypeError:
-        return "review_00000000-0000-7000-8000-000000000000"
 
 
 async def _run_single_product_stage[T](

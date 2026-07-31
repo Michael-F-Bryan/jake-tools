@@ -920,6 +920,18 @@ class BundleStore:
                     f"component file {path} does not parse as a known component: {exc}"
                 ) from exc
 
+    def iter_components(self) -> Iterator[ComponentRecord]:
+        """Every stored component, whether or not a revision references it.
+
+        The public counterpart to the private dedup scan: ``transform
+        assemble`` has to find the components an adapter produced at
+        ingest time (M3: ingestion creates *candidates*), and those are
+        by definition not yet in any revision's closure -- so the document
+        projection cannot see them and there would otherwise be no way to
+        bring them in.
+        """
+        yield from self._iter_components()
+
     def _find_existing_component_by_hash(
         self, content_hash: str
     ) -> ComponentRecord | None:

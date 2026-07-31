@@ -194,6 +194,30 @@ def _resolve_member_order(
     return tuple(resolved)
 
 
+def _unresolved_references(
+    document_components: Mapping[ComponentId, ComponentRecord],
+    included: tuple[ArtefactId, ...],
+) -> tuple[str, ...]:
+    """Note-embed paths that contributed no timeline segment."""
+    included_paths = {
+        component.media_path
+        for component in document_components.values()
+        if isinstance(component, MediaRecordingComponent)
+        and component.source_artefact_id in included
+    }
+    return tuple(
+        sorted(
+            {
+                reference.resolved_path
+                for component in document_components.values()
+                if isinstance(component, RecordingReferenceSetComponent)
+                for reference in component.references
+                if reference.resolved_path not in included_paths
+            }
+        )
+    )
+
+
 def transform_timeline(
     store: BundleStore,
     *,
@@ -255,11 +279,22 @@ def transform_timeline(
     body = build_combined_timeline(members)
     component = store.add_component(body)
 
+    # A note may embed a recording nobody ingested (M3: a reference alone
+    # never satisfies media.recording). That recording is genuinely absent
+    # from the timeline, and a reader of this revision should be able to
+    # see *which* one rather than having to diff the embed list against
+    # the segments by hand.
+    skipped = _unresolved_references(document.components, resolved_order)
+    skipped_note = (
+        f"; skipped {len(skipped)} note embed(s) with no ingested media: {skipped}"
+        if skipped
+        else ""
+    )
     revision = store.append_revision(
         operation=OperationRef(
             kind="timeline",
             input_ids=resolved_order,
-            rationale="combined timeline over media members (M6)",
+            rationale=f"combined timeline over media members (M6){skipped_note}",
         ),
         parent_revision_ids=(document.revision_id,),
         component_ids=(component.component_id,),
