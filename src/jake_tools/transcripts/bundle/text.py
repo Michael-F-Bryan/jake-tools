@@ -29,7 +29,9 @@ prompt:
 - turn count may shrink only by drops the ledger records;
 - ``turn_id``, ``start_ms``, ``end_ms``, ``speaker_label``,
   ``source_segment_id`` and ``source_artefact_id`` are re-attached from
-  the *input* turn, so a model that tried to change them simply cannot;
+  the *input* turn, so a model that tried to change them simply cannot --
+  the model is never even shown a ``turn_id``, and addresses turns by
+  their position in the window instead;
 - both existing M9 validators run over the before/after pair:
   ``verify.py``'s structural gates (ordering, span coverage, speakers
   still represented) and ``stages.py``'s content-retention gate. Neither
@@ -81,6 +83,19 @@ from .store import BundleStore
 
 EDITOR_VERSION = "v1"
 
+#: How many turns one edit call sees. A pass asks the model to return
+#: *every* turn it was given, so the request and the response both scale
+#: with the transcript: a 51-minute meeting is 753 turns, and asking for
+#: all of them in one call spends most of an hour before failing on the
+#: output budget. Windowing is what makes the pass proportional to meeting
+#: length instead of capped by it.
+#:
+#: Windows are cut on turn boundaries and each is edited independently,
+#: which is sound because M9 already forbids the only operations that
+#: would need cross-window context -- no merging turns, no moving text
+#: between them, no reordering. A turn is only ever rewritten in place.
+TEXT_WINDOW_TURNS = 60
+
 
 class TextTransformError(SpeakerError):
     """Base class for every error this module raises."""
@@ -103,26 +118,42 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _config_hash(*, mode: TextEditMode, model: str) -> str:
+def _config_hash(*, mode: TextEditMode, model: str, window_turns: int) -> str:
     return hashlib.sha256(
         json.dumps(
-            {"editor_version": EDITOR_VERSION, "mode": mode.value, "model": model},
+            {
+                "editor_version": EDITOR_VERSION,
+                "mode": mode.value,
+                "model": model,
+                # Window size changes what each call sees, so two passes
+                # run at different sizes are not the same configuration
+                # even when the model and mode match.
+                "window_turns": window_turns,
+            },
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
 
 
 class EditedTurn(BaseModel):
-    """One turn as the model returns it: an ID and replacement text.
+    """One turn as the model returns it: a position and replacement text.
 
     Deliberately carries *only* those two fields. A payload that also
     accepted timings or a speaker would be a payload a model could get
     wrong; the transform re-attaches those from the input turn regardless,
     so not asking for them removes a whole class of failure instead of
     validating it away afterwards.
+
+    ``index`` is the turn's 1-based position **within this window**, not
+    its ``turn_id``. Asking a model to reproduce hundreds of uuid7s does
+    not work -- chaptering learned this first (it collapsed to a single
+    chapter over 413 turns), and a real 753-turn meeting then failed a
+    text pass on a returned ``turn_..._placeholder``. A small integer is
+    something a model can carry accurately, and the transform maps it back
+    to the real turn, so identity never depends on the model at all.
     """
 
-    turn_id: str
+    index: int
     text: str = ""
     removal_reasons: list[RemovalReason] = Field(default_factory=list)
 
@@ -152,9 +183,9 @@ Never:
 - change meaning, hedging, or uncertainty.
 
 Rules:
-- Return JSON only: one entry per turn below, same turn_id, corrected text.
+- Return JSON only: one entry per turn below, same `index`, corrected text.
 - Return every turn, including ones you did not change.
-- Never return a turn_id that is not listed below.
+- Never return an `index` that is not listed below.
 - `removal_reasons` stays empty for this pass.
 
 Meeting context:
@@ -202,9 +233,9 @@ empty text and one or more `removal_reasons` from: filler, stutter-repeat,
 false-start, non-lexical, duplicate.
 
 Rules:
-- Return JSON only: one entry per turn below, same turn_id.
+- Return JSON only: one entry per turn below, same `index`.
 - Return every turn, including ones you did not change.
-- Never return a turn_id that is not listed below.
+- Never return an `index` that is not listed below.
 
 Meeting context:
 {{ context }}
@@ -228,9 +259,12 @@ class TextTransformOutcome:
     revision: RevisionRecord
     turn_set: TimedTurnSetComponent
     ledger: TextEditLedgerComponent
-    reply: Reply
+    #: One reply per window, in window order -- a pass is several agent
+    #: calls, and collapsing them to one would misreport the usage.
+    replies: tuple[Reply, ...]
     changed_turn_count: int
     dropped_turn_count: int
+    window_count: int
 
 
 def _as_legacy_artifact(
@@ -269,14 +303,21 @@ def _as_legacy_artifact(
 def _turn_payload(
     turns: tuple[TimedTurn, ...], context: SpeakerContext
 ) -> list[dict[str, object]]:
+    """The window as the model sees it: positions, not identities.
+
+    ``turn_id`` is deliberately absent. The model has no use for it -- it
+    cannot be asked to return one reliably (see :class:`EditedTurn`) -- and
+    leaving it out costs it nothing while removing the temptation to echo
+    a mangled one back.
+    """
     return [
         {
-            "turn_id": turn.turn_id,
+            "index": position,
             "speaker": speaker_display_name(context.assignment_for(turn), context),
             "start_ms": turn.start_ms,
             "text": turn.text,
         }
-        for turn in turns
+        for position, turn in enumerate(turns, start=1)
     ]
 
 
@@ -286,24 +327,24 @@ def _build_edited_turns(
     """Re-attach every structural field from the input turn and account for
     the full diff (M9).
 
-    A returned turn_id that is not an input turn is a hard error: a stage
-    that invents editorial nodes is not editing this transcript. A missing
-    turn_id is treated as "unchanged" rather than "dropped" -- dropping is
+    A returned index outside the window is a hard error: a stage that
+    edits turns it was not shown is not editing this transcript. A missing
+    index is treated as "unchanged" rather than "dropped" -- dropping is
     an explicit act that must carry a removal reason, and silence is not
     consent to delete evidence.
     """
-    by_id = {edited.turn_id: edited for edited in payload.turns}
-    unknown = sorted(set(by_id) - {turn.turn_id for turn in inputs})
+    by_index = {edited.index: edited for edited in payload.turns}
+    unknown = sorted(set(by_index) - set(range(1, len(inputs) + 1)))
     if unknown:
         raise UnfaithfulEditError(
-            f"the edit stage returned turn ID(s) that are not in the input turn "
-            f"set: {unknown}."
+            f"the edit stage returned index/indices outside the {len(inputs)} turns "
+            f"it was given: {unknown}."
         )
 
     kept: list[TimedTurn] = []
     entries: list[TextEditEntry] = []
-    for turn in inputs:
-        edited = by_id.get(turn.turn_id)
+    for position, turn in enumerate(inputs, start=1):
+        edited = by_index.get(position)
         old_hash = _sha256_text(turn.text)
         if edited is None:
             kept.append(turn)
@@ -357,8 +398,21 @@ def _build_edited_turns(
     return tuple(kept), tuple(entries)
 
 
+def _windows(count: int, size: int) -> tuple[tuple[int, int], ...]:
+    """Split ``count`` turns into consecutive half-open index ranges."""
+    if size < 1:
+        raise TextTransformError(f"window size must be at least one turn, got {size}.")
+    return tuple(
+        (start, min(start + size, count)) for start in range(0, max(count, 1), size)
+    )
+
+
 def _gate_or_refuse(
-    before: TranscriptArtifact, after: TranscriptArtifact, *, mode: TextEditMode
+    before: TranscriptArtifact,
+    after: TranscriptArtifact,
+    *,
+    mode: TextEditMode,
+    where: str = "",
 ) -> None:
     """Run both M9 validators over the before/after pair.
 
@@ -368,17 +422,18 @@ def _gate_or_refuse(
     every turn with a single character satisfies every structural check
     and is still not a transcript.
     """
+    suffix = f" ({where})" if where else ""
     report = verify_turns(before, after, affected_paths=[])
     if report.failed_gate_ids:
         raise UnfaithfulEditError(
-            f"the {mode.value} pass failed M9's verification gates: "
+            f"the {mode.value} pass failed M9's verification gates{suffix}: "
             + ", ".join(report.failed_gate_ids)
         )
     try:
         ensure_polish_preserves_content(before.turns, after.turns)
     except StagePrimitiveError as exc:
         raise UnfaithfulEditError(
-            f"the {mode.value} pass failed M9's content-retention gate: {exc}"
+            f"the {mode.value} pass failed M9's content-retention gate{suffix}: {exc}"
         ) from exc
 
 
@@ -391,6 +446,7 @@ async def transform_text(
     model: str,
     context_note: str = "",
     max_attempts: int = 3,
+    window_turns: int = TEXT_WINDOW_TURNS,
 ) -> TextTransformOutcome:
     """M9: run one text pass over the head's canonical turns.
 
@@ -400,6 +456,12 @@ async def transform_text(
     review, chapter set, or minutes evidence ref keeps binding -- with the
     single exception of a turn this pass dropped, whose bindings M7
     discharges and whose disappearance the ledger accounts for.
+
+    The pass runs in windows of ``window_turns`` (see
+    :data:`TEXT_WINDOW_TURNS`). Each window is gated on its own so a
+    failure names the window that caused it, and the assembled result is
+    gated again as a whole -- windowing is a way to fit the work through
+    the model, not a reason to check less of it.
     """
     document = _require_document(store)
     turn_set = canonical_turn_set(document.components)
@@ -410,26 +472,43 @@ async def transform_text(
         )
     inputs = turn_set.turns
     speaker_context = SpeakerContext.from_components(document.components)
+    participants = [
+        participant.display_names[0]
+        for participant in speaker_context.participants.values()
+    ]
 
-    prompt: StructuredPrompt[TextEditPayload]
-    if mode == TextEditMode.CORRECT:
-        prompt = CorrectPrompt(
-            context=context_note,
-            participants=[
-                participant.display_names[0]
-                for participant in speaker_context.participants.values()
-            ],
-            turns=_turn_payload(inputs, speaker_context),
+    ranges = _windows(len(inputs), window_turns)
+    kept: tuple[TimedTurn, ...] = ()
+    entries: tuple[TextEditEntry, ...] = ()
+    replies: list[Reply] = []
+    for number, (start, end) in enumerate(ranges, start=1):
+        window = inputs[start:end]
+        where = f"window {number} of {len(ranges)}, turns {start + 1}-{end}"
+        prompt: StructuredPrompt[TextEditPayload]
+        if mode == TextEditMode.CORRECT:
+            prompt = CorrectPrompt(
+                context=context_note,
+                participants=participants,
+                turns=_turn_payload(window, speaker_context),
+            )
+        else:
+            prompt = PolishPrompt(
+                context=context_note, turns=_turn_payload(window, speaker_context)
+            )
+        payload, reply = await run_structured_with_retries(
+            agent, prompt, max_attempts=max_attempts
         )
-    else:
-        prompt = PolishPrompt(
-            context=context_note, turns=_turn_payload(inputs, speaker_context)
+        replies.append(reply)
+        window_kept, window_entries = _build_edited_turns(window, payload, mode=mode)
+        _gate_or_refuse(
+            _as_legacy_artifact(window, speaker_context),
+            _as_legacy_artifact(window_kept, speaker_context),
+            mode=mode,
+            where=where,
         )
+        kept += window_kept
+        entries += window_entries
 
-    payload, reply = await run_structured_with_retries(
-        agent, prompt, max_attempts=max_attempts
-    )
-    kept, entries = _build_edited_turns(inputs, payload, mode=mode)
     _gate_or_refuse(
         _as_legacy_artifact(inputs, speaker_context),
         _as_legacy_artifact(kept, speaker_context),
@@ -448,7 +527,7 @@ async def transform_text(
         input_turn_set_component_id=turn_set.component_id,
         output_turn_set_component_id=new_turn_set.component_id,
         editor=f"claude-agent:{model}",
-        config_hash=_config_hash(mode=mode, model=model),
+        config_hash=_config_hash(mode=mode, model=model, window_turns=window_turns),
         entries=entries,
     )
     ledger = store.add_component(ledger_body)
@@ -481,7 +560,8 @@ async def transform_text(
         revision=revision,
         turn_set=new_turn_set,
         ledger=ledger,
-        reply=reply,
+        replies=tuple(replies),
+        window_count=len(ranges),
         changed_turn_count=sum(
             1 for entry in entries if entry.operation == TextEditOperation.TEXT_EDIT
         ),

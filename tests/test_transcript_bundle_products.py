@@ -20,7 +20,7 @@ from bundle_pipeline import (
     prepare_transcribed_bundle,
     tokens_from_utterances,
 )
-from bundle_stage_agent import StagePlan, stage_agent
+from bundle_stage_agent import StagePlan, stage_agent, stage_query_of
 
 from jake_tools.transcripts.bundle.components import (
     ChapterSetComponent,
@@ -167,6 +167,7 @@ def test_a_polish_pass_that_drops_a_filler_turn_records_the_reason(
     # refuses that), and dropping a long one would trip the
     # content-retention gate -- polish removes filler, not substance.
     filler_id = _turn_ids(store)[2]
+    filler_index = 3  # the same turn, as the model addresses it
 
     def _empty_the_first(prompt: str) -> dict[str, Any] | None:
         if "Polish these transcript turns" not in prompt:
@@ -174,11 +175,11 @@ def test_a_polish_pass_that_drops_a_filler_turn_records_the_reason(
         return {
             "turns": [
                 {
-                    "turn_id": turn_id,
-                    "text": "" if turn_id == filler_id else text,
-                    "removal_reasons": ["filler"] if turn_id == filler_id else [],
+                    "index": index,
+                    "text": "" if index == filler_index else text,
+                    "removal_reasons": ["filler"] if index == filler_index else [],
                 }
-                for turn_id, text in zip(_turn_ids(store), _turns(store), strict=True)
+                for index, text in enumerate(_turns(store), start=1)
             ]
         }
 
@@ -213,8 +214,8 @@ def test_a_correct_pass_may_not_empty_a_turn(tmp_path: Path) -> None:
             return None
         return {
             "turns": [
-                {"turn_id": turn_id, "text": "", "removal_reasons": []}
-                for turn_id in _turn_ids(store)
+                {"index": index, "text": "", "removal_reasons": []}
+                for index in range(1, len(_turn_ids(store)) + 1)
             ]
         }
 
@@ -232,24 +233,16 @@ def test_a_correct_pass_may_not_empty_a_turn(tmp_path: Path) -> None:
 def test_an_edit_naming_a_turn_that_does_not_exist_is_refused(
     tmp_path: Path,
 ) -> None:
-    """A stage that invents editorial nodes is not editing this
+    """A stage that edits turns it was never shown is not editing this
     transcript, so its whole result is refused rather than partly kept."""
     store = _normalised(tmp_path)
 
     def _invent(prompt: str) -> dict[str, Any] | None:
         if "Polish these transcript turns" not in prompt:
             return None
-        return {
-            "turns": [
-                {
-                    "turn_id": "turn_019fb000-0000-7000-8000-000000000000",
-                    "text": "invented",
-                    "removal_reasons": [],
-                }
-            ]
-        }
+        return {"turns": [{"index": 999, "text": "invented", "removal_reasons": []}]}
 
-    with pytest.raises(ExecutorFailedError, match="not in the input turn set"):
+    with pytest.raises(ExecutorFailedError, match="outside the 5 turns"):
         asyncio.run(
             run_text_transform(
                 store,
@@ -273,6 +266,101 @@ def test_an_over_aggressive_polish_is_refused_not_published(tmp_path: Path) -> N
                 mode=TextEditMode.POLISH,
                 agent=stage_agent(StagePlan(polish_text=lambda text: "x")),
                 model="fixture-model",
+            )
+        )
+
+
+def test_a_long_transcript_is_edited_in_windows(tmp_path: Path) -> None:
+    """A pass asks for every turn it was given back, so a single call
+    scales with meeting length and eventually exceeds the output budget --
+    a real 51-minute meeting failed this way after 50 minutes of work.
+    Windowing makes the pass proportional to the transcript instead."""
+    store = _normalised(tmp_path)
+    agent = stage_agent(StagePlan(polish_text=lambda text: text.replace("Um ", "")))
+
+    outcome = asyncio.run(
+        run_text_transform(
+            store,
+            mode=TextEditMode.POLISH,
+            agent=agent,
+            model="fixture-model",
+            window_turns=2,
+        )
+    )
+
+    assert outcome.window_count == 3, "five turns at two per window"
+    assert len(stage_query_of(agent).prompts) == 3
+    assert len(outcome.replies) == 3
+
+
+def test_no_window_sees_a_turn_outside_it(tmp_path: Path) -> None:
+    """The point of a window is that it is smaller. A stage that windowed
+    the *response* but still sent the whole transcript would pass the
+    count assertions above and fix nothing."""
+    store = _normalised(tmp_path)
+    agent = stage_agent(StagePlan())
+    expected = _turns(store)
+
+    asyncio.run(
+        run_text_transform(
+            store,
+            mode=TextEditMode.POLISH,
+            agent=agent,
+            model="fixture-model",
+            window_turns=2,
+        )
+    )
+
+    prompts = stage_query_of(agent).prompts
+    seen = [[text for text in expected if text in prompt] for prompt in prompts]
+    assert seen == [list(expected[0:2]), list(expected[2:4]), list(expected[4:5])]
+    assert all("turn_0" not in prompt for prompt in prompts), (
+        "the model is never shown a turn_id it could echo back mangled"
+    )
+
+
+def test_windowing_keeps_the_whole_transcript_and_its_identities(
+    tmp_path: Path,
+) -> None:
+    """M9's guarantee does not weaken because the work was split up: every
+    turn is still accounted for, in order, under its own turn_id."""
+    store = _normalised(tmp_path)
+    before = _turn_ids(store)
+
+    asyncio.run(
+        run_text_transform(
+            store,
+            mode=TextEditMode.CORRECT,
+            agent=stage_agent(StagePlan(correct_text=lambda text: text.upper())),
+            model="fixture-model",
+            window_turns=2,
+        )
+    )
+
+    assert _turn_ids(store) == before
+    ledger = _head(store).components_of(TextEditLedgerComponent)[0]
+    accounted = [
+        turn_id for entry in ledger.entries for turn_id in entry.output_turn_ids
+    ]
+    assert accounted == list(before), "one entry per turn, in transcript order"
+
+
+def test_a_window_that_fails_its_gate_names_itself(tmp_path: Path) -> None:
+    """With one call the failure was obvious; with thirteen, a refusal
+    that does not say which window is a much worse diagnostic."""
+    store = _normalised(tmp_path)
+
+    def _gut_the_last_window(text: str) -> str:
+        return "x" if "vendor lead time" in text else text
+
+    with pytest.raises(ExecutorFailedError, match=r"window 3 of 3, turns 5-5"):
+        asyncio.run(
+            run_text_transform(
+                store,
+                mode=TextEditMode.POLISH,
+                agent=stage_agent(StagePlan(polish_text=_gut_the_last_window)),
+                model="fixture-model",
+                window_turns=2,
             )
         )
 

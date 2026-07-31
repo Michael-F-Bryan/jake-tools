@@ -113,10 +113,11 @@ def _turns_from_prompt(prompt: str) -> list[dict[str, Any]]:
 
 
 def _text_payload(prompt: str, transform: Callable[[str], str]) -> dict[str, Any]:
+    """The text stages address turns by window position -- so does this."""
     return {
         "turns": [
             {
-                "turn_id": turn["turn_id"],
+                "index": turn["index"],
                 "text": transform(str(turn.get("text", ""))),
                 "removal_reasons": [],
             }

@@ -75,7 +75,7 @@ from .review import (
 )
 from .speakers import propose_speakers
 from .store import ArtefactRecord, BundleStore, UnknownSourceError
-from .text import TextTransformOutcome, transform_text
+from .text import TEXT_WINDOW_TURNS, TextTransformOutcome, transform_text
 from .timeline import transform_timeline
 from .transcribe import SubprocessRunner, default_subprocess_runner, transcribe_media
 
@@ -1113,6 +1113,7 @@ async def run_text_transform(
     agent: StructuredAgent,
     model: str,
     context_note: str = "",
+    window_turns: int = TEXT_WINDOW_TURNS,
 ) -> TextTransformOutcome:
     """CLI entry point for `transform text --mode correct|polish` (M9)."""
     return await _run_single_product_stage(
@@ -1126,6 +1127,7 @@ async def run_text_transform(
             agent=agent,
             model=model,
             context_note=context_note,
+            window_turns=window_turns,
         ),
     )
 
