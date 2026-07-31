@@ -53,7 +53,7 @@ import hashlib
 import json
 import re
 import subprocess
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -693,6 +693,7 @@ def adapt_obsidian_note(
     *,
     note_artefact_id: ArtefactId,
     note_path: Path,
+    operator_participants: Sequence[str] = (),
 ) -> ObsidianNoteAdaptation:
     """M3/M13/M19/M20: an Obsidian source note -- a destination component
     (M13: target identity + owned-region detection, never a write), a
@@ -719,9 +720,21 @@ def adapt_obsidian_note(
     can later match (or fail to match) it.
 
     A note is not required to declare recordings (a text-only note is
-    legal), so ``reference_set`` is ``None`` when the note has none --
-    but frontmatter Attendees ARE required (M19 has nothing to declare a
-    participant set from otherwise).
+    legal), so ``reference_set`` is ``None`` when the note has none -- but
+    a participant set is required, because M19 has nothing to declare one
+    from otherwise and every speaker the review step can choose comes from
+    it.
+
+    ``operator_participants`` is the second sanctioned route to that set
+    (M19's ``operator`` declaration source). Plenty of real notes name
+    their people in the body as wikilinks rather than in a frontmatter
+    ``Attendees`` list -- and picking names out of body wikilinks is
+    exactly the inference M19 forbids, since ``[[On-road Driving]]`` and
+    ``[[Michael Bryan]]`` are indistinguishable to a parser. Naming them
+    on the command line is an operator assertion (M3's pattern) and is
+    recorded as one. Supplying both is legal: frontmatter attendees and
+    operator-declared ones merge, deduplicated by display name, each
+    keeping its own provenance.
     """
     source_note = load_source_note(note_path)
     body = source_note.body
@@ -751,13 +764,11 @@ def adapt_obsidian_note(
         assert isinstance(added_reference_set, RecordingReferenceSetComponent)
         reference_set = added_reference_set
 
-    if not source_note.attendees:
-        raise AdapterError(
-            f"no frontmatter Attendees found in {note_path} -- M19 has nothing to "
-            "declare a participant set from."
-        )
-    participant_body = ParticipantSetComponentBody(
-        participants=tuple(
+    declared: list[ParticipantRecord] = []
+    seen_names: set[str] = set()
+    for attendee in source_note.attendees:
+        seen_names.add(attendee)
+        declared.append(
             ParticipantRecord(
                 participant_id=mint_id("participant"),
                 declaration_source=ParticipantDeclarationSource.NOTE_FRONTMATTER,
@@ -767,9 +778,31 @@ def adapt_obsidian_note(
                 display_names=(attendee,),
                 status=ParticipantStatus.DECLARED,
             )
-            for attendee in source_note.attendees
         )
-    )
+    for name in operator_participants:
+        if name in seen_names:
+            continue
+        seen_names.add(name)
+        declared.append(
+            ParticipantRecord(
+                participant_id=mint_id("participant"),
+                declaration_source=ParticipantDeclarationSource.OPERATOR,
+                declaration_evidence=(
+                    f"declared on the command line for {note_path.name}"
+                ),
+                display_names=(name,),
+                status=ParticipantStatus.DECLARED,
+            )
+        )
+    if not declared:
+        raise AdapterError(
+            f"no participants for {note_path}: the note has no frontmatter "
+            "Attendees and none were declared with --participant. M19 has nothing "
+            "to declare a participant set from, and body wikilinks are not a "
+            "substitute -- '[[On-road Driving]]' and '[[Michael Bryan]]' look the "
+            "same to a parser."
+        )
+    participant_body = ParticipantSetComponentBody(participants=tuple(declared))
     participants = store.add_component(participant_body)
     assert isinstance(participants, ParticipantSetComponent)
 

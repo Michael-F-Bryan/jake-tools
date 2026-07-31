@@ -25,6 +25,7 @@ from jake_tools.transcripts.bundle.components import (
     DestinationComponent,
     MediaRecordingComponent,
     OwnedRegionState,
+    ParticipantDeclarationSource,
     ParticipantStatus,
     RecordingReferenceSetComponent,
     TrustClass,
@@ -1071,3 +1072,82 @@ def test_adapt_local_media_is_idempotent_on_retry(tmp_path: Path) -> None:
     )
 
     assert first.component_id == second.component_id
+
+
+def test_operator_declared_participants_stand_in_for_missing_frontmatter(
+    tmp_path: Path,
+) -> None:
+    """M19's ``operator`` declaration source. Plenty of real notes name
+    their people in the body as wikilinks, and picking those out is exactly
+    the inference M19 forbids -- ``[[On-road Driving]]`` and
+    ``[[Michael Bryan]]`` are indistinguishable to a parser. Naming them on
+    the command line is an assertion, and is recorded as one."""
+    note = tmp_path / "ops-log.md"
+    note.write_text(
+        "---\ntags:\n  - ops-log\n---\n\n- Chatting with [[Steven Crawford]]\n",
+        encoding="utf-8",
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=note.read_bytes())
+
+    adaptation = adapt_obsidian_note(
+        store,
+        note_artefact_id=artefact.artefact_id,
+        note_path=note,
+        operator_participants=("Steven Crawford", "Matt Lavender"),
+    )
+
+    participants = adaptation.participants.participants
+    assert {p.display_names[0] for p in participants} == {
+        "Steven Crawford",
+        "Matt Lavender",
+    }
+    assert all(
+        p.declaration_source == ParticipantDeclarationSource.OPERATOR
+        for p in participants
+    )
+
+
+def test_a_note_with_neither_attendees_nor_declared_participants_is_refused(
+    tmp_path: Path,
+) -> None:
+    note = tmp_path / "ops-log.md"
+    note.write_text("---\ntags:\n  - ops-log\n---\n\n- some notes\n", encoding="utf-8")
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=note.read_bytes())
+
+    with pytest.raises(AdapterError, match="--participant"):
+        adapt_obsidian_note(
+            store, note_artefact_id=artefact.artefact_id, note_path=note
+        )
+
+
+def test_frontmatter_and_operator_participants_merge_keeping_provenance(
+    tmp_path: Path,
+) -> None:
+    """Both routes are legal at once, deduplicated by display name -- a
+    frontmatter attendee stays declared by frontmatter even when the
+    operator repeats them."""
+    note = tmp_path / "meeting.md"
+    note.write_text(
+        '---\nAttendees:\n  - "[[Michael Bryan]]"\n---\n\n- notes\n',
+        encoding="utf-8",
+    )
+    store = _store(tmp_path)
+    artefact = registered_source_and_artefact(store, content=note.read_bytes())
+
+    adaptation = adapt_obsidian_note(
+        store,
+        note_artefact_id=artefact.artefact_id,
+        note_path=note,
+        operator_participants=("Michael Bryan", "Steven Crawford"),
+    )
+
+    by_name = {
+        p.display_names[0]: p.declaration_source
+        for p in adaptation.participants.participants
+    }
+    assert by_name == {
+        "Michael Bryan": ParticipantDeclarationSource.NOTE_FRONTMATTER,
+        "Steven Crawford": ParticipantDeclarationSource.OPERATOR,
+    }

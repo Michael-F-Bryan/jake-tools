@@ -199,6 +199,16 @@ def _rendered_invocation(ctx: click.Context) -> str:
     help="Obsidian embed link (plus note snapshot) as the association evidence. "
     "Registers a new source.",
 )
+@click.option(
+    "--participant",
+    "participants",
+    multiple=True,
+    help="Declare a meeting participant by display name (repeatable). Use this "
+    "when the note names its people in the body rather than in a frontmatter "
+    "Attendees list -- naming them here is the operator assertion (M19), and "
+    "body wikilinks are never guessed at. Only meaningful with "
+    "--kind obsidian-note.",
+)
 @_json_option
 @click.argument(
     "input_file", type=click.Path(exists=True, dir_okay=False, path_type=Path)
@@ -212,6 +222,7 @@ def source_ingest(
     source_id: str | None,
     provider_id: str | None,
     note_embed: str | None,
+    participants: tuple[str, ...],
     as_json: bool,
     input_file: Path,
 ) -> None:
@@ -229,7 +240,8 @@ def source_ingest(
 
     `--kind obsidian-note` additionally parses INPUT_FILE as an Obsidian
     source note (destination component, participants from frontmatter
-    Attendees, recording references from embeds -- M3/M13/M19; a
+    Attendees and/or --participant, recording references from embeds --
+    M3/M13/M19; a
     reference alone never satisfies `media.recording`, ingest the
     recording separately with `--kind local-media`). `--kind local-media`
     additionally runs `ffprobe` over INPUT_FILE and records its
@@ -276,6 +288,7 @@ def source_ingest(
                 store,
                 note_artefact_id=outcome.artefact.artefact_id,
                 note_path=input_file,
+                operator_participants=participants,
             )
             adapter_summary = {
                 "destination_component_id": note_adaptation.destination.component_id,
