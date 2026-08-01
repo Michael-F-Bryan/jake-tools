@@ -25,6 +25,7 @@ from jake_tools.transcripts.bundle.components import (
     ParticipantStatus,
     ReviewDecisionKind,
     SpeakerReviewComponentBody,
+    TextEditMode,
     TextEditOperation,
     TimedTurn,
     TimedTurnSetComponent,
@@ -36,12 +37,14 @@ from jake_tools.transcripts.bundle.control import (
     run_reflow_transform,
     run_review_apply,
     run_speakers_propose,
+    run_text_transform,
 )
 from jake_tools.transcripts.bundle.document import TranscriptDocumentV1, project_head
 from jake_tools.transcripts.bundle.ids import mint_id
 from jake_tools.transcripts.bundle.reflow import (
     reflow_turns,
 )
+from jake_tools.transcripts.bundle.registry import CapabilityKey, CapabilityStatus
 from jake_tools.transcripts.bundle.review import export_review_pack
 from jake_tools.transcripts.bundle.store import BundleStore
 
@@ -305,3 +308,47 @@ def test_reflow_transform_is_idempotent_once_no_merge_remains(tmp_path: Path) ->
     assert second.revision is None
     assert second.ledger is None
     assert store.load_manifest().head_revision_id == head_after_first
+
+
+def test_reflow_invalidates_earlier_correction_and_polish_proofs(
+    tmp_path: Path,
+) -> None:
+    store = _reviewed_store(tmp_path / "bundle")
+    agent = stage_agent(StagePlan())
+    asyncio.run(
+        run_text_transform(
+            store,
+            mode=TextEditMode.CORRECT,
+            agent=agent,
+            model="fixture-model",
+        )
+    )
+    asyncio.run(
+        run_text_transform(
+            store,
+            mode=TextEditMode.POLISH,
+            agent=agent,
+            model="fixture-model",
+        )
+    )
+    before = project_head(store)
+    assert isinstance(before, TranscriptDocumentV1)
+    assert (
+        before.capability_status(CapabilityKey.TEXT_CORRECTED)
+        == CapabilityStatus.PRESENT_VALIDATED
+    )
+    assert (
+        before.capability_status(CapabilityKey.TEXT_POLISHED)
+        == CapabilityStatus.PRESENT_VALIDATED
+    )
+
+    run_reflow_transform(store)
+
+    after = project_head(store)
+    assert isinstance(after, TranscriptDocumentV1)
+    assert (
+        after.capability_status(CapabilityKey.TEXT_CORRECTED) == CapabilityStatus.ABSENT
+    )
+    assert (
+        after.capability_status(CapabilityKey.TEXT_POLISHED) == CapabilityStatus.ABSENT
+    )

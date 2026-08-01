@@ -1122,30 +1122,35 @@ def _validate_speakers_human_confirmed(context: ValidationContext) -> Capability
 # -- real validators: text.corrected / text.polished (M9) --------------------
 
 
-def _turn_sets_reaching(
+def _turn_sets_since_reflow(
     components: Mapping[ComponentId, ComponentRecord], live: ComponentId
 ) -> frozenset[ComponentId]:
-    """Every turn set the live one was built from, via the M9 ledgers.
+    """Turn sets reachable from live without crossing a reflow ledger.
 
-    Correct and polish are separate passes over the same lineage: polish
-    supersedes the turn set correction produced, so a validator that
-    demanded ``output_turn_set_component_id == live`` would report
-    ``text.corrected`` as absent the moment polish ran -- even though the
-    corrected text is exactly what polish then polished. Walking the
-    ledger chain backwards from the live set keeps both proofs current,
-    while a ledger on an abandoned branch (a superseded pass nothing built
-    on) is still correctly excluded.
+    Reflow changes turn boundaries, so correction and polish proofs from
+    before it are stale even when their surviving anchor IDs still happen to
+    cover every live turn. The graph is deliberately one-to-many because
+    content-addressed no-op correction and polish passes may share an output
+    turn-set ID while retaining separate ledgers.
     """
-    outputs_to_inputs = {
-        ledger.output_turn_set_component_id: ledger.input_turn_set_component_id
-        for ledger in components.values()
-        if isinstance(ledger, TextEditLedgerComponent)
-    }
+    inputs_by_output: dict[ComponentId, set[ComponentId]] = {}
+    for ledger in components.values():
+        if not isinstance(ledger, TextEditLedgerComponent):
+            continue
+        if ledger.mode == TextEditMode.REFLOW:
+            continue
+        inputs_by_output.setdefault(ledger.output_turn_set_component_id, set()).add(
+            ledger.input_turn_set_component_id
+        )
+
     reachable: set[ComponentId] = set()
-    current: ComponentId | None = live
-    while current is not None and current not in reachable:
+    pending = [live]
+    while pending:
+        current = pending.pop()
+        if current in reachable:
+            continue
         reachable.add(current)
-        current = outputs_to_inputs.get(current)
+        pending.extend(inputs_by_output.get(current, ()))
     return frozenset(reachable)
 
 
@@ -1186,11 +1191,11 @@ def _make_text_validator(
                     "set does, so the ledger describes nothing this document has"
                 ),
             )
-        reachable = _turn_sets_reaching(context.components, turn_set.component_id)
+        recent = _turn_sets_since_reflow(context.components, turn_set.component_id)
         current = [
             ledger
             for ledger in ledgers
-            if ledger.output_turn_set_component_id in reachable
+            if ledger.output_turn_set_component_id in recent
         ]
         if not current:
             return CapabilityRecord(
