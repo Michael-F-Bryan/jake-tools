@@ -36,6 +36,7 @@ from ..transcripts.bundle.control import (
     run_minutes_transform,
     run_normalise_transform,
     run_obsidian_recording_recipe,
+    run_reflow_transform,
     run_review_apply,
     run_speakers_propose,
     run_text_transform,
@@ -994,11 +995,44 @@ async def transform_speakers_propose_command(
     _echo_run_result(run, store, as_json=as_json)
 
 
+@transform_group.command("reflow")
+@_bundle_option
+@_json_option
+def transform_reflow_command(bundle_path: Path, as_json: bool) -> None:
+    """Join reviewed-speaker continuations before correction and polish.
+
+    The transform merges adjacent turns resolved to the same reviewed speaker,
+    objective unattributed word suffixes, and same-speaker continuations split
+    by an overlapping interjection. It refuses general cross-speaker merging
+    and records every retired source turn in a durable merge ledger.
+    """
+    store = BundleStore(bundle_path)
+    try:
+        outcome = run_reflow_transform(store)
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+
+    payload = {
+        "revision_id": (
+            outcome.revision.revision_id if outcome.revision is not None else None
+        ),
+        "merged_turns": outcome.merged_turn_count,
+        "ledger_component_id": (
+            outcome.ledger.component_id if outcome.ledger is not None else None
+        ),
+    }
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    for key, value in payload.items():
+        click.echo(f"{key}: {value}")
+
+
 @transform_group.command("text")
 @_bundle_option
 @click.option(
     "--mode",
-    type=click.Choice([mode.value for mode in TextEditMode]),
+    type=click.Choice([TextEditMode.CORRECT.value, TextEditMode.POLISH.value]),
     required=True,
     help="correct: fix mis-transcriptions only. polish: readability only "
     "(filler, stutters, punctuation). They are separate passes with separate "

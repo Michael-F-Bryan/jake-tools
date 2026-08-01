@@ -58,6 +58,7 @@ from .records import (
     SourceAssociation,
     SourceMembershipRecord,
 )
+from .reflow import ReflowOutcome, transform_reflow
 from .registry import CapabilityKey, CapabilityStatus
 from .render import (
     DUMC_VARIANT,
@@ -889,6 +890,11 @@ def normalise_executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
     return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
 
 
+def reflow_executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+    transform_reflow(store, run_id=run.run_id)
+    return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
+
+
 def default_bundle_executors() -> Mapping[str, BundleExecutor]:
     """The production executor mapping (M2's resume seam): every
     operation kind ``transform timeline``/``transform transcribe`` may
@@ -903,6 +909,7 @@ def default_bundle_executors() -> Mapping[str, BundleExecutor]:
             "timeline": timeline_executor,
             "transcribe": transcribe_executor,
             "normalise": normalise_executor,
+            "reflow": reflow_executor,
         }
     )
 
@@ -991,6 +998,24 @@ def run_normalise_transform(store: BundleStore) -> RunRecord:
         ),
         executor=normalise_executor,
     )
+
+
+def run_reflow_transform(store: BundleStore) -> ReflowOutcome:
+    """Join safe reviewed-speaker continuations under a durable run."""
+    produced: list[ReflowOutcome] = []
+
+    def _executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+        produced.append(transform_reflow(store, run_id=run.run_id))
+        return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
+
+    run_bundle_operation(
+        store,
+        next_action=OperationRef(
+            kind="reflow", rationale="transcript transform reflow"
+        ),
+        executor=_executor,
+    )
+    return produced[0]
 
 
 async def run_speakers_propose(
@@ -1331,6 +1356,12 @@ async def run_obsidian_recording_recipe(
             )
 
     products: list[ProductsOutcome] = []
+
+    # Deterministic reflow runs before any model-backed text pass so the
+    # model sees merged continuations rather than diarisation fragments.
+    # Its own run is created and released atomically; the products run
+    # starts fresh from the reflowed head.
+    run_reflow_transform(store)
 
     async def _executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
         products.append(

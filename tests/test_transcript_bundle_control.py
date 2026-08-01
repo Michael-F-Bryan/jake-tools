@@ -848,7 +848,13 @@ def test_default_bundle_executors_registers_the_model_free_transforms() -> None:
     before --model has been resolved."""
     executors = default_bundle_executors()
 
-    assert set(executors) == {"assemble", "timeline", "transcribe", "normalise"}
+    assert set(executors) == {
+        "assemble",
+        "timeline",
+        "transcribe",
+        "normalise",
+        "reflow",
+    }
 
 
 def test_run_timeline_transform_builds_and_moves_the_head(tmp_path: Path) -> None:

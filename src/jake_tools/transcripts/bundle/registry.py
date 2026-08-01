@@ -851,22 +851,22 @@ def _make_inference_validator[T: AsrResultComponent | DiarisationResultComponent
 
 
 def _dropped_turn_ids(components: Mapping[ComponentId, ComponentRecord]) -> set[str]:
-    """Turn IDs an M9 text pass legitimately removed (``drop-empty``).
+    """Turn IDs an M7/M9 ledger legitimately retired.
 
-    M7's remap set says a dropped node's own bindings are *discharged*,
-    not invalidated -- "routine polish after review therefore never
-    invalidates the applied review". A review or chapter referring to a
-    turn that vanished is only a failure when nothing accounts for the
-    disappearance, and the text-edit ledger is what accounts for it.
+    ``drop-empty`` discharges a turn's bindings. ``merge`` carries the
+    utterance on the sole output turn and retires every other input ID.
+    A vanished ID is a failure only when no ledger accounts for it.
     """
-    return {
-        turn_id
-        for ledger in components.values()
-        if isinstance(ledger, TextEditLedgerComponent)
-        for entry in ledger.entries
-        if entry.operation == TextEditOperation.DROP_EMPTY
-        for turn_id in entry.input_turn_ids
-    }
+    retired: set[str] = set()
+    for ledger in components.values():
+        if not isinstance(ledger, TextEditLedgerComponent):
+            continue
+        for entry in ledger.entries:
+            if entry.operation == TextEditOperation.DROP_EMPTY:
+                retired.update(entry.input_turn_ids)
+            elif entry.operation == TextEditOperation.MERGE:
+                retired.update(set(entry.input_turn_ids) - set(entry.output_turn_ids))
+    return retired
 
 
 def _single_component[T](

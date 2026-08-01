@@ -1333,9 +1333,9 @@ class SpeakerReviewComponent(SpeakerReviewComponentBody):
 
 
 class TextEditMode(StrEnum):
-    """M9's two distinct passes -- distinguished in provenance even when
-    one public command orchestrates both (corpus §7)."""
+    """Transcript text/shape passes, kept distinct in provenance."""
 
+    REFLOW = "reflow"
     CORRECT = "correct"
     POLISH = "polish"
 

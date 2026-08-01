@@ -1077,6 +1077,7 @@ def test_every_phase3_command_is_reachable_and_documents_its_refusals() -> None:
         (("transform", "assemble"), "kind"),
         (("transform", "normalise"), "canonical"),
         (("transform", "speakers-propose"), "review_required"),
+        (("transform", "reflow"), "reviewed"),
         (("transform", "text"), "--mode"),
         (("transform", "chapter"), "exact"),
         (("transform", "minutes"), "evidence"),
