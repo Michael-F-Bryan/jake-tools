@@ -419,6 +419,47 @@ def test_a_filler_turn_at_a_window_edge_may_still_be_dropped(
     assert filler_id not in _turn_ids(store)
 
 
+def test_a_speaker_may_disappear_from_one_window_if_still_present_globally() -> None:
+    """Speaker preservation is a transcript-level invariant. An arbitrary
+    window may contain one filler-only turn for a speaker -- especially the
+    synthetic ``Unclear speaker`` -- and polish must be able to drop it when
+    that speaker remains represented elsewhere in the transcript."""
+    earlier_unclear = TranscriptTurn(
+        start=0.0, end=0.2, speaker="Unclear speaker", text="maybe"
+    )
+    substantive = TranscriptTurn(
+        start=1.0,
+        end=4.0,
+        speaker="Michael Bryan",
+        text="We should review the training plan before the next intake.",
+    )
+    filler = TranscriptTurn(start=4.1, end=4.2, speaker="Unclear speaker", text=",")
+    before_window = TranscriptArtifact(turns=[substantive, filler])
+    after_window = TranscriptArtifact(turns=[substantive])
+
+    _gate_or_refuse(
+        before_window,
+        after_window,
+        mode=TextEditMode.POLISH,
+        exempt_gate_ids=_WINDOW_EXEMPT_GATE_IDS,
+    )
+
+    trailing = TranscriptTurn(
+        start=5.0,
+        end=7.0,
+        speaker="Michael Bryan",
+        text="Then we can publish the intake dates.",
+    )
+    before_full = TranscriptArtifact(
+        turns=[earlier_unclear, substantive, filler, trailing]
+    )
+    after_full = TranscriptArtifact(turns=[earlier_unclear, substantive, trailing])
+    _gate_or_refuse(before_full, after_full, mode=TextEditMode.POLISH)
+
+    with pytest.raises(UnfaithfulEditError, match="turns.speakers-preserved"):
+        _gate_or_refuse(before_window, after_window, mode=TextEditMode.POLISH)
+
+
 def test_truncating_the_transcript_is_still_refused() -> None:
     """The other half of the exemption. Skipping coverage per window would
     be a hole if nothing else checked it, so the assembled gate -- which

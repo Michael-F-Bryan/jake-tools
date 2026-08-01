@@ -407,21 +407,22 @@ def _windows(count: int, size: int) -> tuple[tuple[int, int], ...]:
     )
 
 
-#: ``turns.coverage-preserved`` asks whether the transform still spans
-#: the same stretch of time -- it compares the first turn's start and the
-#: last turn's end. That is a property of the *transcript*, and a window
-#: is an arbitrary slice of one: a filler turn that happens to sit at a
-#: window edge is interior to the transcript, so dropping it is exactly
-#: what polish is for, and only the window's own span moves. Thirteen
-#: windows mean twenty-six such edges, and the real 51-minute meeting hit
-#: one on its fourth window.
+#: Two gates ask transcript-level questions that are meaningless on an
+#: arbitrary text window:
 #:
-#: So the per-window gate skips it and the assembled gate -- which runs
-#: over the whole before/after pair regardless -- enforces it. Nothing is
-#: unchecked: a polish that truncated the real start or end of the
-#: transcript still fails, just at the point where the question is
-#: meaningful.
-_WINDOW_EXEMPT_GATE_IDS = frozenset({"turns.coverage-preserved"})
+#: - ``turns.coverage-preserved`` compares the first start and last end. A
+#:   filler turn at a window edge is normally interior to the transcript.
+#: - ``turns.speakers-preserved`` compares speaker sets. A window can contain
+#:   one filler-only turn for a speaker -- especially ``Unclear speaker`` --
+#:   while that speaker remains represented elsewhere in the transcript.
+#:
+#: The assembled gate runs over the whole before/after pair with no
+#: exemptions, so neither invariant is weakened: truncating the transcript or
+#: removing a speaker globally still fails. Windowing only stops an arbitrary
+#: cut from creating a false failure.
+_WINDOW_EXEMPT_GATE_IDS = frozenset(
+    {"turns.coverage-preserved", "turns.speakers-preserved"}
+)
 
 
 def _gate_or_refuse(
