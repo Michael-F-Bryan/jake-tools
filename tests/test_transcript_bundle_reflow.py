@@ -47,6 +47,7 @@ from jake_tools.transcripts.bundle.document import TranscriptDocumentV1, project
 from jake_tools.transcripts.bundle.ids import mint_id
 from jake_tools.transcripts.bundle.reflow import (
     reflow_turns,
+    reflow_until_stable,
 )
 from jake_tools.transcripts.bundle.registry import CapabilityKey, CapabilityStatus
 from jake_tools.transcripts.bundle.review import export_review_pack
@@ -225,6 +226,34 @@ def test_reflow_does_not_merge_two_named_speakers() -> None:
     assert all(
         entry.operation == TextEditOperation.IDENTITY for entry in result.entries
     )
+
+
+def test_reflow_converges_when_one_merge_creates_a_new_adjacent_pair() -> None:
+    first = _turn("First", start_ms=0, end_ms=900, label="SPEAKER_00")
+    interjection = _turn("Second", start_ms=1000, end_ms=2200, label="SPEAKER_01")
+    continuation = _turn("continued.", start_ms=1100, end_ms=1800, label="SPEAKER_00")
+    second_continuation = _turn(
+        "also continued.", start_ms=2300, end_ms=2900, label="SPEAKER_01"
+    )
+    context = _context(
+        {
+            first.turn_id: _MICHAEL,
+            interjection.turn_id: _AVALON,
+            continuation.turn_id: _MICHAEL,
+            second_continuation.turn_id: _AVALON,
+        }
+    )
+
+    passes = reflow_until_stable(
+        (first, interjection, continuation, second_continuation), context
+    )
+
+    assert len(passes) == 2
+    assert [turn.text for turn in passes[-1].turns] == [
+        "First continued.",
+        "Second also continued.",
+    ]
+    assert sum(result.merged_turn_count for result in passes) == 2
 
 
 def _reviewed_store(bundle_path: Path) -> BundleStore:

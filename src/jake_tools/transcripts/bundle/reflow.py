@@ -220,6 +220,32 @@ def reflow_turns(
     )
 
 
+def reflow_until_stable(
+    turns: tuple[TimedTurn, ...],
+    context: SpeakerContext,
+    *,
+    max_gap_ms: int = 3000,
+    lexical_gap_ms: int = 1000,
+) -> tuple[ReflowResult, ...]:
+    """Run deterministic reflow passes until no new adjacency remains."""
+    passes: list[ReflowResult] = []
+    current = turns
+    for _ in range(len(turns)):
+        result = reflow_turns(
+            current,
+            context,
+            max_gap_ms=max_gap_ms,
+            lexical_gap_ms=lexical_gap_ms,
+        )
+        if result.merged_turn_count == 0:
+            return tuple(passes)
+        if len(result.turns) >= len(current):
+            raise RuntimeError("reflow reported merges without reducing the turn count")
+        passes.append(result)
+        current = result.turns
+    raise RuntimeError("reflow did not converge within the input turn count")
+
+
 def transform_reflow(
     store: BundleStore,
     *,
@@ -227,7 +253,7 @@ def transform_reflow(
     max_gap_ms: int = 3000,
     lexical_gap_ms: int = 1000,
 ) -> ReflowOutcome:
-    """Append one durable reflow revision, or do nothing when already stable."""
+    """Append durable reflow revisions until the canonical turns are stable."""
     document = project_head(store)
     if isinstance(document, NoDocumentYet):
         raise ValueError("this bundle has no assembled document to reflow")
@@ -235,13 +261,13 @@ def transform_reflow(
     if turn_set is None:
         raise ValueError("this document has no single canonical timed turn set")
 
-    result = reflow_turns(
+    results = reflow_until_stable(
         turn_set.turns,
         SpeakerContext.from_components(document.components),
         max_gap_ms=max_gap_ms,
         lexical_gap_ms=lexical_gap_ms,
     )
-    if result.merged_turn_count == 0:
+    if not results:
         return ReflowOutcome(
             revision=None,
             turn_set=turn_set,
@@ -249,50 +275,66 @@ def transform_reflow(
             merged_turn_count=0,
         )
 
-    new_turn_set = store.add_component(
-        TimedTurnSetComponentBody(
-            source_artefact_ids=turn_set.source_artefact_ids,
-            coordinate_domain=turn_set.coordinate_domain,
-            turns=result.turns,
-        )
-    )
-    assert isinstance(new_turn_set, TimedTurnSetComponent)
     config_hash = _sha256_text(
         f"reflow-v1:max-gap-ms={max_gap_ms}:lexical-gap-ms={lexical_gap_ms}"
     )
-    ledger = store.add_component(
-        TextEditLedgerComponentBody(
-            mode=TextEditMode.REFLOW,
-            input_turn_set_component_id=turn_set.component_id,
-            output_turn_set_component_id=new_turn_set.component_id,
-            editor="jake-tools:deterministic-reflow-v1",
-            config_hash=config_hash,
-            entries=result.entries,
+    revision: RevisionRecord | None = None
+    ledger: TextEditLedgerComponent | None = None
+    merged_turn_count = 0
+    for pass_number, result in enumerate(results, start=1):
+        new_turn_set = store.add_component(
+            TimedTurnSetComponentBody(
+                source_artefact_ids=turn_set.source_artefact_ids,
+                coordinate_domain=turn_set.coordinate_domain,
+                turns=result.turns,
+            )
         )
-    )
-    assert isinstance(ledger, TextEditLedgerComponent)
-    revision = store.append_revision(
-        operation=OperationRef(
-            kind="reflow",
-            input_ids=(turn_set.component_id,),
-            config_hash=config_hash,
-            rationale="join reviewed speaker continuations before text correction",
-        ),
-        parent_revision_ids=(document.revision_id,),
-        component_ids=(new_turn_set.component_id, ledger.component_id),
-        superseded_component_ids=(
-            turn_set.component_id,
-            *(
-                component.component_id
-                for component in document.components.values()
-                if isinstance(component, (ChapterSetComponent, MinutesComponent))
+        assert isinstance(new_turn_set, TimedTurnSetComponent)
+        added_ledger = store.add_component(
+            TextEditLedgerComponentBody(
+                mode=TextEditMode.REFLOW,
+                input_turn_set_component_id=turn_set.component_id,
+                output_turn_set_component_id=new_turn_set.component_id,
+                editor="jake-tools:deterministic-reflow-v1",
+                config_hash=config_hash,
+                entries=result.entries,
+            )
+        )
+        assert isinstance(added_ledger, TextEditLedgerComponent)
+        ledger = added_ledger
+        revision = store.append_revision(
+            operation=OperationRef(
+                kind="reflow",
+                input_ids=(turn_set.component_id,),
+                config_hash=config_hash,
+                rationale=(
+                    "join reviewed speaker continuations before text correction "
+                    f"(pass {pass_number})"
+                ),
             ),
-        ),
-    )
-    store.update_head(run_id=run_id, revision_id=revision.revision_id)
+            parent_revision_ids=(document.revision_id,),
+            component_ids=(new_turn_set.component_id, ledger.component_id),
+            superseded_component_ids=(
+                turn_set.component_id,
+                *(
+                    component.component_id
+                    for component in document.components.values()
+                    if isinstance(component, (ChapterSetComponent, MinutesComponent))
+                ),
+            ),
+        )
+        store.update_head(run_id=run_id, revision_id=revision.revision_id)
+        merged_turn_count += result.merged_turn_count
+        turn_set = new_turn_set
+        projected = project_head(store)
+        assert not isinstance(projected, NoDocumentYet)
+        document = projected
+
+    assert revision is not None
+    assert ledger is not None
     return ReflowOutcome(
         revision=revision,
-        turn_set=new_turn_set,
+        turn_set=turn_set,
         ledger=ledger,
-        merged_turn_count=result.merged_turn_count,
+        merged_turn_count=merged_turn_count,
     )
