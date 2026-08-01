@@ -197,14 +197,17 @@ def test_the_render_record_carries_its_complete_identity(tmp_path: Path) -> None
     assert "minutes" in record.input_capability_keys
 
 
-def test_the_render_carries_chapters_minutes_and_the_transcript(
+def test_the_dumc_render_places_summary_before_nested_discussion_notes(
     tmp_path: Path,
 ) -> None:
     store = _reviewed_bundle(tmp_path)
 
     body = store.load_render_output(render_document(store).render_id).decode("utf-8")
 
-    assert "## Meeting Notes" in body
+    assert body.startswith("> [!summary]\n")
+    assert body.index("> [!summary]") < body.index("## Discussion Notes")
+    assert "- Decisions\n\t- Agreed to proceed." in body
+    assert "## Meeting Notes" not in body
     assert "## Chapters" in body
     assert "## Transcript" in body
     assert "Michael Bryan" in body
@@ -394,7 +397,8 @@ def test_applying_writes_the_region_and_preserves_the_rest(
     assert outcome.record.state == ApplyState.VERIFIED
     assert written.startswith("---\ntitle: Tasking\n---\n\n## Prep\n\n- a point\n")
     assert "authored, below" in written
-    assert "## Meeting Notes" in written
+    assert "## Discussion Notes" in written
+    assert "## Meeting Notes" not in written
 
 
 def test_re_applying_the_same_render_writes_nothing(tmp_path: Path) -> None:

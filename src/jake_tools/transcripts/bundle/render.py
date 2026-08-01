@@ -54,12 +54,12 @@ from .registry import CapabilityKey, CapabilityStatus
 #: Bumped whenever this module's own output could differ for an unchanged
 #: revision. Recorded on every render (M17) so a byte difference is always
 #: attributable to a named change rather than to drift.
-RENDERER_VERSION = "v1"
+RENDERER_VERSION = "v2"
 
 #: The meeting-note profile's own version, separate from the renderer's:
 #: a layout change to this profile does not invalidate a source-note
 #: render, and vice versa.
-MEETING_NOTE_PROFILE_VERSION = "v1"
+MEETING_NOTE_PROFILE_VERSION = "v2"
 
 MEETING_NOTE_PROFILE = "meeting-note"
 DUMC_VARIANT = "dumc"
@@ -71,8 +71,9 @@ DUMC_VARIANT = "dumc"
 #: this string would be a silent template change, which is exactly what
 #: M17's field exists to prevent.
 _DUMC_LAYOUT = (
-    "## Meeting Notes"
-    "|summary-callout|decisions|actions|risks|questions|attribution-note"
+    "summary-callout|## Discussion Notes"
+    "|nested-decisions|nested-next-steps|nested-risks|nested-questions"
+    "|attribution-note"
     "|## Chapters|chapter-list"
     "|## Transcript|chaptered-turns"
 )
@@ -169,7 +170,7 @@ def _required_chapters(document: TranscriptDocumentV1) -> ChapterSetComponent:
 def _finding_lines(
     findings: tuple[MinutesFinding, ...], kind: FindingKind, context: SpeakerContext
 ) -> list[str]:
-    """One bullet per finding of ``kind``, notes-derived ones marked.
+    """One nested bullet per finding of ``kind``, notes-derived ones marked.
 
     D2/F22 require notes-derived claims to be visibly distinct from
     transcript-derived ones in the rendered output -- a reader must be able
@@ -180,7 +181,7 @@ def _finding_lines(
     for finding in findings:
         if finding.kind != kind:
             continue
-        parts = [f"- {finding.text}"]
+        parts = [f"\t- {finding.text}"]
         if finding.owner_participant_id is not None:
             participant = context.participants.get(finding.owner_participant_id)
             if participant is not None:
@@ -197,7 +198,7 @@ def _finding_lines(
 
 _FINDING_HEADINGS: tuple[tuple[FindingKind, str], ...] = (
     (FindingKind.DECISION, "Decisions"),
-    (FindingKind.ACTION, "Actions"),
+    (FindingKind.ACTION, "Next steps"),
     (FindingKind.RISK, "Risks"),
     (FindingKind.QUESTION, "Open questions"),
 )
@@ -247,15 +248,16 @@ def render_meeting_note(
     minutes = _required_minutes(document)
     chapters = _required_chapters(document)
 
-    lines: list[str] = ["## Meeting Notes", "", "> [!summary]"]
+    lines: list[str] = ["> [!summary]"]
     lines.extend(
         f"> {line}" for line in minutes.summary.text.strip().splitlines() or [""]
     )
+    lines.extend(["", "## Discussion Notes"])
     for kind, heading in _FINDING_HEADINGS:
         bullets = _finding_lines(minutes.findings, kind, context)
         if not bullets:
             continue
-        lines.extend(["", f"**{heading}**", ""])
+        lines.extend(["", f"- {heading}"])
         lines.extend(bullets)
 
     if coverage.unresolved:
