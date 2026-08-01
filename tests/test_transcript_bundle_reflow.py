@@ -18,7 +18,9 @@ from bundle_stage_agent import StagePlan, stage_agent
 
 from jake_tools.transcripts.bundle.assignment import SpeakerContext
 from jake_tools.transcripts.bundle.components import (
+    ChapterSetComponent,
     ComponentRecord,
+    MinutesComponent,
     ParticipantDeclarationSource,
     ParticipantRecord,
     ParticipantSetComponentBody,
@@ -33,6 +35,8 @@ from jake_tools.transcripts.bundle.components import (
     assemble_component_record,
 )
 from jake_tools.transcripts.bundle.control import (
+    run_chapter_transform,
+    run_minutes_transform,
     run_normalise_transform,
     run_reflow_transform,
     run_review_apply,
@@ -352,3 +356,23 @@ def test_reflow_invalidates_earlier_correction_and_polish_proofs(
     assert (
         after.capability_status(CapabilityKey.TEXT_POLISHED) == CapabilityStatus.ABSENT
     )
+
+
+def test_reflow_supersedes_chapters_and_minutes_built_from_old_turns(
+    tmp_path: Path,
+) -> None:
+    store = _reviewed_store(tmp_path / "bundle")
+    agent = stage_agent(StagePlan())
+    asyncio.run(run_chapter_transform(store, agent=agent, model="fixture-model"))
+    asyncio.run(run_minutes_transform(store, agent=agent, model="fixture-model"))
+    before = project_head(store)
+    assert isinstance(before, TranscriptDocumentV1)
+    assert before.components_of(ChapterSetComponent)
+    assert before.components_of(MinutesComponent)
+
+    run_reflow_transform(store)
+
+    after = project_head(store)
+    assert isinstance(after, TranscriptDocumentV1)
+    assert not after.components_of(ChapterSetComponent)
+    assert not after.components_of(MinutesComponent)

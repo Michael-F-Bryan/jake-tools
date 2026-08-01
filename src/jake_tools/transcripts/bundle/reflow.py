@@ -15,6 +15,8 @@ from dataclasses import dataclass
 
 from .assignment import SpeakerContext, canonical_turn_set
 from .components import (
+    ChapterSetComponent,
+    MinutesComponent,
     TextEditEntry,
     TextEditLedgerComponent,
     TextEditLedgerComponentBody,
@@ -278,7 +280,14 @@ def transform_reflow(
         ),
         parent_revision_ids=(document.revision_id,),
         component_ids=(new_turn_set.component_id, ledger.component_id),
-        superseded_component_ids=(turn_set.component_id,),
+        superseded_component_ids=(
+            turn_set.component_id,
+            *(
+                component.component_id
+                for component in document.components.values()
+                if isinstance(component, (ChapterSetComponent, MinutesComponent))
+            ),
+        ),
     )
     store.update_head(run_id=run_id, revision_id=revision.revision_id)
     return ReflowOutcome(
