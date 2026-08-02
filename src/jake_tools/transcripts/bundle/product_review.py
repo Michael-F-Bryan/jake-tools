@@ -366,9 +366,8 @@ def _review_samples(
         if entry.operation != TextEditOperation.IDENTITY
         for turn_id in entry.output_turn_ids
     }
-    for turn_id in changed_ids:
-        turn = by_id.get(turn_id)
-        if turn is not None:
+    for turn in turns:
+        if turn.turn_id in changed_ids:
             add("changed-turn", (turn,))
 
     seen: set[tuple[str, tuple[str, ...]]] = set()

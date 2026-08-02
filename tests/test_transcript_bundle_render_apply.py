@@ -42,6 +42,9 @@ from jake_tools.transcripts.bundle.components import (
     ChapterSetComponentBody,
     DestinationComponentBody,
     OwnedRegionState,
+    TextEditLedgerComponent,
+    TextEditOperation,
+    TimedTurnSetComponent,
 )
 from jake_tools.transcripts.bundle.control import (
     render_document,
@@ -400,6 +403,39 @@ def _accept_product_review(
     pack["minutes_disposition"] = ProductDisposition.ACCEPTED.value
     pack_path.write_text(json.dumps(pack, indent=2), encoding="utf-8")
     record_product_review(store, pack_path=pack_path)
+
+
+def test_product_review_changed_turn_samples_follow_transcript_order(
+    tmp_path: Path,
+) -> None:
+    store = _reviewed_bundle(tmp_path)
+    render = render_document(store)
+    pack_path = export_product_review_pack(
+        store, render_id=render.render_id, destination=tmp_path / "review.json"
+    )
+    pack = json.loads(pack_path.read_text(encoding="utf-8"))
+    document = _head(store)
+    transcripts = document.components_of(TimedTurnSetComponent)
+    assert len(transcripts) == 1
+    transcript = transcripts[0]
+    changed_ids = {
+        turn_id
+        for ledger in document.components_of(TextEditLedgerComponent)
+        for entry in ledger.entries
+        if entry.operation != TextEditOperation.IDENTITY
+        for turn_id in entry.output_turn_ids
+    }
+
+    expected = [
+        str(turn.turn_id) for turn in transcript.turns if turn.turn_id in changed_ids
+    ]
+    actual = [
+        sample["turn_ids"][0]
+        for sample in pack["samples"]
+        if sample["kind"] == "changed-turn"
+    ]
+
+    assert actual == expected
 
 
 def test_apply_refuses_a_render_without_product_acceptance(tmp_path: Path) -> None:
