@@ -556,25 +556,29 @@ def test_chapter_boundaries_project_onto_an_exact_partition() -> None:
 
 
 def test_chapter_spans_do_not_overlap_when_adjacent_source_turns_do() -> None:
-    first = _fake_turn(0).model_copy(update={"end_ms": 1800})
-    second = _fake_turn(1).model_copy(update={"end_ms": 2200})
-    third = _fake_turn(2)
+    first = _fake_turn(0)
+    second = _fake_turn(1).model_copy(update={"end_ms": 2500})
+    third = _fake_turn(2).model_copy(update={"end_ms": 2600})
+    fourth = _fake_turn(3)
 
-    spans = project_chapter_spans(
-        (first, second, third),
-        ((0, 2), (2, 3)),
-    )
+    turns = (first, second, third, fourth)
+    ranges = project_chapter_boundaries(turns, (0, 2))
+    spans = project_chapter_spans(turns, ranges)
 
-    assert spans == ((0, 2200), (2200, 2500))
+    assert ranges == ((0, 3), (3, 4))
+    assert spans == ((0, 2600), (3000, 3500))
 
 
 def test_chapter_spans_reconcile_a_source_overlap_at_an_evidence_edge() -> None:
     first = _fake_turn(0).model_copy(update={"end_ms": 2500})
     second = _fake_turn(1).model_copy(update={"end_ms": 3000})
 
-    spans = project_chapter_spans((first, second), ((0, 1), (1, 2)))
+    turns = (first, second)
+    ranges = project_chapter_boundaries(turns, (0, 1))
+    spans = project_chapter_spans(turns, ranges)
 
-    assert spans == ((0, 2500), (2500, 3000))
+    assert ranges == ((0, 2),)
+    assert spans == ((0, 3000),)
 
 
 def test_chapter_span_ends_at_the_final_owned_turn_edge() -> None:

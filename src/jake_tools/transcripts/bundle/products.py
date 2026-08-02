@@ -210,6 +210,17 @@ def project_chapter_boundaries(
         )
     if not indices or indices[0] != 0:
         indices = [0, *indices]
+    reconciled = [indices[0]]
+    for boundary in indices[1:]:
+        candidate = max(boundary, reconciled[-1] + 1)
+        while (
+            candidate < len(turns)
+            and turns[candidate - 1].end_ms > turns[candidate].start_ms
+        ):
+            candidate += 1
+        if candidate < len(turns):
+            reconciled.append(candidate)
+    indices = reconciled
     ends = [*indices[1:], len(turns)]
     return tuple(
         (start, end) for start, end in zip(indices, ends, strict=True) if start < end
@@ -221,10 +232,9 @@ def project_chapter_spans(
 ) -> tuple[tuple[int, int], ...]:
     """Derive ordered, non-overlapping display spans for chapter ranges.
 
-    Source turns may overlap around diarisation hand-offs. Turn ownership stays
-    with the exact index ranges; a shared boundary is placed at the previous
-    chapter's final owned-turn edge so the metadata remains non-overlapping and
-    snapped to evidence.
+    Source turns may overlap around diarisation hand-offs. The projected turn
+    ranges must already group those overlaps into one chapter; spans then snap
+    directly to each chapter's first and final owned-turn edges.
     """
     if not ranges:
         raise InvalidChapterPlanError("cannot derive spans for an empty chapter plan.")
@@ -232,11 +242,12 @@ def project_chapter_spans(
     spans: list[tuple[int, int]] = []
     previous_end: int | None = None
     for start, end in ranges:
-        raw_start = turns[start].start_ms
-        chapter_start = (
-            max(raw_start, previous_end) if previous_end is not None else raw_start
-        )
+        chapter_start = turns[start].start_ms
         chapter_end = turns[end - 1].end_ms
+        if previous_end is not None and previous_end > chapter_start:
+            raise InvalidChapterPlanError(
+                "chapter turn ranges still overlap after boundary reconciliation."
+            )
         if chapter_end <= chapter_start:
             raise InvalidChapterPlanError(
                 "overlapping source turns cannot be reconciled into positive chapter spans."
@@ -339,16 +350,20 @@ def _titles_for_ranges(
     ``Opening`` title rather than borrowing the next chapter's, which
     would misdescribe it.
     """
-    by_first_index = {chapter.first_turn_index: chapter for chapter in proposed}
+    known = [
+        chapter for chapter in proposed if 0 <= chapter.first_turn_index < len(turns)
+    ]
+    aligned: list[ProposedChapter | None] = list(known)
+    if not known or known[0].first_turn_index != 0:
+        aligned.insert(0, None)
     titles: list[tuple[str, str]] = []
-    for start, _end in ranges:
-        chapter = by_first_index.get(start)
+    for chapter in aligned[: len(ranges)]:
         if chapter is None:
             titles.append(("Opening", ""))
-        else:
-            titles.append(
-                (chapter.title.strip() or "Untitled chapter", chapter.summary.strip())
-            )
+            continue
+        titles.append(
+            (chapter.title.strip() or "Untitled chapter", chapter.summary.strip())
+        )
     return tuple(titles)
 
 
