@@ -1549,6 +1549,17 @@ class ClaimStatus(StrEnum):
     MIXED = "mixed"
 
 
+class CommitmentStatus(StrEnum):
+    """The meeting's actual level of commitment to a finding."""
+
+    PROPOSED = "proposed"
+    TENTATIVE = "tentative"
+    AGREED = "agreed"
+    DECIDED = "decided"
+    UNRESOLVED = "unresolved"
+    DISCUSSED = "discussed"
+
+
 class _EvidencedClaim(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -1596,8 +1607,46 @@ class MinutesFinding(_EvidencedClaim):
     """
 
     kind: FindingKind
+    commitment_status: CommitmentStatus = CommitmentStatus.DISCUSSED
     owner_participant_id: ParticipantId | None = None
     due: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_legacy_modality(cls, data: object) -> object:
+        if not isinstance(data, dict) or "commitment_status" in data:
+            return data
+        normalised = dict(data)
+        kind = normalised.get("kind")
+        if kind in (FindingKind.DECISION, FindingKind.DECISION.value):
+            status = CommitmentStatus.DECIDED
+        elif kind in (FindingKind.ACTION, FindingKind.ACTION.value):
+            status = CommitmentStatus.AGREED
+        elif kind in (FindingKind.QUESTION, FindingKind.QUESTION.value):
+            status = CommitmentStatus.UNRESOLVED
+        else:
+            status = CommitmentStatus.DISCUSSED
+        normalised["commitment_status"] = status
+        return normalised
+
+    @model_validator(mode="after")
+    def _check_commitment_kind(self) -> Self:
+        if self.kind == FindingKind.DECISION and self.commitment_status not in (
+            CommitmentStatus.AGREED,
+            CommitmentStatus.DECIDED,
+        ):
+            raise ValueError("a decision must be evidenced as agreed or decided.")
+        if self.kind == FindingKind.ACTION and self.commitment_status not in (
+            CommitmentStatus.AGREED,
+            CommitmentStatus.DECIDED,
+        ):
+            raise ValueError("an action must be evidenced as agreed or decided.")
+        if (
+            self.kind == FindingKind.QUESTION
+            and self.commitment_status == CommitmentStatus.DECIDED
+        ):
+            raise ValueError("a decided matter is not an open question.")
+        return self
 
 
 class MinutesComponentBody(BaseModel):

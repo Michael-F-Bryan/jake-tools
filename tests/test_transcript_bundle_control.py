@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -42,6 +43,8 @@ from jake_tools.transcripts.bundle.control import (
     NoResumableRunError,
     NoTakeOverTargetError,
     RunNotResumableError,
+    StaleStageInputError,
+    bundle_executors_with_agent,
     capability_failures,
     create_bundle,
     default_bundle_executors,
@@ -65,6 +68,7 @@ from jake_tools.transcripts.bundle.records import (
 )
 from jake_tools.transcripts.bundle.registry import CapabilityKey, CapabilityStatus
 from jake_tools.transcripts.bundle.store import BundleStore, UnknownSourceError
+from jake_tools.transcripts.stages import StructuredAgent
 
 
 def _store(tmp_path: Path) -> BundleStore:
@@ -539,6 +543,23 @@ def test_status_bundle_reports_a_dead_lease_holder(tmp_path: Path) -> None:
 
 
 # -- resume ------------------------------------------------------------
+
+
+def test_agent_stage_resume_refuses_a_different_head_revision(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _bundle_with_valid_head(store)
+    run = store.create_run(
+        next_action=OperationRef(
+            kind="chapter",
+            input_ids=(mint_id("rev"),),
+        )
+    )
+    executors = bundle_executors_with_agent(
+        cast(StructuredAgent, object()), model="fixture-model"
+    )
+
+    with pytest.raises(StaleStageInputError, match="bound to revision"):
+        executors["chapter"](store, run)
 
 
 def test_resume_run_raises_when_no_run_is_resumable(tmp_path: Path) -> None:

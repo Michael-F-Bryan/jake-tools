@@ -54,6 +54,7 @@ from ..errors import TranscriptError
 from ..merge import GENERATED_HEADINGS
 from .document import NoDocumentYet, project_head, project_revision
 from .ids import ApplyId, BundleId, RenderId, mint_id
+from .product_review import ProductReviewRequiredError, require_accepted_product_review
 from .records import ApplyRecord, ApplyState, RenderRecord
 from .store import BundleStore
 
@@ -299,6 +300,17 @@ def apply_render(
     though the caller sees an exception.
     """
     record = store.load_render(render_id)
+    try:
+        require_accepted_product_review(store, record)
+    except ProductReviewRequiredError as exc:
+        raise _refuse(
+            store,
+            record,
+            target_path,
+            precondition_sha256=_target_hash(target_path),
+            detail=str(exc),
+            error=ProductReviewRequiredError,
+        ) from exc
     body = store.load_render_output(render_id).decode("utf-8")
 
     if not allow_stale_render:
@@ -466,18 +478,14 @@ def _adopt_legacy_region(text: str) -> OwnedRegion:
 def _is_our_own_previous_write(
     store: BundleStore, record: RenderRecord, current_hash: str
 ) -> bool:
-    """Is the target's current content something *this render* already wrote?
+    """Whether this bundle previously verified the exact current target bytes.
 
-    Without this, a successful apply would poison its own precondition:
-    the note no longer hashes to the ingest snapshot (it now contains the
-    generated region), so re-applying would be refused as a stale target.
-    M13 requires re-apply to be idempotent, and the honest way to say
-    "this file changed, but we are the ones who changed it" is the apply
-    record that says so -- a hash the operator edited into the file
-    matches nothing here and is still correctly refused.
+    A later accepted render must be able to replace an earlier render's owned
+    region without pretending the note was untouched. The verified apply record
+    is the evidence; arbitrary edited bytes still match no record and fail closed.
     """
     return any(
-        applied.render_id == record.render_id
+        applied.bundle_id == record.bundle_id
         and applied.state == ApplyState.VERIFIED
         and applied.post_write_sha256 == current_hash
         for applied in store.iter_applies()
@@ -513,8 +521,8 @@ def _refuse(
     *,
     precondition_sha256: str,
     detail: str,
-    error: type[ApplyError],
-) -> ApplyError:
+    error: type[TranscriptError],
+) -> TranscriptError:
     """Record a refusal and build the exception to raise for it.
 
     Returns rather than raises so the call sites read ``raise _refuse(...)``

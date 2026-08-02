@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,8 @@ from jake_tools.transcripts.bundle.apply import (
     locate_owned_region,
 )
 from jake_tools.transcripts.bundle.components import (
+    ChapterSetComponent,
+    ChapterSetComponentBody,
     DestinationComponentBody,
     OwnedRegionState,
 )
@@ -49,6 +52,12 @@ from jake_tools.transcripts.bundle.control import (
     run_speakers_propose,
 )
 from jake_tools.transcripts.bundle.document import TranscriptDocumentV1, project_head
+from jake_tools.transcripts.bundle.product_review import (
+    InvalidProductReviewPackError,
+    ProductDisposition,
+    export_product_review_pack,
+    record_product_review,
+)
 from jake_tools.transcripts.bundle.records import ApplyState, OperationRef, RunState
 from jake_tools.transcripts.bundle.render import (
     SpeakerGateFailedError,
@@ -56,6 +65,7 @@ from jake_tools.transcripts.bundle.render import (
 )
 from jake_tools.transcripts.bundle.review import export_review_pack
 from jake_tools.transcripts.bundle.store import BundleStore
+from jake_tools.transcripts.errors import TranscriptError
 
 _BUNDLE_ID = "bundle_019fb000-0000-7000-8000-000000000001"
 
@@ -378,6 +388,113 @@ def _bind_destination(store: BundleStore, target: Path) -> None:
     store.release_lease(run_id=run.run_id, new_state=RunState.COMPLETED)
 
 
+def _accept_product_review(
+    store: BundleStore, render_id: str, destination: Path
+) -> None:
+    pack_path = export_product_review_pack(
+        store, render_id=render_id, destination=destination
+    )
+    pack = json.loads(pack_path.read_text(encoding="utf-8"))
+    pack["reviewer"] = "Michael Bryan"
+    pack["transcript_disposition"] = ProductDisposition.ACCEPTED.value
+    pack["minutes_disposition"] = ProductDisposition.ACCEPTED.value
+    pack_path.write_text(json.dumps(pack, indent=2), encoding="utf-8")
+    record_product_review(store, pack_path=pack_path)
+
+
+def test_apply_refuses_a_render_without_product_acceptance(tmp_path: Path) -> None:
+    store = _reviewed_bundle(tmp_path)
+    target = tmp_path / "note.md"
+    target.write_text("## Prep\n\n- a point\n", encoding="utf-8")
+    _bind_destination(store, target)
+    record = render_document(store)
+
+    with pytest.raises(TranscriptError, match="product review"):
+        apply_render(store, render_id=record.render_id, target_path=target)
+
+    assert target.read_text(encoding="utf-8") == "## Prep\n\n- a point\n"
+    assert tuple(store.iter_applies())[-1].state == ApplyState.NOT_WRITTEN
+
+
+def test_an_accepted_product_review_allows_apply(tmp_path: Path) -> None:
+    store = _reviewed_bundle(tmp_path)
+    target = tmp_path / "note.md"
+    target.write_text("## Prep\n\n- a point\n", encoding="utf-8")
+    _bind_destination(store, target)
+    render = render_document(store)
+    _accept_product_review(store, render.render_id, tmp_path / "product-review.json")
+
+    outcome = apply_render(store, render_id=render.render_id, target_path=target)
+
+    assert outcome.record.state == ApplyState.VERIFIED
+    assert "## Transcript" in target.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("rendered_body", "altered candidate", "rendered body"),
+        ("policy_version", "obsolete-policy", "policy"),
+    ],
+)
+def test_product_review_refuses_tampered_review_evidence(
+    tmp_path: Path, field: str, value: str, message: str
+) -> None:
+    store = _reviewed_bundle(tmp_path)
+    target = tmp_path / "note.md"
+    target.write_text("## Prep\n", encoding="utf-8")
+    _bind_destination(store, target)
+    render = render_document(store)
+    pack_path = export_product_review_pack(
+        store, render_id=render.render_id, destination=tmp_path / "review.json"
+    )
+    pack = json.loads(pack_path.read_text(encoding="utf-8"))
+    pack["reviewer"] = "Fixture Reviewer"
+    pack["transcript_disposition"] = ProductDisposition.ACCEPTED.value
+    pack["minutes_disposition"] = ProductDisposition.ACCEPTED.value
+    pack[field] = value
+    pack_path.write_text(json.dumps(pack), encoding="utf-8")
+
+    with pytest.raises(InvalidProductReviewPackError, match=message):
+        record_product_review(store, pack_path=pack_path)
+
+
+def test_product_review_refuses_overlapping_chapter_spans(tmp_path: Path) -> None:
+    store = _reviewed_bundle(tmp_path)
+    target = tmp_path / "note.md"
+    target.write_text("## Prep\n", encoding="utf-8")
+    _bind_destination(store, target)
+    document = project_head(store)
+    assert isinstance(document, TranscriptDocumentV1)
+    chapters = document.components_of(ChapterSetComponent)[0]
+    first, second, *remaining = chapters.chapters
+    overlapping = store.add_component(
+        ChapterSetComponentBody(
+            chapters=(
+                first.model_copy(update={"end_ms": second.start_ms + 1}),
+                second,
+                *remaining,
+            )
+        )
+    )
+    run = store.create_run(next_action=OperationRef(kind="chapter-fixture"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+    revision = store.append_revision(
+        operation=OperationRef(kind="chapter-fixture"),
+        parent_revision_ids=(document.revision_id,),
+        component_ids=(overlapping.component_id,),
+        superseded_component_ids=(chapters.component_id,),
+    )
+    store.update_head(run_id=run.run_id, revision_id=revision.revision_id)
+    store.release_lease(run_id=run.run_id, new_state=RunState.COMPLETED)
+    render = render_document(store)
+
+    with pytest.raises(InvalidProductReviewPackError, match="overlaps chapter"):
+        export_product_review_pack(
+            store, render_id=render.render_id, destination=tmp_path / "review.json"
+        )
+
+
 def test_applying_writes_the_region_and_preserves_the_rest(
     tmp_path: Path,
 ) -> None:
@@ -390,6 +507,7 @@ def test_applying_writes_the_region_and_preserves_the_rest(
     )
     _bind_destination(store, target)
     record = render_document(store)
+    _accept_product_review(store, record.render_id, tmp_path / "product-review.json")
 
     outcome = apply_render(store, render_id=record.render_id, target_path=target)
 
@@ -409,6 +527,7 @@ def test_re_applying_the_same_render_writes_nothing(tmp_path: Path) -> None:
     target.write_text("## Prep\n\n- a point\n", encoding="utf-8")
     _bind_destination(store, target)
     record = render_document(store)
+    _accept_product_review(store, record.render_id, tmp_path / "product-review.json")
     apply_render(store, render_id=record.render_id, target_path=target)
     after_first = target.read_text(encoding="utf-8")
 
@@ -427,6 +546,7 @@ def test_a_target_edited_since_the_render_is_refused(tmp_path: Path) -> None:
     target.write_text("## Prep\n\n- a point\n", encoding="utf-8")
     _bind_destination(store, target)
     record = render_document(store)
+    _accept_product_review(store, record.render_id, tmp_path / "product-review.json")
     target.write_text("## Prep\n\n- a point\n\n- and another\n", encoding="utf-8")
 
     with pytest.raises(StaleTargetError):
@@ -442,6 +562,7 @@ def test_a_refusal_is_still_recorded_as_an_apply(tmp_path: Path) -> None:
     target.write_text("## Prep\n", encoding="utf-8")
     _bind_destination(store, target)
     record = render_document(store)
+    _accept_product_review(store, record.render_id, tmp_path / "product-review.json")
     target.write_text("## Prep\n\nedited\n", encoding="utf-8")
 
     with pytest.raises(StaleTargetError):
@@ -455,6 +576,33 @@ def test_a_refusal_is_still_recorded_as_an_apply(tmp_path: Path) -> None:
     assert refusals and refusals[-1].detail
 
 
+def test_a_later_accepted_render_can_replace_this_bundles_owned_region(
+    tmp_path: Path,
+) -> None:
+    store = _reviewed_bundle(tmp_path)
+    target = tmp_path / "note.md"
+    target.write_text("## Prep\n\n- authored\n", encoding="utf-8")
+    _bind_destination(store, target)
+    first = render_document(store)
+    _accept_product_review(store, first.render_id, tmp_path / "first-review.json")
+    apply_render(store, render_id=first.render_id, target_path=target)
+
+    asyncio.run(
+        run_chapter_transform(
+            store,
+            agent=stage_agent(StagePlan(chapter_starts=(0, 1))),
+            model="fixture-model",
+        )
+    )
+    second = render_document(store)
+    _accept_product_review(store, second.render_id, tmp_path / "second-review.json")
+
+    outcome = apply_render(store, render_id=second.render_id, target_path=target)
+
+    assert outcome.record.state == ApplyState.VERIFIED
+    assert target.read_text(encoding="utf-8").startswith("## Prep\n\n- authored\n")
+
+
 def test_a_render_of_a_superseded_revision_needs_an_explicit_override(
     tmp_path: Path,
 ) -> None:
@@ -465,6 +613,7 @@ def test_a_render_of_a_superseded_revision_needs_an_explicit_override(
     target.write_text("## Prep\n", encoding="utf-8")
     _bind_destination(store, target)
     record = render_document(store)
+    _accept_product_review(store, record.render_id, tmp_path / "product-review.json")
     asyncio.run(
         run_chapter_transform(
             store,

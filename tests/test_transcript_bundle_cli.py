@@ -205,6 +205,14 @@ def test_resume_help_documents_take_over() -> None:
     assert "--run" in result.output
 
 
+def test_product_review_help_exposes_export_and_decide() -> None:
+    result = _invoke("review", "product", "--help")
+
+    assert result.exit_code == 0, result.output
+    assert "export" in result.output
+    assert "decide" in result.output
+
+
 # -- create -> ingest -> inspect round trip --------------------------------
 
 

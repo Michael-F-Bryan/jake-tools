@@ -23,6 +23,7 @@ from .ids import (
     BundleId,
     ComponentId,
     DocumentId,
+    ProductReviewId,
     RenderId,
     ReviewId,
     RevisionId,
@@ -256,6 +257,47 @@ class ReviewRecord(BaseModel):
     pack_sha256: Sha256Hex
     reviewer: str = Field(min_length=1)
     created_at: datetime
+
+
+class ProductDisposition(StrEnum):
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
+class ProductReviewRecord(BaseModel):
+    """Editorial acceptance bound to exact transcript, minutes, and render bytes."""
+
+    model_config = ConfigDict(frozen=True)
+
+    product_review_id: ProductReviewId
+    bundle_id: BundleId
+    revision_id: RevisionId
+    render_id: RenderId
+    render_output_sha256: Sha256Hex
+    transcript_component_id: ComponentId
+    transcript_content_hash: Sha256Hex
+    minutes_component_id: ComponentId
+    minutes_content_hash: Sha256Hex
+    transcript_disposition: ProductDisposition
+    minutes_disposition: ProductDisposition
+    pack_schema_version: str = Field(min_length=1)
+    review_policy_version: str = Field(min_length=1)
+    pack_sha256: Sha256Hex
+    reviewer: str = Field(min_length=1)
+    blocking_findings: tuple[str, ...] = ()
+    created_at: datetime
+
+    @model_validator(mode="after")
+    def _check_decision(self) -> Self:
+        dispositions = (self.transcript_disposition, self.minutes_disposition)
+        if ProductDisposition.PENDING in dispositions:
+            raise ValueError("a recorded product review cannot remain pending.")
+        if ProductDisposition.ACCEPTED in dispositions and self.blocking_findings:
+            raise ValueError(
+                "an accepted product review cannot retain blocking findings."
+            )
+        return self
 
 
 class RenderRecord(BaseModel):

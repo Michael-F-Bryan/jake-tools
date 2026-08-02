@@ -45,11 +45,23 @@ from ..transcripts.bundle.control import (
     status_bundle,
 )
 from ..transcripts.bundle.control import create_bundle as _create_bundle
+from ..transcripts.bundle.corrections import (
+    apply_correction_pack,
+    export_correction_pack,
+)
 from ..transcripts.bundle.document import TranscriptDocumentV1
+from ..transcripts.bundle.product_review import (
+    export_product_review_pack,
+    record_product_review,
+)
 from ..transcripts.bundle.records import NoDocumentYet, RunRecord, SourceAssociation
 from ..transcripts.bundle.registry import CapabilityStatus
 from ..transcripts.bundle.review import export_review_pack
 from ..transcripts.bundle.store import BundleStore
+from ..transcripts.bundle.utterances import (
+    apply_utterance_plan,
+    export_utterance_plan,
+)
 from ..transcripts.errors import TranscriptError
 from ..transcripts.obsidian import load_source_note
 from .context import app_context
@@ -729,6 +741,12 @@ def status_command(bundle_path: Path, as_json: bool) -> None:
     "lease itself). Without this flag, that state is a diagnosable refusal "
     "naming this flag -- never silently retried.",
 )
+@click.option(
+    "--context",
+    "context_note",
+    default="",
+    help="Context to restore for a resumable agent-backed stage.",
+)
 @_json_option
 @agent
 @click.pass_context
@@ -738,6 +756,7 @@ def resume_command(
     bundle_path: Path,
     run_id: str | None,
     take_over: bool,
+    context_note: str,
     as_json: bool,
 ) -> None:
     """Re-acquire a durable-state run's lease and dispatch its recorded
@@ -745,10 +764,10 @@ def resume_command(
 
     Never re-plans: the exact operation, input IDs, and config hash
     recorded when the run entered review_required/refused/failed are
-    replayed as-is. `timeline` and `transcribe` (this bundle's own
-    transforms, see `transform timeline`/`transform transcribe`) have
-    real registered executors; resuming a run whose next_action names any
-    other, still-unimplemented operation kind is a safe, explicit no-op:
+    replayed as-is. Model-free transforms and supported agent-backed text,
+    chapter, minutes, speaker, and product stages have registered executors;
+    resuming a run whose next_action names another, still-unimplemented
+    operation kind is a safe, explicit no-op:
     the error names the missing kind, and the run is left exactly where
     it was, lease released, ready to resume again once that transform
     exists. If the executor itself raises, the run moves to `failed`
@@ -760,7 +779,11 @@ def resume_command(
     # the review checkpoint with next_action=products can actually be
     # resumed here without every caller having to assemble the mapping.
     executors = dict(
-        bundle_executors_with_agent(claude_agent, model=claude_agent.defaults.model)
+        bundle_executors_with_agent(
+            claude_agent,
+            model=claude_agent.defaults.model,
+            context_note=context_note,
+        )
     )
     executors.update(app_context(ctx).bundle_executors)
     store = BundleStore(bundle_path)
@@ -1028,6 +1051,102 @@ def transform_reflow_command(bundle_path: Path, as_json: bool) -> None:
         click.echo(f"{key}: {value}")
 
 
+@transform_group.group("utterances", help="Apply a reviewed semantic utterance plan.")
+def utterances_group() -> None:
+    pass
+
+
+@utterances_group.command("export")
+@_bundle_option
+@click.option(
+    "--out", "out_path", required=True, type=click.Path(dir_okay=False, path_type=Path)
+)
+@_json_option
+def utterances_export_command(bundle_path: Path, out_path: Path, as_json: bool) -> None:
+    try:
+        written = export_utterance_plan(BundleStore(bundle_path), destination=out_path)
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+    payload = {"plan": str(written)}
+    click.echo(
+        json.dumps(payload, indent=2, sort_keys=True) if as_json else f"plan: {written}"
+    )
+
+
+@utterances_group.command("apply")
+@_bundle_option
+@_json_option
+@click.argument(
+    "plan_path", type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+def utterances_apply_command(bundle_path: Path, as_json: bool, plan_path: Path) -> None:
+    try:
+        outcome = apply_utterance_plan(BundleStore(bundle_path), plan_path=plan_path)
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+    payload = {
+        "revision_id": outcome.revision.revision_id,
+        "merged_turns": outcome.merged_turn_count,
+        "ledger_component_id": outcome.ledger.component_id,
+    }
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for key, value in payload.items():
+            click.echo(f"{key}: {value}")
+
+
+@transform_group.group(
+    "correction-pack", help="Apply exact evidence-backed text repairs."
+)
+def correction_pack_group() -> None:
+    pass
+
+
+@correction_pack_group.command("export")
+@_bundle_option
+@click.option(
+    "--out", "out_path", required=True, type=click.Path(dir_okay=False, path_type=Path)
+)
+@_json_option
+def correction_pack_export_command(
+    bundle_path: Path, out_path: Path, as_json: bool
+) -> None:
+    try:
+        written = export_correction_pack(BundleStore(bundle_path), destination=out_path)
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+    payload = {"pack": str(written)}
+    click.echo(
+        json.dumps(payload, indent=2, sort_keys=True) if as_json else f"pack: {written}"
+    )
+
+
+@correction_pack_group.command("apply")
+@_bundle_option
+@_json_option
+@click.argument(
+    "pack_path", type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+def correction_pack_apply_command(
+    bundle_path: Path, as_json: bool, pack_path: Path
+) -> None:
+    try:
+        outcome = apply_correction_pack(BundleStore(bundle_path), pack_path=pack_path)
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+    payload = {
+        "revision_id": outcome.revision.revision_id,
+        "changed_turns": outcome.changed_turn_count,
+        "ledger_component_id": outcome.ledger.component_id,
+    }
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for key, value in payload.items():
+            click.echo(f"{key}: {value}")
+
+
 @transform_group.command("text")
 @_bundle_option
 @click.option(
@@ -1260,6 +1379,61 @@ def review_apply_command(bundle_path: Path, as_json: bool, pack_path: Path) -> N
         return
     for key, value in payload.items():
         click.echo(f"{key}: {value}")
+
+
+@review_group.group("product", help="Review transcript and minutes product quality.")
+def product_review_group() -> None:
+    pass
+
+
+@product_review_group.command("export")
+@_bundle_option
+@click.option("--render", "render_id", required=True, help="Exact render to review.")
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+@_json_option
+def product_review_export_command(
+    bundle_path: Path, render_id: str, out_path: Path, as_json: bool
+) -> None:
+    """Export a revision- and render-bound editorial review pack."""
+    try:
+        written = export_product_review_pack(
+            BundleStore(bundle_path), render_id=render_id, destination=out_path
+        )
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+    payload = {"pack": str(written), "render_id": render_id}
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        click.echo(f"pack: {written}")
+
+
+@product_review_group.command("decide")
+@_bundle_option
+@_json_option
+@click.argument(
+    "pack_path", type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+def product_review_decide_command(
+    bundle_path: Path, as_json: bool, pack_path: Path
+) -> None:
+    """Record an immutable accepted or rejected product-review decision."""
+    try:
+        record = record_product_review(BundleStore(bundle_path), pack_path=pack_path)
+    except TranscriptError as exc:
+        _echo_error_and_exit(exc, as_json=as_json)
+    payload = record.model_dump(mode="json")
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        click.echo(f"product_review_id: {record.product_review_id}")
+        click.echo(f"transcript: {record.transcript_disposition.value}")
+        click.echo(f"minutes: {record.minutes_disposition.value}")
 
 
 # -- render / apply (M17 / M13) ---------------------------------------------

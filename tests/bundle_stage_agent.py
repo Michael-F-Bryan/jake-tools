@@ -150,6 +150,7 @@ def _minutes_payload(prompt: str, plan: StagePlan) -> dict[str, Any]:
         findings.append(
             {
                 "kind": "decision",
+                "commitment_status": "decided",
                 "text": plan.finding_text,
                 "evidence_turn_ids": turns[:1],
                 "evidence_section_ids": [],

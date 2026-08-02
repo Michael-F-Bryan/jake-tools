@@ -40,6 +40,7 @@ IdPrefix = Literal[
     "cluster",
     "participant",
     "review",
+    "product_review",
     "render",
     "apply",
     "attempt",
@@ -59,6 +60,7 @@ SegmentId = Annotated[str, StringConstraints(pattern=_pattern("seg"))]
 ClusterId = Annotated[str, StringConstraints(pattern=_pattern("cluster"))]
 ParticipantId = Annotated[str, StringConstraints(pattern=_pattern("participant"))]
 ReviewId = Annotated[str, StringConstraints(pattern=_pattern("review"))]
+ProductReviewId = Annotated[str, StringConstraints(pattern=_pattern("product_review"))]
 RenderId = Annotated[str, StringConstraints(pattern=_pattern("render"))]
 ApplyId = Annotated[str, StringConstraints(pattern=_pattern("apply"))]
 AttemptId = Annotated[str, StringConstraints(pattern=_pattern("attempt"))]

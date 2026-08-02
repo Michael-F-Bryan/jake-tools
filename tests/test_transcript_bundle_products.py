@@ -40,7 +40,9 @@ from jake_tools.transcripts.bundle.control import (
 from jake_tools.transcripts.bundle.document import TranscriptDocumentV1, project_head
 from jake_tools.transcripts.bundle.products import (
     InvalidChapterPlanError,
+    ProposedFinding,
     project_chapter_boundaries,
+    project_chapter_spans,
 )
 from jake_tools.transcripts.bundle.registry import CapabilityKey, CapabilityStatus
 from jake_tools.transcripts.bundle.store import BundleStore
@@ -553,6 +555,28 @@ def test_chapter_boundaries_project_onto_an_exact_partition() -> None:
     assert ranges == ((0, 2), (2, 5))
 
 
+def test_chapter_spans_do_not_overlap_when_adjacent_source_turns_do() -> None:
+    first = _fake_turn(0).model_copy(update={"end_ms": 1800})
+    second = _fake_turn(1).model_copy(update={"end_ms": 2200})
+    third = _fake_turn(2)
+
+    spans = project_chapter_spans(
+        (first, second, third),
+        ((0, 2), (2, 3)),
+    )
+
+    assert spans == ((0, 2000), (2000, 2500))
+
+
+def test_chapter_spans_clip_a_source_overlap_at_the_next_chapter() -> None:
+    first = _fake_turn(0).model_copy(update={"end_ms": 2500})
+    second = _fake_turn(1).model_copy(update={"end_ms": 3000})
+
+    spans = project_chapter_spans((first, second), ((0, 1), (1, 2)))
+
+    assert spans == ((0, 1000), (1000, 3000))
+
+
 def test_a_plan_that_forgets_the_first_turn_still_covers_it() -> None:
     """M7 requires every canonical turn to be in exactly one chapter, so a
     plan starting at turn 2 gets a chapter prepended rather than leaving a
@@ -655,6 +679,7 @@ def test_an_unsourced_finding_is_dropped_and_reported(tmp_path: Path) -> None:
             "findings": [
                 {
                     "kind": "decision",
+                    "commitment_status": "decided",
                     "text": "Report back on Friday.",
                     "evidence_turn_ids": [turn_ids[2]],
                     "evidence_section_ids": [],
@@ -663,6 +688,7 @@ def test_an_unsourced_finding_is_dropped_and_reported(tmp_path: Path) -> None:
                 },
                 {
                     "kind": "action",
+                    "commitment_status": "agreed",
                     "text": "Something nobody actually said.",
                     "evidence_turn_ids": [],
                     "evidence_section_ids": [],
@@ -703,6 +729,7 @@ def test_minutes_whose_every_finding_is_unsourced_are_refused(
             "findings": [
                 {
                     "kind": "decision",
+                    "commitment_status": "decided",
                     "text": "Invented decision.",
                     "evidence_turn_ids": ["turn_019fb000-0000-7000-8000-000000000000"],
                     "evidence_section_ids": [],
@@ -743,6 +770,7 @@ def test_an_invented_owner_drops_the_assignee_not_the_finding(
             "findings": [
                 {
                     "kind": "action",
+                    "commitment_status": "agreed",
                     "text": "Report back on Friday.",
                     "evidence_turn_ids": [turn_ids[2]],
                     "evidence_section_ids": [],
@@ -818,3 +846,14 @@ def test_re_running_a_product_supersedes_rather_than_duplicating(
     document = _head(store)
     assert len(document.components_of(ChapterSetComponent)) == 1
     assert len(document.components_of(MinutesComponent)) == 1
+
+
+def test_explicitly_contradictory_minutes_modality_is_refused() -> None:
+    with pytest.raises(ValueError, match="require agreed or decided"):
+        ProposedFinding.model_validate(
+            {
+                "kind": "decision",
+                "commitment_status": "proposed",
+                "text": "A four-week schedule was discussed.",
+            }
+        )

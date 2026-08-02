@@ -60,6 +60,7 @@ from .components import (
     ComponentBody,
     ComponentKind,
     ComponentRecord,
+    MinutesComponent,
     assemble_component_record,
     component_as_body,
     component_input_refs,
@@ -68,6 +69,7 @@ from .ids import (
     ApplyId,
     ArtefactId,
     ComponentId,
+    ProductReviewId,
     RenderId,
     ReviewId,
     RevisionId,
@@ -83,6 +85,7 @@ from .records import (
     Lease,
     NoDocumentYet,
     OperationRef,
+    ProductReviewRecord,
     RenderRecord,
     ReviewRecord,
     RevisionRecord,
@@ -104,6 +107,7 @@ _SUBDIRECTORIES = (
     "runs",
     "attempts",
     "reviews",
+    "product_reviews",
     "renders",
     "applies",
 )
@@ -152,6 +156,7 @@ _APPLY_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(ApplyId)
 _ARTEFACT_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(ArtefactId)
 _RENDER_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(RenderId)
 _REVIEW_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(ReviewId)
+_PRODUCT_REVIEW_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(ProductReviewId)
 _REVISION_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(RevisionId)
 _RUN_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(RunId)
 _COMPONENT_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(ComponentId)
@@ -184,6 +189,15 @@ def _component_content_hash(model: ComponentBody | ComponentRecord) -> str:
     """
     body = component_as_body(model)
     payload = body.model_dump(mode="json")
+    canonical = json.dumps(payload, sort_keys=True)
+    return _sha256_hex(canonical.encode("utf-8"))
+
+
+def _legacy_minutes_content_hash(record: MinutesComponent) -> str:
+    """Hash a pre-modality minutes component using its original v1 shape."""
+    payload = component_as_body(record).model_dump(mode="json")
+    for finding in payload["findings"]:
+        finding.pop("commitment_status", None)
     canonical = json.dumps(payload, sort_keys=True)
     return _sha256_hex(canonical.encode("utf-8"))
 
@@ -296,6 +310,10 @@ class ArtefactBlobHashMismatchError(BundleStoreError):
 
 
 class UnknownReviewError(BundleStoreError):
+    pass
+
+
+class UnknownProductReviewError(BundleStoreError):
     pass
 
 
@@ -504,6 +522,14 @@ class BundleStore:
     def _review_path(self, review_id: ReviewId) -> Path:
         return self._validated_record_path(
             "reviews", _REVIEW_ID_ADAPTER, review_id, kind="review"
+        )
+
+    def _product_review_path(self, review_id: ProductReviewId) -> Path:
+        return self._validated_record_path(
+            "product_reviews",
+            _PRODUCT_REVIEW_ID_ADAPTER,
+            review_id,
+            kind="product review",
         )
 
     def _render_path(self, render_id: RenderId) -> Path:
@@ -978,7 +1004,10 @@ class BundleStore:
                 f"(closed set: {[kind.value for kind in ComponentKind]})."
             ) from exc
         expected_hash = _component_content_hash(record)
-        if record.content_hash != expected_hash:
+        legacy_minutes_match = isinstance(
+            record, MinutesComponent
+        ) and record.content_hash == _legacy_minutes_content_hash(record)
+        if record.content_hash != expected_hash and not legacy_minutes_match:
             raise InvalidComponentFileError(
                 f"component file {path} has a content_hash that does not match its "
                 f"own content (stored {record.content_hash!r}, recomputed "
@@ -1421,6 +1450,32 @@ class BundleStore:
         if not path.exists():
             return None
         return ReviewRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def add_product_review(self, record: ProductReviewRecord) -> ProductReviewRecord:
+        self._write_json_exclusive(
+            self._product_review_path(record.product_review_id),
+            record,
+            conflict_error=RecordIdCollisionError,
+        )
+        return record
+
+    def load_product_review(self, review_id: ProductReviewId) -> ProductReviewRecord:
+        path = self._product_review_path(review_id)
+        if not path.exists():
+            raise UnknownProductReviewError(
+                f"product review {review_id} does not exist."
+            )
+        return ProductReviewRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def iter_product_reviews(self) -> Iterator[ProductReviewRecord]:
+        directory = self._root / "product_reviews"
+        if not directory.is_dir():
+            return
+        records = [
+            ProductReviewRecord.model_validate_json(path.read_text(encoding="utf-8"))
+            for path in sorted(directory.glob("product_review_*.json"))
+        ]
+        yield from sorted(records, key=lambda record: record.created_at)
 
     def add_render(self, record: RenderRecord, *, output: bytes) -> RenderRecord:
         """M17: store a render's bytes (content-addressed) and its record.

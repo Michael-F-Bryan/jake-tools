@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -123,6 +125,24 @@ class ExecutorFailedError(BundleControlError):
 class NoTakeOverTargetError(BundleControlError):
     """``--take-over``'s precondition (a lease held by a dead PID on a
     ``running`` run, M2) did not hold."""
+
+
+class StaleStageInputError(BundleControlError):
+    """A resumed agent stage no longer has the revision it was created for."""
+
+
+def _agent_stage_config_hash(
+    *, kind: str, model: str, context_note: str, window_turns: int | None = None
+) -> str:
+    payload: dict[str, object] = {
+        "kind": kind,
+        "model": model,
+        "context_note": context_note,
+    }
+    if window_turns is not None:
+        payload["window_turns"] = window_turns
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 # -- bundle create ------------------------------------------------------------
@@ -919,13 +939,14 @@ def bundle_executors_with_agent(
 ) -> Mapping[str, BundleExecutor]:
     """The production executor mapping plus the LLM-backed operations.
 
-    ``speakers-propose`` and ``products`` need a ``ClaudeAgent``, which
+    ``speakers-propose``, product stages, and text stages need a
+    ``ClaudeAgent``, which
     :func:`default_bundle_executors` has no way to build (it is imported by
     ``cli/context.py``'s own module-level default, long before any command
     has resolved ``--model``). Binding them here, at the point where a
     command already holds an agent, keeps the LLM seam out of the default
     mapping while still letting `resume` dispatch a durable run recorded
-    against either kind.
+    against any agent-backed kind.
 
     ``asyncio.run`` appears here because M2's executor seam is
     synchronous and `resume` is a synchronous command; the async
@@ -933,6 +954,35 @@ def bundle_executors_with_agent(
     mapping) by the commands that are already inside an event loop.
     """
     executors = dict(default_bundle_executors())
+
+    def _require_bound_input(store: BundleStore, run: RunRecord) -> None:
+        action = run.next_action
+        if action is None or not action.input_ids:
+            raise StaleStageInputError(
+                f"run {run.run_id} predates revision-bound agent retries; start a "
+                "new stage run from the current head."
+            )
+        head = project_head(store)
+        expected_revision = action.input_ids[0]
+        if isinstance(head, NoDocumentYet) or head.revision_id != expected_revision:
+            actual = "none" if isinstance(head, NoDocumentYet) else head.revision_id
+            raise StaleStageInputError(
+                f"run {run.run_id} is bound to revision {expected_revision}, but the "
+                f"bundle head is {actual}; start a new stage run for the new head."
+            )
+        expected_config = _agent_stage_config_hash(
+            kind=action.kind,
+            model=model,
+            context_note=context_note,
+            window_turns=(
+                TEXT_WINDOW_TURNS if action.kind.startswith("text-") else None
+            ),
+        )
+        if action.config_hash != expected_config:
+            raise StaleStageInputError(
+                f"run {run.run_id} does not match this model/context configuration; "
+                "resume with the original options or start a new stage run."
+            )
 
     def _propose(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
         asyncio.run(
@@ -952,8 +1002,64 @@ def bundle_executors_with_agent(
         )
         return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
 
+    def _chapter(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+        _require_bound_input(store, run)
+        outcome = asyncio.run(
+            transform_chapters(
+                store,
+                run_id=run.run_id,
+                agent=agent,
+                model=model,
+                context_note=context_note,
+            )
+        )
+        return ExecutorOutcome(
+            state=RunState.COMPLETED,
+            revision_id=outcome.revision.revision_id,
+        )
+
+    def _minutes(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+        _require_bound_input(store, run)
+        outcome = asyncio.run(
+            transform_minutes(
+                store,
+                run_id=run.run_id,
+                agent=agent,
+                model=model,
+                context_note=context_note,
+            )
+        )
+        return ExecutorOutcome(
+            state=RunState.COMPLETED,
+            revision_id=outcome.revision.revision_id,
+        )
+
+    def _text(mode: TextEditMode) -> BundleExecutor:
+        def executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
+            _require_bound_input(store, run)
+            outcome = asyncio.run(
+                transform_text(
+                    store,
+                    run_id=run.run_id,
+                    mode=mode,
+                    agent=agent,
+                    model=model,
+                    context_note=context_note,
+                )
+            )
+            return ExecutorOutcome(
+                state=RunState.COMPLETED,
+                revision_id=outcome.revision.revision_id,
+            )
+
+        return executor
+
     executors["speakers-propose"] = _propose
     executors["products"] = _products
+    executors["chapter"] = _chapter
+    executors["minutes"] = _minutes
+    executors["text-correct"] = _text(TextEditMode.CORRECT)
+    executors["text-polish"] = _text(TextEditMode.POLISH)
     return MappingProxyType(executors)
 
 
@@ -1108,6 +1214,7 @@ async def _run_single_product_stage[T](
     *,
     kind: str,
     rationale: str,
+    config_hash: str,
     stage: Callable[[RunId], Awaitable[T]],
 ) -> T:
     """Run one LLM-backed transform under its own run and lease (M2).
@@ -1117,6 +1224,12 @@ async def _run_single_product_stage[T](
     once rather than three times -- and a failure in any of them lands in
     the same durable, resumable ``failed`` state.
     """
+    document = project_head(store)
+    if isinstance(document, NoDocumentYet):
+        raise StaleStageInputError(
+            "agent-backed transcript stages require a document head."
+        )
+    input_revision_id = document.revision_id
     produced: list[T] = []
 
     async def _executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
@@ -1125,7 +1238,12 @@ async def _run_single_product_stage[T](
 
     await run_async_bundle_operation(
         store,
-        next_action=OperationRef(kind=kind, rationale=rationale),
+        next_action=OperationRef(
+            kind=kind,
+            input_ids=(input_revision_id,),
+            config_hash=config_hash,
+            rationale=rationale,
+        ),
         executor=_executor,
     )
     return produced[0]
@@ -1145,6 +1263,12 @@ async def run_text_transform(
         store,
         kind=f"text-{mode.value}",
         rationale=f"transcript transform text --mode {mode.value}",
+        config_hash=_agent_stage_config_hash(
+            kind=f"text-{mode.value}",
+            model=model,
+            context_note=context_note,
+            window_turns=window_turns,
+        ),
         stage=lambda run_id: transform_text(
             store,
             run_id=run_id,
@@ -1169,6 +1293,9 @@ async def run_chapter_transform(
         store,
         kind="chapter",
         rationale="transcript transform chapter",
+        config_hash=_agent_stage_config_hash(
+            kind="chapter", model=model, context_note=context_note
+        ),
         stage=lambda run_id: transform_chapters(
             store,
             run_id=run_id,
@@ -1191,6 +1318,9 @@ async def run_minutes_transform(
         store,
         kind="minutes",
         rationale="transcript transform minutes",
+        config_hash=_agent_stage_config_hash(
+            kind="minutes", model=model, context_note=context_note
+        ),
         stage=lambda run_id: transform_minutes(
             store,
             run_id=run_id,

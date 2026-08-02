@@ -31,9 +31,9 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ...claude import Reply
 from ...prompting import StructuredPrompt
@@ -49,6 +49,7 @@ from .components import (
     ChapterSetComponent,
     ChapterSetComponentBody,
     ClaimStatus,
+    CommitmentStatus,
     FindingKind,
     MinutesComponent,
     MinutesComponentBody,
@@ -210,6 +211,36 @@ def project_chapter_boundaries(
     )
 
 
+def project_chapter_spans(
+    turns: Sequence[TimedTurn], ranges: Sequence[tuple[int, int]]
+) -> tuple[tuple[int, int], ...]:
+    """Derive ordered, non-overlapping display spans for chapter ranges.
+
+    Source turns may overlap around diarisation hand-offs. Turn ownership stays
+    with the exact index ranges; only the chapter's display boundary is clipped
+    at the next chapter start so that chapter metadata remains a valid partition.
+    """
+    if not ranges:
+        raise InvalidChapterPlanError("cannot derive spans for an empty chapter plan.")
+
+    starts: list[int] = []
+    for start, _end in ranges:
+        raw_start = turns[start].start_ms
+        starts.append(max(raw_start, starts[-1] + 1) if starts else raw_start)
+
+    spans: list[tuple[int, int]] = []
+    for index, ((start, end), chapter_start) in enumerate(
+        zip(ranges, starts, strict=True)
+    ):
+        source_end = max(turn.end_ms for turn in turns[start:end])
+        if index + 1 < len(starts):
+            chapter_end = min(source_end, starts[index + 1])
+        else:
+            chapter_end = source_end
+        spans.append((chapter_start, max(chapter_start + 1, chapter_end)))
+    return tuple(spans)
+
+
 @dataclass(frozen=True)
 class ChapterOutcome:
     revision: RevisionRecord
@@ -249,6 +280,7 @@ async def transform_chapters(
     )
     proposed = [chapter.first_turn_index for chapter in payload.chapters]
     ranges = project_chapter_boundaries(turns, proposed)
+    spans = project_chapter_spans(turns, ranges)
     ignored = sum(1 for index in proposed if not 0 <= index < len(turns))
     titles = _titles_for_ranges(payload.chapters, ranges, turns)
     chapters = tuple(
@@ -256,10 +288,12 @@ async def transform_chapters(
             title=title,
             summary=summary,
             turn_ids=tuple(turn.turn_id for turn in turns[start:end]),
-            start_ms=turns[start].start_ms,
-            end_ms=max(turn.end_ms for turn in turns[start:end]),
+            start_ms=span_start,
+            end_ms=span_end,
         )
-        for (start, end), (title, summary) in zip(ranges, titles, strict=True)
+        for (start, end), (title, summary), (span_start, span_end) in zip(
+            ranges, titles, spans, strict=True
+        )
     )
     body = ChapterSetComponentBody(chapters=chapters)
     component = store.add_component(body)
@@ -318,11 +352,28 @@ def _titles_for_ranges(
 
 class ProposedFinding(BaseModel):
     kind: FindingKind
+    commitment_status: CommitmentStatus = CommitmentStatus.DISCUSSED
     text: str
     evidence_turn_ids: list[str] = Field(default_factory=list)
     evidence_section_ids: list[str] = Field(default_factory=list)
     owner_participant_id: str | None = None
     due: str = ""
+
+    @model_validator(mode="after")
+    def _check_commitment_kind(self) -> Self:
+        if self.kind in (FindingKind.DECISION, FindingKind.ACTION) and (
+            self.commitment_status
+            not in (CommitmentStatus.AGREED, CommitmentStatus.DECIDED)
+        ):
+            raise ValueError(
+                "decision/action findings require agreed or decided commitment status."
+            )
+        if (
+            self.kind == FindingKind.QUESTION
+            and self.commitment_status == CommitmentStatus.DECIDED
+        ):
+            raise ValueError("a decided matter is not an open question.")
+        return self
 
 
 class ProposedSummary(BaseModel):
@@ -353,7 +404,13 @@ Findings:
 - `action` -- concrete work someone took on. Set `owner_participant_id` only
   when a participant genuinely took it; otherwise leave it null.
 - `risk` -- a concern raised about something going wrong.
-- `question` -- something explicitly left open.
+- `question` -- unresolved or explicitly left open.
+
+For every finding set `commitment_status` to the source-supported modality:
+`proposed`, `tentative`, `agreed`, `decided`, `unresolved`, or `discussed`.
+Conditional suggestions and working figures remain `proposed` or `tentative`;
+numbers and future tense do not prove agreement. Use `decided` only when the
+evidence shows adoption or closure, and preserve uncertainty in the text.
 
 Never:
 - promote a suggestion, preference, or "we could" into a decision;
@@ -484,6 +541,15 @@ async def transform_minutes(
         findings.append(
             MinutesFinding(
                 kind=proposed.kind,
+                commitment_status=(
+                    {
+                        FindingKind.DECISION: CommitmentStatus.DECIDED,
+                        FindingKind.ACTION: CommitmentStatus.AGREED,
+                        FindingKind.QUESTION: CommitmentStatus.UNRESOLVED,
+                    }.get(proposed.kind, CommitmentStatus.DISCUSSED)
+                    if proposed.commitment_status == CommitmentStatus.DISCUSSED
+                    else proposed.commitment_status
+                ),
                 text=proposed.text.strip(),
                 claim_status=_claim_status(turn_refs, section_refs),
                 evidence_turn_ids=turn_refs,
