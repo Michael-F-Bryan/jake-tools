@@ -633,11 +633,12 @@ def test_chaptering_covers_every_canonical_turn_exactly_once(
     tmp_path: Path,
 ) -> None:
     store = _normalised(tmp_path)
+    agent = stage_agent(StagePlan(chapter_starts=(0, 2)))
 
     asyncio.run(
         run_chapter_transform(
             store,
-            agent=stage_agent(StagePlan(chapter_starts=(0, 2))),
+            agent=agent,
             model="fixture-model",
         )
     )
@@ -650,6 +651,7 @@ def test_chaptering_covers_every_canonical_turn_exactly_once(
         document.capability_status(CapabilityKey.CHAPTERS)
         == CapabilityStatus.PRESENT_VALIDATED
     )
+    assert "A proposal, option, tentative" in stage_query_of(agent).prompts[0]
 
 
 # -- M10: minutes ------------------------------------------------------------

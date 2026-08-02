@@ -141,6 +141,11 @@ decision", not "Discussion" or "Part 2". Summaries are one or two sentences
 covering only what is in that chapter's own turns; never speculate about, or
 carry claims from, anything outside them.
 
+Preserve commitment and uncertainty exactly. A proposal, option, tentative
+position, or open question must not become an agreement or decision. An agreed
+aim must not become a completed action. Avoid contradictory phrasing such as
+"settled on a proposed cap".
+
 Rules:
 - Return JSON only.
 - Every `first_turn_index` must be an index shown below, in ascending order.
