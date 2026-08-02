@@ -577,6 +577,19 @@ def test_chapter_spans_clip_a_source_overlap_at_the_next_chapter() -> None:
     assert spans == ((0, 1000), (1000, 3000))
 
 
+def test_chapter_span_ends_at_the_final_owned_turn_edge() -> None:
+    earlier = _fake_turn(0).model_copy(update={"end_ms": 4000})
+    final = _fake_turn(1).model_copy(update={"end_ms": 2200})
+    next_chapter = _fake_turn(2).model_copy(update={"start_ms": 5000, "end_ms": 5500})
+
+    spans = project_chapter_spans(
+        (earlier, final, next_chapter),
+        ((0, 2), (2, 3)),
+    )
+
+    assert spans == ((0, 2200), (5000, 5500))
+
+
 def test_a_plan_that_forgets_the_first_turn_still_covers_it() -> None:
     """M7 requires every canonical turn to be in exactly one chapter, so a
     plan starting at turn 2 gets a chapter prepended rather than leaving a

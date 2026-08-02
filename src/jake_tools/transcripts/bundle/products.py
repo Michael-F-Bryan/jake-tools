@@ -229,10 +229,10 @@ def project_chapter_spans(
         starts.append(max(raw_start, starts[-1] + 1) if starts else raw_start)
 
     spans: list[tuple[int, int]] = []
-    for index, ((start, end), chapter_start) in enumerate(
+    for index, ((_start, end), chapter_start) in enumerate(
         zip(ranges, starts, strict=True)
     ):
-        source_end = max(turn.end_ms for turn in turns[start:end])
+        source_end = turns[end - 1].end_ms
         if index + 1 < len(starts):
             chapter_end = min(source_end, starts[index + 1])
         else:
