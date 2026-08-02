@@ -217,27 +217,27 @@ def project_chapter_spans(
     """Derive ordered, non-overlapping display spans for chapter ranges.
 
     Source turns may overlap around diarisation hand-offs. Turn ownership stays
-    with the exact index ranges; only the chapter's display boundary is clipped
-    at the next chapter start so that chapter metadata remains a valid partition.
+    with the exact index ranges; a shared boundary is placed at the previous
+    chapter's final owned-turn edge so the metadata remains non-overlapping and
+    snapped to evidence.
     """
     if not ranges:
         raise InvalidChapterPlanError("cannot derive spans for an empty chapter plan.")
 
-    starts: list[int] = []
-    for start, _end in ranges:
-        raw_start = turns[start].start_ms
-        starts.append(max(raw_start, starts[-1] + 1) if starts else raw_start)
-
     spans: list[tuple[int, int]] = []
-    for index, ((_start, end), chapter_start) in enumerate(
-        zip(ranges, starts, strict=True)
-    ):
-        source_end = turns[end - 1].end_ms
-        if index + 1 < len(starts):
-            chapter_end = min(source_end, starts[index + 1])
-        else:
-            chapter_end = source_end
-        spans.append((chapter_start, max(chapter_start + 1, chapter_end)))
+    previous_end: int | None = None
+    for start, end in ranges:
+        raw_start = turns[start].start_ms
+        chapter_start = (
+            max(raw_start, previous_end) if previous_end is not None else raw_start
+        )
+        chapter_end = turns[end - 1].end_ms
+        if chapter_end <= chapter_start:
+            raise InvalidChapterPlanError(
+                "overlapping source turns cannot be reconciled into positive chapter spans."
+            )
+        spans.append((chapter_start, chapter_end))
+        previous_end = chapter_end
     return tuple(spans)
 
 

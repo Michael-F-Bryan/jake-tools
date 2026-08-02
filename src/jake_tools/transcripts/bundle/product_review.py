@@ -289,6 +289,27 @@ def _bound_products(store: BundleStore, render: RenderRecord):
                 f"chapter {previous.title!r} overlaps chapter {current.title!r}; "
                 "regenerate chapters before product review."
             )
+    by_turn_id = {turn.turn_id: turn for turn in transcript.turns}
+    previous_end: int | None = None
+    for chapter in chapters[0].chapters:
+        try:
+            first_turn = by_turn_id[chapter.turn_ids[0]]
+            final_turn = by_turn_id[chapter.turn_ids[-1]]
+        except KeyError as exc:
+            raise InvalidProductReviewPackError(
+                f"chapter {chapter.title!r} references an unknown canonical turn."
+            ) from exc
+        expected_start = (
+            max(first_turn.start_ms, previous_end)
+            if previous_end is not None
+            else first_turn.start_ms
+        )
+        if chapter.start_ms != expected_start or chapter.end_ms != final_turn.end_ms:
+            raise InvalidProductReviewPackError(
+                f"chapter {chapter.title!r} is not snapped to its reconciled canonical "
+                "turn edges; regenerate chapters before product review."
+            )
+        previous_end = final_turn.end_ms
     return document, transcript, minutes[0]
 
 

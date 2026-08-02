@@ -565,16 +565,16 @@ def test_chapter_spans_do_not_overlap_when_adjacent_source_turns_do() -> None:
         ((0, 2), (2, 3)),
     )
 
-    assert spans == ((0, 2000), (2000, 2500))
+    assert spans == ((0, 2200), (2200, 2500))
 
 
-def test_chapter_spans_clip_a_source_overlap_at_the_next_chapter() -> None:
+def test_chapter_spans_reconcile_a_source_overlap_at_an_evidence_edge() -> None:
     first = _fake_turn(0).model_copy(update={"end_ms": 2500})
     second = _fake_turn(1).model_copy(update={"end_ms": 3000})
 
     spans = project_chapter_spans((first, second), ((0, 1), (1, 2)))
 
-    assert spans == ((0, 1000), (1000, 3000))
+    assert spans == ((0, 2500), (2500, 3000))
 
 
 def test_chapter_span_ends_at_the_final_owned_turn_edge() -> None:

@@ -495,6 +495,43 @@ def test_product_review_refuses_overlapping_chapter_spans(tmp_path: Path) -> Non
         )
 
 
+def test_product_review_refuses_unsnapped_chapter_edges(tmp_path: Path) -> None:
+    store = _reviewed_bundle(tmp_path)
+    target = tmp_path / "note.md"
+    target.write_text("## Prep\n", encoding="utf-8")
+    _bind_destination(store, target)
+    document = project_head(store)
+    assert isinstance(document, TranscriptDocumentV1)
+    chapters = document.components_of(ChapterSetComponent)[0]
+    first, second, *remaining = chapters.chapters
+    assert first.end_ms + 1 < second.start_ms
+    unsnapped = store.add_component(
+        ChapterSetComponentBody(
+            chapters=(
+                first.model_copy(update={"end_ms": first.end_ms + 1}),
+                second,
+                *remaining,
+            )
+        )
+    )
+    run = store.create_run(next_action=OperationRef(kind="chapter-fixture"))
+    store.acquire_lease(run_id=run.run_id, pid=os.getpid())
+    revision = store.append_revision(
+        operation=OperationRef(kind="chapter-fixture"),
+        parent_revision_ids=(document.revision_id,),
+        component_ids=(unsnapped.component_id,),
+        superseded_component_ids=(chapters.component_id,),
+    )
+    store.update_head(run_id=run.run_id, revision_id=revision.revision_id)
+    store.release_lease(run_id=run.run_id, new_state=RunState.COMPLETED)
+    render = render_document(store)
+
+    with pytest.raises(InvalidProductReviewPackError, match="not snapped"):
+        export_product_review_pack(
+            store, render_id=render.render_id, destination=tmp_path / "review.json"
+        )
+
+
 def test_applying_writes_the_region_and_preserves_the_rest(
     tmp_path: Path,
 ) -> None:
