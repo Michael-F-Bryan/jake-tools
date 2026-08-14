@@ -26,10 +26,13 @@ from types import MappingProxyType
 from ..errors import TranscriptError
 from ..stages import StructuredAgent
 from .assemble import assemble
+from .assignment import canonical_turn_set
 from .components import (
     ArtefactSelection,
     ComponentId,
     Disposition,
+    EditorialOperationLedgerComponent,
+    EditorialTranscriptComponent,
     SpeakerHypothesisSetComponent,
     SpeakerReviewComponent,
     TextEditMode,
@@ -38,6 +41,7 @@ from .components import (
     component_input_refs,
 )
 from .document import TranscriptDocumentV1, project_head, project_revision
+from .editorial import IDENTITY_CONFIG_HASH, identity_editorial_projection
 from .ids import ArtefactId, RevisionId, RunId, mint_id
 from .normalise import normalise_transcript
 from .products import (
@@ -49,6 +53,9 @@ from .products import (
 from .records import (
     DURABLE_RUN_STATES,
     BundleManifest,
+    ComponentBinding,
+    ContinuationGraph,
+    ContinuationStage,
     Lease,
     NoDocumentYet,
     OperationRef,
@@ -59,6 +66,7 @@ from .records import (
     RunState,
     SourceAssociation,
     SourceMembershipRecord,
+    StageProgressState,
 )
 from .reflow import ReflowOutcome, transform_reflow
 from .registry import CapabilityKey, CapabilityStatus
@@ -143,6 +151,104 @@ def _agent_stage_config_hash(
         payload["window_turns"] = window_turns
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _deterministic_stage_config_hash(
+    *, kind: str, implementation_version: str, parameters: Mapping[str, object]
+) -> str:
+    canonical = json.dumps(
+        {
+            "kind": kind,
+            "implementation_version": implementation_version,
+            "parameters": dict(parameters),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _post_review_continuation_graph(
+    *, model: str, context_note: str
+) -> ContinuationGraph:
+    """Declare the exact transcript-specific stages before human review."""
+    stage_specs = (
+        (
+            "editorial-identity",
+            "v1",
+            IDENTITY_CONFIG_HASH,
+        ),
+        (
+            "editorial-reflow",
+            "v1",
+            _deterministic_stage_config_hash(
+                kind="editorial-reflow",
+                implementation_version="v1",
+                parameters={"max_gap_ms": 3000, "lexical_gap_ms": 1000},
+            ),
+        ),
+        (
+            "editorial-correct",
+            "v1",
+            _agent_stage_config_hash(
+                kind="editorial-correct",
+                model=model,
+                context_note=context_note,
+                window_turns=TEXT_WINDOW_TURNS,
+            ),
+        ),
+        (
+            "editorial-polish",
+            "v1",
+            _agent_stage_config_hash(
+                kind="editorial-polish",
+                model=model,
+                context_note=context_note,
+                window_turns=TEXT_WINDOW_TURNS,
+            ),
+        ),
+        (
+            "chapters",
+            "v1",
+            _agent_stage_config_hash(
+                kind="chapters", model=model, context_note=context_note
+            ),
+        ),
+        (
+            "minutes",
+            "v1",
+            _agent_stage_config_hash(
+                kind="minutes", model=model, context_note=context_note
+            ),
+        ),
+        (
+            "render",
+            RENDERER_VERSION,
+            _deterministic_stage_config_hash(
+                kind="render",
+                implementation_version=RENDERER_VERSION,
+                parameters={
+                    "profile": MEETING_NOTE_PROFILE,
+                    "profile_version": MEETING_NOTE_PROFILE_VERSION,
+                    "template_sha256": template_sha256(),
+                    "variant": DUMC_VARIANT,
+                },
+            ),
+        ),
+    )
+    return ContinuationGraph(
+        schema_version="post-review-continuation-v1",
+        stages=tuple(
+            ContinuationStage(
+                ordinal=ordinal,
+                kind=kind,
+                implementation_version=version,
+                config_hash=config_hash,
+            )
+            for ordinal, (kind, version, config_hash) in enumerate(stage_specs)
+        ),
+        terminal_checkpoint="product_review_required",
+    )
 
 
 # -- bundle create ------------------------------------------------------------
@@ -1064,7 +1170,11 @@ def bundle_executors_with_agent(
 
 
 async def run_async_bundle_operation(
-    store: BundleStore, *, next_action: OperationRef, executor: AsyncBundleExecutor
+    store: BundleStore,
+    *,
+    next_action: OperationRef,
+    executor: AsyncBundleExecutor,
+    continuation_graph: ContinuationGraph | None = None,
 ) -> RunRecord:
     """:func:`run_bundle_operation` for the LLM-backed transforms.
 
@@ -1076,7 +1186,9 @@ async def run_async_bundle_operation(
     exactly the same durable, resumable ``failed`` state a crashed
     synchronous one does.
     """
-    run = store.create_run(next_action=next_action)
+    run = store.create_run(
+        next_action=next_action, continuation_graph=continuation_graph
+    )
     store.acquire_lease(run_id=run.run_id, pid=os.getpid())
     run = store.load_run(run.run_id)
     try:
@@ -1141,20 +1253,39 @@ async def run_speakers_propose(
     -- on another day, from another shell -- without repeating any of the
     stable upstream work.
     """
+    document = project_head(store)
+    if isinstance(document, NoDocumentYet):
+        raise StaleStageInputError(
+            "speaker proposals require a document head before declaring continuation."
+        )
+    proposal_input_revision_id = document.revision_id
+    continuation_graph = _post_review_continuation_graph(
+        model=model, context_note=context_note
+    )
 
     async def _executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
         await propose_speakers(store, run_id=run.run_id, agent=agent, model=model)
+        proposal_document = project_head(store)
+        if isinstance(proposal_document, NoDocumentYet):
+            raise StaleStageInputError(
+                "speaker proposals completed without a document revision."
+            )
+        review_input_revision_id = proposal_document.revision_id
         if not stop_for_review:
             return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
         return ExecutorOutcome(
             state=RunState.REVIEW_REQUIRED,
             next_action=OperationRef(
-                kind="products",
-                config_hash=None,
+                kind="post-review-continuation",
+                input_ids=(
+                    review_input_revision_id,
+                    continuation_graph.content_hash,
+                ),
+                config_hash=continuation_graph.content_hash,
                 rationale=(
-                    "speaker hypotheses are proposals only (M8 rung 7); export a "
-                    "review pack, decide each cluster, apply it, then resume to "
-                    "build the polished transcript, chapters, and minutes"
+                    "speaker hypotheses are proposals only; export and apply the "
+                    "revision-bound review pack, then resume the exact declared "
+                    "post-review continuation"
                 ),
             ),
         )
@@ -1162,10 +1293,105 @@ async def run_speakers_propose(
     return await run_async_bundle_operation(
         store,
         next_action=OperationRef(
-            kind="speakers-propose", rationale="transcript speakers propose"
+            kind="speakers-propose",
+            input_ids=(proposal_input_revision_id,),
+            config_hash=_agent_stage_config_hash(
+                kind="speakers-propose", model=model, context_note=context_note
+            ),
+            rationale="transcript speakers propose",
         ),
         executor=_executor,
+        continuation_graph=continuation_graph,
     )
+
+
+def _append_editorial_identity_stage(
+    store: BundleStore,
+    *,
+    run_id: RunId,
+    outcome: ApplyReviewOutcome,
+) -> RevisionRecord:
+    activation = outcome.continuation
+    review = outcome.component
+    if activation is None or review is None:
+        raise StaleStageInputError(
+            "fresh review application did not produce its exact continuation binding."
+        )
+    document = project_head(store)
+    if isinstance(document, NoDocumentYet):
+        raise StaleStageInputError(
+            "speaker review completed without a projectable document head."
+        )
+    canonical = canonical_turn_set(document.components)
+    if canonical is None:
+        raise StaleStageInputError(
+            "editorial identity requires one canonical timed-turn component."
+        )
+    if (
+        activation.canonical_turns.component_id != canonical.component_id
+        or activation.canonical_turns.content_hash != canonical.content_hash
+        or activation.speaker_review.component_id != review.component_id
+        or activation.speaker_review.content_hash != review.content_hash
+    ):
+        raise StaleStageInputError(
+            "editorial identity inputs differ from the activated reviewed checkpoint."
+        )
+
+    body, ledger_body = identity_editorial_projection(
+        canonical=canonical,
+        review=review,
+        components=document.components,
+    )
+    editorial = store.add_component(body)
+    if not isinstance(editorial, EditorialTranscriptComponent):
+        raise StaleStageInputError(
+            "editorial identity content hash collided with a different component kind."
+        )
+    ledger = store.add_component(
+        ledger_body.model_copy(
+            update={"output_editorial_component_id": editorial.component_id}
+        )
+    )
+    if not isinstance(ledger, EditorialOperationLedgerComponent):
+        raise StaleStageInputError(
+            "editorial ledger content hash collided with a different component kind."
+        )
+    revision = store.append_revision(
+        operation=OperationRef(
+            kind="editorial-identity",
+            input_ids=(
+                document.revision_id,
+                canonical.component_id,
+                review.component_id,
+            ),
+            config_hash=IDENTITY_CONFIG_HASH,
+            rationale="canonical-preserving editorial identity projection",
+        ),
+        parent_revision_ids=(document.revision_id,),
+        component_ids=(editorial.component_id, ledger.component_id),
+    )
+    store.update_head(run_id=run_id, revision_id=revision.revision_id)
+    store.append_stage_progress(
+        continuation_id=activation.continuation_id,
+        stage_ordinal=0,
+        state=StageProgressState.COMPLETED,
+        input_revision_id=document.revision_id,
+        output_revision_id=revision.revision_id,
+        input_components=(activation.canonical_turns, activation.speaker_review),
+        output_components=(
+            ComponentBinding(
+                component_id=editorial.component_id,
+                content_hash=editorial.content_hash,
+            ),
+            ComponentBinding(
+                component_id=ledger.component_id,
+                content_hash=ledger.content_hash,
+            ),
+        ),
+        operation_count=0,
+        detail="one verbatim editorial node per reviewed canonical turn",
+    )
+    return revision
 
 
 def run_review_apply(store: BundleStore, *, pack_path: Path) -> ApplyReviewOutcome:
@@ -1186,6 +1412,7 @@ def run_review_apply(store: BundleStore, *, pack_path: Path) -> ApplyReviewOutco
             review=prepared,
             revision=None,
             component=None,
+            continuation=store.find_continuation_activation(prepared.review_id),
             already_applied=True,
             addressed_item_count=0,
             total_item_count=0,
@@ -1194,7 +1421,12 @@ def run_review_apply(store: BundleStore, *, pack_path: Path) -> ApplyReviewOutco
     outcome: list[ApplyReviewOutcome] = []
 
     def _executor(store: BundleStore, run: RunRecord) -> ExecutorOutcome:
-        outcome.append(commit_review(store, run_id=run.run_id, prepared=prepared))
+        committed = commit_review(store, run_id=run.run_id, prepared=prepared)
+        if committed.addressed_item_count == committed.total_item_count:
+            _append_editorial_identity_stage(
+                store, run_id=run.run_id, outcome=committed
+            )
+        outcome.append(committed)
         return ExecutorOutcome(state=RunState.COMPLETED, revision_id=None)
 
     run_bundle_operation(

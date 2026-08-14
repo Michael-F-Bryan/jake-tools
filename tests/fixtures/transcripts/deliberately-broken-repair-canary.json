@@ -1,0 +1,688 @@
+{
+  "schema_version": "transcript-repair-canary-v2",
+  "name": "deliberately-broken-low-power-controller-sample",
+  "meeting_context": "A Sunfish Robotics engineering discussion about the low-power controller (LPC), Q5 controller, autopilot, CAN bus, real-time clock, Ethernet, MPPT, battery packs, and vehicle recovery. Preserve proposals, objections, uncertainty, commitments, numbers, and negation exactly.",
+  "participants": [
+    "Will",
+    "Michael",
+    "Morgan",
+    "Taylor",
+    "David",
+    "William"
+  ],
+  "source_span_ms": [
+    0,
+    48000
+  ],
+  "turns": [
+    {
+      "key": "boundary-filler-start",
+      "speaker": "Morgan",
+      "start_ms": 0,
+      "end_ms": 500,
+      "broken_text": "Um.",
+      "clean_text": "",
+      "allowed_operation": "drop-filler",
+      "canonical_turn_id": "turn_019fffc5-aaa8-76d9-b1d8-84b267acc5a5",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-76d9-b1d8-84b267acc5a5",
+        "start_char": 0,
+        "end_char": 3
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-76d9-b1d8-84b267acc5a5",
+        "start_ms": 0,
+        "end_ms": 500
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-7363-877f-56a6f704b01c",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:boundary-filler-start"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-76d9-b1d8-84b267acc5a5"
+      ]
+    },
+    {
+      "key": "lpc-split-a",
+      "speaker": "Will",
+      "start_ms": 1000,
+      "end_ms": 2600,
+      "broken_text": "The low power con",
+      "clean_text": "The low-power controller talks over the CAN bus.",
+      "allowed_operation": "merge-with-next-and-correct",
+      "canonical_turn_id": "turn_019fffc5-aaa8-7512-a580-ffc1d097f0d9",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-7512-a580-ffc1d097f0d9",
+        "start_char": 0,
+        "end_char": 17
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-7512-a580-ffc1d097f0d9",
+        "start_ms": 1000,
+        "end_ms": 2600
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-79bd-8a49-f6dd98b9ef10",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:lpc-split-a"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-7512-a580-ffc1d097f0d9"
+      ]
+    },
+    {
+      "key": "lpc-split-b",
+      "speaker": "Will",
+      "start_ms": 2650,
+      "end_ms": 4600,
+      "broken_text": "troller talks over the can buzz.",
+      "clean_text": null,
+      "allowed_operation": "merged-into-previous",
+      "canonical_turn_id": "turn_019fffc5-aaa8-73ff-8a3b-3f1b2ea961e6",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-73ff-8a3b-3f1b2ea961e6",
+        "start_char": 0,
+        "end_char": 32
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-73ff-8a3b-3f1b2ea961e6",
+        "start_ms": 2650,
+        "end_ms": 4600
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-79bd-8a49-f6dd98b9ef10",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:lpc-split-b"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-73ff-8a3b-3f1b2ea961e6"
+      ]
+    },
+    {
+      "key": "tentative-proposal-a",
+      "speaker": "Michael",
+      "start_ms": 5200,
+      "end_ms": 7600,
+      "broken_text": "I I think panel control might belong in the auto pilot",
+      "clean_text": "I think panel control might belong in the autopilot, but I'm not saying we've decided that.",
+      "allowed_operation": "merge-around-overlap-and-polish",
+      "canonical_turn_id": "turn_019fffc5-aaa8-766b-862d-a4b26cf14e7d",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-766b-862d-a4b26cf14e7d",
+        "start_char": 0,
+        "end_char": 54
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-766b-862d-a4b26cf14e7d",
+        "start_ms": 5200,
+        "end_ms": 7600
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-70cf-a548-af6796230598",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:tentative-proposal-a"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-766b-862d-a4b26cf14e7d"
+      ]
+    },
+    {
+      "key": "objection-overlap",
+      "speaker": "Will",
+      "start_ms": 7000,
+      "end_ms": 8500,
+      "broken_text": "No no I don't agree yet.",
+      "clean_text": "No, I don't agree yet.",
+      "allowed_operation": "polish",
+      "canonical_turn_id": "turn_019fffc5-aaa8-7c62-b3cb-1c6ba7f343aa",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-7c62-b3cb-1c6ba7f343aa",
+        "start_char": 0,
+        "end_char": 24
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-7c62-b3cb-1c6ba7f343aa",
+        "start_ms": 7000,
+        "end_ms": 8500
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-79bd-8a49-f6dd98b9ef10",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:objection-overlap"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-7c62-b3cb-1c6ba7f343aa"
+      ]
+    },
+    {
+      "key": "tentative-proposal-b",
+      "speaker": "Michael",
+      "start_ms": 7900,
+      "end_ms": 10000,
+      "broken_text": "but I'm not saying we've decided that",
+      "clean_text": null,
+      "allowed_operation": "merged-into-previous",
+      "canonical_turn_id": "turn_019fffc5-aaa8-73a6-bb6d-dec5da4880d8",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-73a6-bb6d-dec5da4880d8",
+        "start_char": 0,
+        "end_char": 37
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-73a6-bb6d-dec5da4880d8",
+        "start_ms": 7900,
+        "end_ms": 10000
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-70cf-a548-af6796230598",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:tentative-proposal-b"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-73a6-bb6d-dec5da4880d8"
+      ]
+    },
+    {
+      "key": "rtc-term",
+      "speaker": "Morgan",
+      "start_ms": 10800,
+      "end_ms": 14000,
+      "broken_text": "The real time cluck should be the golden source of local time.",
+      "clean_text": "The real-time clock should be the golden source of local time.",
+      "allowed_operation": "correct",
+      "canonical_turn_id": "turn_019fffc5-aaa8-712a-abc2-8e8980b0ef59",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-712a-abc2-8e8980b0ef59",
+        "start_char": 0,
+        "end_char": 62
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-712a-abc2-8e8980b0ef59",
+        "start_ms": 10800,
+        "end_ms": 14000
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-7363-877f-56a6f704b01c",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:rtc-term"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-712a-abc2-8e8980b0ef59"
+      ]
+    },
+    {
+      "key": "battery-hedge",
+      "speaker": "Taylor",
+      "start_ms": 14800,
+      "end_ms": 18400,
+      "broken_text": "We should probably test two to four battery packs before we decide.",
+      "clean_text": "We should probably test two to four battery packs before we decide.",
+      "allowed_operation": "identity",
+      "canonical_turn_id": "turn_019fffc5-aaa8-7cf8-8ed0-77a8e5853d46",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-7cf8-8ed0-77a8e5853d46",
+        "start_char": 0,
+        "end_char": 67
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-7cf8-8ed0-77a8e5853d46",
+        "start_ms": 14800,
+        "end_ms": 18400
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-7db4-9859-036244a92c23",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:battery-hedge"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-7cf8-8ed0-77a8e5853d46"
+      ]
+    },
+    {
+      "key": "deturtle-question",
+      "speaker": "David",
+      "start_ms": 19200,
+      "end_ms": 22600,
+      "broken_text": "If the auto pilot fails can the L P C de turtle the vehicle",
+      "clean_text": "If the autopilot fails, can the LPC de-turtle the vehicle?",
+      "allowed_operation": "correct-and-polish",
+      "canonical_turn_id": "turn_019fffc5-aaa8-7b24-ae16-5a398a539fcc",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-7b24-ae16-5a398a539fcc",
+        "start_char": 0,
+        "end_char": 59
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-7b24-ae16-5a398a539fcc",
+        "start_ms": 19200,
+        "end_ms": 22600
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-78e1-8027-55489ee088a7",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:deturtle-question"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-7b24-ae16-5a398a539fcc"
+      ]
+    },
+    {
+      "key": "unaccepted-proposal",
+      "speaker": "Will",
+      "start_ms": 23400,
+      "end_ms": 27800,
+      "broken_text": "I propose that the power board recover an unresponsive auto pilot but this still needs source review.",
+      "clean_text": "I propose that the power board recover an unresponsive autopilot, but this still needs source review.",
+      "allowed_operation": "correct-and-polish",
+      "canonical_turn_id": "turn_019fffc5-aaa8-7906-a4fc-a1e826c5b661",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-7906-a4fc-a1e826c5b661",
+        "start_char": 0,
+        "end_char": 101
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-7906-a4fc-a1e826c5b661",
+        "start_ms": 23400,
+        "end_ms": 27800
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-79bd-8a49-f6dd98b9ef10",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:unaccepted-proposal"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-7906-a4fc-a1e826c5b661"
+      ]
+    },
+    {
+      "key": "ethernet-split-a",
+      "speaker": "Morgan",
+      "start_ms": 28600,
+      "end_ms": 29300,
+      "broken_text": "Ether",
+      "clean_text": "Ethernet should not be on the LPC.",
+      "allowed_operation": "merge-with-next-and-correct",
+      "canonical_turn_id": "turn_019fffc5-aaa8-7d98-904f-736110f20803",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-7d98-904f-736110f20803",
+        "start_char": 0,
+        "end_char": 5
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-7d98-904f-736110f20803",
+        "start_ms": 28600,
+        "end_ms": 29300
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-7363-877f-56a6f704b01c",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:ethernet-split-a"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-7d98-904f-736110f20803"
+      ]
+    },
+    {
+      "key": "ethernet-split-b",
+      "speaker": "Morgan",
+      "start_ms": 29350,
+      "end_ms": 31600,
+      "broken_text": "net should not be on the L P C.",
+      "clean_text": null,
+      "allowed_operation": "merged-into-previous",
+      "canonical_turn_id": "turn_019fffc5-aaa8-733c-bdf6-c8b13bc5248b",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-733c-bdf6-c8b13bc5248b",
+        "start_char": 0,
+        "end_char": 31
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-733c-bdf6-c8b13bc5248b",
+        "start_ms": 29350,
+        "end_ms": 31600
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-7363-877f-56a6f704b01c",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:ethernet-split-b"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-733c-bdf6-c8b13bc5248b"
+      ]
+    },
+    {
+      "key": "explicit-decision",
+      "speaker": "Taylor",
+      "start_ms": 32400,
+      "end_ms": 35500,
+      "broken_text": "We agreed the boot loader is non negotiable.",
+      "clean_text": "We agreed the bootloader is non-negotiable.",
+      "allowed_operation": "correct",
+      "canonical_turn_id": "turn_019fffc5-aaa8-7230-a8e1-63b00391ce5f",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-7230-a8e1-63b00391ce5f",
+        "start_char": 0,
+        "end_char": 44
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-7230-a8e1-63b00391ce5f",
+        "start_ms": 32400,
+        "end_ms": 35500
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-7db4-9859-036244a92c23",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:explicit-decision"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-7230-a8e1-63b00391ce5f"
+      ]
+    },
+    {
+      "key": "explicit-action",
+      "speaker": "Taylor",
+      "start_ms": 36300,
+      "end_ms": 39700,
+      "broken_text": "William will investigate M P P T efficiency.",
+      "clean_text": "William will investigate MPPT efficiency.",
+      "allowed_operation": "correct",
+      "canonical_turn_id": "turn_019fffc5-aaa8-734d-8885-ccb41ec54bce",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-734d-8885-ccb41ec54bce",
+        "start_char": 0,
+        "end_char": 44
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-734d-8885-ccb41ec54bce",
+        "start_ms": 36300,
+        "end_ms": 39700
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-7db4-9859-036244a92c23",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:explicit-action"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-734d-8885-ccb41ec54bce"
+      ]
+    },
+    {
+      "key": "numeric-negation",
+      "speaker": "David",
+      "start_ms": 40500,
+      "end_ms": 44800,
+      "broken_text": "The current was thirty amps not thirteen.",
+      "clean_text": "The current was 30 amps, not 13.",
+      "allowed_operation": "polish-normalisation",
+      "canonical_turn_id": "turn_019fffc5-aaa8-7c88-9fb0-dfb4c6102a0d",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-7c88-9fb0-dfb4c6102a0d",
+        "start_char": 0,
+        "end_char": 41
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-7c88-9fb0-dfb4c6102a0d",
+        "start_ms": 40500,
+        "end_ms": 44800
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-78e1-8027-55489ee088a7",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:numeric-negation"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-7c88-9fb0-dfb4c6102a0d"
+      ]
+    },
+    {
+      "key": "boundary-filler-end",
+      "speaker": "David",
+      "start_ms": 47000,
+      "end_ms": 48000,
+      "broken_text": "Uh.",
+      "clean_text": "",
+      "allowed_operation": "drop-filler",
+      "canonical_turn_id": "turn_019fffc5-aaa8-75e8-a9bb-2a6c0800f287",
+      "canonical_source_span": {
+        "canonical_component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+        "turn_id": "turn_019fffc5-aaa8-75e8-a9bb-2a6c0800f287",
+        "start_char": 0,
+        "end_char": 3
+      },
+      "constituent_interval": {
+        "turn_id": "turn_019fffc5-aaa8-75e8-a9bb-2a6c0800f287",
+        "start_ms": 47000,
+        "end_ms": 48000
+      },
+      "effective_attribution": {
+        "state": "named",
+        "participant_id": "participant_019fffc5-aaa8-78e1-8027-55489ee088a7",
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-review:boundary-filler-end"
+      },
+      "derivation_mode": "verbatim",
+      "operation_ancestry": [
+        "identity:turn_019fffc5-aaa8-75e8-a9bb-2a6c0800f287"
+      ]
+    }
+  ],
+  "required_semantics": [
+    {
+      "id": "technical-terms",
+      "description": "Correct all context-disambiguated ASR technical terms.",
+      "required_regexes": [
+        "(?i)low-power controller",
+        "\\bCAN bus\\b",
+        "(?i)\\bautopilot\\b",
+        "(?i)real-time clock",
+        "\\bLPC\\b",
+        "(?i)de-turtle",
+        "\\bEthernet\\b",
+        "(?i)\\bbootloader\\b",
+        "\\bMPPT\\b"
+      ],
+      "forbidden_regexes": [
+        "(?i)low power con\\s+troller",
+        "(?i)can buzz",
+        "(?i)real time cluck",
+        "(?i)auto pilot",
+        "\\bL P C\\b",
+        "\\bM P P T\\b"
+      ]
+    },
+    {
+      "id": "proposal-not-decision",
+      "description": "The panel-control statement remains tentative and explicitly not decided.",
+      "required_regexes": [
+        "(?is)panel control.*\\bmight\\b.*not saying.*decided"
+      ],
+      "forbidden_regexes": [
+        "(?i)(we |the team )?(agreed|decided) (that )?panel control"
+      ]
+    },
+    {
+      "id": "objection-preserved",
+      "description": "Will's disagreement remains explicit and follows the locally reconstructed proposal.",
+      "required_regexes": [
+        "(?i)No,? I don't agree yet"
+      ],
+      "forbidden_regexes": []
+    },
+    {
+      "id": "hedges-and-review-status",
+      "description": "Testing and recovery language remains tentative rather than becoming a commitment.",
+      "required_regexes": [
+        "(?i)should probably test two to four battery packs before we decide",
+        "(?is)I propose.*recover an unresponsive autopilot.*still needs source review"
+      ],
+      "forbidden_regexes": [
+        "(?i)(decided|agreed) to test two to four battery packs",
+        "(?i)(decided|agreed) (that )?the power board (will|must) recover"
+      ]
+    },
+    {
+      "id": "explicit-commitments-distinguished",
+      "description": "The explicit bootloader decision and William action remain commitments.",
+      "required_regexes": [
+        "(?i)We agreed the bootloader is non-negotiable",
+        "(?i)William will investigate MPPT efficiency"
+      ],
+      "forbidden_regexes": []
+    },
+    {
+      "id": "numbers-and-negation",
+      "description": "Thirty and thirteen remain distinct and negated in the same direction.",
+      "required_regexes": [
+        "(?i)(30|thirty) amps,? not (13|thirteen)"
+      ],
+      "forbidden_regexes": [
+        "(?i)(13|thirteen) amps,? not (30|thirty)"
+      ]
+    }
+  ],
+  "structural_expectations": {
+    "first_source_start_ms": 0,
+    "final_source_end_ms": 48000,
+    "display_dialogue_may_drop_source_boundaries": true,
+    "required_dropped_keys": [
+      "boundary-filler-start",
+      "boundary-filler-end"
+    ],
+    "required_merge_groups": [
+      [
+        "lpc-split-a",
+        "lpc-split-b"
+      ],
+      [
+        "tentative-proposal-a",
+        "tentative-proposal-b"
+      ],
+      [
+        "ethernet-split-a",
+        "ethernet-split-b"
+      ]
+    ],
+    "required_display_order": [
+      "lpc-split-a",
+      "tentative-proposal-a",
+      "objection-overlap",
+      "rtc-term",
+      "battery-hedge",
+      "deturtle-question",
+      "unaccepted-proposal",
+      "ethernet-split-a",
+      "explicit-decision",
+      "explicit-action",
+      "numeric-negation"
+    ],
+    "source_turn_keys_must_be_accounted_exactly_once": true,
+    "speaker_attribution_must_not_change": true
+  },
+  "acceptance": {
+    "all_required_semantics_pass": true,
+    "all_structural_expectations_pass": true,
+    "no_unsupported_additions": true,
+    "no_unaccounted_deletions": true,
+    "correction_and_polish_have_distinct_ledgers": true,
+    "high_risk_changes_have_explicit_dispositions": true
+  },
+  "lineage": {
+    "canonical_turn_set": {
+      "component_id": "component_019fffc5-aaa8-7933-976f-65e07839c5d9",
+      "content_hash": "bb955eb6980051a368b5d1250d023e8703424563e9c5624f464c012c0746f8fa",
+      "hash_payload": "ordered-turn-id-speaker-text-start-end-v1"
+    },
+    "speaker_review": {
+      "component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+      "content_hash": "431202e9a954c231ef2af5d9286181d988c0d28047dc4c10d2c5b66c45dfac90",
+      "hash_payload": "ordered-turn-id-participant-id-v1",
+      "reviewer": "fixture operator"
+    },
+    "participant_ids": {
+      "Will": "participant_019fffc5-aaa8-79bd-8a49-f6dd98b9ef10",
+      "Michael": "participant_019fffc5-aaa8-70cf-a548-af6796230598",
+      "Morgan": "participant_019fffc5-aaa8-7363-877f-56a6f704b01c",
+      "Taylor": "participant_019fffc5-aaa8-7db4-9859-036244a92c23",
+      "David": "participant_019fffc5-aaa8-78e1-8027-55489ee088a7",
+      "William": "participant_019fffc5-aaa8-7765-8f07-decc5717a96d"
+    },
+    "reviewed_overlap_groups": [
+      {
+        "overlap_group_id": "overlap_019fffc5-aaa8-723c-9b04-4d811c70b9fc",
+        "turn_keys": [
+          "tentative-proposal-a",
+          "objection-overlap",
+          "tentative-proposal-b"
+        ],
+        "turn_ids": [
+          "turn_019fffc5-aaa8-766b-862d-a4b26cf14e7d",
+          "turn_019fffc5-aaa8-7c62-b3cb-1c6ba7f343aa",
+          "turn_019fffc5-aaa8-73a6-bb6d-dec5da4880d8"
+        ],
+        "speaker_review_component_id": "component_019fffc5-aaa8-7fff-8d06-1d8b314606dd",
+        "evidence_ref": "fixture-reviewed-local-interruption-and-continuation"
+      }
+    ]
+  },
+  "expected_risk_findings": [
+    {
+      "id": "context-disambiguated-can-bus",
+      "finding_type": "context-disambiguated-technical-term",
+      "severity": "human-disposition-required",
+      "source_turn_keys": [
+        "lpc-split-a",
+        "lpc-split-b"
+      ],
+      "broken_form": "can buzz",
+      "proposed_form": "CAN bus",
+      "basis": "meeting_context, not mechanically recoverable from source bytes",
+      "required_disposition": "pending-human-review"
+    }
+  ]
+}

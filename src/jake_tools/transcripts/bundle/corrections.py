@@ -12,6 +12,8 @@ from ..errors import TranscriptError
 from .assignment import canonical_turn_set
 from .components import (
     ChapterSetComponent,
+    EditorialOperationLedgerComponent,
+    EditorialTranscriptComponent,
     MinutesComponent,
     TextEditEntry,
     TextEditLedgerComponent,
@@ -196,7 +198,15 @@ def apply_correction_pack(store: BundleStore, *, pack_path: Path) -> CorrectionO
                 *(
                     c.component_id
                     for c in document.components.values()
-                    if isinstance(c, (ChapterSetComponent, MinutesComponent))
+                    if isinstance(
+                        c,
+                        (
+                            ChapterSetComponent,
+                            EditorialOperationLedgerComponent,
+                            EditorialTranscriptComponent,
+                            MinutesComponent,
+                        ),
+                    )
                 ),
             ),
         )

@@ -16,6 +16,13 @@ from dataclasses import dataclass
 from .assignment import SpeakerContext, canonical_turn_set
 from .components import (
     ChapterSetComponent,
+    EditorialDerivationMode,
+    EditorialNode,
+    EditorialOperation,
+    EditorialOperationKind,
+    EditorialOperationLedgerComponentBody,
+    EditorialSpeakerState,
+    EditorialTranscriptComponentBody,
     MinutesComponent,
     TextEditEntry,
     TextEditLedgerComponent,
@@ -27,7 +34,7 @@ from .components import (
     TimedTurnSetComponentBody,
 )
 from .document import NoDocumentYet, project_head
-from .ids import RunId
+from .ids import RunId, mint_id
 from .records import OperationRef, RevisionRecord
 from .store import BundleStore
 
@@ -244,6 +251,223 @@ def reflow_until_stable(
         passes.append(result)
         current = result.turns
     raise RuntimeError("reflow did not converge within the input turn count")
+
+
+@dataclass(frozen=True)
+class EditorialReflowResult:
+    body: EditorialTranscriptComponentBody
+    ledger: EditorialOperationLedgerComponentBody
+    merged_node_count: int
+
+
+def editorial_reflow_config_hash(
+    *, max_gap_ms: int = 3000, lexical_gap_ms: int = 1000
+) -> str:
+    return _sha256_text(
+        f"editorial-reflow-v1:max-gap-ms={max_gap_ms}:lexical-gap-ms={lexical_gap_ms}"
+    )
+
+
+def _same_named_editorial_speaker(first: EditorialNode, second: EditorialNode) -> bool:
+    return (
+        first.attribution.state == EditorialSpeakerState.NAMED
+        and second.attribution.state == EditorialSpeakerState.NAMED
+        and first.attribution.participant_ids == second.attribution.participant_ids
+    )
+
+
+def _looks_like_editorial_word_suffix(
+    first: EditorialNode, second: EditorialNode
+) -> bool:
+    if first.text.endswith((".", "?", "!", ",", ";", ":")):
+        return False
+    last = _LAST_WORD_RE.search(first.text)
+    following = _FIRST_WORD_RE.match(second.text)
+    if last is None or following is None:
+        return False
+    return bool(_SUFFIX_RE.match(following.group(1))) and len(last.group(1)) <= 6
+
+
+def _editorial_group_is_reviewed_overlap(
+    body: EditorialTranscriptComponentBody,
+    nodes: tuple[EditorialNode, ...],
+) -> bool:
+    group_id = nodes[0].overlap_group_id
+    if group_id is None or any(node.overlap_group_id != group_id for node in nodes):
+        return False
+    group = next(
+        (
+            candidate
+            for candidate in body.overlap_groups
+            if candidate.overlap_group_id == group_id
+        ),
+        None,
+    )
+    if group is None:
+        return False
+    source_turn_ids = {span.turn_id for node in nodes for span in node.source_spans}
+    return source_turn_ids.issubset(set(group.turn_ids))
+
+
+def reflow_editorial_nodes(
+    body: EditorialTranscriptComponentBody,
+    *,
+    max_gap_ms: int = 3000,
+    lexical_gap_ms: int = 1000,
+) -> EditorialReflowResult:
+    """Port the bounded deterministic reflow rules onto editorial nodes."""
+    if max_gap_ms < 0 or lexical_gap_ms < 0:
+        raise ValueError("reflow gap limits must be zero or greater")
+    nodes = body.nodes
+    groups: dict[int, tuple[tuple[int, ...], str]] = {}
+    consumed: set[int] = set()
+    for index, node in enumerate(nodes):
+        if index in consumed:
+            continue
+        group = [index]
+        evidence = "same-reviewed-speaker"
+        following_index = index + 1
+        while following_index < len(nodes) and following_index not in consumed:
+            previous = nodes[group[-1]]
+            following = nodes[following_index]
+            gap_ms = following.display_start_ms - previous.display_end_ms
+            if (
+                _same_named_editorial_speaker(previous, following)
+                and gap_ms <= max_gap_ms
+            ):
+                group.append(following_index)
+                following_index += 1
+                continue
+            if (
+                previous.attribution.state == EditorialSpeakerState.NAMED
+                and following.attribution.state == EditorialSpeakerState.UNCLEAR
+                and gap_ms <= lexical_gap_ms
+                and _looks_like_editorial_word_suffix(previous, following)
+            ):
+                group.append(following_index)
+                evidence = "lexical-boundary-repair"
+                following_index += 1
+                continue
+            break
+        if len(group) == 1 and index + 2 < len(nodes):
+            interjection = nodes[index + 1]
+            continuation = nodes[index + 2]
+            overlap_nodes = (node, interjection, continuation)
+            if (
+                _same_named_editorial_speaker(node, continuation)
+                and continuation.display_start_ms < interjection.display_end_ms
+                and continuation.display_start_ms - node.display_end_ms <= max_gap_ms
+                and _editorial_group_is_reviewed_overlap(body, overlap_nodes)
+            ):
+                group.append(index + 2)
+                evidence = "reviewed-overlap-same-speaker-continuation"
+        if len(group) > 1:
+            indices = tuple(group)
+            groups[index] = (indices, evidence)
+            consumed.update(indices[1:])
+
+    config_hash = editorial_reflow_config_hash(
+        max_gap_ms=max_gap_ms, lexical_gap_ms=lexical_gap_ms
+    )
+    output_nodes: list[EditorialNode] = []
+    operations: list[EditorialOperation] = []
+    merged_node_count = 0
+    for index, node in enumerate(nodes):
+        if index in consumed:
+            continue
+        planned = groups.get(index)
+        if planned is None:
+            output_nodes.append(node)
+            operations.append(
+                EditorialOperation(
+                    operation_id=f"identity-reflow:{node.node_id}",
+                    operation=EditorialOperationKind.IDENTITY,
+                    input_node_ids=(node.node_id,),
+                    output_node_ids=(node.node_id,),
+                    source_spans=node.source_spans,
+                    reason="deterministic reflow left node unchanged",
+                )
+            )
+            continue
+        indices, evidence = planned
+        source_nodes = tuple(nodes[source_index] for source_index in indices)
+        lexical = evidence == "lexical-boundary-repair"
+        text = source_nodes[0].text.rstrip()
+        for source in source_nodes[1:]:
+            following = source.text.lstrip()
+            text += following if lexical else f" {following}"
+        output_id = mint_id("editorial")
+        operation_id = f"reflow:{output_id}"
+        overlap_group_id = (
+            source_nodes[0].overlap_group_id
+            if evidence.startswith("reviewed-overlap")
+            else None
+        )
+        merged = EditorialNode(
+            node_id=output_id,
+            display_order=len(output_nodes),
+            text=text.strip(),
+            source_spans=tuple(
+                span for source in source_nodes for span in source.source_spans
+            ),
+            constituent_intervals=tuple(
+                interval
+                for source in source_nodes
+                for interval in source.constituent_intervals
+            ),
+            overlap_group_id=overlap_group_id,
+            display_start_ms=min(source.display_start_ms for source in source_nodes),
+            display_end_ms=max(source.display_end_ms for source in source_nodes),
+            attribution=source_nodes[0].attribution,
+            derivation_mode=(
+                EditorialDerivationMode.RECONSTRUCTED
+                if lexical
+                else EditorialDerivationMode.NORMALISED
+            ),
+            operation_ancestry=tuple(
+                ancestry
+                for source in source_nodes
+                for ancestry in source.operation_ancestry
+            )
+            + (operation_id,),
+            creator="jake-tools:deterministic-editorial-reflow-v1",
+            config_hash=config_hash,
+        )
+        output_nodes.append(merged)
+        operations.append(
+            EditorialOperation(
+                operation_id=operation_id,
+                operation=(
+                    EditorialOperationKind.OVERLAP_REORDER
+                    if overlap_group_id is not None
+                    else EditorialOperationKind.MERGE
+                ),
+                input_node_ids=tuple(source.node_id for source in source_nodes),
+                output_node_ids=(output_id,),
+                source_spans=merged.source_spans,
+                reason=evidence,
+                overlap_group_id=overlap_group_id,
+            )
+        )
+        merged_node_count += len(source_nodes) - 1
+
+    reindexed_nodes = tuple(
+        node.model_copy(update={"display_order": index})
+        for index, node in enumerate(output_nodes)
+    )
+    output_body = body.model_copy(update={"nodes": reindexed_nodes})
+    ledger = EditorialOperationLedgerComponentBody(
+        canonical_turn_set_component_id=body.canonical_turn_set_component_id,
+        speaker_review_component_id=body.speaker_review_component_id,
+        creator="jake-tools:deterministic-editorial-reflow-v1",
+        config_hash=config_hash,
+        operations=tuple(operations),
+    )
+    return EditorialReflowResult(
+        body=output_body,
+        ledger=ledger,
+        merged_node_count=merged_node_count,
+    )
 
 
 def transform_reflow(

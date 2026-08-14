@@ -24,14 +24,19 @@ from bundle_pipeline import (
 )
 from bundle_stage_agent import StagePlan, stage_agent
 
-from jake_tools.transcripts.bundle.components import SpeakerReviewComponent
+from jake_tools.transcripts.bundle.components import (
+    EditorialOperationLedgerComponent,
+    EditorialTranscriptComponent,
+    SpeakerReviewComponent,
+    TimedTurnSetComponent,
+)
 from jake_tools.transcripts.bundle.control import (
     run_normalise_transform,
     run_review_apply,
     run_speakers_propose,
 )
 from jake_tools.transcripts.bundle.document import TranscriptDocumentV1, project_head
-from jake_tools.transcripts.bundle.records import RunState
+from jake_tools.transcripts.bundle.records import RunState, StageProgressState
 from jake_tools.transcripts.bundle.registry import CapabilityKey, CapabilityStatus
 from jake_tools.transcripts.bundle.review import (
     CompetingReviewError,
@@ -136,7 +141,13 @@ def test_the_waiting_run_records_what_to_do_next(tmp_path: Path) -> None:
     )
 
     assert waiting.next_action is not None
-    assert waiting.next_action.kind == "products"
+    assert waiting.next_action.kind == "post-review-continuation"
+    assert waiting.continuation_graph is not None
+    assert waiting.next_action.config_hash == waiting.continuation_graph.content_hash
+    assert waiting.next_action.input_ids == (
+        _head(store).revision_id,
+        waiting.continuation_graph.content_hash,
+    )
 
 
 # -- pack export -------------------------------------------------------------
@@ -151,6 +162,8 @@ def test_the_pack_binds_to_the_exact_revision_and_inventories(
 
     pack = json.loads(pack_path.read_text(encoding="utf-8"))
     assert pack["input_revision_id"] == _head(store).revision_id
+    assert pack["originating_run_id"].startswith("run_")
+    assert len(pack["continuation_graph_hash"]) == 64
     assert len(pack["turn_inventory_sha256"]) == 64
     assert len(pack["cluster_inventory_sha256"]) == 64
 
@@ -189,11 +202,31 @@ def test_applying_a_filled_pack_makes_human_reviewed_real(tmp_path: Path) -> Non
     outcome = run_review_apply(store, pack_path=pack_path)
 
     assert not outcome.already_applied
+    assert outcome.continuation is not None
+    assert outcome.continuation.review_id == outcome.review.review_id
+    assert (
+        outcome.continuation.reviewed_revision_id == outcome.review.result_revision_id
+    )
+    assert outcome.continuation.graph_hash == outcome.continuation.graph.content_hash
     document = _head(store)
     assert (
         document.capability_status(CapabilityKey.SPEAKERS_HUMAN_REVIEWED)
         == CapabilityStatus.PRESENT_VALIDATED
     )
+    editorial = document.components_of(EditorialTranscriptComponent)
+    ledgers = document.components_of(EditorialOperationLedgerComponent)
+    canonical = document.components_of(TimedTurnSetComponent)
+    assert len(editorial) == 1
+    assert len(ledgers) == 1
+    assert len(canonical) == 1
+    assert editorial[0].canonical_turn_set_component_id == canonical[0].component_id
+    assert editorial[0].canonical_turn_set_content_hash == canonical[0].content_hash
+    progress = store.load_stage_progress(outcome.continuation.continuation_id, 0)
+    assert progress.state == StageProgressState.COMPLETED
+    assert progress.stage_kind == "editorial-identity"
+    assert progress.input_revision_id == outcome.review.result_revision_id
+    assert progress.output_revision_id == document.revision_id
+    assert progress.operation_count == 0
 
 
 def test_re_applying_the_same_pack_is_idempotent(tmp_path: Path) -> None:
@@ -202,12 +235,13 @@ def test_re_applying_the_same_pack_is_idempotent(tmp_path: Path) -> None:
     store = _bundle_at_review_checkpoint(tmp_path)
     pack_path = _fill(export_review_pack(store, destination=tmp_path / "r.json"))
     first = run_review_apply(store, pack_path=pack_path)
+    first_head = _head(store).revision_id
 
     second = run_review_apply(store, pack_path=pack_path)
 
     assert second.already_applied
     assert second.review.result_revision_id == first.review.result_revision_id
-    assert _head(store).revision_id == first.review.result_revision_id
+    assert _head(store).revision_id == first_head
 
 
 def test_a_second_differing_review_of_the_same_revision_is_rejected(

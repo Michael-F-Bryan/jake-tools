@@ -322,7 +322,11 @@ def _turn_payload(
 
 
 def _build_edited_turns(
-    inputs: tuple[TimedTurn, ...], payload: TextEditPayload, *, mode: TextEditMode
+    inputs: tuple[TimedTurn, ...],
+    payload: TextEditPayload,
+    *,
+    mode: TextEditMode,
+    preserve_empty_positions: frozenset[int] = frozenset(),
 ) -> tuple[tuple[TimedTurn, ...], tuple[TextEditEntry, ...]]:
     """Re-attach every structural field from the input turn and account for
     the full diff (M9).
@@ -332,6 +336,11 @@ def _build_edited_turns(
     index is treated as "unchanged" rather than "dropped" -- dropping is
     an explicit act that must carry a removal reason, and silence is not
     consent to delete evidence.
+
+    A polish may preserve an empty model edit at a protected position. The
+    caller uses this only for the transcript's global first and final turns:
+    dropping either would move its coverage boundary, while non-empty edits
+    and arbitrary interior window edges retain their normal behaviour.
     """
     by_index = {edited.index: edited for edited in payload.turns}
     unknown = sorted(set(by_index) - set(range(1, len(inputs) + 1)))
@@ -345,6 +354,12 @@ def _build_edited_turns(
     entries: list[TextEditEntry] = []
     for position, turn in enumerate(inputs, start=1):
         edited = by_index.get(position)
+        if (
+            edited is not None
+            and position in preserve_empty_positions
+            and not edited.text.strip()
+        ):
+            edited = None
         old_hash = _sha256_text(turn.text)
         if edited is None:
             kept.append(turn)
@@ -519,7 +534,24 @@ async def transform_text(
             agent, prompt, max_attempts=max_attempts
         )
         replies.append(reply)
-        window_kept, window_entries = _build_edited_turns(window, payload, mode=mode)
+        preserve_empty_positions = (
+            frozenset(
+                position
+                for position, is_transcript_boundary in (
+                    (1, start == 0),
+                    (len(window), end == len(inputs)),
+                )
+                if is_transcript_boundary
+            )
+            if mode == TextEditMode.POLISH
+            else frozenset()
+        )
+        window_kept, window_entries = _build_edited_turns(
+            window,
+            payload,
+            mode=mode,
+            preserve_empty_positions=preserve_empty_positions,
+        )
         _gate_or_refuse(
             _as_legacy_artifact(window, speaker_context),
             _as_legacy_artifact(window_kept, speaker_context),

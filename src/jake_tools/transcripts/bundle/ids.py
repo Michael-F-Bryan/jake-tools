@@ -44,6 +44,9 @@ IdPrefix = Literal[
     "render",
     "apply",
     "attempt",
+    "continuation",
+    "editorial",
+    "overlap",
 ]
 
 ID_PREFIXES: tuple[IdPrefix, ...] = get_args(IdPrefix)
@@ -64,6 +67,9 @@ ProductReviewId = Annotated[str, StringConstraints(pattern=_pattern("product_rev
 RenderId = Annotated[str, StringConstraints(pattern=_pattern("render"))]
 ApplyId = Annotated[str, StringConstraints(pattern=_pattern("apply"))]
 AttemptId = Annotated[str, StringConstraints(pattern=_pattern("attempt"))]
+ContinuationId = Annotated[str, StringConstraints(pattern=_pattern("continuation"))]
+EditorialNodeId = Annotated[str, StringConstraints(pattern=_pattern("editorial"))]
+OverlapGroupId = Annotated[str, StringConstraints(pattern=_pattern("overlap"))]
 
 
 #: M6: the named coordinate domains a timed component may live in.

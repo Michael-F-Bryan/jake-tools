@@ -211,6 +211,41 @@ def test_a_polish_pass_that_drops_a_filler_turn_records_the_reason(
     assert filler_id not in _turn_ids(store)
 
 
+def test_a_polish_pass_preserves_an_emptied_transcript_boundary_verbatim(
+    tmp_path: Path,
+) -> None:
+    store = _normalised(tmp_path)
+    before_text = _turns(store)
+    before_ids = _turn_ids(store)
+
+    def _drop_first_turn(prompt: str) -> dict[str, Any] | None:
+        if "Polish these transcript turns" not in prompt:
+            return None
+        return {
+            "turns": [
+                {
+                    "index": index,
+                    "text": "" if index == 1 else text,
+                    "removal_reasons": ["false-start"] if index == 1 else [],
+                }
+                for index, text in enumerate(before_text, start=1)
+            ]
+        }
+
+    outcome = asyncio.run(
+        run_text_transform(
+            store,
+            mode=TextEditMode.POLISH,
+            agent=stage_agent(StagePlan(override=_drop_first_turn)),
+            model="fixture-model",
+        )
+    )
+
+    assert _turn_ids(store) == before_ids
+    assert _turns(store)[0] == before_text[0]
+    assert outcome.dropped_turn_count == 0
+
+
 def test_a_correct_pass_may_not_empty_a_turn(tmp_path: Path) -> None:
     """Correction fixes mis-transcriptions; removing a turn is a different
     act with different lineage, and conflating them would let "correct"

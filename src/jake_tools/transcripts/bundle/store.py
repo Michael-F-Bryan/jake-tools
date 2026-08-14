@@ -69,6 +69,7 @@ from .ids import (
     ApplyId,
     ArtefactId,
     ComponentId,
+    ContinuationId,
     ProductReviewId,
     RenderId,
     ReviewId,
@@ -82,6 +83,9 @@ from .records import (
     ApplyRecord,
     ArtefactRecord,
     BundleManifest,
+    ComponentBinding,
+    ContinuationActivationRecord,
+    ContinuationGraph,
     Lease,
     NoDocumentYet,
     OperationRef,
@@ -93,6 +97,8 @@ from .records import (
     RunState,
     SourceAssociation,
     SourceMembershipRecord,
+    StageProgressRecord,
+    StageProgressState,
 )
 
 ReplaceFn = Callable[[str, str], None]
@@ -110,6 +116,7 @@ _SUBDIRECTORIES = (
     "product_reviews",
     "renders",
     "applies",
+    "continuations",
 )
 
 _LOCK_FILENAME = ".store.lock"
@@ -160,6 +167,7 @@ _PRODUCT_REVIEW_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(ProductReviewId)
 _REVISION_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(RevisionId)
 _RUN_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(RunId)
 _COMPONENT_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(ComponentId)
+_CONTINUATION_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(ContinuationId)
 _COMPONENT_RECORD_ADAPTER: TypeAdapter[ComponentRecord] = TypeAdapter(ComponentRecord)
 
 
@@ -381,6 +389,14 @@ class RecordIdCollisionError(BundleStoreError):
     """
 
 
+class ContinuationBindingConflictError(BundleStoreError):
+    """One review was already activated against different exact inputs."""
+
+
+class StageProgressConflictError(BundleStoreError):
+    """A stage result conflicts with its graph declaration or prior result."""
+
+
 class UnresolvedClosureError(BundleStoreError):
     """A revision's dependency closure does not fully resolve (M16)."""
 
@@ -542,7 +558,30 @@ class BundleStore:
             "applies", _APPLY_ID_ADAPTER, apply_id, kind="apply"
         )
 
-    # -- locking and generic atomic IO ---------------------------------------
+    def _continuation_directory(self, continuation_id: ContinuationId) -> Path:
+        record_path = self._validated_record_path(
+            "continuations",
+            _CONTINUATION_ID_ADAPTER,
+            continuation_id,
+            kind="continuation",
+        )
+        return record_path.with_suffix("")
+
+    def _continuation_activation_path(self, continuation_id: ContinuationId) -> Path:
+        return self._continuation_directory(continuation_id) / "activation.json"
+
+    def _stage_progress_path(
+        self, continuation_id: ContinuationId, stage_ordinal: int
+    ) -> Path:
+        if stage_ordinal < 0:
+            raise StageProgressConflictError(
+                f"stage ordinal must be zero or greater, got {stage_ordinal}."
+            )
+        return self._continuation_directory(continuation_id) / (
+            f"stage-{stage_ordinal:03d}.json"
+        )
+
+    # -- lock and IO primitives ------------------------------------------
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
@@ -1555,6 +1594,170 @@ class BundleStore:
             )
         return self.load_revision(manifest.head_revision_id)
 
+    # -- transcript post-review continuation records ------------------------
+
+    def load_continuation_activation(
+        self, continuation_id: ContinuationId
+    ) -> ContinuationActivationRecord:
+        path = self._continuation_activation_path(continuation_id)
+        if not path.exists():
+            raise ContinuationBindingConflictError(
+                f"continuation {continuation_id} does not exist."
+            )
+        return ContinuationActivationRecord.model_validate_json(
+            path.read_text(encoding="utf-8")
+        )
+
+    def find_continuation_activation(
+        self, review_id: ReviewId
+    ) -> ContinuationActivationRecord | None:
+        for path in sorted((self._root / "continuations").glob("*/activation.json")):
+            record = ContinuationActivationRecord.model_validate_json(
+                path.read_text(encoding="utf-8")
+            )
+            if record.review_id == review_id:
+                return record
+        return None
+
+    def create_continuation_activation(
+        self,
+        *,
+        originating_run_id: RunId,
+        review_id: ReviewId,
+        reviewed_revision_id: RevisionId,
+        canonical_turns: ComponentBinding,
+        speaker_review: ComponentBinding,
+        graph: ContinuationGraph,
+    ) -> ContinuationActivationRecord:
+        """Bind one applied speaker review to one exact ordered stage graph.
+
+        Repeating the same binding is idempotent.  The review ID is the
+        application identity, so attempting to activate it against a different
+        revision, component hash, or graph is a conflict rather than a second
+        continuation.
+        """
+        with self._locked():
+            manifest = self.load_manifest()
+            logical = {
+                "bundle_id": manifest.bundle_id,
+                "originating_run_id": originating_run_id,
+                "review_id": review_id,
+                "reviewed_revision_id": reviewed_revision_id,
+                "canonical_turns": canonical_turns,
+                "speaker_review": speaker_review,
+                "graph": graph,
+                "graph_hash": graph.content_hash,
+            }
+            for path in sorted(
+                (self._root / "continuations").glob("*/activation.json")
+            ):
+                existing = ContinuationActivationRecord.model_validate_json(
+                    path.read_text(encoding="utf-8")
+                )
+                if existing.review_id != review_id:
+                    continue
+                requested = ContinuationActivationRecord(
+                    continuation_id=existing.continuation_id,
+                    created_at=existing.created_at,
+                    **logical,
+                )
+                if existing == requested:
+                    return existing
+                raise ContinuationBindingConflictError(
+                    f"review {review_id} already activates continuation "
+                    f"{existing.continuation_id} against different exact inputs."
+                )
+
+            record = ContinuationActivationRecord(
+                continuation_id=mint_id("continuation"),
+                created_at=_utc_now(),
+                **logical,
+            )
+            directory = self._continuation_directory(record.continuation_id)
+            directory.mkdir()
+            self._write_json_exclusive(
+                self._continuation_activation_path(record.continuation_id),
+                record,
+                conflict_error=RecordIdCollisionError,
+            )
+            return record
+
+    def load_stage_progress(
+        self, continuation_id: ContinuationId, stage_ordinal: int
+    ) -> StageProgressRecord:
+        path = self._stage_progress_path(continuation_id, stage_ordinal)
+        if not path.exists():
+            raise StageProgressConflictError(
+                f"continuation {continuation_id} has no result for stage ordinal "
+                f"{stage_ordinal}."
+            )
+        return StageProgressRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def append_stage_progress(
+        self,
+        *,
+        continuation_id: ContinuationId,
+        stage_ordinal: int,
+        state: StageProgressState,
+        input_revision_id: RevisionId,
+        output_revision_id: RevisionId | None,
+        input_components: tuple[ComponentBinding, ...],
+        output_components: tuple[ComponentBinding, ...],
+        operation_count: int,
+        detail: str = "",
+    ) -> StageProgressRecord:
+        """Append one immutable result at a declared graph ordinal.
+
+        A byte-equivalent replay returns the first record.  Any other result at
+        the same continuation/ordinal is refused, so resume can skip completed
+        work without either overwriting history or treating surviving component
+        IDs as sufficient proof.
+        """
+        with self._locked():
+            activation = self.load_continuation_activation(continuation_id)
+            if stage_ordinal >= len(activation.graph.stages):
+                raise StageProgressConflictError(
+                    f"continuation {continuation_id}'s graph does not declare ordinal "
+                    f"{stage_ordinal}."
+                )
+            stage = activation.graph.stages[stage_ordinal]
+            logical = {
+                "continuation_id": continuation_id,
+                "bundle_id": activation.bundle_id,
+                "graph_hash": activation.graph_hash,
+                "stage_ordinal": stage_ordinal,
+                "stage_kind": stage.kind,
+                "stage_config_hash": stage.config_hash,
+                "state": state,
+                "input_revision_id": input_revision_id,
+                "output_revision_id": output_revision_id,
+                "input_components": input_components,
+                "output_components": output_components,
+                "operation_count": operation_count,
+                "detail": detail,
+            }
+            path = self._stage_progress_path(continuation_id, stage_ordinal)
+            if path.exists():
+                existing = StageProgressRecord.model_validate_json(
+                    path.read_text(encoding="utf-8")
+                )
+                requested = StageProgressRecord(
+                    created_at=existing.created_at,
+                    **logical,
+                )
+                if existing == requested:
+                    return existing
+                raise StageProgressConflictError(
+                    f"continuation {continuation_id} already has a different "
+                    f"immutable result at stage ordinal {stage_ordinal}."
+                )
+
+            record = StageProgressRecord(created_at=_utc_now(), **logical)
+            self._write_json_exclusive(
+                path, record, conflict_error=StageProgressConflictError
+            )
+            return record
+
     # -- runs and leases ------------------------------------------------------
 
     def load_run(self, run_id: RunId) -> RunRecord:
@@ -1575,6 +1778,7 @@ class BundleStore:
         next_action: OperationRef,
         resumes_run_id: RunId | None = None,
         takeover_of_run_id: RunId | None = None,
+        continuation_graph: ContinuationGraph | None = None,
     ) -> RunRecord:
         """Mint a run record in state ``created`` (M2). Does not acquire the lease.
 
@@ -1596,6 +1800,7 @@ class BundleStore:
                 next_action=next_action,
                 resumes_run_id=resumes_run_id,
                 takeover_of_run_id=takeover_of_run_id,
+                continuation_graph=continuation_graph,
                 created_at=_utc_now(),
             )
             self._write_json_exclusive(

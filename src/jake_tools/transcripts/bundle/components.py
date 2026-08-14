@@ -53,6 +53,8 @@ from .ids import (
     ClusterId,
     ComponentId,
     CoordinateDomain,
+    EditorialNodeId,
+    OverlapGroupId,
     ParticipantId,
     ReviewId,
     RevisionId,
@@ -222,6 +224,8 @@ class ComponentKind(StrEnum):
     MACHINE_ATTRIBUTION_SET = "machine-attribution-set"
     SPEAKER_HYPOTHESIS_SET = "speaker-hypothesis-set"
     SPEAKER_REVIEW = "speaker-review"
+    EDITORIAL_TRANSCRIPT = "editorial-transcript"
+    EDITORIAL_OPERATION_LEDGER = "editorial-operation-ledger"
     TEXT_EDIT_LEDGER = "text-edit-ledger"
     CHAPTER_SET = "chapter-set"
     MINUTES = "minutes"
@@ -1329,6 +1333,254 @@ class SpeakerReviewComponent(SpeakerReviewComponentBody):
     created_at: datetime
 
 
+# -- Editorial transcript lineage -------------------------------------------
+
+
+class EditorialDerivationMode(StrEnum):
+    """Truthful relationship between displayed bytes and canonical evidence."""
+
+    VERBATIM = "verbatim"
+    NORMALISED = "normalised"
+    RECONSTRUCTED = "reconstructed"
+
+
+class EditorialSpeakerState(StrEnum):
+    NAMED = "named"
+    UNCLEAR = "unclear"
+    MIXED_UNKNOWN = "mixed-unknown"
+
+
+class EditorialOperationKind(StrEnum):
+    IDENTITY = "identity"
+    TEXT_EDIT = "text-edit"
+    DROP = "drop"
+    MERGE = "merge"
+    SPLIT = "split"
+    OVERLAP_REORDER = "overlap-reorder"
+
+
+class CanonicalTextSpan(BaseModel):
+    """One half-open character range into immutable canonical turn text."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    canonical_component_id: ComponentId
+    turn_id: TurnId
+    start_char: int = Field(ge=0)
+    end_char: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _check_half_open(self) -> Self:
+        if self.end_char <= self.start_char:
+            raise ValueError("canonical text spans must be non-empty and half-open.")
+        return self
+
+
+class SourceInterval(BaseModel):
+    """One constituent half-open canonical time interval."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    turn_id: TurnId
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _check_half_open(self) -> Self:
+        if self.end_ms <= self.start_ms:
+            raise ValueError("source intervals must be non-empty and half-open.")
+        return self
+
+
+class EditorialAttribution(BaseModel):
+    """Effective reviewed speaker state for one editorial span."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    state: EditorialSpeakerState
+    participant_ids: tuple[ParticipantId, ...] = ()
+    speaker_review_component_id: ComponentId
+    evidence_ref: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_state_shape(self) -> Self:
+        if self.state == EditorialSpeakerState.NAMED and len(self.participant_ids) != 1:
+            raise ValueError("named editorial attribution requires one participant.")
+        if self.state == EditorialSpeakerState.UNCLEAR and self.participant_ids:
+            raise ValueError("unclear editorial attribution cannot name a participant.")
+        if len(set(self.participant_ids)) != len(self.participant_ids):
+            raise ValueError("editorial attribution participant IDs must be distinct.")
+        return self
+
+
+class ReviewedOverlapGroup(BaseModel):
+    """Human-reviewed authority for one bounded local overlap reorder."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    overlap_group_id: OverlapGroupId
+    turn_ids: tuple[TurnId, ...] = Field(min_length=2)
+    speaker_review_component_id: ComponentId
+    evidence_ref: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_turns(self) -> Self:
+        if len(set(self.turn_ids)) != len(self.turn_ids):
+            raise ValueError("reviewed overlap-group turn IDs must be distinct.")
+        return self
+
+
+class EditorialNode(BaseModel):
+    """One reader-facing node with exact canonical evidence lineage."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    node_id: EditorialNodeId
+    display_order: int = Field(ge=0)
+    text: str = Field(min_length=1)
+    source_spans: tuple[CanonicalTextSpan, ...] = Field(min_length=1)
+    constituent_intervals: tuple[SourceInterval, ...] = Field(min_length=1)
+    overlap_group_id: OverlapGroupId | None = None
+    display_start_ms: int = Field(ge=0)
+    display_end_ms: int = Field(ge=0)
+    attribution: EditorialAttribution
+    derivation_mode: EditorialDerivationMode
+    operation_ancestry: tuple[str, ...] = Field(min_length=1)
+    creator: str = Field(min_length=1)
+    config_hash: Sha256Hex
+
+    @model_validator(mode="after")
+    def _check_envelope(self) -> Self:
+        expected_start = min(
+            interval.start_ms for interval in self.constituent_intervals
+        )
+        expected_end = max(interval.end_ms for interval in self.constituent_intervals)
+        if (self.display_start_ms, self.display_end_ms) != (
+            expected_start,
+            expected_end,
+        ):
+            raise ValueError(
+                "editorial display envelope must equal the min/max constituent interval."
+            )
+        return self
+
+
+class EditorialTranscriptComponentBody(BaseModel):
+    """Reader-facing transcript distinct from immutable canonical turns."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_kind: Literal[ComponentKind.EDITORIAL_TRANSCRIPT] = (
+        ComponentKind.EDITORIAL_TRANSCRIPT
+    )
+    canonical_turn_set_component_id: ComponentId
+    canonical_turn_set_content_hash: Sha256Hex
+    speaker_review_component_id: ComponentId
+    speaker_review_content_hash: Sha256Hex
+    nodes: tuple[EditorialNode, ...] = Field(min_length=1)
+    omitted_source_spans: tuple[CanonicalTextSpan, ...] = ()
+    overlap_groups: tuple[ReviewedOverlapGroup, ...] = ()
+
+    @model_validator(mode="after")
+    def _check_local_identity(self) -> Self:
+        orders = [node.display_order for node in self.nodes]
+        if orders != list(range(len(self.nodes))):
+            raise ValueError("editorial display_order must be contiguous from zero.")
+        node_ids = [node.node_id for node in self.nodes]
+        if len(set(node_ids)) != len(node_ids):
+            raise ValueError("editorial node IDs must be distinct.")
+        group_ids = [group.overlap_group_id for group in self.overlap_groups]
+        if len(set(group_ids)) != len(group_ids):
+            raise ValueError("reviewed overlap-group IDs must be distinct.")
+        for node in self.nodes:
+            if any(
+                span.canonical_component_id != self.canonical_turn_set_component_id
+                for span in node.source_spans
+            ):
+                raise ValueError(
+                    "editorial source span cites the wrong canonical component."
+                )
+            if (
+                node.attribution.speaker_review_component_id
+                != self.speaker_review_component_id
+            ):
+                raise ValueError(
+                    "editorial attribution cites the wrong speaker review."
+                )
+            if (
+                node.overlap_group_id is not None
+                and node.overlap_group_id not in group_ids
+            ):
+                raise ValueError(
+                    "editorial node cites an undeclared reviewed overlap group."
+                )
+        return self
+
+
+class EditorialTranscriptComponent(EditorialTranscriptComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
+class EditorialOperation(BaseModel):
+    """One closed primitive in an editorial derivation ledger."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    operation_id: str = Field(min_length=1)
+    operation: EditorialOperationKind
+    input_node_ids: tuple[EditorialNodeId, ...] = ()
+    output_node_ids: tuple[EditorialNodeId, ...] = ()
+    source_spans: tuple[CanonicalTextSpan, ...] = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    overlap_group_id: OverlapGroupId | None = None
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> Self:
+        if self.operation == EditorialOperationKind.IDENTITY:
+            if (
+                len(self.input_node_ids) != 1
+                or self.input_node_ids != self.output_node_ids
+            ):
+                raise ValueError("identity maps one editorial node to itself.")
+        elif self.operation == EditorialOperationKind.DROP:
+            if not self.input_node_ids or self.output_node_ids:
+                raise ValueError("drop consumes nodes and produces none.")
+        elif self.operation == EditorialOperationKind.MERGE:
+            if len(self.input_node_ids) < 2 or len(self.output_node_ids) != 1:
+                raise ValueError("merge consumes at least two nodes and produces one.")
+        elif self.operation == EditorialOperationKind.SPLIT:
+            if len(self.input_node_ids) != 1 or len(self.output_node_ids) < 2:
+                raise ValueError("split consumes one node and produces at least two.")
+        elif (
+            self.operation == EditorialOperationKind.OVERLAP_REORDER
+            and self.overlap_group_id is None
+        ):
+            raise ValueError("overlap-reorder requires a reviewed overlap group.")
+        return self
+
+
+class EditorialOperationLedgerComponentBody(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_kind: Literal[ComponentKind.EDITORIAL_OPERATION_LEDGER] = (
+        ComponentKind.EDITORIAL_OPERATION_LEDGER
+    )
+    canonical_turn_set_component_id: ComponentId
+    speaker_review_component_id: ComponentId
+    output_editorial_component_id: ComponentId | None = None
+    creator: str = Field(min_length=1)
+    config_hash: Sha256Hex
+    operations: tuple[EditorialOperation, ...] = Field(min_length=1)
+
+
+class EditorialOperationLedgerComponent(EditorialOperationLedgerComponentBody):
+    component_id: ComponentId
+    content_hash: Sha256Hex
+    created_at: datetime
+
+
 # -- M9: text-edit ledger ---------------------------------------------------
 
 
@@ -1685,6 +1937,8 @@ ComponentBody = Annotated[
     | MachineAttributionSetComponentBody
     | SpeakerHypothesisSetComponentBody
     | SpeakerReviewComponentBody
+    | EditorialTranscriptComponentBody
+    | EditorialOperationLedgerComponentBody
     | TextEditLedgerComponentBody
     | ChapterSetComponentBody
     | MinutesComponentBody,
@@ -1708,6 +1962,8 @@ ComponentRecord = Annotated[
     | MachineAttributionSetComponent
     | SpeakerHypothesisSetComponent
     | SpeakerReviewComponent
+    | EditorialTranscriptComponent
+    | EditorialOperationLedgerComponent
     | TextEditLedgerComponent
     | ChapterSetComponent
     | MinutesComponent,
@@ -1833,6 +2089,22 @@ def component_input_refs(record: ComponentRecord) -> ComponentInputRefs:
             return ComponentInputRefs(artefact_ids=(), component_ids=())
         case SpeakerReviewComponent():
             return ComponentInputRefs(artefact_ids=(), component_ids=())
+        case EditorialTranscriptComponent():
+            return ComponentInputRefs(
+                artefact_ids=(),
+                component_ids=(
+                    record.canonical_turn_set_component_id,
+                    record.speaker_review_component_id,
+                ),
+            )
+        case EditorialOperationLedgerComponent():
+            component_ids = (
+                record.canonical_turn_set_component_id,
+                record.speaker_review_component_id,
+            )
+            if record.output_editorial_component_id is not None:
+                component_ids = (*component_ids, record.output_editorial_component_id)
+            return ComponentInputRefs(artefact_ids=(), component_ids=component_ids)
         case TextEditLedgerComponent():
             return ComponentInputRefs(artefact_ids=(), component_ids=())
         case ChapterSetComponent():
@@ -2011,6 +2283,16 @@ def component_as_body(component: ComponentBody | ComponentRecord) -> ComponentBo
             return _strip_stored_identity(SpeakerReviewComponentBody, component)
         case SpeakerReviewComponentBody():
             return component
+        case EditorialTranscriptComponent():
+            return _strip_stored_identity(EditorialTranscriptComponentBody, component)
+        case EditorialTranscriptComponentBody():
+            return component
+        case EditorialOperationLedgerComponent():
+            return _strip_stored_identity(
+                EditorialOperationLedgerComponentBody, component
+            )
+        case EditorialOperationLedgerComponentBody():
+            return component
         case TextEditLedgerComponent():
             return _strip_stored_identity(TextEditLedgerComponentBody, component)
         case TextEditLedgerComponentBody():
@@ -2186,6 +2468,20 @@ def assemble_component_record(
             )
         case SpeakerReviewComponentBody():
             return SpeakerReviewComponent(
+                **body.model_dump(mode="python"),
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case EditorialTranscriptComponentBody():
+            return EditorialTranscriptComponent(
+                **body.model_dump(mode="python"),
+                component_id=component_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        case EditorialOperationLedgerComponentBody():
+            return EditorialOperationLedgerComponent(
                 **body.model_dump(mode="python"),
                 component_id=component_id,
                 content_hash=content_hash,

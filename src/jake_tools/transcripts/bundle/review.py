@@ -38,6 +38,7 @@ from ..errors import TranscriptError
 from .assignment import (
     UNCLEAR_SPEAKER_LABEL,
     SpeakerContext,
+    canonical_turn_set,
     canonical_turns,
     cluster_inventory_hash,
     effective_assignment,
@@ -59,13 +60,21 @@ from .components import (
 )
 from .document import NoDocumentYet, TranscriptDocumentV1, project_head
 from .ids import ReviewId, RevisionId, RunId, mint_id
-from .records import OperationRef, ReviewRecord, RevisionRecord
+from .records import (
+    ComponentBinding,
+    ContinuationActivationRecord,
+    ContinuationGraph,
+    OperationRef,
+    ReviewRecord,
+    RevisionRecord,
+    RunState,
+)
 from .store import BundleStore
 
 #: Bumped when the pack's own shape changes incompatibly. Stored on the
 #: applied review (M8) so an old pack cannot be applied against a newer
 #: reader that would misread its decisions.
-PACK_SCHEMA_VERSION = "1"
+PACK_SCHEMA_VERSION = "2"
 
 #: How many of a cluster's turns the pack quotes as listening material.
 #: A reviewer needs enough to recognise a voice's role in the
@@ -116,6 +125,8 @@ class UnknownReviewTargetError(ReviewError):
 class ReviewPackBinding:
     review_id: ReviewId
     input_revision_id: RevisionId
+    originating_run_id: RunId
+    continuation_graph_hash: str
     turn_inventory_sha256: str
     cluster_inventory_sha256: str
 
@@ -128,7 +139,12 @@ def _cluster_ids(document: TranscriptDocumentV1) -> tuple[str, ...]:
     )
 
 
-def build_review_pack(document: TranscriptDocumentV1) -> dict[str, Any]:
+def build_review_pack(
+    document: TranscriptDocumentV1,
+    *,
+    originating_run_id: RunId,
+    continuation_graph: ContinuationGraph,
+) -> dict[str, Any]:
     """M8: the exported pack, bound to ``document``'s exact revision.
 
     Items -- the things the reviewer is asked to decide -- are one per
@@ -206,6 +222,8 @@ def build_review_pack(document: TranscriptDocumentV1) -> dict[str, Any]:
         "bundle_id": document.bundle_id,
         "document_id": document.document_id,
         "input_revision_id": document.revision_id,
+        "originating_run_id": originating_run_id,
+        "continuation_graph_hash": continuation_graph.content_hash,
         "turn_inventory_sha256": turn_inventory_hash([turn.turn_id for turn in turns]),
         "cluster_inventory_sha256": cluster_inventory_hash(
             list(_cluster_ids(document))
@@ -269,7 +287,31 @@ def export_review_pack(store: BundleStore, *, destination: Path) -> Path:
             "this bundle has no assembled document yet (M18: run `transform "
             "assemble` first)."
         )
-    pack = build_review_pack(document)
+    matching_runs = [
+        run
+        for run in (store.load_run(run_id) for run_id in store.load_manifest().run_ids)
+        if run.state == RunState.REVIEW_REQUIRED
+        and run.continuation_graph is not None
+        and run.next_action is not None
+        and run.next_action.kind == "post-review-continuation"
+        and run.next_action.input_ids
+        and run.next_action.input_ids[0] == document.revision_id
+        and run.next_action.config_hash == run.continuation_graph.content_hash
+    ]
+    if len(matching_runs) != 1:
+        raise InvalidReviewPackError(
+            "speaker review export requires exactly one review-required run bound "
+            f"to revision {document.revision_id} and its declared continuation; "
+            f"found {len(matching_runs)}. Historical unbound runs must be restarted "
+            "from the reviewed checkpoint."
+        )
+    waiting = matching_runs[0]
+    assert waiting.continuation_graph is not None
+    pack = build_review_pack(
+        document,
+        originating_run_id=waiting.run_id,
+        continuation_graph=waiting.continuation_graph,
+    )
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(
         json.dumps(pack, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -405,6 +447,8 @@ def _read_binding(pack: dict[str, Any]) -> ReviewPackBinding:
         for field in (
             "review_id",
             "input_revision_id",
+            "originating_run_id",
+            "continuation_graph_hash",
             "turn_inventory_sha256",
             "cluster_inventory_sha256",
         )
@@ -417,6 +461,8 @@ def _read_binding(pack: dict[str, Any]) -> ReviewPackBinding:
     return ReviewPackBinding(
         review_id=pack["review_id"],
         input_revision_id=pack["input_revision_id"],
+        originating_run_id=pack["originating_run_id"],
+        continuation_graph_hash=pack["continuation_graph_hash"],
         turn_inventory_sha256=pack["turn_inventory_sha256"],
         cluster_inventory_sha256=pack["cluster_inventory_sha256"],
     )
@@ -467,6 +513,7 @@ class ApplyReviewOutcome:
     review: ReviewRecord
     revision: RevisionRecord | None
     component: SpeakerReviewComponent | None
+    continuation: ContinuationActivationRecord | None
     already_applied: bool
     addressed_item_count: int
     total_item_count: int
@@ -486,6 +533,8 @@ class PreparedReview:
     body: SpeakerReviewComponentBody
     document: TranscriptDocumentV1
     pack_sha256: str
+    originating_run_id: RunId
+    continuation_graph: ContinuationGraph
 
 
 def prepare_review_application(
@@ -510,6 +559,22 @@ def prepare_review_application(
         ) from exc
     pack_sha256 = hashlib.sha256(pack_path.read_bytes()).hexdigest()
     binding = _read_binding(pack)
+    originating_run = store.load_run(binding.originating_run_id)
+    graph = originating_run.continuation_graph
+    action = originating_run.next_action
+    if (
+        graph is None
+        or graph.content_hash != binding.continuation_graph_hash
+        or action is None
+        or action.kind != "post-review-continuation"
+        or action.config_hash != binding.continuation_graph_hash
+        or action.input_ids
+        != (binding.input_revision_id, binding.continuation_graph_hash)
+    ):
+        raise StaleReviewError(
+            f"review pack {binding.review_id} is not bound to the exact declared "
+            f"continuation on run {binding.originating_run_id}; re-export the pack."
+        )
 
     existing = store.find_review(binding.review_id)
     if existing is not None:
@@ -592,6 +657,8 @@ def prepare_review_application(
         ),
         document=document,
         pack_sha256=pack_sha256,
+        originating_run_id=binding.originating_run_id,
+        continuation_graph=graph,
     )
 
 
@@ -637,10 +704,30 @@ def commit_review(
         )
     )
     addressed = _addressed_item_ids(body.decisions)
+    canonical = canonical_turn_set(document.components)
+    if canonical is None:
+        raise StaleReviewError(
+            "cannot activate post-review continuation without canonical timed turns."
+        )
+    continuation = store.create_continuation_activation(
+        originating_run_id=prepared.originating_run_id,
+        review_id=review.review_id,
+        reviewed_revision_id=revision.revision_id,
+        canonical_turns=ComponentBinding(
+            component_id=canonical.component_id,
+            content_hash=canonical.content_hash,
+        ),
+        speaker_review=ComponentBinding(
+            component_id=component.component_id,
+            content_hash=component.content_hash,
+        ),
+        graph=prepared.continuation_graph,
+    )
     return ApplyReviewOutcome(
         review=review,
         revision=revision,
         component=component,
+        continuation=continuation,
         already_applied=False,
         addressed_item_count=len(addressed.intersection(body.pack_item_ids)),
         total_item_count=len(body.pack_item_ids),
@@ -662,6 +749,7 @@ def apply_review(
             review=prepared,
             revision=None,
             component=None,
+            continuation=store.find_continuation_activation(prepared.review_id),
             already_applied=True,
             addressed_item_count=0,
             total_item_count=0,

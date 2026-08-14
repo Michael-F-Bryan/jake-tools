@@ -10,11 +10,19 @@ through the store.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 from .ids import (
     ApplyId,
@@ -22,6 +30,7 @@ from .ids import (
     AttemptId,
     BundleId,
     ComponentId,
+    ContinuationId,
     DocumentId,
     ProductReviewId,
     RenderId,
@@ -178,6 +187,7 @@ class RunRecord(BaseModel):
     next_action: OperationRef | None
     resumes_run_id: RunId | None = None
     takeover_of_run_id: RunId | None = None
+    continuation_graph: ContinuationGraph | None = None
     pid: int | None = None
     created_at: datetime
     started_at: datetime | None = None
@@ -197,6 +207,111 @@ class RunRecord(BaseModel):
         if self.resumes_run_id is not None and self.takeover_of_run_id is not None:
             raise ValueError("a run cannot both resume and take over another run.")
         return self
+
+
+class ComponentBinding(BaseModel):
+    """One exact component identity used by a continuation stage."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    component_id: ComponentId
+    content_hash: Sha256Hex
+
+
+class ContinuationStage(BaseModel):
+    """One ordered, versioned stage in the post-review transcript graph."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ordinal: int = Field(ge=0)
+    kind: str = Field(min_length=1)
+    implementation_version: str = Field(min_length=1)
+    config_hash: Sha256Hex
+
+
+class ContinuationGraph(BaseModel):
+    """The complete transcript-specific graph declared before review.
+
+    The content hash covers stage order, implementation identity, configuration,
+    and the terminal checkpoint.  It is therefore safe to bind at review time:
+    changing any later execution contract produces a different graph identity.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: str = Field(min_length=1)
+    stages: tuple[ContinuationStage, ...] = Field(min_length=1)
+    terminal_checkpoint: Literal["product_review_required"]
+
+    @model_validator(mode="after")
+    def _check_ordered_stages(self) -> Self:
+        ordinals = tuple(stage.ordinal for stage in self.stages)
+        expected = tuple(range(len(self.stages)))
+        if ordinals != expected:
+            raise ValueError(
+                f"continuation stages require consecutive ordinals {expected}, got "
+                f"{ordinals}."
+            )
+        return self
+
+    @property
+    def content_hash(self) -> Sha256Hex:
+        payload = self.model_dump(mode="json")
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+class ContinuationActivationRecord(BaseModel):
+    """A reviewed revision bound to one immutable post-review graph."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    continuation_id: ContinuationId
+    bundle_id: BundleId
+    originating_run_id: RunId
+    review_id: ReviewId
+    reviewed_revision_id: RevisionId
+    canonical_turns: ComponentBinding
+    speaker_review: ComponentBinding
+    graph: ContinuationGraph
+    graph_hash: Sha256Hex
+    created_at: datetime
+
+    @model_validator(mode="after")
+    def _check_graph_hash(self) -> Self:
+        if self.graph_hash != self.graph.content_hash:
+            raise ValueError(
+                "continuation activation graph_hash does not match its ordered graph."
+            )
+        return self
+
+
+class StageProgressState(StrEnum):
+    """Append-only result of one declared continuation stage."""
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class StageProgressRecord(BaseModel):
+    """One immutable, exact-input result at a graph stage ordinal."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    continuation_id: ContinuationId
+    bundle_id: BundleId
+    graph_hash: Sha256Hex
+    stage_ordinal: int = Field(ge=0)
+    stage_kind: str = Field(min_length=1)
+    stage_config_hash: Sha256Hex
+    state: StageProgressState
+    input_revision_id: RevisionId
+    output_revision_id: RevisionId | None = None
+    input_components: tuple[ComponentBinding, ...] = Field(min_length=1)
+    output_components: tuple[ComponentBinding, ...] = Field(min_length=1)
+    operation_count: int = Field(ge=0)
+    detail: str = ""
+    created_at: datetime
 
 
 class Lease(BaseModel):
