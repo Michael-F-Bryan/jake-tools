@@ -11,13 +11,11 @@ When in doubt, run `jake-tools <command> --help` for current flags.
 ```text
 src/jake_tools/
   cli/           # Click commands (keep thin)
-  ai_watch/      # collect→fetch→scout→curate→obsidian→digest→deliver
   transcripts/   # obsidian-recording / youtube / teams-meeting recipes
   claude.py      # Claude Agent SDK wrapper — the only LLM seam
   prompting.py   # typed Jinja prompts bound to a response model
   newsletters.py # SharePoint Graph client
 tests/           # mirrors packages above
-.agents/skills/ai-watch/  # deep workflow guidance (not CLI code)
 ```
 
 ## Developing
@@ -79,8 +77,6 @@ uv run pytest -q
 | ------------------ | ----------------------------------------------------- |
 | `uv`                | dependency management and script runner                |
 | `claude-agent-sdk`  | LLM calls; drives the local `claude` CLI               |
-| `hermes-agent`      | `ai-watch` `web_search`/`web_extract` tool calls only  |
-| `hermes` (CLI)      | `ai-watch deliver` live send (`hermes send --to ...`)  |
 | `ffmpeg`, `scribe`  | `transcript obsidian-recording` audio pipeline         |
 | `yt-dlp`            | YouTube caption and metadata source adapter            |
 | `az` (Azure CLI)    | `newsletter` commands (Microsoft Graph token)          |
@@ -89,42 +85,6 @@ If a required external tool is missing, report the blocker. Do not mock
 preflight checks or skip them silently.
 
 ## Commands
-
-### `ai-watch`
-
-```bash
-jake-tools ai-watch run --date YYYY-MM-DD
-jake-tools ai-watch run --date today --dry-run --max-candidates 10
-jake-tools ai-watch collect --date today
-jake-tools ai-watch deliver --date today --dry-run
-jake-tools ai-watch audit --since 7d
-```
-
-Low-noise AI developments radar. Archives checked articles, surfaces almost
-nothing, syncs curated items to Obsidian, and DMs a digest on Discord when items
-clear the bar.
-
-- Pipeline stages: collect, fetch, scout, curate, obsidian-sync, digest,
-  deliver. `run` executes all stages sequentially; individual subcommands call
-  the same domain functions.
-- Discovery and fetch use Hermes `web_search` / `web_extract` (no hand-rolled
-  HTTP); these are deterministic tool calls, not LLM calls, and are the one
-  place `hermes-agent` is still imported. Scout uses `--scout-model`
-  (`claude-haiku-4-5`); curator uses `--curator-model` (`claude-sonnet-5`).
-- `--dry-run` skips vault writes and live Discord send; still writes run
-  artefacts including `delivery-payload.txt`.
-- Empty main digest is **silent** (no Discord message; audit records still
-  written). Speculative items go to `speculative.md` only (not Discord in v1).
-- Discord target from `--discord-target` or `AI_WATCH_DISCORD_TARGET`.
-- `--max-candidates` and `--cost-cap-usd` guard run cost. Exits `1` when any
-  stage fails.
-
-Key artefacts under `_working/ai-watch/YYYY-MM-DD/`: `manifest.json`,
-`summary.json`, `digest.md`, `speculative.md`, stage JSONL files, `articles/`,
-and `delivery-payload.txt`.
-
-For checkpoint gates, calibration replay, artefact layout, and audit-driven
-tuning, see [.agents/skills/ai-watch/SKILL.md](.agents/skills/ai-watch/SKILL.md).
 
 ### `transcript`
 
@@ -194,6 +154,5 @@ Requires `az login` to the CSU tenant for a Graph access token.
 ## Boundaries
 
 - Do not commit secrets, tokens, or credentials.
-- `ai-watch` and `transcript` write to Obsidian notes, and `newsletter`
-  writes to SharePoint, by design. `--dry-run` suppresses those writes where
-  the command offers it.
+- `transcript` writes to Obsidian notes, and `newsletter` writes to SharePoint,
+  by design. `--dry-run` suppresses those writes where the command offers it.

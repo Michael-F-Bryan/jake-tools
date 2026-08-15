@@ -18,9 +18,8 @@ def _usage() -> Usage:
 def test_ai_stage_stats_json_is_flattened_and_nested_identically_to_before() -> None:
     """Guard test: captured from the pre-refactor `@computed_field` output.
 
-    `summary.json` consumers (``jake_tools.ai_watch.tuning``) round-trip this
-    shape, so the flattened keys and the nested ``usage`` object must both
-    survive the move to a single ``@model_serializer``.
+    Transcript manifests retain this shape, so the flattened keys and the
+    nested ``usage`` object must both survive the serializer implementation.
     """
     stats = AIStageStats(stage="scout", usage=_usage())
 
@@ -73,10 +72,8 @@ def test_ai_totals_json_is_flattened_and_nested_identically_to_before() -> None:
     }
 
 
-def test_ai_totals_round_trips_through_json_for_tune() -> None:
-    """`ai_watch.tuning.run_tune` rehydrates `AITotals` from `summary.json` via
-    `model_validate_json`, so the flattened top-level keys must not shadow or
-    replace the real ``usage`` field that round-trip depends on."""
+def test_ai_totals_round_trips_through_json() -> None:
+    """Flattened keys must not shadow the nested typed usage field."""
     totals = AITotals(stage_count=2, usage=_usage())
 
     round_tripped = AITotals.model_validate_json(totals.model_dump_json())

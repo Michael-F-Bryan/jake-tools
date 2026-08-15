@@ -60,17 +60,15 @@ def _flatten_usage(
 ) -> dict[str, Any]:
     """Duplicate ``usage``'s scalar fields at the top level alongside it.
 
-    `summary.json` consumers grep the flat keys, while
-    :func:`jake_tools.ai_watch.tuning.run_tune` rehydrates the model from
-    that same file via ``model_validate_json`` — so the nested ``usage``
-    object has to survive untouched for the round trip to work.
+    Transcript manifests expose flat keys for quick inspection while retaining
+    the nested ``usage`` object so Pydantic can rehydrate the model unchanged.
     """
     extra = {key: value for key, value in dumped["usage"].items() if key not in exclude}
     return {**dumped, **extra}
 
 
 class AIStageStats(BaseModel):
-    """Per-stage usage, flattened so `summary.json` stays greppable."""
+    """Per-stage usage with greppable flat fields and a nested typed model."""
 
     stage: str
     usage: Usage = Field(default_factory=Usage)

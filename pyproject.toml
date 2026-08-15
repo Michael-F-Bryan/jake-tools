@@ -10,7 +10,6 @@ requires-python = ">=3.14"
 dependencies = [
     "claude-agent-sdk>=0.2.128",
     "click>=8.4.1",
-    "hermes-agent",
     "jinja2>=3.1.6",
     "pydantic>=2.13.4",
     "requests>=2.33.0",
@@ -20,9 +19,6 @@ dependencies = [
 [build-system]
 requires = ["uv_build>=0.9.21,<0.10.0"]
 build-backend = "uv_build"
-
-[tool.uv.sources]
-hermes-agent = { git = "https://github.com/NousResearch/hermes-agent.git", rev = "44ddc552f5e054759a6970af8997ea588a9d81c9" }
 
 [dependency-groups]
 dev = [
