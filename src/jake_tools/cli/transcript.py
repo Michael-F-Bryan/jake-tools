@@ -15,6 +15,7 @@ from pathlib import Path
 
 import click
 
+from ..transcription.adapt import AdaptError, adapt_transcript
 from ..transcription.asr import TranscriberError, transcribe_merged_audio
 from ..transcription.audio import (
     AudioEmbedResolutionError,
@@ -24,6 +25,7 @@ from ..transcription.audio import (
 )
 from ..transcription.note import parse_note
 from ..transcription.obsidian import ObsidianCliError
+from .options import AgentOptions, agent_options, coro
 from .transcript_options import (
     AudioOptions,
     CacheOptions,
@@ -34,6 +36,10 @@ from .transcript_options import (
     obsidian_options,
     transcriber_options,
 )
+
+# The cache name both `asr` and `adapt` store `RawTranscript` under: whichever
+# stage produced it, downstream stages read the same key from the run cache.
+_RAW_TRANSCRIPT_CACHE_NAME = "raw_transcript"
 
 
 @click.group()
@@ -116,5 +122,55 @@ def asr(
         )
     except TranscriberError as exc:
         raise click.ClickException(str(exc)) from exc
+
+    click.echo(result.model_dump_json(indent=2))
+
+
+@transcript.command("adapt")
+@agent_options
+@cache_options
+@click.argument(
+    "transcript_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False, readable=True),
+)
+@click.option(
+    "--run-id",
+    "run_id",
+    default=None,
+    help=(
+        "Run id to cache the result under (the same cache key `transcript "
+        "asr` uses). Omit to skip caching and just print the JSON."
+    ),
+)
+@coro
+async def adapt(
+    transcript_path: Path,
+    run_id: str | None,
+    agent_options: AgentOptions,
+    cache_options: CacheOptions,
+) -> None:
+    """Adapt a pre-diarised text transcript (Gemini/Teams export) into the raw transcript.
+
+    Some meetings arrive as text rather than audio — a Gemini-produced
+    transcript document from Google Meet, or a Teams `.vtt`/plain-text
+    export. TRANSCRIPT_PATH is that file. Tries deterministic parsers first
+    (WebVTT cue tags, then `Name: text` / `Name (00:12:34): text` plain
+    text); if neither matches, falls back to an LLM call that restructures
+    the document into utterances without rewriting its words. Prints the
+    resulting `RawTranscript` JSON to stdout, and — like `transcript asr` —
+    stores it as `raw_transcript.json` in the run cache when `--run-id` is
+    given, so downstream stages find it under the same key regardless of
+    whether it came from audio or text.
+    """
+    agent = agent_options.agent()
+    cache = cache_options.run_cache()
+
+    try:
+        result = await adapt_transcript(transcript_path, agent=agent)
+    except AdaptError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if run_id is not None:
+        cache.store(run_id, _RAW_TRANSCRIPT_CACHE_NAME, result)
 
     click.echo(result.model_dump_json(indent=2))
