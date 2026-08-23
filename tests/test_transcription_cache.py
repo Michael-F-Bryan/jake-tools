@@ -1,0 +1,65 @@
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+import pytest
+
+from jake_tools.transcription.cache import RunCache, sha256_of
+from jake_tools.transcription.models import SourceClip
+
+
+def test_store_then_load_returns_equal_model(tmp_path: Path) -> None:
+    cache = RunCache(tmp_path)
+    clip = SourceClip(path="a.wav", offset_seconds=0.0, duration_seconds=10.0)
+
+    cache.store("run-1", "clip", clip)
+
+    assert cache.load("run-1", "clip", SourceClip) == clip
+
+
+def test_load_of_missing_name_returns_none(tmp_path: Path) -> None:
+    cache = RunCache(tmp_path)
+
+    assert cache.load("run-1", "missing", SourceClip) is None
+
+
+def test_load_of_corrupt_json_raises(tmp_path: Path) -> None:
+    cache = RunCache(tmp_path)
+    path = cache.run_dir("run-1") / "clip.json"
+    path.write_text("{not valid json")
+
+    with pytest.raises(ValueError):
+        cache.load("run-1", "clip", SourceClip)
+
+
+def test_store_text_then_load_text_round_trips(tmp_path: Path) -> None:
+    cache = RunCache(tmp_path)
+
+    cache.store_text("run-1", "baseline", "tier-b baseline text")
+
+    assert cache.load_text("run-1", "baseline") == "tier-b baseline text"
+
+
+def test_load_text_of_missing_name_returns_none(tmp_path: Path) -> None:
+    cache = RunCache(tmp_path)
+
+    assert cache.load_text("run-1", "missing") is None
+
+
+def test_store_creates_run_dir_on_demand(tmp_path: Path) -> None:
+    cache = RunCache(tmp_path)
+
+    run_dir = cache.run_dir("run-1")
+
+    assert run_dir.is_dir()
+    assert run_dir == tmp_path / "run-1"
+
+
+def test_sha256_of_matches_hashlib_for_small_file(tmp_path: Path) -> None:
+    fixture = tmp_path / "fixture.bin"
+    fixture.write_bytes(b"some fixture bytes for hashing" * 100)
+
+    expected = hashlib.sha256(fixture.read_bytes()).hexdigest()
+
+    assert sha256_of(fixture) == expected
