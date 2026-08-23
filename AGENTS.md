@@ -51,13 +51,14 @@ uv run pytest -q
 - All LLM calls go through `ClaudeAgent` in `claude.py`. Nothing else imports
   `claude_agent_sdk` directly. No command currently calls the LLM; the seam
   and the conventions below stand for the next one that does.
-- Commands that call the LLM use the `@agent` decorator in `cli/options.py`
-  (adds `--model` and `--effort`) and `@coro`, applied closest to the callback,
-  which runs the async callback with `asyncio.run`. `@agent` resolves the
-  agent through the typed `AppContext` on `ctx.obj` (`cli/context.py`): it
-  always builds an `AgentSpec` from `--model`/`--effort` and hands it to
-  `AppContext.agent_factory`, so an injected factory still sees the flags
-  instead of silently ignoring them. `--effort`'s choices come from
+- Commands that call the LLM use the `agent_options` decorator in
+  `cli/options.py` (adds `--model`/`--effort` and injects a typed
+  `AgentOptions`) and `@coro`, applied closest to the callback, which runs the
+  async callback with `asyncio.run`. The handler builds the agent itself —
+  `agent_options.agent()` for a `ClaudeAgent`, or `.spec()` for just the
+  `AgentSpec` — there is no shared factory seam to route through, so a test
+  fakes the call by monkeypatching `AgentOptions.agent` (or the dependency it
+  returns), not by injecting a factory. `--effort`'s choices come from
   `typing.get_args(EffortLevel)`, imported from `claude.py` (never
   `claude_agent_sdk` directly).
 - `AgentSpec.tools` defaults to an empty tuple, which is genuinely tool-less.
@@ -65,11 +66,25 @@ uv run pytest -q
   and the agent inherits Claude Code's full default toolset.
 - Tests inject a fake at the `run_query` seam (see `tests/test_claude_agent.py`),
   so prompt rendering, schema injection, and usage accounting stay real.
-- `cli/context.py`'s `AppContext` carries factories for every client a CLI
-  command builds (`agent_factory`, `clockify_client_factory`,
-  `jira_client_factory`, `newsletter_client_factory`). CLI tests inject fakes
-  via `CliRunner(...).invoke(cmd, args, obj=AppContext(...))`, not by
-  monkeypatching the client class on the CLI module.
+- There is no shared `ctx.obj` context object carrying factories. Every CLI
+  dependency is built by the command that needs it: a decorator (see
+  `cli/transcript_options.py`, `cli/options.py`, `cli/clockify.py`) stacks the
+  relevant `click.option`s, pops their parsed values, and injects a typed
+  Pydantic options model with dependency-constructor methods — e.g.
+  `ObsidianOptions.vault_client()`, `ClockifyOptions.inventory_client()`,
+  `AgentOptions.agent()` — via `ctx.invoke`. When a dependency takes no CLI
+  flags at all (e.g. `NewsletterClient`), the handler just constructs it
+  directly at the top of the function. The one exception is `clockify`'s
+  `--api-key`/`--api-base-url`, which are group-level flags shared by several
+  subcommands: Click only threads group state to subcommands via `ctx.obj`,
+  so the group callback builds the `ClockifyOptions` once and subcommands
+  read it from there — still a single typed value with no factories, not a
+  context-object seam.
+- CLI tests stay thin: they monkeypatch the constructor method on an options
+  model (e.g. `ClockifyOptions.inventory_client`) or the client/orchestration
+  symbol in the CLI module, and assert flag parsing and delegation. Real
+  behaviour — reconciliation logic, HTTP clients, etc. — is tested at the
+  library seam with injected fakes, not through the CLI.
 
 ## External dependencies
 

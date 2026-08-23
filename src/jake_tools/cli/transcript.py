@@ -5,7 +5,8 @@ thin Click wrapper that builds its dependencies from injected options
 objects (`transcript_options.py`) and prints a JSON document to stdout for
 the next stage — or an agent — to chain. Orchestration logic lives in
 ``transcription/audio.py``, not here. Per the CLI-options memo (E19), these
-commands do not use `AppContext`/`ctx.obj`.
+commands build their dependencies from injected options objects rather than
+shared context state.
 """
 
 from __future__ import annotations

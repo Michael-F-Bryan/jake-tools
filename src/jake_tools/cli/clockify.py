@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import functools
 import json
+from typing import Any, cast
 
 import click
+from pydantic import BaseModel
 
 from ..clockify import (
     CLOCKIFY_API_ROOT,
+    ClockifyClient,
     ClockifyError,
     ClockifyUser,
     JiraIssueRef,
 )
 from ..clockify_jira_sync import (
     ClockifyInventoryClient,
+    JiraInventoryClient,
     SyncAction,
     SyncActionKind,
     SyncApplyError,
@@ -20,8 +25,93 @@ from ..clockify_jira_sync import (
     apply_sync_plan,
     prepare_jira_sync,
 )
-from ..jira import JiraError
-from .context import ClockifyConfig, JiraConfig, app_context
+from ..jira import JiraClient, JiraError
+
+
+class ClockifyOptions(BaseModel):
+    """Clockify credentials, resolved once per invocation (flag -> env -> default).
+
+    Set by the ``clockify`` group callback and carried on ``ctx.obj`` — the
+    one seam Click's own dispatch requires, since group-level flags are
+    parsed before any subcommand runs. It holds nothing but the flag values
+    themselves; every subcommand builds its own client from it explicitly.
+    """
+
+    api_key: str | None
+    api_base_url: str = CLOCKIFY_API_ROOT
+
+    def inventory_client(self) -> ClockifyInventoryClient:
+        if self.api_key is None:
+            raise ClockifyError(
+                "Clockify API key is required. Set CLOCKIFY_API_KEY or pass --api-key."
+            )
+        return ClockifyClient(api_key=self.api_key, base_url=self.api_base_url)
+
+
+class JiraOptions(BaseModel):
+    """Jira REST credentials for the ``jira-sync`` command."""
+
+    base_url: str | None
+    email: str | None
+    api_token: str | None
+
+    def inventory_client(self) -> JiraInventoryClient:
+        if self.base_url is None or self.email is None or self.api_token is None:
+            missing = [
+                name
+                for name, value in (
+                    ("JIRA_BASE_URL", self.base_url),
+                    ("JIRA_EMAIL", self.email),
+                    ("JIRA_API_TOKEN", self.api_token),
+                )
+                if value is None
+            ]
+            raise JiraError(
+                f"Jira configuration is required. Set {', '.join(missing)}."
+            )
+        return JiraClient(
+            base_url=self.base_url,
+            email=self.email,
+            api_token=self.api_token,
+        )
+
+
+def jira_options(func: Any) -> Any:
+    """Inject a :class:`JiraOptions` built from the ``--jira-*`` flags."""
+
+    @click.option(
+        "--jira-base-url",
+        envvar="JIRA_BASE_URL",
+        default=None,
+        help="Jira site URL or hostname. Defaults to JIRA_BASE_URL.",
+    )
+    @click.option(
+        "--jira-email",
+        envvar="JIRA_EMAIL",
+        default=None,
+        help="Atlassian account email. Defaults to JIRA_EMAIL.",
+    )
+    @click.option(
+        "--jira-api-token",
+        envvar="JIRA_API_TOKEN",
+        default=None,
+        help="Atlassian API token. Defaults to JIRA_API_TOKEN.",
+    )
+    @click.pass_context
+    @functools.wraps(func)
+    def wrapper(ctx: click.Context, *args: Any, **kwargs: Any) -> Any:
+        options = JiraOptions(
+            base_url=kwargs.pop("jira_base_url"),
+            email=kwargs.pop("jira_email"),
+            api_token=kwargs.pop("jira_api_token"),
+        )
+        return ctx.invoke(func, *args, jira_options=options, **kwargs)
+
+    return wrapper
+
+
+def _clockify_options(ctx: click.Context) -> ClockifyOptions:
+    return cast(ClockifyOptions, ctx.obj)
 
 
 @click.group()
@@ -41,8 +131,7 @@ from .context import ClockifyConfig, JiraConfig, app_context
 @click.pass_context
 def clockify(ctx: click.Context, api_key: str | None, api_base_url: str) -> None:
     """Work with Clockify time-tracking data."""
-    config = ClockifyConfig(api_key=api_key, api_base_url=api_base_url)
-    ctx.obj = app_context(ctx).with_clockify_config(config)
+    ctx.obj = ClockifyOptions(api_key=api_key, api_base_url=api_base_url)
 
 
 @clockify.command("jira-name")
@@ -83,24 +172,7 @@ def jira_name(key: str, summary: str, kind: str, as_json: bool) -> None:
 
 
 @clockify.command("jira-sync")
-@click.option(
-    "--jira-base-url",
-    envvar="JIRA_BASE_URL",
-    default=None,
-    help="Jira site URL or hostname. Defaults to JIRA_BASE_URL.",
-)
-@click.option(
-    "--jira-email",
-    envvar="JIRA_EMAIL",
-    default=None,
-    help="Atlassian account email. Defaults to JIRA_EMAIL.",
-)
-@click.option(
-    "--jira-api-token",
-    envvar="JIRA_API_TOKEN",
-    default=None,
-    help="Atlassian API token. Defaults to JIRA_API_TOKEN.",
-)
+@jira_options
 @click.option(
     "--apply/--dry-run",
     "apply_changes",
@@ -132,9 +204,7 @@ def jira_name(key: str, summary: str, kind: str, as_json: bool) -> None:
 @click.pass_context
 def jira_sync(
     ctx: click.Context,
-    jira_base_url: str | None,
-    jira_email: str | None,
-    jira_api_token: str | None,
+    jira_options: JiraOptions,
     apply_changes: bool,
     as_json: bool,
     jira_project: str,
@@ -149,15 +219,8 @@ def jira_sync(
     regardless of assignee. The command never deletes records.
     """
     try:
-        app = app_context(ctx)
-        clockify_api = _client_from_context(ctx)
-        jira_api = app.jira_client_factory(
-            JiraConfig(
-                base_url=jira_base_url,
-                email=jira_email,
-                api_token=jira_api_token,
-            )
-        )
+        clockify_api = _clockify_options(ctx).inventory_client()
+        jira_api = jira_options.inventory_client()
         snapshot = prepare_jira_sync(
             clockify=clockify_api,
             jira=jira_api,
@@ -207,7 +270,7 @@ def jira_sync(
 def whoami(ctx: click.Context, as_json: bool) -> None:
     """Show the Clockify user for the configured API key."""
     try:
-        client = _client_from_context(ctx)
+        client = _clockify_options(ctx).inventory_client()
         user = client.get_user()
     except ClockifyError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -280,12 +343,6 @@ def _describe_action(action: SyncAction) -> str:
     if action.kind == SyncActionKind.CONFLICT:
         return f"{prefix} — {action.message}"
     return prefix
-
-
-def _client_from_context(ctx: click.Context) -> ClockifyInventoryClient:
-    app = app_context(ctx)
-    config = app.clockify_config or ClockifyConfig(api_key=None)
-    return app.clockify_client_factory(config)
 
 
 def _emit_user(user: ClockifyUser, *, as_json: bool) -> None:

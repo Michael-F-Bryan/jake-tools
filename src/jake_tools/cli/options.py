@@ -4,9 +4,11 @@ from collections.abc import Callable, Coroutine
 from typing import Any, cast, get_args
 
 import click
+from pydantic import BaseModel
 
-from ..claude import DEFAULT_MODEL, AgentSpec, EffortLevel
-from .context import app_context
+from ..claude import DEFAULT_MODEL, AgentSpec, ClaudeAgent, EffortLevel
+
+F = Callable[..., Any]
 
 
 def coro[**P, R](func: Callable[P, Coroutine[Any, Any, R]]) -> Callable[P, R]:
@@ -24,13 +26,35 @@ def coro[**P, R](func: Callable[P, Coroutine[Any, Any, R]]) -> Callable[P, R]:
     return wrapper
 
 
-def agent[F: Callable[..., Any]](func: F) -> F:
-    """Inject a :class:`ClaudeAgent` as the decorated command's first argument.
+class AgentOptions(BaseModel):
+    """Which model/effort to run the shared Claude agent seam with.
 
-    The agent comes from the typed :class:`~.context.AppContext` carried on
-    ``ctx.obj`` (an :class:`~.context.AgentFactory`), so a test-injected agent
-    factory still sees ``--model``/``--effort`` — it just decides what to do
-    with them, rather than having the flags silently ignored.
+    Every LLM-calling command builds its :class:`~..claude.ClaudeAgent` from
+    one of these instead of resolving it through shared context state, per
+    the CLI-options memo
+    (``_working/transcription-workflow-interview/plans/memo-cli-options.md``).
+    """
+
+    model: str
+    effort: EffortLevel | None
+
+    def spec(self) -> AgentSpec:
+        return AgentSpec(model=self.model, effort=self.effort)
+
+    def agent(self) -> ClaudeAgent:
+        return ClaudeAgent(defaults=self.spec())
+
+
+def agent_options(func: F) -> F:
+    """Inject an :class:`AgentOptions` built from ``--model``/``--effort``.
+
+    Stacks the two flags, pops their parsed values, builds the typed options
+    object, and forwards it via ``ctx.invoke`` — the same shape as the
+    ``transcript_options.py`` decorators. The handler constructs the real
+    :class:`~..claude.ClaudeAgent` from ``agent_options.agent()`` at the top
+    of its body, so a fake agent for tests is created by monkeypatching
+    ``AgentOptions.agent`` (or the specific dependency it returns), not by
+    injecting a factory through shared context state.
     """
 
     @click.option(
@@ -47,15 +71,11 @@ def agent[F: Callable[..., Any]](func: F) -> F:
     )
     @click.pass_context
     @functools.wraps(func)
-    def wrapper(
-        ctx: click.Context,
-        model: str,
-        effort: str | None,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        spec = AgentSpec(model=model, effort=cast(EffortLevel | None, effort))
-        instance = app_context(ctx).agent_factory(spec)
-        return ctx.invoke(func, instance, *args, **kwargs)
+    def wrapper(ctx: click.Context, *args: Any, **kwargs: Any) -> Any:
+        options = AgentOptions(
+            model=kwargs.pop("model"),
+            effort=cast(EffortLevel | None, kwargs.pop("effort")),
+        )
+        return ctx.invoke(func, *args, agent_options=options, **kwargs)
 
     return cast(F, wrapper)

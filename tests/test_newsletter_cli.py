@@ -6,7 +6,6 @@ import click
 import pytest
 from click.testing import CliRunner
 
-from jake_tools.cli.context import AppContext
 from jake_tools.cli.newsletter import newsletter
 from jake_tools.newsletters import (
     NewsletterAttachment,
@@ -90,15 +89,14 @@ class FakeNewsletterClient:
         )
 
 
-def test_list_newsletter_items() -> None:
+def test_list_newsletter_items(monkeypatch) -> None:
     client = FakeNewsletterClient()
-    app = AppContext(newsletter_client_factory=lambda: client)
+    monkeypatch.setattr(newsletter_cli, "NewsletterClient", lambda: client)
     runner = CliRunner()
 
     result = runner.invoke(
         newsletter,
         ["list", "--limit", "1", "--body"],
-        obj=app,
     )
 
     assert result.exit_code == 0
@@ -107,19 +105,18 @@ def test_list_newsletter_items() -> None:
 
 
 def test_add_newsletter_item_reads_body_from_stdin_and_accepts_attachments(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch
 ) -> None:
     attachment = tmp_path / "flyer.pdf"
     attachment.write_bytes(b"fake pdf")
     client = FakeNewsletterClient()
-    app = AppContext(newsletter_client_factory=lambda: client)
+    monkeypatch.setattr(newsletter_cli, "NewsletterClient", lambda: client)
     runner = CliRunner()
 
     result = runner.invoke(
         newsletter,
         ["add", "Gosnells GPS Workshop", "--attach", str(attachment)],
         input="Gosnells SES are running their GPS workshop again this year.\n",
-        obj=app,
     )
 
     assert result.exit_code == 0
@@ -142,18 +139,17 @@ def test_add_requires_body_on_stdin() -> None:
     assert "newsletter body is required on stdin" in result.output
 
 
-def test_edit_updates_title_body_and_attachments(tmp_path: Path) -> None:
+def test_edit_updates_title_body_and_attachments(tmp_path: Path, monkeypatch) -> None:
     attachment = tmp_path / "map.png"
     attachment.write_bytes(b"fake image")
     client = FakeNewsletterClient()
-    app = AppContext(newsletter_client_factory=lambda: client)
+    monkeypatch.setattr(newsletter_cli, "NewsletterClient", lambda: client)
     runner = CliRunner()
 
     result = runner.invoke(
         newsletter,
         ["edit", "295", "--title", "Updated title", "--attach", str(attachment)],
         input="Updated body\n",
-        obj=app,
     )
 
     assert result.exit_code == 0
@@ -177,36 +173,34 @@ def test_edit_requires_at_least_one_change() -> None:
     assert "nothing to update" in result.output
 
 
-def test_edit_rejects_non_numeric_item_id_before_any_client_call() -> None:
+def test_edit_rejects_non_numeric_item_id_before_any_client_call(monkeypatch) -> None:
     # item_id is interpolated directly into Graph/SharePoint URLs, so a
     # malformed id must fail at argument parsing, before the newsletter
-    # client factory is ever called.
+    # client is ever constructed.
     def fail_if_constructed():
-        raise AssertionError("newsletter client factory must not be called")
+        raise AssertionError("NewsletterClient must not be constructed")
 
-    app = AppContext(newsletter_client_factory=fail_if_constructed)
+    monkeypatch.setattr(newsletter_cli, "NewsletterClient", fail_if_constructed)
     runner = CliRunner()
 
     result = runner.invoke(
         newsletter,
         ["edit", "not-an-id", "--title", "x"],
-        obj=app,
     )
 
     assert result.exit_code != 0
     assert "not a valid newsletter item id" in result.output
 
 
-def test_edit_title_only_succeeds_with_no_stdin_body() -> None:
+def test_edit_title_only_succeeds_with_no_stdin_body(monkeypatch) -> None:
     client = FakeNewsletterClient()
-    app = AppContext(newsletter_client_factory=lambda: client)
+    monkeypatch.setattr(newsletter_cli, "NewsletterClient", lambda: client)
     runner = CliRunner()
 
     result = runner.invoke(
         newsletter,
         ["edit", "295", "--title", "Updated title"],
         input="",
-        obj=app,
     )
 
     assert result.exit_code == 0

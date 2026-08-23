@@ -8,10 +8,10 @@ import click
 
 from ..newsletters import (
     NewsletterAttachment,
+    NewsletterClient,
     NewsletterError,
     NewsletterItem,
 )
-from .context import app_context
 
 
 class _NumericItemId(click.ParamType):
@@ -56,12 +56,11 @@ def newsletter():
 @click.option("--limit", default=10, show_default=True, type=click.IntRange(1, 100))
 @click.option("--body", is_flag=True, help="Include the plaintext body for each item.")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
-@click.pass_context
-def list_items(ctx: click.Context, limit: int, body: bool, as_json: bool):
+def list_items(limit: int, body: bool, as_json: bool):
     """
     Show recent CSU Weekly Newsletter items.
     """
-    client = app_context(ctx).newsletter_client_factory()
+    client = NewsletterClient()
     try:
         items = client.list_items(limit=limit)
     except NewsletterError as exc:
@@ -80,8 +79,7 @@ def list_items(ctx: click.Context, limit: int, body: bool, as_json: bool):
     help="Attach a file to the newsletter item. Can be supplied multiple times.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
-@click.pass_context
-def add(ctx: click.Context, title: str, attachments: tuple[Path, ...], as_json: bool):
+def add(title: str, attachments: tuple[Path, ...], as_json: bool):
     """
     Create a CSU Weekly Newsletter item.
 
@@ -91,7 +89,7 @@ def add(ctx: click.Context, title: str, attachments: tuple[Path, ...], as_json: 
     """
     body = _require_stdin_body()
 
-    client = app_context(ctx).newsletter_client_factory()
+    client = NewsletterClient()
     try:
         item = client.create_item(
             title=title,
@@ -115,9 +113,7 @@ def add(ctx: click.Context, title: str, attachments: tuple[Path, ...], as_json: 
     help="Attach a file to the newsletter item. Can be supplied multiple times.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
-@click.pass_context
 def edit(
-    ctx: click.Context,
     item_id: str,
     title: str | None,
     attachments: tuple[Path, ...],
@@ -135,7 +131,7 @@ def edit(
             "nothing to update: provide --title, stdin body, or --attach"
         )
 
-    client = app_context(ctx).newsletter_client_factory()
+    client = NewsletterClient()
     try:
         item = client.update_item(
             item_id,

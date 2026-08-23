@@ -1,8 +1,9 @@
 """Options objects and decorators for the ``transcript`` CLI group.
 
-Transcription commands do not use ``AppContext``/``ctx.obj`` (memo:
+Transcription commands build their dependencies from injected options
+objects rather than shared context state (memo:
 `_working/transcription-workflow-interview/plans/memo-cli-options.md`,
-E19). Instead, each dependency a command needs arrives as a typed options
+E19). Each dependency a command needs arrives as a typed options
 object — a Pydantic model holding raw flag/env values plus one or more
 dependency-constructor methods — injected by a decorator that stacks the
 underlying ``click.option``s, pops their values out of the parsed kwargs,
