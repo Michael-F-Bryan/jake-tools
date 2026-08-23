@@ -29,6 +29,7 @@ dev = [
     "pyright>=1.1.410",
     "pytest>=8.4.0",
     "pytest-asyncio>=1.4.0",
+    "pytest-skip-slow>=1.1.0",
     "ruff>=0.15.18",
 ]
 
@@ -58,4 +59,5 @@ addopts = "-m \"not live\""
 asyncio_mode = "auto"
 markers = [
     "live: marks tests that hit real external services",
+    "slow: marks tests as slow to run (pytest-skip-slow; skipped unless --slow is passed)",
 ]

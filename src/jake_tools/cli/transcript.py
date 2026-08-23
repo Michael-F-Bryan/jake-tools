@@ -31,6 +31,7 @@ from ..transcription.chapters import (
 )
 from ..transcription.note import parse_note
 from ..transcription.obsidian import ObsidianCliError
+from ..transcription.polish import PolishError, run_polish
 from ..transcription.speakers import SpeakersError, run_speaker_resolution
 from .options import AgentOptions, agent_options, coro
 from .transcript_options import (
@@ -328,3 +329,94 @@ async def chapterise(
         raise click.ClickException(str(exc)) from exc
 
     click.echo(CHAPTERS_ADAPTER.dump_json(chapters, indent=2).decode())
+
+
+@transcript.command("polish")
+@agent_options
+@obsidian_options
+@cache_options
+@click.argument(
+    "note_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False, readable=True),
+)
+@click.option(
+    "--run-id",
+    "run_id",
+    required=True,
+    help="Run id from `transcript merge-audio` (the cache key for this run).",
+)
+@click.option(
+    "--chapter",
+    "chapter",
+    type=int,
+    default=None,
+    help=(
+        "Re-polish a single chapter by its 0-based index into chapters.json, "
+        "merging the result into the existing polished.json/polish_issues.json "
+        "(for an agent-driven retry of one bad chapter after a full run). "
+        "Omit to polish every chapter."
+    ),
+)
+@click.option(
+    "--max-concurrency",
+    "max_concurrency",
+    type=int,
+    default=4,
+    show_default=True,
+    help="Maximum number of chapters polished concurrently.",
+)
+@coro
+async def polish(
+    note_path: Path,
+    run_id: str,
+    chapter: int | None,
+    max_concurrency: int,
+    agent_options: AgentOptions,
+    obsidian_options: ObsidianOptions,
+    cache_options: CacheOptions,
+) -> None:
+    """Polish each chapter's raw dialogue, then check it with a fresh adversarial pass.
+
+    Reads the cached resolved transcript and chapters for RUN_ID (from
+    `transcript speakers` and `transcript chapterise`; errors naming
+    whichever prerequisite hasn't run yet), builds a lexicon of
+    meeting-specific vocabulary from NOTE_PATH's attendees, wikilinks, and
+    vault note titles, and polishes every chapter concurrently (bounded by
+    --max-concurrency).
+
+    Each chapter gets two separate LLM calls: one that polishes the raw
+    dialogue (removing filler, merging turns, untangling crosstalk,
+    correcting mishearings against the lexicon), and a second, independent
+    call that reviews that polish adversarially against the raw utterances
+    and returns a corrected chapter - never a "check your work" turn on the
+    same conversation. Meaning preservation is the invariant: form is
+    rewritten, content never is.
+
+    Stores polished.json (list[PolishedChapter]) and polish_issues.json
+    (every fixer issue, prefixed with its chapter's title) in the run
+    cache, and prints a JSON summary (chapter count, issue count, issues)
+    to stdout. One chapter's failure fails the whole run, naming the
+    chapter, rather than silently producing an incomplete result.
+
+    --chapter N re-polishes just that one chapter and merges it into an
+    existing polished.json - for retrying a single bad chapter without
+    re-running (and re-paying for) the whole meeting.
+    """
+    agent = agent_options.agent()
+    vault = obsidian_options.vault_client()
+    cache = cache_options.run_cache()
+
+    try:
+        result = await run_polish(
+            note_path,
+            run_id,
+            chapter=chapter,
+            max_concurrency=max_concurrency,
+            agent=agent,
+            vault=vault,
+            cache=cache,
+        )
+    except (PolishError, ClaudeAgentError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(result.model_dump_json(indent=2))
