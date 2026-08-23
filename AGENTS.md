@@ -52,10 +52,15 @@ default, via two independent markers:
 - `@pytest.mark.live` — anything that hits a real external service; excluded
   via `addopts = -m "not live"` in `pyproject.toml`, independent of `--slow`.
 
-A test can (and often does) carry only `slow` — see `transcription/`'s own
-real-model tests (`tests/test_transcription_*.py`, `tests/test_transcribe_cli.py`),
+A test can (and often does) carry only `slow` — see most of `transcription/`'s
+own real-model tests (`tests/test_transcription_*.py`, `tests/test_transcribe_cli.py`),
 named `test_live_...` for a convenient `-k live` selector even though `live`
-itself isn't the marker gating them.
+itself isn't the marker gating them. One test in that family is a genuine
+exception, actually gated by `live` rather than just named for it:
+`tests/test_transcription_asr.py::test_local_transcriber_produces_nonempty_monotonic_utterances`
+downloads real ASR/diarisation models from Hugging Face Hub (HF-gated -
+requires an `HF_TOKEN` that has accepted the diarisation model's licence),
+which is exactly the "real external service" `live` exists for.
 
 ### Code conventions
 

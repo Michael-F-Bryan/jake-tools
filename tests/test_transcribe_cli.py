@@ -25,6 +25,7 @@ from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 import pytest
+import yaml
 from claude_agent_sdk import ClaudeAgentOptions, Message, ResultMessage
 from click.testing import CliRunner
 
@@ -44,6 +45,7 @@ from jake_tools.transcription.models import (
     SourceClip,
     Utterance,
 )
+from jake_tools.transcription.note import NoteParseError
 from jake_tools.transcription.obsidian import ObsidianCliError, VaultClient
 from jake_tools.transcription.pipeline import (
     NoEntryRampError,
@@ -790,6 +792,10 @@ _ERROR_CASES: list[tuple[str, Exception]] = [
     ("transcriber", TranscriberError("HF_TOKEN missing")),
     ("obsidian CLI", ObsidianCliError("vault not found")),
     ("claude agent", ClaudeAgentError("agent call failed")),
+    (
+        "note parse (broken frontmatter YAML)",
+        NoteParseError(Path("note.md"), yaml.YAMLError("bad yaml")),
+    ),
 ]
 
 

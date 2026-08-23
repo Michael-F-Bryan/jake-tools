@@ -51,16 +51,6 @@ resume story this module *is* required to get right - stopping at
 `needs_input` and resuming from there - is unaffected: chapterise/polish/
 minutes/integrate never run until speaker resolution is complete, so they
 only ever run once per completed run in that flow.
-
-A second, related gap surfaced by composing 005 (text ramp) with 006
-(speaker resolution): `resolve`/`_snippet_request` unconditionally cut audio
-snippets from `<run_dir>/merged.m4a` for any cluster that stays unresolved -
-a file that is never created on the text ramp (there is no merged audio for
-a pre-diarised transcript). A text-sourced meeting whose speakers the LLM
-can't confidently resolve would hit that missing file rather than a clean
-error. This is a plan-006-owned fix (teach `resolve` to skip/report snippet
-generation when there's no merged audio), reported here rather than patched
-inline.
 """
 
 from __future__ import annotations

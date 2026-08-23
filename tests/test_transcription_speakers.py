@@ -908,8 +908,28 @@ async def test_run_speaker_resolution_writes_hints_only_for_assigned_clusters(
     assert resolved is not None
     assert [u.speaker for u in resolved.utterances] == ["Ada Lovelace", "Grace Hopper"]
     note_text = note_path.read_text()
-    assert "Ada Lovelace was SPEAKER_00" in note_text  # --assign'd: written
-    assert "Grace Hopper was SPEAKER_01" not in note_text  # LLM-only: not written
+    # --assign'd: written, quoting the cluster's own distinctive utterance
+    # rather than naming the run-local `SPEAKER_NN` cluster id (F8: a
+    # pyannote cluster number from this recording is meaningless - and
+    # could be actively misleading - to a later run over different audio).
+    assert 'Ada Lovelace said "hi" in the August 3, 2026 recording' in note_text
+    assert "SPEAKER_00" not in note_text
+    assert "SPEAKER_01" not in note_text
+    assert "Grace Hopper said" not in note_text  # LLM-only: no hint written at all
+
+    # Idempotency still holds with the new hint text: re-running with the
+    # same assignment must not duplicate the hint line.
+    await run_speaker_resolution(
+        note_path,
+        "run-1",
+        assign=("SPEAKER_00=Ada Lovelace",),
+        finalise=False,
+        agent=agent,
+        audio_tool=FakeAudioTool(),
+        cache=cache,
+    )
+    note_text_after_rerun = note_path.read_text()
+    assert note_text_after_rerun.count('Ada Lovelace said "hi"') == 1
 
 
 async def test_run_speaker_resolution_persists_assignments_across_calls(

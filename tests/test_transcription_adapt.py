@@ -29,7 +29,7 @@ from claude_agent_sdk import (
 )
 from click.testing import CliRunner
 
-from jake_tools.claude import AgentSpec, ClaudeAgent
+from jake_tools.claude import AgentSpec, ClaudeAgent, ClaudeAgentError
 from jake_tools.cli import main
 from jake_tools.transcription.adapt import (
     NoFallbackAgentError,
@@ -615,6 +615,26 @@ def test_adapt_cli_reports_adapt_errors_as_a_clean_click_exception(
 
     assert result.exit_code != 0
     assert str(transcript_path) in result.output
+
+
+def test_adapt_cli_reports_claude_agent_errors_as_a_clean_click_exception(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every other LLM stage's CLI command catches `ClaudeAgentError`
+    alongside its own domain error - `adapt` must too, since its fallback
+    path makes the same kind of agent call."""
+
+    async def raising_adapt_transcript(path: Path, *, agent: object) -> RawTranscript:
+        raise ClaudeAgentError("agent call failed")
+
+    monkeypatch.setattr(transcript_cli, "adapt_transcript", raising_adapt_transcript)
+    transcript_path = tmp_path / "transcript.txt"
+    transcript_path.write_text("no structure here at all\n")
+
+    result = CliRunner().invoke(main, ["transcript", "adapt", str(transcript_path)])
+
+    assert result.exit_code != 0
+    assert "agent call failed" in result.output
 
 
 def test_transcript_adapt_help_exits_zero() -> None:

@@ -64,6 +64,7 @@ RESOLVED_TRANSCRIPT_CACHE_NAME = "resolved_transcript"
 _UNKNOWN = "Unknown"
 _SNIPPETS_PER_CLUSTER = 3
 _MIN_QUOTE_SEPARATION_SECONDS = 30.0
+_HINT_QUOTE_MAX_CHARS = 80
 
 
 class SpeakersError(RuntimeError):
@@ -487,8 +488,30 @@ def _recording_phrase(note: ParsedNote) -> str:
     return f"in the {text} recording" if text else "in this recording"
 
 
+def _distinctive_quote(cluster: str, utterances: Sequence[Utterance]) -> str | None:
+    """The single most representative utterance text for `cluster`, truncated.
+
+    Reuses `_select_representative_indices`'s "longest text" heuristic
+    (already used to pick evidence quotes for the resolution prompt and
+    snippet requests) rather than inventing a second one - just asking for
+    one pick instead of `_SNIPPETS_PER_CLUSTER`. Returns `None` only if
+    `cluster` has no utterances at all, which should never happen for a
+    cluster that was actually assigned.
+    """
+    cluster_utterances = [u for u in utterances if u.speaker == cluster]
+    if not cluster_utterances:
+        return None
+    pick = _select_representative_indices(cluster_utterances, 1)[0]
+    text = cluster_utterances[pick].text.strip()
+    if len(text) > _HINT_QUOTE_MAX_CHARS:
+        text = text[: _HINT_QUOTE_MAX_CHARS - 1].rstrip() + "…"
+    return text
+
+
 def _hint_lines_for_assignments(
-    note: ParsedNote, assignments: Sequence[SpeakerAssignment]
+    note: ParsedNote,
+    assignments: Sequence[SpeakerAssignment],
+    utterances: Sequence[Utterance],
 ) -> list[str]:
     """Hint bullets for HUMAN-confirmed mappings only.
 
@@ -498,13 +521,27 @@ def _hint_lines_for_assignments(
     high its confidence. `append_diarisation_hints` is idempotent, so it's
     safe to pass every non-"Unknown" assignment on record each call, not
     just ones new to this invocation.
+
+    The bullet never names the run-local diarisation cluster id
+    (`SPEAKER_NN`) - a pyannote cluster number from *this* recording has no
+    meaning to a later run over different audio, where the prompt treats a
+    Meeting Prep hint as outranking its own inference. Presenting a stale
+    `SPEAKER_NN` as if it were still authoritative risks steering that
+    later, unrelated run's proposals. Instead the hint carries the name
+    plus a short, distinctive quote actually attributed to that cluster
+    (`_distinctive_quote`) - identifying evidence a human can recognise
+    regardless of how clusters are numbered next time.
     """
     phrase = _recording_phrase(note)
-    return [
-        f"{assignment.name} was {assignment.cluster} {phrase}"
-        for assignment in sorted(assignments, key=lambda item: item.cluster)
-        if assignment.name != _UNKNOWN
-    ]
+    lines: list[str] = []
+    for assignment in sorted(assignments, key=lambda item: item.cluster):
+        if assignment.name == _UNKNOWN:
+            continue
+        quote = _distinctive_quote(assignment.cluster, utterances)
+        if quote is None:
+            continue
+        lines.append(f'{assignment.name} said "{quote}" {phrase}')
+    return lines
 
 
 async def run_speaker_resolution(
@@ -566,7 +603,9 @@ async def run_speaker_resolution(
 
     cache.store(run_id, RESOLVED_TRANSCRIPT_CACHE_NAME, resolved)
 
-    hint_lines = _hint_lines_for_assignments(note, merged_assignments)
+    hint_lines = _hint_lines_for_assignments(
+        note, merged_assignments, transcript.utterances
+    )
     if hint_lines:
         append_diarisation_hints(Path(note.path), hint_lines)
 

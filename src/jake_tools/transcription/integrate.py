@@ -210,13 +210,63 @@ def _normalize(unit: str) -> str:
     return " ".join(unit.split())
 
 
-def _split_summary_unit(text: str) -> list[str]:
-    stripped = text.strip()
-    return [stripped] if stripped else []
+def _split_summary_units(text: str) -> list[str]:
+    """One unit per top-level line (a bare lead sentence, or a bullet - each
+    carrying its own indented continuation lines), blank lines dropped.
+
+    `minutes.py`'s prompt always emits the summary callout in this shape: a
+    plain-prose lead sentence, then zero or more top-level bullets. Splitting
+    it the same way `_split_discussion_units` splits Discussion Notes (one
+    merge unit per bullet, sub-bullets carried with their parent) means a
+    human edit to *one* callout bullet only preserves that bullet - it no
+    longer forces the whole callout to be treated as one giant edited unit,
+    which previously made every re-run append a second, third, ... full
+    fresh summary underneath the human-edited one once any edit had been
+    made (and registered the entire original callout as one deleted
+    fingerprint in the process).
+
+    Any top-level (column-0) line starts a fresh unit, whether or not it's a
+    bullet - not just the first line of the text. That matters once a merge
+    has actually run: preserved (human-edited) units are re-assembled ahead
+    of fresh appended ones (see `_merge_tier_b`), so a bare lead sentence can
+    end up *after* a bullet in the merged text on a later run, not only
+    before it. A split that only recognised a lead at the very start of the
+    text would then glue that sentence onto the preceding bullet as a
+    "continuation" on the next parse - silently merging two units into one,
+    which both breaks preservation and manufactures a spurious "deletion"
+    fingerprint for content nobody touched. Blank lines are structural only
+    (dropped here, reinserted by `_join_summary_units` at unit-type
+    boundaries) so they can never be misread as part of a unit's own text.
+    """
+    stripped = text.strip("\n")
+    if not stripped.strip():
+        return []
+    units: list[str] = []
+    for line in stripped.splitlines():
+        if not line.strip():
+            continue  # a blank line is a separator, never unit content
+        if not units or not line[:1].isspace():
+            units.append(line + "\n")  # a fresh top-level line: new unit
+        else:
+            units[-1] += line + "\n"  # an indented continuation
+    return units
 
 
 def _join_summary_units(units: Sequence[str]) -> str:
-    return "\n\n".join(units)
+    """Reassemble summary units: a blank line between a lead paragraph and
+    the bullets (or between two paragraph units), no blank line between
+    consecutive bullets - the shape `_split_summary_units` expects back.
+    No trailing newline, matching `render_summary_callout`'s expectation
+    (and the pre-F2 join's own convention) of a bare block of text."""
+    parts: list[str] = []
+    for index, unit in enumerate(units):
+        if index > 0:
+            prev_is_bullet = _TOP_LEVEL_BULLET_RE.match(units[index - 1]) is not None
+            this_is_bullet = _TOP_LEVEL_BULLET_RE.match(unit) is not None
+            if not (prev_is_bullet and this_is_bullet):
+                parts.append("\n")
+        parts.append(unit)
+    return "".join(parts).rstrip("\n")
 
 
 def _split_discussion_units(text: str) -> list[str]:
@@ -439,18 +489,56 @@ def _find_heading(sections: Sequence[NoteSection], name: str) -> int | None:
 
 
 def _is_chapter_heading(heading: str | None) -> bool:
-    """Whether `heading` is unambiguously one of this module's own chapter headings.
+    """Whether `heading` has this module's own chapter-heading *shape*.
 
     `render_transcript` only ever produces `### <ts> — <title>` headings
-    (`format_timestamp` output, an em-dash, the title) - no human-authored
-    heading looks like this by convention, so a match is treated as
-    pipeline output wherever it appears, per the ruling on legacy shapes.
+    (`format_timestamp` output, an em-dash, the title) - but a human can
+    coincidentally write a heading with the same shape (e.g. `### 10:30 —
+    Standup round-robin` as a Meeting Prep sub-heading), so this shape
+    match alone is *not* sufficient to treat a heading as pipeline output -
+    see `_find_transcript_sweep_sections`, which additionally requires the
+    heading's governing section to be `## Transcript`/`## Chapters` before
+    sweeping it.
     """
     return heading is not None and _CHAPTER_HEADING_RE.match(heading) is not None
 
 
-def _find_transcript_sweep_indices(sections: Sequence[NoteSection]) -> list[int]:
-    """Every existing section the tier-a Transcript replacement must remove.
+# The headings this module treats as structurally significant when scoping
+# the tier-a sweep - see `_governing_heading`.
+_GOVERNING_HEADINGS = frozenset(
+    {
+        MEETING_PREP_HEADING,
+        _DISCUSSION_NOTES_HEADING,
+        _CHAPTERS_HEADING,
+        _TRANSCRIPT_HEADING,
+    }
+)
+
+
+def _governing_heading(sections: Sequence[NoteSection], index: int) -> str | None:
+    """The nearest preceding heading at `index` that this module recognises structurally.
+
+    Walks backward from `index`, skipping any heading this module doesn't
+    otherwise track (an arbitrary human aside, or another chapter-shaped
+    `### <ts> — <title>` heading already swept elsewhere) - only
+    `_GOVERNING_HEADINGS` count as establishing or ending a region for the
+    purpose of `_find_transcript_sweep_sections`. An unrelated human section
+    interrupting a run of swept chapters (see the interrupted-sweep test)
+    is therefore transparent here: it doesn't reset which region a later
+    chapter heading belongs to. Returns `None`, lower-cased/stripped
+    otherwise, if no governing heading precedes `index` at all.
+    """
+    for probe in range(index - 1, -1, -1):
+        heading = sections[probe].heading
+        if heading is not None and heading.strip().lower() in _GOVERNING_HEADINGS:
+            return heading.strip().lower()
+    return None
+
+
+def _find_transcript_sweep_sections(
+    original_sections: Sequence[NoteSection],
+) -> list[NoteSection]:
+    """Every existing section (by identity) the tier-a Transcript replacement must remove.
 
     Two shapes occur in practice, and both must be fully swept, not just
     the first contiguous run:
@@ -465,26 +553,54 @@ def _find_transcript_sweep_indices(sections: Sequence[NoteSection]) -> list[int]
       stage. Re-running on one of these must not orphan the old chapters
       or duplicate their content.
 
-    A `### <ts> — <title>` heading is unambiguous pipeline output wherever
-    it occurs in the document - contiguous with `## Transcript`/`##
-    Chapters` or not (an unrelated section can interrupt the run without
-    stopping the sweep) - so every matching section is collected,
-    regardless of position. A human section's heading never matches this
-    shape (or `## Transcript` itself) and is never included here, so it's
-    never touched by the replacement that follows.
+    A literal `## Transcript` heading is always swept - unambiguous
+    pipeline output wherever it occurs. A chapter-*shaped* `### <ts> —
+    <title>` heading is swept only when its nearest governing heading
+    (`_governing_heading`) is `## Transcript` or `## Chapters` - an
+    unrelated human section interrupting a run of chapters doesn't stop
+    the sweep (it isn't a governing heading, so it's skipped over), but a
+    human heading that merely *looks* timestamp-shaped while actually
+    nested under `## Meeting Prep` (or any other non-tier-a section) is
+    never swept, because `## Meeting Prep` *is* a governing heading and it
+    isn't `## Transcript`/`## Chapters`. This is what stops the sweep from
+    silently deleting a human `### 10:30 — Standup round-robin` heading
+    inside Meeting Prep - the Meeting Prep byte-identity guard alone can't
+    catch that, since `parse_note` splits such a heading into its own
+    section, outside Meeting Prep's own body.
 
-    Returns the matching indices in ascending document order (possibly
-    empty, if this is a first run with neither shape present).
+    Takes and must be called against `original_sections` - the section
+    list exactly as parsed, *before* this run's own Discussion Notes/
+    Chapters insertions happen - and returns the matching section
+    *objects*, not indices. `run_integrate` inserts fresh, empty ``##
+    Discussion Notes``/``## Chapters`` sections earlier in the same call
+    when they're absent, always right after ``## Meeting Prep``; if a
+    chapter-shaped heading happened to sit immediately after ``##
+    Meeting Prep`` in the original document (exactly the human-heading-in-
+    Meeting-Prep case this function exists to protect), those insertions
+    would land *between* Meeting Prep and it, making a freshly-created
+    ``## Chapters`` look like its nearest governing heading if this were
+    recomputed against the already-mutated list. Judging every section
+    once, against the pristine original structure, and having the caller
+    match the results back into the (by-then mutated) working list by
+    object identity avoids that - the insertions can only ever change
+    *positions*, never which original section object a heading actually
+    was.
+
+    Returns the matching section objects in ascending document order
+    (possibly empty, if this is a first run with neither shape present).
     """
-    return [
-        index
-        for index, section in enumerate(sections)
+    result: list[NoteSection] = []
+    for index, section in enumerate(original_sections):
+        heading = section.heading
         if (
-            section.heading is not None
-            and section.heading.strip().lower() == _TRANSCRIPT_HEADING
-        )
-        or _is_chapter_heading(section.heading)
-    ]
+            heading is not None
+            and heading.strip().lower() == _TRANSCRIPT_HEADING
+            or _is_chapter_heading(heading)
+            and _governing_heading(original_sections, index)
+            in (_CHAPTERS_HEADING, _TRANSCRIPT_HEADING)
+        ):
+            result.append(section)
+    return result
 
 
 def _split_summary_callout(body: str) -> tuple[str, str, str]:
@@ -579,8 +695,12 @@ def run_integrate(
        created in the exemplar order (right after `## Meeting Prep` when
        present, otherwise right after the preamble) when absent. The
        `## Transcript` replacement sweeps every section that looks like
-       this module's own chapter output, wherever it sits in the
-       document - see `_find_transcript_sweep_indices`.
+       this module's own chapter output and is actually governed by `##
+       Transcript`/`## Chapters` - see `_find_transcript_sweep_sections`,
+       which is deliberately evaluated against the document exactly as
+       parsed, before this step's own Discussion Notes/Chapters insertions
+       above can shift what looks like a heading's nearest governing
+       section.
     4. Before writing, re-asserts that `## Meeting Prep` (if present) is
        still byte-identical to what was parsed in step 1 - a second,
        independent guard on the same invariant, this time checking that
@@ -605,6 +725,13 @@ def run_integrate(
         )
 
     sections = list(note.sections)
+    # Judged once, against the document exactly as parsed - before this
+    # function's own Discussion Notes/Chapters insertions below can land
+    # between `## Meeting Prep` and a heading that was never actually
+    # governed by `## Transcript`/`## Chapters`, which would otherwise make
+    # a freshly-inserted section look like that heading's nearest governing
+    # heading. See `_find_transcript_sweep_sections`'s docstring.
+    sweep_targets = _find_transcript_sweep_sections(sections)
     outcomes: list[SectionOutcome] = []
 
     meeting_prep_index = _find_heading(sections, MEETING_PREP_HEADING)
@@ -631,7 +758,7 @@ def run_integrate(
             baseline_text=baseline_summary,
             new_text=products.meeting_summary,
             deleted_fingerprints=deleted_summary_fingerprints,
-            split=_split_summary_unit,
+            split=_split_summary_units,
             join=_join_summary_units,
         )
     )
@@ -700,7 +827,17 @@ def run_integrate(
     cursor = ch_final_index + 1
 
     # --- Tier a: Transcript (the full per-chapter content) ---
-    sweep_indices = _find_transcript_sweep_indices(sections)
+    # `sweep_targets` was judged against the original, pre-surgery document
+    # (see its capture above); translate those section objects into their
+    # (possibly shifted, by the insertions above) indices in the current
+    # list by identity - never by re-judging position/governing-heading
+    # against the now-mutated `sections`.
+    sweep_target_ids = {id(section) for section in sweep_targets}
+    sweep_indices = [
+        index
+        for index, section in enumerate(sections)
+        if id(section) in sweep_target_ids
+    ]
     transcript_body = render_transcript(products.chapters)
     new_transcript_section = NoteSection(
         heading="Transcript", level=2, body=transcript_body

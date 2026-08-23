@@ -31,7 +31,7 @@ from ..transcription.chapters import (
 )
 from ..transcription.integrate import IntegrateError, load_products, run_integrate
 from ..transcription.minutes import MinutesError, run_minutes
-from ..transcription.note import parse_note
+from ..transcription.note import NoteParseError, parse_note
 from ..transcription.obsidian import ObsidianCliError
 from ..transcription.polish import PolishError, run_polish
 from ..transcription.speakers import SpeakersError, run_speaker_resolution
@@ -83,18 +83,19 @@ def merge_audio(
     clips chronologically, merges them with ffmpeg, and prints a JSON
     document: run id, merged audio path, audio hash, and per-clip offsets.
     """
-    note = parse_note(note_path)
     vault = obsidian_options.vault_client()
     audio_tool = audio_options.audio_tool()
     cache = cache_options.run_cache()
 
     try:
+        note = parse_note(note_path)
         result = merge_note_audio(note, vault=vault, audio_tool=audio_tool, cache=cache)
     except (
         NoAudioEmbedsError,
         AudioEmbedResolutionError,
         ObsidianCliError,
         AudioToolError,
+        NoteParseError,
     ) as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -183,7 +184,7 @@ async def adapt(
 
     try:
         result = await adapt_transcript(transcript_path, agent=agent)
-    except AdaptError as exc:
+    except (AdaptError, ClaudeAgentError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     if run_id is not None:
@@ -275,7 +276,7 @@ async def speakers(
             audio_tool=audio_tool,
             cache=cache,
         )
-    except (SpeakersError, ClaudeAgentError, AudioToolError) as exc:
+    except (SpeakersError, ClaudeAgentError, AudioToolError, NoteParseError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     click.echo(result.model_dump_json(indent=2))
@@ -418,7 +419,7 @@ async def polish(
             vault=vault,
             cache=cache,
         )
-    except (PolishError, ClaudeAgentError) as exc:
+    except (PolishError, ClaudeAgentError, NoteParseError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     click.echo(result.model_dump_json(indent=2))
@@ -469,7 +470,7 @@ async def minutes(
         result = await run_minutes(
             note_path, run_id, agent=agent, vault=vault, cache=cache
         )
-    except (MinutesError, ClaudeAgentError) as exc:
+    except (MinutesError, ClaudeAgentError, NoteParseError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     click.echo(result.model_dump_json(indent=2))
@@ -512,7 +513,7 @@ def integrate(
     try:
         products = load_products(note_path, run_id, cache)
         report = run_integrate(note_path, products, cache=cache, run_id=run_id)
-    except IntegrateError as exc:
+    except (IntegrateError, NoteParseError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     click.echo(report.model_dump_json(indent=2))

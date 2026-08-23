@@ -30,6 +30,21 @@ _BULLET_RE = re.compile(r"^([ \t]*)-\s*(.*)$")
 _DIARISATION_HINTS_LABEL = "diarisation hints"
 
 
+class NoteParseError(RuntimeError):
+    """Raised when a note's frontmatter can't be parsed as YAML.
+
+    `yaml.safe_load` raising here is otherwise an uncaught traceback
+    surfacing from any of the several CLI commands that parse a note before
+    doing anything else - this turns it into a domain error every one of
+    them can map to a clean `ClickException`, the same way every other
+    stage's own errors are handled.
+    """
+
+    def __init__(self, path: Path, error: yaml.YAMLError) -> None:
+        super().__init__(f"{path}: could not parse frontmatter YAML: {error}")
+        self.path = path
+
+
 class NoteSection(BaseModel):
     """One heading-delimited slice of a note body.
 
@@ -75,7 +90,7 @@ def render_body(sections: list[NoteSection]) -> str:
 def parse_note(path: Path) -> ParsedNote:
     """Parse the note at ``path`` into attendees, hints, embeds, and sections."""
     text = path.read_text()
-    frontmatter, body = _split_frontmatter(text)
+    frontmatter, body = _split_frontmatter(text, path)
     sections = _split_sections(body)
     return ParsedNote(
         path=str(path),
@@ -88,7 +103,7 @@ def parse_note(path: Path) -> ParsedNote:
     )
 
 
-def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+def _split_frontmatter(text: str, path: Path) -> tuple[dict[str, Any], str]:
     lines = text.split("\n")
     if not lines or lines[0] != "---":
         return {}, text
@@ -98,7 +113,10 @@ def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         return {}, text
     yaml_text = "\n".join(lines[1:closing_index])
     body = "\n".join(lines[closing_index + 1 :])
-    loaded = yaml.safe_load(yaml_text)
+    try:
+        loaded = yaml.safe_load(yaml_text)
+    except yaml.YAMLError as exc:
+        raise NoteParseError(path, exc) from exc
     frontmatter = loaded if isinstance(loaded, dict) else {}
     return frontmatter, body
 

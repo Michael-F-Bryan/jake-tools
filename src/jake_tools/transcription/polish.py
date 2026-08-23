@@ -125,8 +125,9 @@ def build_lexicon(note: ParsedNote, vault: VaultClient) -> list[str]:
 
     Sources, in priority order (earlier entries survive dedupe over later
     duplicates): attendee names, wikilink targets appearing anywhere in the
-    note body, and vault note titles (a vault-root glob of `*.md` stems -
-    cheap and good enough; no need for the Obsidian CLI's `files` listing).
+    note body, and vault note titles (a recursive vault-root glob of
+    `**/*.md` stems - cheap and good enough; no need for the Obsidian CLI's
+    `files` listing).
     Deduped case-insensitively (keeping the first-seen casing) and capped so
     the prompt stays a reasonable size.
     """

@@ -207,6 +207,22 @@ def test_merge_audio_exits_nonzero_with_a_clear_error_when_an_embed_fails_to_res
     assert str(note_path) in result.output
 
 
+def test_merge_audio_exits_nonzero_with_a_clear_error_for_broken_frontmatter(
+    tmp_path: Path,
+) -> None:
+    """`note.py`'s `yaml.safe_load` raising on malformed frontmatter YAML
+    must surface as a clean `ClickException`, not a raw traceback - this
+    command parses the note before doing anything else, so it's the first
+    of several commands reachable by this path."""
+    note_path = tmp_path / "broken_frontmatter.md"
+    note_path.write_text("---\ntags: [note/meeting\n---\n\nJust some text.\n")
+
+    result = CliRunner().invoke(main, ["transcript", "merge-audio", str(note_path)])
+
+    assert result.exit_code != 0
+    assert str(note_path) in result.output
+
+
 def test_transcript_merge_audio_help_exits_zero() -> None:
     result = CliRunner().invoke(main, ["transcript", "merge-audio", "--help"])
 

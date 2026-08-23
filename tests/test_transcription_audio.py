@@ -403,10 +403,10 @@ def test_ensure_available_raises_clearly_when_ffmpeg_is_missing(
         tool.ensure_available()
 
 
-# --- live: real ffmpeg ----------------------------------------------------
+# --- slow: real ffmpeg subprocess (LOCAL binary, not an external service) --
 
 
-@pytest.mark.live
+@pytest.mark.slow
 def test_ffmpeg_merge_of_two_generated_clips_sums_their_durations(
     tmp_path: Path,
 ) -> None:

@@ -27,6 +27,7 @@ from ..transcription.audio import (
 from ..transcription.chapters import ChaptersError
 from ..transcription.integrate import IntegrateError
 from ..transcription.minutes import MinutesError
+from ..transcription.note import NoteParseError
 from ..transcription.obsidian import ObsidianCliError
 from ..transcription.pipeline import PipelineError, PipelineFactories, run_pipeline
 from ..transcription.polish import PolishError
@@ -69,6 +70,7 @@ _STAGE_ERRORS: tuple[type[Exception], ...] = (
     AudioEmbedResolutionError,
     ObsidianCliError,
     ClaudeAgentError,
+    NoteParseError,
 )
 
 

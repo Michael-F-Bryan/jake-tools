@@ -315,6 +315,75 @@ def test_rerun_with_human_untouched_content_is_replaced_and_baselines_updated_on
     assert "Point D" in stored_notes
 
 
+# --- summary callout: bullet-granularity merge (F2) --------------------------
+
+
+def test_summary_callout_human_edit_to_one_bullet_preserves_it_without_duplicating_across_reruns(
+    tmp_path: Path,
+) -> None:
+    """Regression for the reviewer's exact repro: treating the whole callout
+    as one merge unit meant a human edit to even one bullet made every
+    subsequent run append a second, full fresh summary underneath it
+    (v1..v4 pile-up), and registered the entire original callout as one
+    deleted fingerprint. Splitting the callout the same way Discussion
+    Notes are (lead sentence, then one unit per bullet) fixes both: only
+    the edited bullet is preserved, the untouched lead and other bullets
+    still update from fresh pipeline output, and two further re-runs with
+    unchanged fresh content neither duplicate anything nor grow the
+    fingerprint set."""
+    note_path = _write_note(tmp_path, MEETING_PREP_ONLY)
+    cache = RunCache(tmp_path / "cache")
+    summary_v1 = "Kickoff meeting.\n\n- Budget approved\n- Timeline slipped\n"
+    run_integrate(note_path, _products(summary=summary_v1), cache=cache, run_id="run-1")
+
+    text = note_path.read_text()
+    edited = text.replace("- Timeline slipped", "- Timeline slipped, EDITED BY A HUMAN")
+    assert edited != text
+    note_path.write_text(edited)
+
+    summary_v2 = (
+        "Kickoff meeting.\n\n- Budget approved\n- Timeline slipped\n- New risk raised\n"
+    )
+    report_2 = run_integrate(
+        note_path, _products(summary=summary_v2), cache=cache, run_id="run-1"
+    )
+
+    text_after_2 = note_path.read_text()
+    # Only one note-level summary callout (a per-chapter callout also
+    # renders as "> [!summary]" further down in `## Transcript` - not the
+    # thing under test here, so scope the count to the preamble).
+    preamble_after_2 = text_after_2.split("## Meeting Prep")[0]
+    assert preamble_after_2.count("> [!summary]") == 1  # no duplicate summary block
+    assert text_after_2.count("Kickoff meeting.") == 1  # not piled up either
+    assert text_after_2.count("Budget approved") == 1
+    assert "Timeline slipped, EDITED BY A HUMAN" in text_after_2
+    # The un-edited original bullet wasn't resurrected alongside the edit.
+    assert "- Timeline slipped\n" not in text_after_2
+    assert "New risk raised" in text_after_2
+
+    summary_outcome = _outcome(report_2, "summary callout")
+    assert summary_outcome.mode == "merged"
+    assert summary_outcome.preserved_units == 1  # the edited bullet, alone
+
+    fingerprints_after_2 = cache.load(
+        "run-1", DELETED_SUMMARY_NAME, DeletedFingerprints
+    )
+    assert fingerprints_after_2 is not None
+
+    # A further re-run with the exact same fresh content: byte-stable, and
+    # the fingerprint set must not grow across runs with no new edits.
+    run_integrate(note_path, _products(summary=summary_v2), cache=cache, run_id="run-1")
+    text_after_3 = note_path.read_text()
+    assert text_after_3 == text_after_2
+    assert text_after_3.split("## Meeting Prep")[0].count("> [!summary]") == 1
+
+    fingerprints_after_3 = cache.load(
+        "run-1", DELETED_SUMMARY_NAME, DeletedFingerprints
+    )
+    assert fingerprints_after_3 is not None
+    assert fingerprints_after_3.fingerprints == fingerprints_after_2.fingerprints
+
+
 # --- re-run, human edited a bullet: preserved verbatim; new points appended -------
 
 
@@ -769,6 +838,46 @@ Michael's own note, unrelated to the transcript.
     assert text.index("## Transcript") < text.index("## A Human's Own Aside")
 
     assert _outcome(report, "Transcript").mode == "replaced"
+
+
+def test_time_like_human_heading_inside_meeting_prep_survives_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    """F1 repro: a human heading that happens to share this module's own
+    chapter shape (`### <ts> — <title>`) but sits inside `## Meeting Prep` -
+    with no `## Transcript`/`## Chapters` heading anywhere else in the note
+    yet - must never be swept. The `## Meeting Prep` byte-identity guard
+    alone can't catch this: `parse_note` splits the nested heading into its
+    own section, outside Meeting Prep's own body, so the guard never even
+    looks at it."""
+    note_body = (
+        "---\n"
+        "tags:\n"
+        "  - note/meeting\n"
+        "---\n"
+        "\n"
+        "## Meeting Prep\n"
+        "\n"
+        "- Agenda link: <https://example.test/agenda>\n"
+        "\n"
+        "### 10:30 — Standup round-robin\n"
+        "\n"
+        "- Ada: shipped the parser\n"
+        "- Bob: blocked on review\n"
+    )
+    note_path = _write_note(tmp_path, note_body)
+    standup_block = (
+        "### 10:30 — Standup round-robin\n"
+        "\n"
+        "- Ada: shipped the parser\n"
+        "- Bob: blocked on review\n"
+    )
+    assert standup_block in note_path.read_text()  # sanity: the fixture is as written
+    cache = RunCache(tmp_path / "cache")
+
+    run_integrate(note_path, _products(), cache=cache, run_id="run-1")
+
+    assert standup_block in note_path.read_text()
 
 
 # --- abort path: a broken reconstruction invariant aborts without writing --------
