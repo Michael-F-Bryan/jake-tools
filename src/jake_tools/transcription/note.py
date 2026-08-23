@@ -249,6 +249,18 @@ def append_diarisation_hints(path: Path, lines: Sequence[str]) -> bool:
     return True
 
 
+def split_raw_frontmatter(text: str) -> tuple[str, str]:
+    """Public wrapper around :func:`_split_raw_frontmatter`.
+
+    Plan 010's ``transcription/integrate.py`` needs the same byte-exact
+    frontmatter/body split this module already uses internally for
+    :func:`append_diarisation_hints` - re-serialising frontmatter through
+    ``yaml.dump`` anywhere in that write path would risk reordering or
+    reformatting human-owned YAML. Exposed publicly rather than duplicated.
+    """
+    return _split_raw_frontmatter(text)
+
+
 def _split_raw_frontmatter(text: str) -> tuple[str, str]:
     """Like :func:`_split_frontmatter`, but keeps the frontmatter as raw text.
 

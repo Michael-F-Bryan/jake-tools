@@ -29,6 +29,7 @@ from ..transcription.chapters import (
     ChaptersError,
     run_chapterisation,
 )
+from ..transcription.integrate import IntegrateError, load_products, run_integrate
 from ..transcription.minutes import MinutesError, run_minutes
 from ..transcription.note import parse_note
 from ..transcription.obsidian import ObsidianCliError
@@ -472,3 +473,46 @@ async def minutes(
         raise click.ClickException(str(exc)) from exc
 
     click.echo(result.model_dump_json(indent=2))
+
+
+@transcript.command("integrate")
+@cache_options
+@click.argument(
+    "note_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False, readable=True),
+)
+@click.option(
+    "--run-id",
+    "run_id",
+    required=True,
+    help="Run id from `transcript merge-audio` (the cache key for this run).",
+)
+def integrate(
+    note_path: Path,
+    run_id: str,
+    cache_options: CacheOptions,
+) -> None:
+    """Write this run's products into NOTE_PATH's tier-owned sections.
+
+    Reads the cached polished chapters and minutes for RUN_ID (from
+    `transcript polish` and `transcript minutes`; errors naming whichever
+    prerequisite hasn't run yet), then writes them into the note: `##
+    Chapters` and `## Transcript` are replaced wholesale (pipeline-owned),
+    while the `> [!summary]` callout and `## Discussion Notes` go through a
+    three-way textual merge against this run id's cached baseline - never
+    an LLM - so a human edit is preserved verbatim rather than clobbered.
+    Frontmatter and `## Meeting Prep` are never touched here.
+
+    Makes no LLM calls. Prints the resulting `IntegrationReport` (sections
+    created/replaced/merged/appended, human-preserved unit counts) as
+    JSON.
+    """
+    cache = cache_options.run_cache()
+
+    try:
+        products = load_products(note_path, run_id, cache)
+        report = run_integrate(note_path, products, cache=cache, run_id=run_id)
+    except IntegrateError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(report.model_dump_json(indent=2))
