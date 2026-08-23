@@ -26,6 +26,9 @@ from jake_tools.transcription.cache import RunCache
 from jake_tools.transcription.integrate import (
     BASELINE_NOTES_NAME,
     BASELINE_SUMMARY_NAME,
+    DELETED_NOTES_NAME,
+    DELETED_SUMMARY_NAME,
+    DeletedFingerprints,
     IntegrationReport,
     MissingMinutesError,
     MissingPolishedChaptersError,
@@ -282,6 +285,10 @@ def test_rerun_with_human_untouched_content_is_replaced_and_baselines_updated_on
     assert (run_dir / "baseline_notes.txt").exists()
     assert not (run_dir / "baseline_summary.md").exists()
     assert not (run_dir / "baseline_notes.md").exists()
+    # The deleted-fingerprint artefacts are typed JSON via `RunCache.store`
+    # (a different mechanism from the text baselines), landing as `.json`.
+    assert (run_dir / f"{DELETED_SUMMARY_NAME}.json").exists()
+    assert (run_dir / f"{DELETED_NOTES_NAME}.json").exists()
 
     report = run_integrate(
         note_path,
@@ -418,15 +425,24 @@ def test_rerun_with_human_deleted_bullet_does_not_resurrect_it_but_still_appends
 
     outcome = _outcome(report, "Discussion Notes")
     assert outcome.deleted_units == 1
+    assert outcome.suppressed_units == 1  # "Point B" was withheld, visibly
+
+    # The baseline itself must never contain a unit absent from the note -
+    # deletion-suppression lives in the separate deleted-fingerprint
+    # artefact, not "carried" inside the baseline as a ghost entry.
+    stored_baseline = cache.load_text("run-1", BASELINE_NOTES_NAME)
+    assert stored_baseline is not None
+    assert "Point B" not in stored_baseline
 
 
 def test_deleted_bullet_suppression_persists_across_a_further_rerun(
     tmp_path: Path,
 ) -> None:
-    """The deleted unit's normalised fingerprint is carried into the new
-    baseline, so a *second* re-run - not just the one that first noticed
+    """The deleted unit's normalised fingerprint is carried in the
+    separate `DeletedFingerprints` artefact (never inside the baseline
+    itself), so a *second* re-run - not just the one that first noticed
     the deletion - still doesn't resurrect it, matching the documented
-    "stays gone until manually restored" semantics."""
+    "stays gone until manually retyped" semantics."""
     note_path = _write_note(tmp_path, MEETING_PREP_ONLY)
     cache = RunCache(tmp_path / "cache")
     run_integrate(
@@ -444,6 +460,9 @@ def test_deleted_bullet_suppression_persists_across_a_further_rerun(
         run_id="run-1",
     )
     assert "Point B" not in note_path.read_text()
+    deleted = cache.load("run-1", DELETED_NOTES_NAME, DeletedFingerprints)
+    assert deleted is not None
+    assert deleted.fingerprints == ["- Point B"]
 
     # A further re-run, still regenerating "Point B" every time.
     run_integrate(
@@ -454,6 +473,81 @@ def test_deleted_bullet_suppression_persists_across_a_further_rerun(
     )
 
     assert "Point B" not in note_path.read_text()
+
+
+def test_human_retyping_a_deleted_bullet_restores_it_instead_of_vanishing(
+    tmp_path: Path,
+) -> None:
+    """Re-reviewer's exact regression scenario: an earlier "carry the
+    deleted fingerprint inside the baseline" design made a human's
+    manually-retyped bullet silently vanish again, because the ghost
+    baseline entry made the retyped text look like untouched pipeline
+    content due for replacement. The fix keeps deletion tracking in a
+    separate, restorable set: retyping a deleted bullet must make it
+    survive a run whose fresh pipeline output doesn't even propose it."""
+    note_path = _write_note(tmp_path, MEETING_PREP_ONLY)
+    cache = RunCache(tmp_path / "cache")
+
+    # 1. Write A + B.
+    run_integrate(
+        note_path,
+        _products(notes="- Point A\n- Point B\n"),
+        cache=cache,
+        run_id="run-1",
+    )
+
+    # 2. Human deletes B.
+    note_path.write_text(note_path.read_text().replace("- Point B\n", ""))
+
+    # 3. Re-run regenerating both: B is suppressed.
+    report_2 = run_integrate(
+        note_path,
+        _products(notes="- Point A\n- Point B\n"),
+        cache=cache,
+        run_id="run-1",
+    )
+    assert "Point B" not in note_path.read_text()
+    assert _outcome(report_2, "Discussion Notes").suppressed_units == 1
+    deleted_after_suppression = cache.load(
+        "run-1", DELETED_NOTES_NAME, DeletedFingerprints
+    )
+    assert deleted_after_suppression is not None
+    assert deleted_after_suppression.fingerprints == ["- Point B"]
+
+    # 4. Human retypes B.
+    note_path.write_text(
+        note_path.read_text().replace("- Point A\n", "- Point A\n- Point B\n")
+    )
+    assert "- Point B" in note_path.read_text()
+
+    # 5. Re-run with pipeline output that doesn't even propose B this
+    # time: B must be PRESERVED in the file (not vanish), the deleted set
+    # must no longer contain it, and the report must show it preserved.
+    report_3 = run_integrate(
+        note_path,
+        _products(notes="- Point A\n"),
+        cache=cache,
+        run_id="run-1",
+    )
+
+    final_text = note_path.read_text()
+    assert "- Point B" in final_text  # retyped content survives
+    assert "- Point A" in final_text
+
+    notes_outcome = _outcome(report_3, "Discussion Notes")
+    assert notes_outcome.preserved_units == 1  # the retyped "Point B"
+    assert notes_outcome.suppressed_units == 0  # nothing suppressed this run
+
+    deleted_after_restoration = cache.load(
+        "run-1", DELETED_NOTES_NAME, DeletedFingerprints
+    )
+    assert deleted_after_restoration is not None
+    assert deleted_after_restoration.fingerprints == []
+
+    # And the baseline never held a ghost for "Point B" at any point.
+    stored_baseline = cache.load_text("run-1", BASELINE_NOTES_NAME)
+    assert stored_baseline is not None
+    assert "Point B" not in stored_baseline
 
 
 # --- no baseline but section has content: append-only degraded mode ---------------
