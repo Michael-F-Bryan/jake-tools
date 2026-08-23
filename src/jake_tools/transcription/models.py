@@ -39,7 +39,15 @@ class Utterance(BaseModel):
 
 
 class RawTranscript(BaseModel):
-    """The output of ASR+diarisation, before speakers are resolved."""
+    """The output of ASR+diarisation, before speakers are resolved.
+
+    `utterances` is a total order by non-decreasing `start` (tiebroken by
+    `(start, end, speaker)`), not a guarantee of disjoint spans: genuine
+    cross-talk — two diarised speakers overlapping in time — produces
+    utterances that overlap too (see `transcription/asr.py`'s `align()`).
+    That overlap is real information for the polish stage, not noise to be
+    clamped away.
+    """
 
     clips: list[SourceClip]
     utterances: list[Utterance]

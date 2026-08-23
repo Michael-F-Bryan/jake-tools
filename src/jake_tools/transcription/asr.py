@@ -10,15 +10,32 @@ testing without real models.
 
 :func:`align` assigns each ASR segment the speaker whose diarised turn
 overlaps it the most. When a segment's overlap spans more than one speaker
-(diarisation switched mid-segment), the segment is split at the diarisation
-boundaries, with its text divided across the split words proportionally to
-each side's share of the overlapping duration — an honest-but-imperfect
-split, not a word-aligned one; the polish stage (plan 008) carries the
-residual noise. A diarised turn with no overlapping ASR text produces no
-utterance at all: :func:`align` walks the ASR segments (the carriers of
-text), so diarisation-only spans are silently dropped rather than emitted as
+(diarisation switched mid-segment, or genuinely overlapping cross-talk —
+pyannote's overlap-aware segmentation reports both), the segment is split at
+the diarisation boundaries, with its text divided across the split words
+proportionally to each side's share of the overlapping duration — an
+honest-but-imperfect split, not a word-aligned one; the polish stage (plan
+008) carries the residual noise.
+
+**Ordering contract**: :func:`align`'s output is a total order by
+non-decreasing `start`, tiebroken by `(start, end, speaker)` — not a
+guarantee of disjoint (non-overlapping) spans. Real cross-talk produces
+genuinely overlapping diarised turns (e.g. `SPEAKER_00` 0-6s and
+`SPEAKER_01` 4-10s both overlapping one ASR segment); the resulting
+utterances overlap too, faithfully, because that overlap *is* the
+information — collapsing or truncating it would just hide the cross-talk
+from the polish stage that's supposed to untangle it. What's guaranteed:
+the returned list is sorted under that tiebreak, and identical inputs
+always produce identical output.
+
+A diarised turn with no overlapping ASR text produces no utterance at all:
+:func:`align` walks the ASR segments (the carriers of text), so
+diarisation-only spans are silently dropped rather than emitted as
 empty-text utterances — they are far more often diarisation noise (breaths,
-cross-talk fragments) than real unheard speech.
+cross-talk fragments) than real unheard speech. The same drop applies to an
+individual split share that rounds down to zero words when there aren't
+enough words in a segment to give every genuine speaker at least one — see
+:func:`_apportion`.
 """
 
 from __future__ import annotations
@@ -177,13 +194,39 @@ def _merge_runs(
 
 
 def _apportion(total: int, weights: Sequence[float]) -> list[int]:
-    """Split `total` items across `weights` proportionally (largest-remainder method)."""
+    """Split `total` words across `weights` proportionally, guaranteeing every
+    genuine speaker at least one word when there are enough to go around.
+
+    A plain largest-remainder split can round a real speaker's share down to
+    zero (e.g. 1 word split 9.9s/0.1s rounds the second speaker to nothing),
+    which would silently produce an empty-text utterance — the one thing
+    this module's docstring promises never happens. So: seed every bucket
+    with 1 word first, then apportion the remainder by largest-remainder
+    method for proportionality. If there are fewer words than buckets (an
+    unavoidable case — you cannot give two speakers a non-empty share of one
+    word), the largest-weight buckets get one word each and the rest get
+    zero; :func:`_split_segment` drops those zero-count buckets, same as it
+    drops a segment with no overlap at all.
+    """
+    count = len(weights)
+    if total <= 0:
+        return [0] * count
+    if total < count:
+        order = sorted(range(count), key=lambda i: (-weights[i], i))
+        counts = [0] * count
+        for index in order[:total]:
+            counts[index] = 1
+        return counts
+
+    counts = [1] * count
+    remaining = total - count
     weight_sum = sum(weights)
-    raw = [total * weight / weight_sum for weight in weights]
-    counts = [int(share) for share in raw]
-    remainder = total - sum(counts)
-    order = sorted(range(len(weights)), key=lambda i: raw[i] - counts[i], reverse=True)
-    for index in order[:remainder]:
+    raw = [remaining * weight / weight_sum for weight in weights]
+    extra = [int(share) for share in raw]
+    counts = [seed + share for seed, share in zip(counts, extra, strict=True)]
+    leftover = remaining - sum(extra)
+    order = sorted(range(count), key=lambda i: (-(raw[i] - extra[i]), i))
+    for index in order[:leftover]:
         counts[index] += 1
     return counts
 
@@ -216,14 +259,15 @@ def _split_segment(
     utterances: list[Utterance] = []
     index = 0
     for (speaker, start, end), count in zip(clipped, word_counts, strict=True):
-        utterances.append(
-            Utterance(
-                start=start,
-                end=end,
-                speaker=speaker,
-                text=" ".join(words[index : index + count]),
+        if count > 0:
+            utterances.append(
+                Utterance(
+                    start=start,
+                    end=end,
+                    speaker=speaker,
+                    text=" ".join(words[index : index + count]),
+                )
             )
-        )
         index += count
     return utterances
 
@@ -234,26 +278,29 @@ def align(
     """Assign each ASR segment a speaker from the diarised turns it overlaps.
 
     Pure and model-free — every ASR/diarisation call above is thin glue
-    around this. Walks `asr_segments` in order (callers must pass them
-    chronologically; parakeet already does) and only ever subdivides within
-    a single segment's own span, so the returned utterances stay
-    monotonically non-decreasing in time whenever the input segments are.
+    around this.
 
-    A segment whose overlapping diarised turns are all the same speaker is
-    kept whole, with its own timestamps. A segment overlapping two or more
-    distinct speakers is a mid-segment switch: it is split at the diarised
-    turn boundaries (clipped to the segment's own span), with its words
-    divided across the split proportionally to each side's share of the
-    overlapping duration. A segment with no diarised overlap at all keeps
-    its own span under :data:`UNKNOWN_SPEAKER`, rather than being dropped —
-    ASR still heard something, so that's preserved for a human or the
-    polish stage to judge.
+    **Contract**: the returned list is a total order by non-decreasing
+    `start`, tiebroken by `(start, end, speaker)`; it is deterministic for
+    identical inputs. It is *not* a guarantee of disjoint (non-overlapping)
+    spans — see the module docstring. A segment whose overlapping diarised
+    turns are all the same speaker is kept whole, with its own timestamps. A
+    segment overlapping two or more distinct speakers — a mid-segment
+    switch, or genuine cross-talk — is split at the diarised turn boundaries
+    (clipped to the segment's own span, consecutive same-speaker turns
+    merged first), with its words divided across the split proportionally
+    to each side's share of the overlapping duration; when the turns
+    genuinely overlap in time, so do the resulting utterances. A segment
+    with no diarised overlap at all keeps its own span under
+    :data:`UNKNOWN_SPEAKER`, rather than being dropped — ASR still heard
+    something, so that's preserved for a human or the polish stage to
+    judge.
     """
     utterances: list[Utterance] = []
     for segment in asr_segments:
         overlapping = sorted(
             (turn for turn in diarised_turns if _overlap(segment, turn) > 0),
-            key=lambda turn: turn.start,
+            key=lambda turn: (turn.start, turn.end, turn.speaker),
         )
         if not overlapping:
             utterances.append(
@@ -280,6 +327,11 @@ def align(
 
         utterances.extend(_split_segment(segment, _merge_runs(overlapping)))
 
+    # Per-segment processing already yields locally-sorted output, but the
+    # ordering contract is a property of the *whole* returned list — sort
+    # explicitly so it holds regardless of segment order or cross-segment
+    # overlap, with a fully deterministic tiebreak.
+    utterances.sort(key=lambda u: (u.start, u.end, u.speaker))
     return utterances
 
 
