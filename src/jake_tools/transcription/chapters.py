@@ -31,11 +31,24 @@ from .speakers import RESOLVED_TRANSCRIPT_CACHE_NAME
 # The cache name `transcript chapterise` stores its output under.
 CHAPTERS_CACHE_NAME = "chapters"
 
-# Shared (de)serialiser for the bare `list[ChapterSpan]` this stage produces
-# - unlike other stages, the output isn't itself a `BaseModel`, so neither
-# `RunCache.store` nor `model_dump_json` apply directly; both the cache
-# write and the CLI's stdout print go through this adapter.
+# Adapter for the CLI's stdout print, which is a bare `list[ChapterSpan]`
+# (the porcelain contract) - not what's written to disk. See `ChapterList`
+# for the on-disk shape.
 CHAPTERS_ADAPTER: TypeAdapter[list[ChapterSpan]] = TypeAdapter(list[ChapterSpan])
+
+
+class ChapterList(BaseModel):
+    """On-disk wrapper for `chapters.json`.
+
+    `chapterise`/`run_chapterisation`'s real output is a bare
+    `list[ChapterSpan]`, but `RunCache.store`/`.load` only round-trip a
+    `BaseModel` (like every sibling stage's cache artefact), so this wraps
+    the list for storage only. Plans 008-009 import this to load
+    `chapters.json` back out of the run cache.
+    """
+
+    chapters: list[ChapterSpan]
+
 
 _RETRY_NOTE = (
     "Your previous answer collapsed the whole meeting into a single "
@@ -285,7 +298,5 @@ async def run_chapterisation(
         raise MissingResolvedTranscriptError(run_id)
 
     chapters = await chapterise(transcript, agent=agent)
-    cache.store_text(
-        run_id, CHAPTERS_CACHE_NAME, CHAPTERS_ADAPTER.dump_json(chapters).decode()
-    )
+    cache.store(run_id, CHAPTERS_CACHE_NAME, ChapterList(chapters=chapters))
     return chapters

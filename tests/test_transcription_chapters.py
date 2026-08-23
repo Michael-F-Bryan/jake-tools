@@ -37,6 +37,7 @@ from jake_tools.transcription.cache import RunCache
 from jake_tools.transcription.chapters import (
     CHAPTERS_ADAPTER,
     ChapterBoundary,
+    ChapterList,
     DegenerateChaptersError,
     MissingResolvedTranscriptError,
     _repair_boundaries,
@@ -336,9 +337,15 @@ async def test_run_chapterisation_stores_chapters_json_and_returns_them(
 
     chapters = await run_chapterisation("run-1", agent=agent, cache=cache)
 
-    stored_text = cache.load_text("run-1", "chapters")
-    assert stored_text is not None
-    assert CHAPTERS_ADAPTER.validate_json(stored_text) == chapters
+    run_dir = cache.run_dir("run-1")
+    # The artefact on disk must actually be `chapters.json`, stored via the
+    # typed cache path like every sibling stage - not `chapters.txt` via
+    # `store_text` (the bug this test now guards against).
+    assert (run_dir / "chapters.json").exists()
+    assert not (run_dir / "chapters.txt").exists()
+    loaded = cache.load("run-1", "chapters", ChapterList)
+    assert loaded is not None
+    assert loaded.chapters == chapters
 
 
 # --- CLI: delegation, prerequisite error, and the effort="low" default -----
