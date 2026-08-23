@@ -15,6 +15,7 @@ from pathlib import Path
 
 import click
 
+from ..claude import ClaudeAgentError
 from ..transcription.adapt import AdaptError, adapt_transcript
 from ..transcription.asr import TranscriberError, transcribe_merged_audio
 from ..transcription.audio import (
@@ -25,6 +26,7 @@ from ..transcription.audio import (
 )
 from ..transcription.note import parse_note
 from ..transcription.obsidian import ObsidianCliError
+from ..transcription.speakers import SpeakersError, run_speaker_resolution
 from .options import AgentOptions, agent_options, coro
 from .transcript_options import (
     AudioOptions,
@@ -40,6 +42,12 @@ from .transcript_options import (
 # The cache name both `asr` and `adapt` store `RawTranscript` under: whichever
 # stage produced it, downstream stages read the same key from the run cache.
 _RAW_TRANSCRIPT_CACHE_NAME = "raw_transcript"
+
+# `transcript speakers` exits with this code (never 0 or the generic
+# ClickException code 1) when unresolved clusters need a human answer.
+# Stable contract: plan 011's porcelain and any coordinating agent branch on
+# it to know a Discord relay is needed before re-running with `--assign`.
+NEEDS_INPUT_EXIT_CODE = 3
 
 
 @click.group()
@@ -174,3 +182,94 @@ async def adapt(
         cache.store(run_id, _RAW_TRANSCRIPT_CACHE_NAME, result)
 
     click.echo(result.model_dump_json(indent=2))
+
+
+@transcript.command("speakers")
+@agent_options
+@audio_options
+@cache_options
+@click.argument(
+    "note_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False, readable=True),
+)
+@click.option(
+    "--run-id",
+    "run_id",
+    required=True,
+    help="Run id from `transcript merge-audio` (the cache key for this run).",
+)
+@click.option(
+    "--assign",
+    "assign",
+    multiple=True,
+    metavar="CLUSTER=NAME",
+    help=(
+        "Confirm one cluster's speaker, e.g. --assign \"SPEAKER_03=Nikki "
+        'Staltari" (repeatable). Assignments are ground truth: merged into '
+        "the run cache's assignments.json and never re-litigated by the "
+        'resolver, in this run or a later one. --assign "SPEAKER_04=Unknown" '
+        "records that a cluster could not be identified."
+    ),
+)
+@click.option(
+    "--finalise",
+    "finalise",
+    is_flag=True,
+    help=(
+        "Map any clusters still unresolved after --assign and the LLM's "
+        'proposals to "Unknown", instead of asking for more input.'
+    ),
+)
+@coro
+async def speakers(
+    note_path: Path,
+    run_id: str,
+    assign: tuple[str, ...],
+    finalise: bool,
+    agent_options: AgentOptions,
+    audio_options: AudioOptions,
+    cache_options: CacheOptions,
+) -> None:
+    """Resolve diarisation clusters (SPEAKER_NN) to attendee names.
+
+    Reads the cached raw transcript for RUN_ID (from `transcript asr` or
+    `transcript adapt --run-id`), applies any --assign overrides, and asks
+    an LLM to propose names for every other cluster from NOTE_PATH's
+    Attendees list and Meeting Prep section (hints in Michael's own
+    phrasing, wherever they appear in that section). Only high-confidence
+    proposals are accepted, plus medium-confidence ones a hint corroborates
+    - never a guess.
+
+    A cluster that stays unresolved gets 2-3 short audio snippets cut from
+    the merged recording. If any remain and --finalise was not given, this
+    prints `{"status": "needs_input", "requests": [...]}` and exits with
+    code 3 (a stable contract: relay the requests - e.g. over Discord - and
+    re-run with more --assign flags, or with --finalise to give up and
+    label the rest "Unknown").
+
+    Once every cluster is resolved, the result is cached as
+    resolved_transcript.json, newly confirmed names are appended as hint
+    bullets under Meeting Prep's "Diarisation hints:" list - the only
+    sanctioned write into that human-owned section - and this prints
+    `{"status": "resolved", ...}` and exits 0.
+    """
+    agent = agent_options.agent()
+    audio_tool = audio_options.audio_tool()
+    cache = cache_options.run_cache()
+
+    try:
+        result = await run_speaker_resolution(
+            note_path,
+            run_id,
+            assign=assign,
+            finalise=finalise,
+            agent=agent,
+            audio_tool=audio_tool,
+            cache=cache,
+        )
+    except (SpeakersError, ClaudeAgentError, AudioToolError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(result.model_dump_json(indent=2))
+    if result.status == "needs_input":
+        raise click.exceptions.Exit(NEEDS_INPUT_EXIT_CODE)

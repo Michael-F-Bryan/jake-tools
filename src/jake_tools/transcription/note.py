@@ -15,6 +15,7 @@ so the splitter only needs to recognise the ``#`` prefix form.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -185,3 +186,148 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
     return [value]
+
+
+_MEETING_PREP_HEADING = "meeting prep"
+
+
+def append_diarisation_hints(path: Path, lines: Sequence[str]) -> bool:
+    """Append ``lines`` as bullets under Meeting Prep's ``Diarisation hints:`` list.
+
+    This is the **only** sanctioned write into a human-owned note section
+    (plan 006's speaker resolution). It is scoped structurally, not just by
+    convention: the note is split into ``NoteSection``s exactly as
+    :func:`parse_note` would, only the ``Meeting Prep`` section's body is
+    ever touched, and the whole document is reassembled with
+    :func:`render_body` — the same byte-for-byte reconstruction property
+    plan 010's surgical writes will depend on. Frontmatter is preserved as
+    raw text (never round-tripped through ``yaml.dump``, which could
+    reorder keys or reformat values) so nothing outside Meeting Prep can
+    change, not even incidentally.
+
+    The ``Diarisation hints:`` bullet is created at the end of Meeting Prep
+    when absent (and nothing else is created — no Meeting Prep section
+    means this is a silent no-op). A line already present as a hint bullet
+    (compared stripped, verbatim) is never duplicated, so calling this
+    repeatedly with overlapping input is safe.
+
+    Returns ``True`` if the file changed, ``False`` if every line was
+    already present or there was no Meeting Prep section to append into.
+    """
+    text = path.read_text()
+    prefix, body = _split_raw_frontmatter(text)
+    sections = _split_sections(body)
+
+    target_index = next(
+        (
+            index
+            for index, section in enumerate(sections)
+            if section.heading is not None
+            and section.heading.strip().lower() == _MEETING_PREP_HEADING
+        ),
+        None,
+    )
+    if target_index is None:
+        return False  # no Meeting Prep section: this helper creates nothing
+
+    new_body, changed = _append_hints_to_section_body(
+        sections[target_index].body, lines
+    )
+    if not changed:
+        return False
+
+    sections[target_index] = sections[target_index].model_copy(
+        update={"body": new_body}
+    )
+    path.write_text(prefix + render_body(sections))
+    return True
+
+
+def _split_raw_frontmatter(text: str) -> tuple[str, str]:
+    """Like :func:`_split_frontmatter`, but keeps the frontmatter as raw text.
+
+    :func:`append_diarisation_hints` needs byte-fidelity outside Meeting
+    Prep, and re-serialising frontmatter through ``yaml.dump`` risks
+    reordering keys or reformatting values it merely parsed. This returns
+    the frontmatter block's exact original text (delimiters included) so
+    mutation only ever touches the body.
+    """
+    lines = text.split("\n")
+    if not lines or lines[0] != "---":
+        return "", text
+    try:
+        closing_index = lines.index("---", 1)
+    except ValueError:
+        return "", text
+    prefix = "\n".join(lines[: closing_index + 1]) + "\n"
+    body = "\n".join(lines[closing_index + 1 :])
+    return prefix, body
+
+
+def _append_hints_to_section_body(body: str, lines: Sequence[str]) -> tuple[str, bool]:
+    wanted = list(dict.fromkeys(line.strip() for line in lines if line.strip()))
+    if not wanted:
+        return body, False
+
+    split = body.split("\n")
+    parent_index, children_start, children_end, child_indent = _locate_hints_bullet(
+        split
+    )
+
+    if parent_index is None:
+        block = "- Diarisation hints:\n" + "".join(f"\t- {line}\n" for line in wanted)
+        prefix = "" if body == "" else (body if body.endswith("\n") else body + "\n")
+        return prefix + block, True
+
+    existing = {_bullet_text(split[i]) for i in range(children_start, children_end)}
+    to_add = [line for line in wanted if line not in existing]
+    if not to_add:
+        return body, False
+
+    indent = child_indent if child_indent is not None else "\t"
+    inserted = [f"{indent}- {line}" for line in to_add]
+    new_split = split[:children_end] + inserted + split[children_end:]
+    return "\n".join(new_split), True
+
+
+def _bullet_text(line: str) -> str:
+    match = _BULLET_RE.match(line)
+    assert match is not None
+    return match.group(2).strip()
+
+
+def _locate_hints_bullet(
+    lines: list[str],
+) -> tuple[int | None, int, int, str | None]:
+    """Find the ``Diarisation hints:`` bullet's children within ``lines``.
+
+    Mirrors :func:`_extract_diarisation_hints`'s scan so the two stay
+    consistent about what counts as a child bullet. Returns
+    ``(parent_index, children_start, children_end, child_indent)``, or
+    ``(None, 0, 0, None)`` when no such bullet exists. ``child_indent`` is
+    the exact leading whitespace of the existing children (``None`` when
+    the bullet has none yet), so newly appended lines match their style.
+    """
+    for index, line in enumerate(lines):
+        match = _BULLET_RE.match(line)
+        if match is None:
+            continue
+        if match.group(2).strip().lower().rstrip(":") != _DIARISATION_HINTS_LABEL:
+            continue
+        parent_indent = len(match.group(1).expandtabs())
+        cursor = index + 1
+        child_indent: str | None = None
+        while cursor < len(lines):
+            candidate = lines[cursor]
+            if not candidate.strip():
+                break
+            child = _BULLET_RE.match(candidate)
+            if child is None:
+                break
+            if len(child.group(1).expandtabs()) <= parent_indent:
+                break
+            if child_indent is None:
+                child_indent = child.group(1)
+            cursor += 1
+        return index, index + 1, cursor, child_indent
+    return None, 0, 0, None
