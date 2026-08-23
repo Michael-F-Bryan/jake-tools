@@ -15,7 +15,7 @@ from pathlib import Path
 
 import click
 
-from ..claude import ClaudeAgentError
+from ..claude import ClaudeAgent, ClaudeAgentError
 from ..transcription.adapt import AdaptError, adapt_transcript
 from ..transcription.asr import TranscriberError, transcribe_merged_audio
 from ..transcription.audio import (
@@ -23,6 +23,11 @@ from ..transcription.audio import (
     AudioToolError,
     NoAudioEmbedsError,
     merge_note_audio,
+)
+from ..transcription.chapters import (
+    CHAPTERS_ADAPTER,
+    ChaptersError,
+    run_chapterisation,
 )
 from ..transcription.note import parse_note
 from ..transcription.obsidian import ObsidianCliError
@@ -273,3 +278,53 @@ async def speakers(
     click.echo(result.model_dump_json(indent=2))
     if result.status == "needs_input":
         raise click.exceptions.Exit(NEEDS_INPUT_EXIT_CODE)
+
+
+@transcript.command("chapterise")
+@agent_options
+@cache_options
+@click.option(
+    "--run-id",
+    "run_id",
+    required=True,
+    help="Run id from `transcript merge-audio` (the cache key for this run).",
+)
+@coro
+async def chapterise(
+    run_id: str,
+    agent_options: AgentOptions,
+    cache_options: CacheOptions,
+) -> None:
+    """Chapterise the resolved transcript into topic-based spans.
+
+    Reads the cached resolved transcript for RUN_ID (from `transcript
+    speakers`; errors naming that prerequisite if it hasn't run yet), asks
+    an LLM for chapter boundaries over a compact index/speaker/text
+    rendering of the raw dialogue (chapter boundaries need topic flow, not
+    clean prose, so the un-polished text is sufficient), and
+    deterministically repairs the boundaries in code - sorted, clamped,
+    deduplicated - so every utterance ends up in exactly one chapter,
+    never trusting that arithmetic to the model. Stores the result as
+    `chapters.json` and prints it to stdout as a JSON array.
+
+    This is a cheap-model stage: unless you pass `--effort` explicitly,
+    this command layers `effort="low"` onto the agent spec built from
+    `--model`/`--effort` (`AgentOptions.spec()`), rather than changing the
+    `agent_options` decorator's own default.
+    """
+    spec = agent_options.spec()
+    if agent_options.effort is None:
+        # `--effort` was not passed, so `AgentOptions.effort` is still its
+        # unset default (None) - the one case this stage's own "low"
+        # default should apply. An explicit `--effort` (including a
+        # user-chosen "low") is captured above and left alone.
+        spec = spec.model_copy(update={"effort": "low"})
+    agent = ClaudeAgent(defaults=spec)
+    cache = cache_options.run_cache()
+
+    try:
+        chapters = await run_chapterisation(run_id, agent=agent, cache=cache)
+    except (ChaptersError, ClaudeAgentError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(CHAPTERS_ADAPTER.dump_json(chapters, indent=2).decode())
