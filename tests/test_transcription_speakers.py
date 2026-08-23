@@ -208,7 +208,7 @@ async def test_low_confidence_proposal_becomes_a_snippet_request_with_cut_clips(
                 start=40.0, end=42.0, speaker="SPEAKER_02", text="Anyway, moving on."
             ),
         ],
-        audio_sha256=None,
+        audio_sha256="deadbeef",  # an audio-sourced run: has a real merged recording
     )
     agent, _fake = _fake_agent(
         [
@@ -222,6 +222,7 @@ async def test_low_confidence_proposal_becomes_a_snippet_request_with_cut_clips(
     )
     audio_tool = FakeAudioTool()
     merged_audio = tmp_path / "merged.m4a"
+    merged_audio.write_bytes(b"fake merged audio")  # has_audio needs it to exist
     snippet_dir = tmp_path / "run" / "snippets"
 
     resolved, requests = await resolve(
@@ -250,6 +251,60 @@ async def test_low_confidence_proposal_becomes_a_snippet_request_with_cut_clips(
     assert all(call[0] == merged_audio for call in audio_tool.cut_calls)
     for path in request.clip_paths:
         assert Path(path).exists()
+
+
+async def test_low_confidence_proposal_on_a_text_sourced_run_yields_quotes_not_clips(
+    tmp_path: Path,
+) -> None:
+    """A text-sourced run (plan 005's Gemini/Teams adapter) never has a
+    merged recording: `audio_sha256` is `None` and no `merged.m4a` was ever
+    written. `resolve` must still produce a `SnippetRequest` for an
+    unresolved cluster - just with `clip_paths=[]` and the representative
+    quotes folded into `context` as text, never a cut against a file that
+    doesn't exist."""
+    note = _note(attendees=["Ada Lovelace", "Grace Hopper"])
+    transcript = RawTranscript(
+        clips=[],
+        utterances=[
+            Utterance(start=0.0, end=1.0, speaker="SPEAKER_02", text="Hello there."),
+            Utterance(
+                start=40.0, end=42.0, speaker="SPEAKER_02", text="Anyway, moving on."
+            ),
+        ],
+        audio_sha256=None,
+    )
+    agent, _fake = _fake_agent(
+        [
+            {
+                "cluster": "SPEAKER_02",
+                "name": None,
+                "confidence": "low",
+                "reasoning": "not enough to go on",
+            }
+        ]
+    )
+    audio_tool = FakeAudioTool()
+    merged_audio = tmp_path / "merged.m4a"  # deliberately never created
+    snippet_dir = tmp_path / "run" / "snippets"
+
+    resolved, requests = await resolve(
+        note,
+        transcript,
+        agent=agent,
+        assignments=[],
+        audio_tool=audio_tool,
+        merged_audio=merged_audio,
+        snippet_dir=snippet_dir,
+    )
+
+    assert [u.speaker for u in resolved.utterances] == ["SPEAKER_02", "SPEAKER_02"]
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.cluster == "SPEAKER_02"
+    assert request.clip_paths == []
+    assert audio_tool.cut_calls == []  # never cut against a nonexistent file
+    assert "Hello there." in request.context
+    assert "Anyway, moving on." in request.context
 
 
 async def test_no_proposal_at_all_for_a_cluster_also_becomes_a_snippet_request(
@@ -518,10 +573,12 @@ async def test_live_resolve_follows_natural_meeting_prep_hints_and_never_guesses
             ),
             Utterance(start=17.0, end=17.3, speaker="SPEAKER_02", text="Right."),
         ],
-        audio_sha256=None,
+        audio_sha256="fake-hash-for-live-test",
     )
     agent = ClaudeAgent(defaults=AgentSpec(effort="low"))
     audio_tool = FakeAudioTool()
+    merged_audio = tmp_path / "merged.m4a"
+    merged_audio.write_bytes(b"fake merged audio")  # has_audio needs it to exist
 
     resolved, requests = await resolve(
         note,
@@ -529,7 +586,7 @@ async def test_live_resolve_follows_natural_meeting_prep_hints_and_never_guesses
         agent=agent,
         assignments=[],
         audio_tool=audio_tool,
-        merged_audio=tmp_path / "merged.m4a",
+        merged_audio=merged_audio,
         snippet_dir=tmp_path / "snippets",
     )
 
@@ -699,6 +756,12 @@ async def test_run_speaker_resolution_raises_without_a_cached_raw_transcript(
 async def test_run_speaker_resolution_needs_input_when_unresolved_and_not_finalised(
     tmp_path: Path,
 ) -> None:
+    """Also covers the text-sourced run case: `audio_sha256=None` and no
+    `merged.m4a` ever written to the run dir (plan 005's Gemini/Teams ramp,
+    composed with speaker resolution by plan 011). The unresolvable cluster
+    must still surface as a `needs_input` `SnippetRequest` - with
+    `clip_paths=[]` and its representative quotes folded into `context` as
+    text - never a cut attempted against a file that was never created."""
     cache = RunCache(tmp_path / "cache")
     cache.store(
         "run-1",
@@ -714,6 +777,7 @@ async def test_run_speaker_resolution_needs_input_when_unresolved_and_not_finali
     agent, _fake = _fake_agent(
         [{"cluster": "SPEAKER_00", "name": None, "confidence": "low", "reasoning": "?"}]
     )
+    audio_tool = FakeAudioTool()
 
     result = await run_speaker_resolution(
         _cache_note(tmp_path),
@@ -721,14 +785,20 @@ async def test_run_speaker_resolution_needs_input_when_unresolved_and_not_finali
         assign=(),
         finalise=False,
         agent=agent,
-        audio_tool=FakeAudioTool(),
+        audio_tool=audio_tool,
         cache=cache,
     )
 
     assert result.status == "needs_input"
     assert result.run_id == "run-1"
     assert len(result.requests) == 1
-    assert result.requests[0].cluster == "SPEAKER_00"
+    request = result.requests[0]
+    assert request.cluster == "SPEAKER_00"
+    assert request.clip_paths == []
+    assert request.context != ""
+    assert "hi" in request.context  # the representative quote, as text
+    assert audio_tool.cut_calls == []  # never cut against a nonexistent merged.m4a
+    assert not (tmp_path / "cache" / "run-1" / "merged.m4a").exists()
     assert cache.load("run-1", "resolved_transcript", RawTranscript) is None
 
 

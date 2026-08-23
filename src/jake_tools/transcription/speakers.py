@@ -16,7 +16,11 @@ Michael'"). This module never guesses past that evidence:
   of short audio snippets cut from the merged recording plus the
   already-resolved dialogue around them, for a human (via Discord, outside
   this module's scope) to identify. It is never silently force-assigned to
-  a silent attendee or dropped.
+  a silent attendee or dropped. A text-sourced run (plan 005's Gemini/Teams
+  adapter — no merged recording ever existed) gets the same request shape
+  with ``clip_paths=[]`` and the representative quotes folded into
+  ``context`` as text instead — never a cut against a file that isn't
+  there.
 
 :func:`resolve` is the pure per-run step: given a note, a raw transcript, an
 agent, and the ground-truth assignments, it returns the transcript with
@@ -181,14 +185,19 @@ async def resolve(
     2. Every other cluster present in `transcript` is asked about in one LLM
        call; `high`-confidence proposals are accepted, as are `medium`
        ones corroborated by a diarisation hint mentioning the name.
-    3. Every cluster that stays unresolved gets a `SnippetRequest`: 2-3
-       representative utterances cut from `merged_audio` into
-       `snippet_dir`, with the surrounding already-resolved dialogue as
-       context.
+    3. Every cluster that stays unresolved gets a `SnippetRequest`: when
+       `merged_audio` is a real recording (see `_has_mergeable_audio`), 2-3
+       representative utterances are cut from it into `snippet_dir`; for a
+       text-sourced run (plan 005's adapter - there is no merged recording)
+       the same representative quotes are folded into `context` as text
+       instead, with `clip_paths=[]`. Either way the surrounding
+       already-resolved dialogue is included as context. Never errors, never
+       fabricates a clip path, and never skips a cluster.
 
     Only present clusters are ever considered - a silent attendee (listed
     in Attendees but never a speaker) is never force-assigned to anything.
     """
+    has_audio = _has_mergeable_audio(transcript, merged_audio)
     assigned = {item.cluster: item.name for item in assignments}
     present_clusters = list(dict.fromkeys(u.speaker for u in transcript.utterances))
     unassigned_clusters = [c for c in present_clusters if c not in assigned]
@@ -246,10 +255,27 @@ async def resolve(
             audio_tool=audio_tool,
             merged_audio=merged_audio,
             snippet_dir=snippet_dir,
+            has_audio=has_audio,
         )
         for cluster in unresolved_clusters
     ]
     return resolved_transcript, requests
+
+
+def _has_mergeable_audio(transcript: RawTranscript, merged_audio: Path) -> bool:
+    """Is there an actual merged recording to cut snippets from?
+
+    A text-sourced run (`transcript adapt`, plan 005's Gemini/Teams ramp)
+    never has one: `RawTranscript.audio_sha256` is `None`, and no
+    `merged.m4a` was ever written to the run directory. Neither signal
+    alone is trustworthy on its own - `audio_sha256 is None` doesn't prove
+    the file is absent (paranoia, not a real path), and `merged_audio.
+    exists()` alone could be fooled by a stale/relocated file - so this
+    requires both: a `RawTranscript` that claims audio provenance *and* a
+    file that is actually there right now. Anything else means "don't try
+    to cut, and don't fabricate a path" (see `resolve`/`_snippet_request`).
+    """
+    return transcript.audio_sha256 is not None and merged_audio.exists()
 
 
 def _corroborated_by_hint(name: str, hints: Sequence[str]) -> bool:
@@ -343,6 +369,7 @@ def _snippet_request(
     audio_tool: AudioTool,
     merged_audio: Path,
     snippet_dir: Path,
+    has_audio: bool,
 ) -> SnippetRequest:
     cluster_indices = [
         i for i, u in enumerate(original_utterances) if u.speaker == cluster
@@ -353,16 +380,30 @@ def _snippet_request(
     )
     picked_positions = [cluster_indices[i] for i in local_picks]
 
-    snippet_dir.mkdir(parents=True, exist_ok=True)
     clip_paths: list[str] = []
-    for n, position in enumerate(picked_positions, start=1):
-        utterance = original_utterances[position]
-        out = snippet_dir / f"{cluster}-{n}.m4a"
-        audio_tool.cut(merged_audio, utterance.start, utterance.end, out)
-        clip_paths.append(str(out))
+    quote_lines: list[str] = []
+    if has_audio:
+        snippet_dir.mkdir(parents=True, exist_ok=True)
+        for n, position in enumerate(picked_positions, start=1):
+            utterance = original_utterances[position]
+            out = snippet_dir / f"{cluster}-{n}.m4a"
+            audio_tool.cut(merged_audio, utterance.start, utterance.end, out)
+            clip_paths.append(str(out))
+    else:
+        # No merged recording to cut from (a text-sourced run): fall back to
+        # the same representative picks as text, so there's still something
+        # for a human to identify the cluster from over Discord.
+        quote_lines = [
+            f'{cluster}: "{original_utterances[position].text}"'
+            for position in picked_positions
+        ]
 
-    context = "\n".join(_context_lines(cluster, picked_positions, resolved_utterances))
-    return SnippetRequest(cluster=cluster, clip_paths=clip_paths, context=context)
+    context_lines = quote_lines + _context_lines(
+        cluster, picked_positions, resolved_utterances
+    )
+    return SnippetRequest(
+        cluster=cluster, clip_paths=clip_paths, context="\n".join(context_lines)
+    )
 
 
 def _context_lines(
