@@ -30,8 +30,12 @@ from click.testing import CliRunner
 
 from jake_tools.claude import AgentSpec, ClaudeAgent, ClaudeAgentError
 from jake_tools.cli import main
-from jake_tools.transcription.asr import Transcriber
-from jake_tools.transcription.audio import AudioTool
+from jake_tools.transcription.asr import Transcriber, TranscriberError
+from jake_tools.transcription.audio import (
+    AudioEmbedResolutionError,
+    AudioTool,
+    NoAudioEmbedsError,
+)
 from jake_tools.transcription.cache import RunCache
 from jake_tools.transcription.integrate import IntegrationReport
 from jake_tools.transcription.models import (
@@ -48,7 +52,7 @@ from jake_tools.transcription.pipeline import (
     RunReport,
     run_pipeline,
 )
-from jake_tools.transcription.speakers import SpeakersResponse
+from jake_tools.transcription.speakers import SpeakersError, SpeakersResponse
 
 # `jake_tools.cli`'s __init__ rebinds the names `transcribe`/`transcript` to
 # their Click commands, shadowing the submodules (see `test_transcript_cli.py`)
@@ -771,38 +775,41 @@ def test_transcribe_cli_delegates_to_run_pipeline_and_prints_the_report(
     assert captured["max_concurrency"] == 2
 
 
-def test_transcribe_cli_reports_domain_errors_as_a_clean_click_exception(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+# One representative instance per error family `_STAGE_ERRORS` maps to a
+# clean `ClickException` - including the two `audio.py` raises directly as
+# `RuntimeError` (never through `AudioToolError`), the specific gap a
+# moved/renamed audio file exercises in production (a previous version of
+# this test only covered `NoEntryRampError`, which stayed green even after
+# `AudioEmbedResolutionError`/`NoAudioEmbedsError` were dropped from
+# `_STAGE_ERRORS` - a raw, unwrapped traceback would not have failed it).
+_ERROR_CASES: list[tuple[str, Exception]] = [
+    ("pipeline (no entry ramp)", NoEntryRampError(Path("note.md"))),
+    ("audio embed resolution failure", AudioEmbedResolutionError("no such clip")),
+    ("no audio embeds at all", NoAudioEmbedsError("nothing to merge")),
+    ("speaker resolution", SpeakersError("no cached raw transcript")),
+    ("transcriber", TranscriberError("HF_TOKEN missing")),
+    ("obsidian CLI", ObsidianCliError("vault not found")),
+    ("claude agent", ClaudeAgentError("agent call failed")),
+]
+
+
+@pytest.mark.parametrize("case", _ERROR_CASES, ids=[label for label, _ in _ERROR_CASES])
+def test_transcribe_cli_reports_each_stage_error_family_as_a_clean_click_exception(
+    case: tuple[str, Exception], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _label, error = case
     note_path = tmp_path / "note.md"
     note_path.write_text("placeholder")
 
     async def raising_run_pipeline(*args: object, **kwargs: object) -> PipelineOutcome:
-        raise NoEntryRampError(note_path)
+        raise error
 
     monkeypatch.setattr(transcribe_cli, "run_pipeline", raising_run_pipeline)
 
     result = CliRunner().invoke(main, ["transcribe", str(note_path)])
 
     assert result.exit_code == 1
-    assert str(note_path) in result.output
-
-
-def test_transcribe_cli_reports_claude_agent_errors_as_a_clean_click_exception(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    note_path = tmp_path / "note.md"
-    note_path.write_text("placeholder")
-
-    async def raising_run_pipeline(*args: object, **kwargs: object) -> PipelineOutcome:
-        raise ClaudeAgentError("agent call failed")
-
-    monkeypatch.setattr(transcribe_cli, "run_pipeline", raising_run_pipeline)
-
-    result = CliRunner().invoke(main, ["transcribe", str(note_path)])
-
-    assert result.exit_code == 1
-    assert "agent call failed" in result.output
+    assert str(error) in result.output
 
 
 def test_transcribe_help_exits_zero_and_documents_the_needs_input_contract() -> None:
@@ -810,7 +817,12 @@ def test_transcribe_help_exits_zero_and_documents_the_needs_input_contract() -> 
 
     assert result.exit_code == 0
     assert "needs_input" in result.output
-    assert "3" in result.output
+    # Whitespace-normalised so Click's own paragraph rewrapping (which can
+    # split "exits with code 3" across a line break) doesn't defeat an
+    # anchored substring check - a bare "3" would also match "1", "--max-
+    # concurrency 4", etc. and prove nothing about the documented exit code.
+    normalised = " ".join(result.output.split())
+    assert "exits with code 3" in normalised
 
 
 # --- Step 3a: real-LLM end-to-end slow test (E22) ---------------------------

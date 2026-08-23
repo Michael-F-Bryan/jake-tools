@@ -164,9 +164,13 @@ integrate) over one Obsidian prep note, one call. If speaker resolution
 can't confidently name every voice it prints `{"status": "needs_input",
 "requests": [...]}` and exits 3 instead of guessing; re-run with more
 `--assign "SPEAKER_NN=Name"` flags, or `--assign "...=Unknown" --finalise`
-to give up on the rest. Every stage checks the run cache first, so a re-run
-resumes rather than repeating finished work. See README.md's Transcription
-section for the full behaviour and the requirements list.
+to give up on the rest. ASR/diarisation (and the text-transcript adapter)
+check the run cache first, so that resume loop never redoes finished
+ASR/diarisation work; chapterise/polish/minutes currently re-run their LLM
+calls on a repeat invocation of an already-complete run (a known
+follow-up — see `transcription/pipeline.py`'s module docstring). See
+README.md's Transcription section for the full behaviour and the
+requirements list.
 
 `transcript` exposes the same eight stages individually (`merge-audio`,
 `asr`, `adapt`, `speakers`, `chapterise`, `polish`, `minutes`, `integrate`)

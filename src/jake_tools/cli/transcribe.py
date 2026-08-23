@@ -19,7 +19,11 @@ import click
 from ..claude import ClaudeAgentError
 from ..transcription.adapt import AdaptError
 from ..transcription.asr import TranscriberError
-from ..transcription.audio import AudioToolError
+from ..transcription.audio import (
+    AudioEmbedResolutionError,
+    AudioToolError,
+    NoAudioEmbedsError,
+)
 from ..transcription.chapters import ChaptersError
 from ..transcription.integrate import IntegrateError
 from ..transcription.minutes import MinutesError
@@ -40,10 +44,17 @@ from .transcript_options import (
     transcriber_options,
 )
 
-# Every domain error a composed stage can raise, mapped to a clean
-# `ClickException` - the same precedent every `transcript` sub-command
-# follows (domain errors + `ClaudeAgentError` -> `ClickException`), just
-# gathered from every stage this porcelain composes instead of just one.
+# Domain errors mapped to a clean `ClickException` - the same precedent
+# every `transcript` sub-command follows (domain errors + `ClaudeAgentError`
+# -> `ClickException`). This is a manually maintained union of every
+# `except (...)` tuple across `cli/transcript.py`'s own sub-commands (each
+# stage raises its own error type(s); some, like `audio.py`'s
+# `NoAudioEmbedsError`/`AudioEmbedResolutionError`, deliberately do NOT
+# share a base with that module's other error, `AudioToolError`, so no
+# single `issubclass` check can stand in for this list). Keep it in sync
+# with `cli/transcript.py` when a stage adds or changes an error type; the
+# CLI-layer tests below exercise at least one case per family so an
+# omission fails loudly rather than surfacing as a raw traceback.
 _STAGE_ERRORS: tuple[type[Exception], ...] = (
     PipelineError,
     SpeakersError,
@@ -54,6 +65,8 @@ _STAGE_ERRORS: tuple[type[Exception], ...] = (
     AdaptError,
     TranscriberError,
     AudioToolError,
+    NoAudioEmbedsError,
+    AudioEmbedResolutionError,
     ObsidianCliError,
     ClaudeAgentError,
 )
@@ -119,10 +132,12 @@ async def transcribe(
     generates the meeting summary and Discussion Notes, and writes every
     product into the note - the same eight stages `transcript merge-audio` /
     `asr` / `adapt` / `speakers` / `chapterise` / `polish` / `minutes` /
-    `integrate` run individually, composed into one call. Every stage
-    consults the run cache first, so a re-run resumes rather than redoing
-    finished work (ASR/diarisation in particular - the expensive, HF-gated
-    step - is never repeated once cached).
+    `integrate` run individually, composed into one call. ASR/diarisation
+    (or adapt, on the text ramp) checks the run cache first, so the
+    needs_input -> `--assign` resume loop below never repeats that
+    expensive, HF-gated work - chapterise/polish/minutes currently re-run
+    their LLM calls on a repeat invocation of an already-complete run
+    (a known follow-up, not a resume-loop concern).
 
     If speaker resolution can't confidently name every cluster, this prints
     `{"status": "needs_input", "run_id": ..., "requests": [...]}` and exits

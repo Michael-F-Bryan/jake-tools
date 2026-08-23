@@ -85,9 +85,11 @@ than guess. Each request carries a couple of short audio snippets and the
 surrounding resolved dialogue, for a human to identify (relayed over
 Discord, or asked directly). Re-run with `--assign "SPEAKER_03=Name"` to
 answer one cluster (repeatable), or `--assign "SPEAKER_04=Unknown"
---finalise` to give up on whatever's left and proceed anyway. Every stage
-checks the run cache first, so a re-run resumes rather than repeating
-finished work — ASR/diarisation in particular is never redone once cached.
+--finalise` to give up on whatever's left and proceed anyway. ASR/diarisation
+(and the pre-diarised-transcript adapter) check the run cache first, so that
+`--assign` resume never redoes that expensive, HF-gated work; chapterising,
+polishing, and generating minutes currently re-run their LLM calls if you
+invoke the command again on an already-complete run (a known follow-up).
 
 The individual pipeline stages are also available as `transcript` plumbing
 sub-commands, each reading and writing the same run cache the porcelain
