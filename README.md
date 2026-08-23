@@ -55,7 +55,7 @@ The command requires:
 
 - Jira REST credentials via `JIRA_BASE_URL`, `JIRA_EMAIL`, and
   `JIRA_API_TOKEN`, or their corresponding `jira-sync` options
-- `CLOCKIFY_API_KEY`, or the Clockify group-level `--api-key` option
+- `CLOCKIFY_API_KEY`, or `jira-sync`'s own `--api-key` option
 
 For unattended runs, inject these values through the scheduler's secret
 environment or resolve `op://` references with `op run`. Do not persist the API

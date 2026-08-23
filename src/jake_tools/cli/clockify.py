@@ -29,15 +29,7 @@ from ..jira import JiraClient, JiraError
 
 
 class ClockifyOptions(BaseModel):
-    """Clockify credentials, resolved once per invocation (flag -> env -> default).
-
-    Set by the ``clockify`` group callback and carried on ``ctx.obj`` — the
-    one seam Click's own dispatch requires, since group-level flags are
-    parsed before any subcommand runs. The ``clockify_options`` decorator
-    below is the only thing that reads it back; subcommands themselves just
-    receive it as a typed argument and build their own client from it
-    explicitly.
-    """
+    """Clockify credentials, resolved once per invocation (flag -> env -> default)."""
 
     api_key: str | None
     api_base_url: str = CLOCKIFY_API_ROOT
@@ -113,50 +105,36 @@ def jira_options(func: Any) -> Any:
 
 
 def clockify_options(func: Any) -> Any:
-    """Inject the :class:`ClockifyOptions` the ``clockify`` group resolved.
+    """Inject a :class:`ClockifyOptions` built from the ``--api-*`` flags."""
 
-    ``--api-key``/``--api-base-url`` are group-level flags shared by several
-    subcommands, so the ``clockify`` group callback is the only place that
-    parses them; it stores the built :class:`ClockifyOptions` on ``ctx.obj``
-    because Click's own group-to-subcommand dispatch has no other way to
-    thread that state down. This decorator is the single place that reads
-    it back, so handlers themselves never touch ``ctx`` or ``ctx.obj`` for
-    this — they just receive a typed argument, like every other options
-    decorator here.
-    """
-
+    @click.option(
+        "--api-key",
+        envvar="CLOCKIFY_API_KEY",
+        default=None,
+        help="Clockify API key. Defaults to CLOCKIFY_API_KEY.",
+    )
+    @click.option(
+        "--api-base-url",
+        envvar="CLOCKIFY_API_BASE_URL",
+        default=CLOCKIFY_API_ROOT,
+        show_default=True,
+        help="Clockify API base URL. Defaults to CLOCKIFY_API_BASE_URL.",
+    )
     @click.pass_context
     @functools.wraps(func)
     def wrapper(ctx: click.Context, *args: Any, **kwargs: Any) -> Any:
-        if not isinstance(ctx.obj, ClockifyOptions):
-            raise RuntimeError(
-                "clockify_options requires running under the `clockify` "
-                "group, which sets ctx.obj to a ClockifyOptions before any "
-                f"subcommand runs (got {ctx.obj!r})"
-            )
-        return ctx.invoke(func, *args, clockify_options=ctx.obj, **kwargs)
+        options = ClockifyOptions(
+            api_key=kwargs.pop("api_key"),
+            api_base_url=kwargs.pop("api_base_url"),
+        )
+        return ctx.invoke(func, *args, clockify_options=options, **kwargs)
 
     return wrapper
 
 
 @click.group()
-@click.option(
-    "--api-key",
-    envvar="CLOCKIFY_API_KEY",
-    default=None,
-    help="Clockify API key. Defaults to CLOCKIFY_API_KEY.",
-)
-@click.option(
-    "--api-base-url",
-    envvar="CLOCKIFY_API_BASE_URL",
-    default=CLOCKIFY_API_ROOT,
-    show_default=True,
-    help="Clockify API base URL. Defaults to CLOCKIFY_API_BASE_URL.",
-)
-@click.pass_context
-def clockify(ctx: click.Context, api_key: str | None, api_base_url: str) -> None:
+def clockify() -> None:
     """Work with Clockify time-tracking data."""
-    ctx.obj = ClockifyOptions(api_key=api_key, api_base_url=api_base_url)
 
 
 @clockify.command("jira-name")

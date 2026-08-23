@@ -66,7 +66,7 @@ uv run pytest -q
   and the agent inherits Claude Code's full default toolset.
 - Tests inject a fake at the `run_query` seam (see `tests/test_claude_agent.py`),
   so prompt rendering, schema injection, and usage accounting stay real.
-- There is no shared `ctx.obj` context object carrying factories. Every CLI
+- `ctx.obj` is never set or read anywhere in this codebase. Every CLI
   dependency is built by the command that needs it: a decorator (see
   `cli/transcript_options.py`, `cli/options.py`, `cli/clockify.py`) stacks the
   relevant `click.option`s, pops their parsed values, and injects a typed
@@ -74,15 +74,10 @@ uv run pytest -q
   `ObsidianOptions.vault_client()`, `ClockifyOptions.inventory_client()`,
   `AgentOptions.agent()` — via `ctx.invoke`. When a dependency takes no CLI
   flags at all (e.g. `NewsletterClient`), the handler just constructs it
-  directly at the top of the function. The one exception is `clockify`'s
-  `--api-key`/`--api-base-url`, which are group-level flags shared by several
-  subcommands: Click only threads group state to subcommands via `ctx.obj`,
-  so the group callback builds the `ClockifyOptions` once and stores it
-  there — but handlers still never touch `ctx.obj` themselves. A
-  `clockify_options` decorator (`cli/clockify.py`) is the one place that
-  reads it back and injects it as a typed argument, the same shape as every
-  other options decorator; it's a single typed value with no factories, not
-  a context-object seam.
+  directly at the top of the function. `clockify`'s `--api-key`/
+  `--api-base-url` are ordinary per-subcommand flags via a `clockify_options`
+  decorator, the same shape as every other options decorator — there is no
+  group-level state and no exception to this rule.
 - CLI tests stay thin: they monkeypatch the constructor method on an options
   model (e.g. `ClockifyOptions.inventory_client`) or the client/orchestration
   symbol in the CLI module, and assert flag parsing and delegation. Real

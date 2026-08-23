@@ -4,7 +4,7 @@ import json
 
 from click.testing import CliRunner
 
-from jake_tools.cli.clockify import ClockifyOptions, JiraOptions, clockify, whoami
+from jake_tools.cli.clockify import ClockifyOptions, JiraOptions, clockify
 from jake_tools.clockify import (
     CLOCKIFY_API_ROOT,
     ClockifyClientRecord,
@@ -88,7 +88,7 @@ def test_whoami_prints_current_clockify_user(monkeypatch) -> None:
 
     result = runner.invoke(
         clockify,
-        ["--api-key", "test-key", "whoami"],
+        ["whoami", "--api-key", "test-key"],
     )
 
     assert result.exit_code == 0
@@ -139,7 +139,7 @@ def test_api_base_url_resolves_from_env_when_the_flag_is_omitted(monkeypatch) ->
     monkeypatch.setattr(ClockifyOptions, "inventory_client", fake_inventory_client)
     runner = CliRunner()
 
-    result = runner.invoke(clockify, ["--api-key", "test-key", "whoami"])
+    result = runner.invoke(clockify, ["whoami", "--api-key", "test-key"])
 
     assert result.exit_code == 0
     assert captured == [
@@ -160,28 +160,12 @@ def test_api_base_url_falls_back_to_the_default_root(monkeypatch) -> None:
     monkeypatch.setattr(ClockifyOptions, "inventory_client", fake_inventory_client)
     runner = CliRunner()
 
-    result = runner.invoke(clockify, ["--api-key", "test-key", "whoami"])
+    result = runner.invoke(clockify, ["whoami", "--api-key", "test-key"])
 
     assert result.exit_code == 0
     assert captured == [
         ClockifyOptions(api_key="test-key", api_base_url=CLOCKIFY_API_ROOT)
     ]
-
-
-def test_clockify_options_decorator_errors_clearly_outside_the_group() -> None:
-    """``clockify_options`` reads ``ctx.obj`` itself, not the handler.
-
-    Regression guard for the bare-``cast`` version of this seam: invoking a
-    ``clockify_options``-decorated command without going through the
-    ``clockify`` group (which is the only place ``ctx.obj`` gets set) must
-    fail with a clear, typed error naming the group requirement, not an
-    ``AttributeError`` from treating ``None`` as a ``ClockifyOptions``.
-    """
-    result = CliRunner().invoke(whoami, [])
-
-    assert result.exit_code != 0
-    assert isinstance(result.exception, RuntimeError)
-    assert "clockify` group" in str(result.exception)
 
 
 def test_jira_name_renders_project_without_key_and_task_with_key() -> None:
@@ -390,7 +374,7 @@ def test_jira_sync_defaults_to_json_dry_run(monkeypatch) -> None:
 
     result = runner.invoke(
         clockify,
-        ["--api-key", "test-key", "jira-sync", "--json"],
+        ["jira-sync", "--api-key", "test-key", "--json"],
     )
 
     assert result.exit_code == 0
@@ -435,7 +419,7 @@ def test_jira_sync_resolves_typed_jira_config_from_environment(monkeypatch) -> N
     monkeypatch.setattr(JiraOptions, "inventory_client", fake_inventory_client)
     result = CliRunner().invoke(
         clockify,
-        ["--api-key", "test-key", "jira-sync", "--json"],
+        ["jira-sync", "--api-key", "test-key", "--json"],
         env={
             "JIRA_BASE_URL": "sunfishrobotics.atlassian.net",
             "JIRA_EMAIL": "michael@example.test",
@@ -460,7 +444,7 @@ def test_jira_sync_human_dry_run_is_concise(monkeypatch) -> None:
 
     result = runner.invoke(
         clockify,
-        ["--api-key", "test-key", "jira-sync", "--dry-run"],
+        ["jira-sync", "--api-key", "test-key", "--dry-run"],
     )
 
     assert result.exit_code == 0
@@ -476,7 +460,7 @@ def test_jira_sync_apply_executes_and_reports_changes(monkeypatch) -> None:
 
     result = runner.invoke(
         clockify,
-        ["--api-key", "test-key", "jira-sync", "--apply", "--json"],
+        ["jira-sync", "--api-key", "test-key", "--apply", "--json"],
     )
 
     assert result.exit_code == 0
@@ -495,9 +479,9 @@ def test_jira_sync_can_target_issue_assigned_to_someone_else(monkeypatch) -> Non
     result = runner.invoke(
         clockify,
         [
+            "jira-sync",
             "--api-key",
             "test-key",
-            "jira-sync",
             "--issue",
             "sf-304",
             "--json",
@@ -562,7 +546,7 @@ def test_jira_sync_reports_when_no_changes_are_required(monkeypatch) -> None:
 
     result = runner.invoke(
         clockify,
-        ["--api-key", "test-key", "jira-sync", "--dry-run"],
+        ["jira-sync", "--api-key", "test-key", "--dry-run"],
     )
 
     assert result.exit_code == 0
@@ -583,7 +567,7 @@ def test_jira_sync_reports_conflicts_as_json_and_exits_nonzero(monkeypatch) -> N
 
     result = runner.invoke(
         clockify,
-        ["--api-key", "test-key", "jira-sync", "--dry-run", "--json"],
+        ["jira-sync", "--api-key", "test-key", "--dry-run", "--json"],
     )
 
     assert result.exit_code == 1
@@ -603,7 +587,7 @@ def test_jira_sync_reports_backend_errors_without_polluting_json(monkeypatch) ->
 
     result = runner.invoke(
         clockify,
-        ["--api-key", "test-key", "jira-sync", "--json"],
+        ["jira-sync", "--api-key", "test-key", "--json"],
     )
 
     assert result.exit_code == 1

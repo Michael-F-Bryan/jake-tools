@@ -31,11 +31,11 @@ def test_handler_built_agent_carries_the_flag_values() -> None:
     """The handler builds the real agent itself from ``AgentOptions``.
 
     Regression guard: the old ``@agent`` decorator resolved the agent through
-    an injected factory on ``ctx.obj``, and the concern was that a factory
-    could silently ignore ``--model``/``--effort``. There is no factory
-    seam any more — the handler calls ``agent_options.spec()``/``.agent()``
-    directly — so the equivalent guard is that those flag values reach the
-    spec the handler actually builds.
+    an injected factory carried on shared context state, and the concern was
+    that a factory could silently ignore ``--model``/``--effort``. There is no
+    factory seam any more — the handler calls
+    ``agent_options.spec()``/``.agent()`` directly — so the equivalent guard
+    is that those flag values reach the spec the handler actually builds.
     """
     captured: list[AgentSpec] = []
 
