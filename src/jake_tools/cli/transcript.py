@@ -1,9 +1,11 @@
 """The ``jake-tools transcript`` command group.
 
 Plumbing sub-commands for the meeting-transcription pipeline: each one is a
-thin Click wrapper that resolves inputs through :class:`~.context.AppContext`
-and prints a JSON document to stdout for the next stage — or an agent — to
-chain. Orchestration logic lives in ``transcription/audio.py``, not here.
+thin Click wrapper that builds its dependencies from injected options
+objects (`transcript_options.py`) and prints a JSON document to stdout for
+the next stage — or an agent — to chain. Orchestration logic lives in
+``transcription/audio.py``, not here. Per the CLI-options memo (E19), these
+commands do not use `AppContext`/`ctx.obj`.
 """
 
 from __future__ import annotations
@@ -15,7 +17,14 @@ import click
 from ..transcription.audio import AudioToolError, NoAudioEmbedsError, merge_note_audio
 from ..transcription.note import parse_note
 from ..transcription.obsidian import ObsidianCliError
-from .context import app_context
+from .transcript_options import (
+    AudioOptions,
+    CacheOptions,
+    ObsidianOptions,
+    audio_options,
+    cache_options,
+    obsidian_options,
+)
 
 
 @click.group()
@@ -24,23 +33,29 @@ def transcript() -> None:
 
 
 @transcript.command("merge-audio")
+@obsidian_options
+@audio_options
+@cache_options
 @click.argument(
     "note_path",
     type=click.Path(path_type=Path, exists=True, dir_okay=False, readable=True),
 )
-@click.pass_context
-def merge_audio(ctx: click.Context, note_path: Path) -> None:
+def merge_audio(
+    note_path: Path,
+    obsidian_options: ObsidianOptions,
+    audio_options: AudioOptions,
+    cache_options: CacheOptions,
+) -> None:
     """Merge a meeting note's audio embeds into one recording.
 
     Resolves every audio embed in NOTE_PATH via the vault client, orders the
     clips chronologically, merges them with ffmpeg, and prints a JSON
     document: run id, merged audio path, audio hash, and per-clip offsets.
     """
-    context = app_context(ctx)
     note = parse_note(note_path)
-    vault = context.vault_client_factory()
-    audio_tool = context.audio_tool_factory()
-    cache = context.run_cache_factory()
+    vault = obsidian_options.vault_client()
+    audio_tool = audio_options.audio_tool()
+    cache = cache_options.run_cache()
 
     try:
         result = merge_note_audio(note, vault=vault, audio_tool=audio_tool, cache=cache)
