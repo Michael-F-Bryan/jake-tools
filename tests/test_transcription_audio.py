@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from jake_tools.transcription.audio import (
+    AudioEmbedResolutionError,
     AudioToolError,
     FfmpegAudioTool,
     NoAudioEmbedsError,
@@ -218,6 +219,31 @@ def test_merge_note_audio_raises_when_note_has_no_audio_embeds(tmp_path: Path) -
             audio_tool=audio_tool,
             cache=cache,
         )
+
+
+def test_merge_note_audio_names_the_note_when_an_embed_fails_to_resolve(
+    tmp_path: Path,
+) -> None:
+    """An embed that exists but can't be resolved is a different failure mode
+    from having no embeds at all, but the plan's requirement is the same:
+    the error must name the note, not just the unresolvable embed target.
+    """
+    note_path = tmp_path / "unresolvable.md"
+    note_path.write_text(
+        "---\ntags:\n  - note/meeting\n---\n\n![[Recording 20260803090000.m4a]]\n"
+    )
+    note = parse_note(note_path)
+    audio_tool = FakeAudioTool()
+    cache = RunCache(tmp_path / "cache")
+    vault = FakeVaultClient(tmp_path, {})  # no mapping -> resolve_embed raises
+
+    with pytest.raises(AudioEmbedResolutionError) as excinfo:
+        merge_note_audio(note, vault=vault, audio_tool=audio_tool, cache=cache)
+
+    message = str(excinfo.value)
+    assert str(note_path) in message
+    assert "Recording 20260803090000.m4a" in message
+    assert not audio_tool.merge_calls  # failed before any merge was attempted
 
 
 # --- FfmpegAudioTool command assembly ------------------------------------

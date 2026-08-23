@@ -53,6 +53,15 @@ class NoAudioEmbedsError(RuntimeError):
     """Raised when a note has no resolvable audio embeds to merge."""
 
 
+class AudioEmbedResolutionError(RuntimeError):
+    """Raised when one of a note's audio embeds can't be resolved to a file.
+
+    The message always names the note (the plan's error/ask case), with the
+    failing embed target and the underlying vault-client error appended for
+    diagnosis.
+    """
+
+
 class AudioTool(Protocol):
     def duration_seconds(self, path: Path) -> float: ...
 
@@ -272,7 +281,14 @@ def merge_note_audio(
     if not audio_embeds:
         raise NoAudioEmbedsError(f"note {note.path!r} has no audio embeds to merge")
 
-    resolved = [(vault.resolve_embed(target), index) for index, target in audio_embeds]
+    resolved: list[tuple[Path, int]] = []
+    for index, target in audio_embeds:
+        try:
+            resolved.append((vault.resolve_embed(target), index))
+        except Exception as exc:
+            raise AudioEmbedResolutionError(
+                f"note {note.path!r} has an unresolvable audio embed {target!r}: {exc}"
+            ) from exc
     ordered = sorted(resolved, key=lambda pair: clip_sort_key(pair[0], pair[1]))
     clip_paths = [path for path, _ in ordered]
 

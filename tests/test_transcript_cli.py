@@ -28,7 +28,11 @@ from jake_tools.cli.transcript_options import (
     cache_options,
     obsidian_options,
 )
-from jake_tools.transcription.audio import MergeAudioResult, NoAudioEmbedsError
+from jake_tools.transcription.audio import (
+    AudioEmbedResolutionError,
+    MergeAudioResult,
+    NoAudioEmbedsError,
+)
 from jake_tools.transcription.models import SourceClip
 from jake_tools.transcription.note import ParsedNote
 
@@ -168,6 +172,31 @@ def test_merge_audio_exits_nonzero_with_a_clear_error_for_a_note_with_no_embeds(
         note: ParsedNote, *, vault: object, audio_tool: object, cache: object
     ) -> MergeAudioResult:
         raise NoAudioEmbedsError(f"note {note.path!r} has no audio embeds to merge")
+
+    monkeypatch.setattr(transcript_cli, "merge_note_audio", raising_merge_note_audio)
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["transcript", "merge-audio", str(note_path)])
+
+    assert result.exit_code != 0
+    assert str(note_path) in result.output
+
+
+def test_merge_audio_exits_nonzero_with_a_clear_error_when_an_embed_fails_to_resolve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    note_path = tmp_path / "unresolvable.md"
+    note_path.write_text(
+        "---\ntags:\n  - note/meeting\n---\n\n![[Recording 20260803090000.m4a]]\n"
+    )
+
+    def raising_merge_note_audio(
+        note: ParsedNote, *, vault: object, audio_tool: object, cache: object
+    ) -> MergeAudioResult:
+        raise AudioEmbedResolutionError(
+            f"note {note.path!r} has an unresolvable audio embed "
+            "'Recording 20260803090000.m4a': no fake mapping"
+        )
 
     monkeypatch.setattr(transcript_cli, "merge_note_audio", raising_merge_note_audio)
     runner = CliRunner()

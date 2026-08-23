@@ -14,7 +14,12 @@ from pathlib import Path
 
 import click
 
-from ..transcription.audio import AudioToolError, NoAudioEmbedsError, merge_note_audio
+from ..transcription.audio import (
+    AudioEmbedResolutionError,
+    AudioToolError,
+    NoAudioEmbedsError,
+    merge_note_audio,
+)
 from ..transcription.note import parse_note
 from ..transcription.obsidian import ObsidianCliError
 from .transcript_options import (
@@ -59,7 +64,12 @@ def merge_audio(
 
     try:
         result = merge_note_audio(note, vault=vault, audio_tool=audio_tool, cache=cache)
-    except (NoAudioEmbedsError, ObsidianCliError, AudioToolError) as exc:
+    except (
+        NoAudioEmbedsError,
+        AudioEmbedResolutionError,
+        ObsidianCliError,
+        AudioToolError,
+    ) as exc:
         raise click.ClickException(str(exc)) from exc
 
     click.echo(result.model_dump_json(indent=2))
