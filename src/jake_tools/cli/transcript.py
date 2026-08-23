@@ -29,6 +29,7 @@ from ..transcription.chapters import (
     ChaptersError,
     run_chapterisation,
 )
+from ..transcription.minutes import MinutesError, run_minutes
 from ..transcription.note import parse_note
 from ..transcription.obsidian import ObsidianCliError
 from ..transcription.polish import PolishError, run_polish
@@ -417,6 +418,57 @@ async def polish(
             cache=cache,
         )
     except (PolishError, ClaudeAgentError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(result.model_dump_json(indent=2))
+
+
+@transcript.command("minutes")
+@agent_options
+@obsidian_options
+@cache_options
+@click.argument(
+    "note_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False, readable=True),
+)
+@click.option(
+    "--run-id",
+    "run_id",
+    required=True,
+    help="Run id from `transcript merge-audio` (the cache key for this run).",
+)
+@coro
+async def minutes(
+    note_path: Path,
+    run_id: str,
+    agent_options: AgentOptions,
+    obsidian_options: ObsidianOptions,
+    cache_options: CacheOptions,
+) -> None:
+    """Generate the meeting summary and Discussion Notes minutes.
+
+    Reads the cached polished chapters for RUN_ID (from `transcript polish`;
+    errors naming that prerequisite if it hasn't run yet), builds the same
+    vault lexicon `transcript polish` builds from NOTE_PATH (attendees,
+    wikilinks already in the note, vault note titles) as the wikilink
+    candidate set, and asks an LLM for the meeting summary and Discussion
+    Notes in one call over every polished chapter.
+
+    The minutes report what was said - facts, positions, decisions, and
+    open questions - and never prescribe what should happen next: an
+    action item only appears when someone actually took it on in the
+    meeting, attributed as they said it. Stores the result as
+    minutes.json in the run cache and prints it as JSON to stdout.
+    """
+    agent = agent_options.agent()
+    vault = obsidian_options.vault_client()
+    cache = cache_options.run_cache()
+
+    try:
+        result = await run_minutes(
+            note_path, run_id, agent=agent, vault=vault, cache=cache
+        )
+    except (MinutesError, ClaudeAgentError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     click.echo(result.model_dump_json(indent=2))
