@@ -26,7 +26,8 @@ from __future__ import annotations
 
 import importlib
 import json
-from collections.abc import AsyncIterator
+import re
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 import pytest
@@ -422,6 +423,123 @@ def test_minutes_cli_help_exits_zero() -> None:
 # the load-bearing instructions reach the prompt; it cannot prove the real
 # model actually *follows* them. This is the one test that does, run with
 # `uv run pytest --slow -k live tests/test_transcription_minutes.py`.
+#
+# Its assertions deliberately avoid "does the word appear anywhere in the
+# whole reply" - that would pass unchanged for a regression that resolves
+# the open question ("the team decided on canary") or that mentions the
+# venue and Rob in unrelated bullets. The helpers below group the reply
+# into bullet items and isolate one topic's block, so the checks below can
+# require same-bullet/same-topic co-occurrence instead.
+
+_BULLET_LINE_RE = re.compile(r"^[ \t]*[-*]\s+")
+_TOP_LEVEL_BULLET_RE = re.compile(r"^[-*]\s+")  # no leading whitespace
+
+
+def _bullet_items(text: str) -> list[str]:
+    """Group `text`'s lines into logical bullet items.
+
+    A line starting a new bullet (at any nesting level) starts a new item;
+    any other line is a wrapped continuation of the previous bullet and is
+    folded into it. This matters for the co-occurrence checks below: a
+    bullet whose sentence happens to wrap onto a second line must still
+    count as one item, not be split into two unrelated "lines".
+    """
+    items: list[str] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if _BULLET_LINE_RE.match(line) or not items:
+            items.append(line)
+        else:
+            items[-1] += " " + line.strip()
+    return items
+
+
+def _topic_block(text: str, keyword: str) -> str:
+    """The lines belonging to the top-level bullet whose own line mentions
+    `keyword` (case-insensitively): that bullet line plus every following
+    line up to (but excluding) the next top-level bullet.
+
+    This bounds a search to one topic instead of the whole document, so an
+    unrelated word elsewhere (e.g. a different bullet that happens to say
+    "open") can't produce a false pass. Falls back to the whole text if no
+    top-level bullet matches `keyword`, so a structural surprise (e.g. the
+    model titling the topic differently than expected) widens the search
+    rather than silently making the check vacuous.
+    """
+    lines = text.splitlines()
+    start = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if _TOP_LEVEL_BULLET_RE.match(line)
+            and keyword.casefold() in line.casefold()
+        ),
+        None,
+    )
+    if start is None:
+        return text
+    end = next(
+        (
+            i
+            for i in range(start + 1, len(lines))
+            if _TOP_LEVEL_BULLET_RE.match(lines[i])
+        ),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def _contains_marker(text: str, marker: str) -> bool:
+    """Case-insensitive containment for one curated word/phrase marker.
+
+    A single word is matched with a `\\b` word-boundary regex so it can't
+    fire on an unrelated word that merely contains it as a substring (e.g.
+    "rob" inside "problem", "agreed" inside "disagreed", "will" inside
+    "willing") - a real trap for the short markers these checks use. A
+    multi-word phrase (e.g. "no decision") is matched as a plain substring;
+    word-boundary regex adds nothing extra for a phrase.
+    """
+    if " " in marker:
+        return marker.casefold() in text.casefold()
+    return re.search(rf"\b{re.escape(marker)}\b", text, re.IGNORECASE) is not None
+
+
+def _contains_any_marker(text: str, markers: Sequence[str]) -> bool:
+    return any(_contains_marker(text, marker) for marker in markers)
+
+
+def test_bullet_items_folds_a_wrapped_continuation_into_its_bullet() -> None:
+    text = "- Top bullet\n  - Sub bullet starts here\n    and wraps onto this line\n- Next top bullet"
+
+    items = _bullet_items(text)
+
+    assert items == [
+        "- Top bullet",
+        "  - Sub bullet starts here and wraps onto this line",
+        "- Next top bullet",
+    ]
+
+
+def test_topic_block_isolates_one_top_level_bullet_and_its_children() -> None:
+    text = (
+        "- Venue booking\n"
+        "  - Rob will book it\n"
+        "- Deployment strategy\n"
+        "  - Blue-green or canary\n"
+        "  - Remains open\n"
+        "- Wrap-up\n"
+        "  - Nothing else to add\n"
+    )
+
+    block = _topic_block(text, "deployment")
+
+    assert "Deployment strategy" in block
+    assert "Blue-green or canary" in block
+    assert "Remains open" in block
+    assert "Venue booking" not in block
+    assert "Wrap-up" not in block
+
 
 _VENUE_CHAPTER = _chapter(
     "Venue booking",
@@ -526,14 +644,57 @@ async def test_live_minutes_report_facts_and_action_and_leave_the_open_question_
     # An attendee wikilink is present.
     assert "[[Rob Miller]]" in combined
 
-    # The as-said action item is attributed: who, and what they took on.
-    assert "venue" in lowered
-    assert "rob" in lowered
+    # The as-said action item is attributed: "venue" and "Rob" must
+    # co-occur on the SAME bullet, not merely appear anywhere in the
+    # document - two words mentioned in unrelated bullets would prove
+    # nothing about attribution, and "rob"/"agreed"/"will" are short enough
+    # to hit unrelated words as bare substrings (see `_contains_marker`).
+    items = _bullet_items(notes)
+    venue_items = [item for item in items if _contains_marker(item, "venue")]
+    assert venue_items, f"no bullet mentions the venue: {notes!r}"
+    venue_and_rob_items = [
+        item for item in venue_items if _contains_marker(item, "rob")
+    ]
+    assert venue_and_rob_items, (
+        f"a venue bullet exists but none also names Rob: {venue_items!r}"
+    )
+    # Ideally that bullet also carries a commitment cue, not just both
+    # names in passing - catching a regression that drops the actual
+    # as-said commitment while still mentioning venue and Rob separately.
+    assert any(
+        _contains_marker(item, cue) or "'ll" in item.casefold()
+        for item in venue_and_rob_items
+        for cue in ("will", "committed", "agreed")
+    ), f"no venue/Rob bullet carries a commitment cue: {venue_and_rob_items!r}"
 
-    # The open question is reported as open, with both alternatives named -
-    # never resolved one way.
-    assert "blue-green" in lowered
-    assert "canary" in lowered
+    # The open question is reported as open, never resolved one way. Two
+    # things must both hold, checked honestly against the actual
+    # regression this guards: a model that writes "the team decided to go
+    # with canary" would still make both alternative names appear "nearby"
+    # an unresolved-sounding word elsewhere in the topic (a bare presence
+    # check alone would pass it unchanged), so the decisive check is that
+    # NO decision language sits on the same bullet as the alternatives.
+    deployment_block = _topic_block(notes, "deployment")
+    assert "blue-green" in deployment_block.casefold()
+    assert "canary" in deployment_block.casefold()
+
+    unresolved_cues = ("open", "undecided", "unresolved", "remains", "no decision")
+    assert _contains_any_marker(deployment_block, unresolved_cues), (
+        "no unresolved cue found near the alternatives "
+        f"(topic block: {deployment_block!r})"
+    )
+
+    alternative_items = [
+        item
+        for item in _bullet_items(deployment_block)
+        if "blue-green" in item.casefold() or "canary" in item.casefold()
+    ]
+    assert alternative_items
+    decision_markers = ("decided", "agreed")
+    for item in alternative_items:
+        assert not _contains_any_marker(item, decision_markers), (
+            f"decision language found on the same bullet as the alternatives: {item!r}"
+        )
 
     # Report, never prescribe (see `_PRESCRIPTIVE_MARKERS` above).
     for marker in _PRESCRIPTIVE_MARKERS:
