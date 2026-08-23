@@ -382,6 +382,80 @@ def test_rerun_with_human_added_bullet_preserves_it(tmp_path: Path) -> None:
     assert outcome.preserved_units == 1
 
 
+# --- re-run, human deleted a bullet: not resurrected; genuinely new still appends --
+
+
+def test_rerun_with_human_deleted_bullet_does_not_resurrect_it_but_still_appends_new(
+    tmp_path: Path,
+) -> None:
+    note_path = _write_note(tmp_path, MEETING_PREP_ONLY)
+    cache = RunCache(tmp_path / "cache")
+    run_integrate(
+        note_path,
+        _products(notes="- Point A\n- Point B\n"),
+        cache=cache,
+        run_id="run-1",
+    )
+
+    text = note_path.read_text()
+    without_b = text.replace("- Point B\n", "")
+    assert without_b != text
+    note_path.write_text(without_b)
+
+    # The pipeline regenerates BOTH points again (it has no memory of the
+    # deletion), plus one genuinely new point.
+    report = run_integrate(
+        note_path,
+        _products(notes="- Point A\n- Point B\n- Point C (genuinely new)\n"),
+        cache=cache,
+        run_id="run-1",
+    )
+
+    new_text = note_path.read_text()
+    assert "Point A" in new_text
+    assert "Point B" not in new_text  # deleted by a human - not resurrected
+    assert "Point C (genuinely new)" in new_text  # genuinely new still appends
+
+    outcome = _outcome(report, "Discussion Notes")
+    assert outcome.deleted_units == 1
+
+
+def test_deleted_bullet_suppression_persists_across_a_further_rerun(
+    tmp_path: Path,
+) -> None:
+    """The deleted unit's normalised fingerprint is carried into the new
+    baseline, so a *second* re-run - not just the one that first noticed
+    the deletion - still doesn't resurrect it, matching the documented
+    "stays gone until manually restored" semantics."""
+    note_path = _write_note(tmp_path, MEETING_PREP_ONLY)
+    cache = RunCache(tmp_path / "cache")
+    run_integrate(
+        note_path,
+        _products(notes="- Point A\n- Point B\n"),
+        cache=cache,
+        run_id="run-1",
+    )
+    note_path.write_text(note_path.read_text().replace("- Point B\n", ""))
+
+    run_integrate(
+        note_path,
+        _products(notes="- Point A\n- Point B\n"),
+        cache=cache,
+        run_id="run-1",
+    )
+    assert "Point B" not in note_path.read_text()
+
+    # A further re-run, still regenerating "Point B" every time.
+    run_integrate(
+        note_path,
+        _products(notes="- Point A\n- Point B\n"),
+        cache=cache,
+        run_id="run-1",
+    )
+
+    assert "Point B" not in note_path.read_text()
+
+
 # --- no baseline but section has content: append-only degraded mode ---------------
 
 
@@ -481,6 +555,128 @@ def test_tier_a_sections_are_always_replaced_wholesale_even_when_hand_edited(
     assert _outcome(report, "Transcript").mode == "replaced"
 
 
+# --- tier-a Transcript sweep: legacy shapes and non-contiguous chapters -----------
+
+LEGACY_TRANSCRIPT_NOTE = """---
+tags:
+  - note/meeting
+---
+
+## Meeting Prep
+
+- Agenda link: <https://example.test/agenda>
+
+## Discussion Notes
+
+- Old discussion point
+
+## Chapters
+
+- 00:00 — Opening
+- 05:00 — Wrap-up
+
+### 00:00 — Opening
+
+**Ada Lovelace:** Let's get started.
+
+### 05:00 — Wrap-up
+
+**Ada Lovelace:** That's everything for today.
+"""
+
+
+def test_rerun_on_legacy_shape_with_no_transcript_heading_sweeps_old_chapters(
+    tmp_path: Path,
+) -> None:
+    """The real shape of existing vault notes predating this stage:
+    `### <ts> — <title>` chapter sections sit directly after `## Chapters`,
+    with no `## Transcript` heading at all. Re-running must not orphan the
+    old chapters or duplicate their content."""
+    note_path = _write_note(tmp_path, LEGACY_TRANSCRIPT_NOTE)
+    cache = RunCache(tmp_path / "cache")
+    new_chapter = _chapter(
+        title="Kickoff",
+        start=3.0,
+        summary="Kickoff.",
+        turns=(("Ada Lovelace", "New content."),),
+    )
+
+    report = run_integrate(
+        note_path, _products(chapters=[new_chapter]), cache=cache, run_id="run-1"
+    )
+
+    text = note_path.read_text()
+    assert "Let's get started." not in text
+    assert "That's everything for today." not in text
+    assert text.count("### ") == 1  # exactly one fresh chapter heading, no orphans
+    assert "### 00:03 — Kickoff" in text
+    assert "New content." in text
+    assert text.count("## Transcript") == 1
+
+    assert _outcome(report, "Transcript").mode == "replaced"
+
+
+def test_rerun_sweeps_transcript_chapters_interrupted_by_a_human_section(
+    tmp_path: Path,
+) -> None:
+    """Chapter sections that aren't contiguous with `## Transcript` (an
+    unrelated human section splits them) must still all be swept - and the
+    human section, whose heading never matches the chapter shape, must
+    survive untouched."""
+    note_path = _write_note(
+        tmp_path,
+        """---
+tags:
+  - note/meeting
+---
+
+## Meeting Prep
+
+- Agenda link: <https://example.test/agenda>
+
+## Discussion Notes
+
+- Old discussion point
+
+## Chapters
+
+- 00:00 — Opening
+- 05:00 — Wrap-up
+
+## Transcript
+
+### 00:00 — Opening
+
+**Ada Lovelace:** Let's get started.
+
+## A Human's Own Aside
+
+Michael's own note, unrelated to the transcript.
+
+### 05:00 — Wrap-up
+
+**Ada Lovelace:** That's everything for today.
+""",
+    )
+    cache = RunCache(tmp_path / "cache")
+
+    report = run_integrate(note_path, _products(), cache=cache, run_id="run-1")
+
+    text = note_path.read_text()
+    assert "Let's get started." not in text
+    assert "That's everything for today." not in text
+    assert "Michael's own note, unrelated to the transcript." in text
+    assert "## A Human's Own Aside" in text
+    assert text.count("## Transcript") == 1
+    # The consolidated Transcript section lands where the swept content
+    # started; the surviving human section ends up after it (there is no
+    # way to keep it "in the middle" once the chapters it split are
+    # collapsed into one fresh block).
+    assert text.index("## Transcript") < text.index("## A Human's Own Aside")
+
+    assert _outcome(report, "Transcript").mode == "replaced"
+
+
 # --- abort path: a broken reconstruction invariant aborts without writing --------
 
 
@@ -505,6 +701,44 @@ def test_broken_reconstruction_invariant_raises_and_leaves_the_file_unmodified(
 
     assert note_path.read_bytes() == original_bytes
     # No baseline was stored either - the abort happens before any I/O.
+    assert cache.load_text("run-1", BASELINE_SUMMARY_NAME) is None
+    assert cache.load_text("run-1", BASELINE_NOTES_NAME) is None
+
+
+def test_baseline_writes_wait_until_every_guard_has_passed(tmp_path: Path) -> None:
+    """Reviewer-constructed scenario: `## Discussion Notes` sits *before*
+    `## Meeting Prep` in the note, and `## Chapters` is absent. Inserting a
+    fresh `## Chapters` (and then `## Transcript`) section right after
+    Discussion Notes lands exactly at `## Meeting Prep`'s captured index,
+    shifting it - so the post-surgery "Meeting Prep unchanged" guard trips
+    on an independently-reachable path, not the pre-surgery one. Both
+    tier-b merges still ran and produced fresh baseline content before
+    that guard fires: this proves neither baseline is persisted anyway -
+    the note write and the guards that gate it come first, no exceptions.
+    """
+    note_path = _write_note(
+        tmp_path,
+        """---
+tags:
+  - note/meeting
+---
+
+## Discussion Notes
+
+- Some notes
+
+## Meeting Prep
+
+- Agenda link: <https://example.test/agenda>
+""",
+    )
+    original_bytes = note_path.read_bytes()
+    cache = RunCache(tmp_path / "cache")
+
+    with pytest.raises(ReconstructionError):
+        run_integrate(note_path, _products(), cache=cache, run_id="run-1")
+
+    assert note_path.read_bytes() == original_bytes
     assert cache.load_text("run-1", BASELINE_SUMMARY_NAME) is None
     assert cache.load_text("run-1", BASELINE_NOTES_NAME) is None
 

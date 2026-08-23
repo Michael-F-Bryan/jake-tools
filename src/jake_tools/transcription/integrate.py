@@ -77,6 +77,11 @@ _SUMMARY_LABEL = "summary callout"  # report label; not a real heading
 
 _TOP_LEVEL_BULLET_RE = re.compile(r"^[-*]\s+")
 
+# Matches this module's own `### <ts> — <title>` chapter headings
+# (`format_timestamp` output, an em-dash, then the title) - unambiguous
+# pipeline output wherever it appears, per the legacy-shape sweep ruling.
+_CHAPTER_HEADING_RE = re.compile(r"^\d{1,2}:\d{2}(:\d{2})? — ")
+
 
 class IntegrateError(RuntimeError):
     """Base for integrate domain errors."""
@@ -234,6 +239,7 @@ class SectionOutcome(BaseModel):
     mode: Mode
     preserved_units: int = 0
     appended_units: int = 0
+    deleted_units: int = 0
 
 
 class IntegrationReport(BaseModel):
@@ -260,10 +266,25 @@ def _merge_tier_b(
     granularity lives entirely in `split`/`join`, the merge logic itself is
     identical for both per the plan.
 
-    Returns `(merged_body, new_baseline, outcome)`. `new_baseline` is only
-    ever the pipeline-owned part of the merge (newly appended units) - a
-    baseline that included preserved human content would make this
-    module mistake human edits for its own on a later run.
+    **Deletions are a human edit too.** A unit present in the baseline but
+    absent (by normalised comparison) from the current section is treated
+    as human-deleted, not as "the pipeline just hasn't written it back
+    yet": a fresh pipeline unit whose normalised text matches a deleted
+    baseline unit is never appended, so the pipeline can't silently
+    resurrect something a human removed. This is "preserve on doubt"
+    applied to absence as well as presence - the accepted cost is that an
+    accidentally-deleted bullet stays gone until a human manually retypes
+    it; the pipeline will never offer it back on its own. The deleted
+    unit's normalised fingerprint is carried forward into the new baseline
+    (alongside genuinely new appended content) so this suppression
+    persists across future runs too, not just the one where the deletion
+    was first noticed.
+
+    Returns `(merged_body, new_baseline, outcome)`. `new_baseline` is the
+    pipeline-owned part of the merge (newly appended units) plus any
+    baseline units still being suppressed as deleted - never preserved
+    human content, which would make this module mistake human edits for
+    its own on a later run.
     """
     current_units = split(current_text)
     new_units = split(new_text)
@@ -279,7 +300,9 @@ def _merge_tier_b(
         # Degraded append-only mode: no baseline (evicted cache, or a run
         # on a different machine) but the section already has content -
         # presume every existing unit is human-owned. Add only units that
-        # are clearly new; never modify what's there.
+        # are clearly new; never modify what's there. There is no baseline
+        # to detect a deletion against, so deletion-suppression doesn't
+        # apply here - there's nothing to remember was ever deleted.
         preserved = current_units
         preserved_norms = {_normalize(unit) for unit in preserved}
         appended = [
@@ -298,21 +321,38 @@ def _merge_tier_b(
 
     baseline_units = split(baseline_text)
     baseline_norms = {_normalize(unit) for unit in baseline_units}
+    current_norms = {_normalize(unit) for unit in current_units}
+
     preserved = [
         unit for unit in current_units if _normalize(unit) not in baseline_norms
     ]
     preserved_norms = {_normalize(unit) for unit in preserved}
-    appended = [unit for unit in new_units if _normalize(unit) not in preserved_norms]
+
+    # A baseline unit no longer present (by normalised text) among the
+    # current units was removed by a human - deduped by normalised text so
+    # a baseline with an accidental literal duplicate doesn't double-count.
+    deleted_norms = baseline_norms - current_norms
+    deleted_units: list[str] = []
+    seen_deleted_norms: set[str] = set()
+    for unit in baseline_units:
+        norm = _normalize(unit)
+        if norm in deleted_norms and norm not in seen_deleted_norms:
+            seen_deleted_norms.add(norm)
+            deleted_units.append(unit)
+
+    excluded_norms = preserved_norms | deleted_norms
+    appended = [unit for unit in new_units if _normalize(unit) not in excluded_norms]
 
     mode: Mode = "merged" if preserved else "replaced"
     return (
         join(preserved + appended),
-        join(appended),
+        join(deleted_units + appended),
         SectionOutcome(
             heading=label,
             mode=mode,
             preserved_units=len(preserved),
             appended_units=len(appended),
+            deleted_units=len(deleted_units),
         ),
     )
 
@@ -331,29 +371,53 @@ def _find_heading(sections: Sequence[NoteSection], name: str) -> int | None:
     )
 
 
-def _find_transcript_span(sections: Sequence[NoteSection]) -> tuple[int | None, int]:
-    """The `## Transcript` section's index and the end of its trailing chapters.
+def _is_chapter_heading(heading: str | None) -> bool:
+    """Whether `heading` is unambiguously one of this module's own chapter headings.
 
-    On a re-run, `## Transcript`'s body from the *previous* write is empty
-    - the `### <ts> — <title>` chapter headings it contains were split into
-    their own (deeper-level) sections by `parse_note`, exactly like
-    `## Chapters`' index never nests anything. This finds the whole
-    span - the `## Transcript` heading plus every section immediately
-    after it at a deeper level - so it can be replaced as one wholesale
-    unit, per the tier-a contract.
+    `render_transcript` only ever produces `### <ts> — <title>` headings
+    (`format_timestamp` output, an em-dash, the title) - no human-authored
+    heading looks like this by convention, so a match is treated as
+    pipeline output wherever it appears, per the ruling on legacy shapes.
     """
-    index = _find_heading(sections, _TRANSCRIPT_HEADING)
-    if index is None:
-        return None, 0
-    level = sections[index].level
-    end = index + 1
-    while (
-        end < len(sections)
-        and sections[end].heading is not None
-        and sections[end].level > level
-    ):
-        end += 1
-    return index, end
+    return heading is not None and _CHAPTER_HEADING_RE.match(heading) is not None
+
+
+def _find_transcript_sweep_indices(sections: Sequence[NoteSection]) -> list[int]:
+    """Every existing section the tier-a Transcript replacement must remove.
+
+    Two shapes occur in practice, and both must be fully swept, not just
+    the first contiguous run:
+
+    - This module's own prior output: a `## Transcript` heading with its
+      `### <ts> — <title>` chapter sections immediately following it (on a
+      re-run, `## Transcript`'s own body is empty - `parse_note` splits
+      each chapter heading it contains into its own section).
+    - The **legacy** shape: `### <ts> — <title>` chapter sections sitting
+      directly after `## Chapters` with **no** `## Transcript` heading at
+      all - the real shape of existing vault notes that predate this
+      stage. Re-running on one of these must not orphan the old chapters
+      or duplicate their content.
+
+    A `### <ts> — <title>` heading is unambiguous pipeline output wherever
+    it occurs in the document - contiguous with `## Transcript`/`##
+    Chapters` or not (an unrelated section can interrupt the run without
+    stopping the sweep) - so every matching section is collected,
+    regardless of position. A human section's heading never matches this
+    shape (or `## Transcript` itself) and is never included here, so it's
+    never touched by the replacement that follows.
+
+    Returns the matching indices in ascending document order (possibly
+    empty, if this is a first run with neither shape present).
+    """
+    return [
+        index
+        for index, section in enumerate(sections)
+        if (
+            section.heading is not None
+            and section.heading.strip().lower() == _TRANSCRIPT_HEADING
+        )
+        or _is_chapter_heading(section.heading)
+    ]
 
 
 def _split_summary_callout(body: str) -> tuple[str, str, str]:
@@ -442,15 +506,24 @@ def run_integrate(
        *before* anything else happens: no baseline load, no write.
     2. Tier b (the summary callout, `## Discussion Notes`): three-way
        merge against this run id's cached baseline, per `_merge_tier_b`.
-       New baselines are stored immediately after each merge.
+       The new baseline *contents* are computed here but not yet
+       persisted - see step 5.
     3. Tier a (`## Chapters`, `## Transcript`): replaced wholesale,
        created in the exemplar order (right after `## Meeting Prep` when
-       present, otherwise right after the preamble) when absent.
+       present, otherwise right after the preamble) when absent. The
+       `## Transcript` replacement sweeps every section that looks like
+       this module's own chapter output, wherever it sits in the
+       document - see `_find_transcript_sweep_indices`.
     4. Before writing, re-asserts that `## Meeting Prep` (if present) is
        still byte-identical to what was parsed in step 1 - a second,
        independent guard on the same invariant, this time checking that
-       *this run's own surgery* didn't touch it. Either guard failing
-       aborts without writing.
+       *this run's own surgery* didn't touch it.
+    5. Only once every guard has passed does this write anything: the note
+       file first, then the two tier-b baselines. Either guard in step 1
+       or step 4 failing raises before *any* write - note or baseline -
+       so an aborted run never leaves a baseline pointing at content that
+       was never actually written to the file (which would make an
+       untouched note look human-edited on the next run).
     """
     text = note_path.read_text()
     frontmatter_prefix, raw_body = split_raw_frontmatter(text)
@@ -485,7 +558,8 @@ def run_integrate(
         split=_split_summary_unit,
         join=_join_summary_units,
     )
-    cache.store_text(run_id, BASELINE_SUMMARY_NAME, new_baseline_summary)
+    # Not persisted yet - see the docstring's step 5. `new_baseline_summary`
+    # is stored only after the note write below has actually committed.
     # `after` is only empty when the callout sat at the very end of the
     # preamble (or is being created fresh there) - fall back to a blank
     # line so a heading that immediately follows isn't jammed against it.
@@ -510,8 +584,8 @@ def run_integrate(
         split=_split_discussion_units,
         join=_join_discussion_units,
     )
-    cache.store_text(run_id, BASELINE_NOTES_NAME, new_baseline_notes)
-    new_dn_body = f"\n{merged_notes}\n" if merged_notes else "\n"
+    # Not persisted yet - see the docstring's step 5.
+    new_dn_body = f"\n{merged_notes}\n" if merged_notes else "\n\n"
 
     if dn_index is not None:
         sections[dn_index] = sections[dn_index].model_copy(update={"body": new_dn_body})
@@ -544,24 +618,31 @@ def run_integrate(
     cursor = ch_final_index + 1
 
     # --- Tier a: Transcript (the full per-chapter content) ---
-    tr_index, tr_end = _find_transcript_span(sections)
+    sweep_indices = _find_transcript_sweep_indices(sections)
     transcript_body = render_transcript(products.chapters)
-    if tr_index is not None:
-        replacement = NoteSection(
-            heading=sections[tr_index].heading,
-            level=sections[tr_index].level,
-            body=transcript_body,
-        )
-        sections[tr_index:tr_end] = [replacement]
+    new_transcript_section = NoteSection(
+        heading="Transcript", level=2, body=transcript_body
+    )
+    if sweep_indices:
+        sweep_set = set(sweep_indices)
+        sections = [
+            section for index, section in enumerate(sections) if index not in sweep_set
+        ]
+        # `sweep_indices[0]` is still correct in the filtered list: nothing
+        # smaller than it was removed (it's the smallest swept index), so
+        # everything before it kept its original position.
+        sections.insert(sweep_indices[0], new_transcript_section)
         tr_mode: Mode = "replaced"
     else:
-        sections.insert(
-            cursor, NoteSection(heading="Transcript", level=2, body=transcript_body)
-        )
+        sections.insert(cursor, new_transcript_section)
         tr_mode = "created"
     outcomes.append(SectionOutcome(heading="Transcript", mode=tr_mode))
 
     # --- Pre-write guard: Meeting Prep must be byte-identical ---
+    # `meeting_prep_index` is only safe to reuse here because every
+    # insertion/removal above happens at or after it (the exemplar order
+    # places Meeting Prep before every tier-owned section this stage
+    # touches) - it never shifts what sits at that index.
     if (
         meeting_prep_index is not None
         and sections[meeting_prep_index] != original_meeting_prep
@@ -572,7 +653,12 @@ def run_integrate(
             "touches it."
         )
 
+    # Only now, with every guard passed, is anything actually written:
+    # the note file first, then the two tier-b baselines - never before,
+    # and never if a guard raised above.
     new_text = frontmatter_prefix + render_body(sections)
     note_path.write_text(new_text)
+    cache.store_text(run_id, BASELINE_SUMMARY_NAME, new_baseline_summary)
+    cache.store_text(run_id, BASELINE_NOTES_NAME, new_baseline_notes)
 
     return IntegrationReport(run_id=run_id, note_path=str(note_path), sections=outcomes)
