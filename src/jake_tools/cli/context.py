@@ -19,6 +19,9 @@ from ..clockify import CLOCKIFY_API_ROOT, ClockifyClient, ClockifyError
 from ..clockify_jira_sync import ClockifyInventoryClient, JiraInventoryClient
 from ..jira import JiraClient, JiraError
 from ..newsletters import NewsletterClient, NewsletterOperations
+from ..transcription.audio import AudioTool, FfmpegAudioTool
+from ..transcription.cache import RunCache
+from ..transcription.obsidian import ObsidianCli, VaultClient
 
 AgentFactory = Callable[[AgentSpec], ClaudeAgent]
 
@@ -43,6 +46,9 @@ class JiraConfig:
 ClockifyClientFactory = Callable[[ClockifyConfig], ClockifyInventoryClient]
 JiraClientFactory = Callable[[JiraConfig], JiraInventoryClient]
 NewsletterClientFactory = Callable[[], NewsletterOperations]
+VaultClientFactory = Callable[[], VaultClient]
+AudioToolFactory = Callable[[], AudioTool]
+RunCacheFactory = Callable[[], RunCache]
 
 
 def _default_agent_factory(spec: AgentSpec) -> ClaudeAgent:
@@ -89,6 +95,9 @@ class AppContext:
     clockify_client_factory: ClockifyClientFactory = _default_clockify_client_factory
     jira_client_factory: JiraClientFactory = _default_jira_client_factory
     newsletter_client_factory: NewsletterClientFactory = NewsletterClient
+    vault_client_factory: VaultClientFactory = ObsidianCli
+    audio_tool_factory: AudioToolFactory = FfmpegAudioTool
+    run_cache_factory: RunCacheFactory = RunCache
     clockify_config: ClockifyConfig | None = None
 
     def with_clockify_config(self, config: ClockifyConfig) -> AppContext:
