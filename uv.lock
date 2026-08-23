@@ -313,6 +313,7 @@ dependencies = [
     { name = "click" },
     { name = "jinja2" },
     { name = "pydantic" },
+    { name = "python-dotenv" },
     { name = "requests" },
 ]
 
@@ -331,6 +332,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.4.1" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "pydantic", specifier = ">=2.13.4" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "requests", specifier = ">=2.33.0" },
 ]
 
