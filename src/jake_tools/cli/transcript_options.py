@@ -28,6 +28,12 @@ from typing import Any, cast
 import click
 from pydantic import BaseModel
 
+from ..transcription.asr import (
+    DEFAULT_ASR_MODEL,
+    DEFAULT_DIARISATION_MODEL,
+    LocalTranscriber,
+    Transcriber,
+)
 from ..transcription.audio import AudioTool, FfmpegAudioTool
 from ..transcription.cache import RunCache
 from ..transcription.obsidian import ObsidianCli, VaultClient
@@ -62,6 +68,28 @@ class CacheOptions(BaseModel):
 
     def run_cache(self) -> RunCache:
         return RunCache(root=self.root)
+
+
+class TranscriberOptions(BaseModel):
+    """Which ASR/diarisation models to run, and the token that gates them.
+
+    `hf_token` is read from `--hf-token` or the `HF_TOKEN` environment
+    variable (`.env` is already loaded elsewhere in the package) — pyannote's
+    pretrained diarisation pipeline is a gated HuggingFace model. It is
+    never logged or echoed; :class:`~..transcription.asr.LocalTranscriber`
+    only refers to it as `HF_TOKEN` in error messages.
+    """
+
+    hf_token: str | None
+    asr_model: str
+    diarisation_model: str
+
+    def transcriber(self) -> Transcriber:
+        return LocalTranscriber(
+            hf_token=self.hf_token,
+            asr_model=self.asr_model,
+            diarisation_model=self.diarisation_model,
+        )
 
 
 def obsidian_options(func: F) -> F:
@@ -134,5 +162,43 @@ def cache_options(func: F) -> F:
     def wrapper(ctx: click.Context, *args: Any, **kwargs: Any) -> Any:
         options = CacheOptions(root=kwargs.pop("cache_root"))
         return ctx.invoke(func, *args, cache_options=options, **kwargs)
+
+    return cast(F, wrapper)
+
+
+def transcriber_options(func: F) -> F:
+    @click.option(
+        "--hf-token",
+        "hf_token",
+        envvar="HF_TOKEN",
+        default=None,
+        help=(
+            "HuggingFace token for pyannote's gated diarisation model "
+            "(or set HF_TOKEN). Not needed for a cached run."
+        ),
+    )
+    @click.option(
+        "--asr-model",
+        "asr_model",
+        default=DEFAULT_ASR_MODEL,
+        show_default=True,
+        help="parakeet-mlx model id (or local path) for ASR.",
+    )
+    @click.option(
+        "--diarisation-model",
+        "diarisation_model",
+        default=DEFAULT_DIARISATION_MODEL,
+        show_default=True,
+        help="pyannote-audio pipeline id (or local path) for speaker diarisation.",
+    )
+    @click.pass_context
+    @functools.wraps(func)
+    def wrapper(ctx: click.Context, *args: Any, **kwargs: Any) -> Any:
+        options = TranscriberOptions(
+            hf_token=kwargs.pop("hf_token"),
+            asr_model=kwargs.pop("asr_model"),
+            diarisation_model=kwargs.pop("diarisation_model"),
+        )
+        return ctx.invoke(func, *args, transcriber_options=options, **kwargs)
 
     return cast(F, wrapper)

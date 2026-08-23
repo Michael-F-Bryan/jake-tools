@@ -15,6 +15,7 @@ from pathlib import Path
 
 import click
 
+from ..transcription.asr import TranscriberError, transcribe_merged_audio
 from ..transcription.audio import (
     AudioEmbedResolutionError,
     AudioToolError,
@@ -27,9 +28,11 @@ from .transcript_options import (
     AudioOptions,
     CacheOptions,
     ObsidianOptions,
+    TranscriberOptions,
     audio_options,
     cache_options,
     obsidian_options,
+    transcriber_options,
 )
 
 
@@ -71,6 +74,47 @@ def merge_audio(
         ObsidianCliError,
         AudioToolError,
     ) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(result.model_dump_json(indent=2))
+
+
+@transcript.command("asr")
+@transcriber_options
+@cache_options
+@click.argument(
+    "audio_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False, readable=True),
+)
+@click.option(
+    "--run-id",
+    "run_id",
+    required=True,
+    help="Run id from `transcript merge-audio` (the cache key for this run).",
+)
+def asr(
+    audio_path: Path,
+    run_id: str,
+    transcriber_options: TranscriberOptions,
+    cache_options: CacheOptions,
+) -> None:
+    """Run local ASR + diarisation over AUDIO_PATH, producing the raw transcript.
+
+    Consults the run cache first (idempotent re-runs): a cached
+    `raw_transcript.json` for RUN_ID is printed as-is, with no model
+    download or HF_TOKEN needed. On a cache miss, runs parakeet-mlx ASR and
+    pyannote-audio diarisation over AUDIO_PATH, aligns them into
+    utterances, caches the result, and prints it. Both models run locally —
+    audio never leaves this machine.
+    """
+    transcriber = transcriber_options.transcriber()
+    cache = cache_options.run_cache()
+
+    try:
+        result = transcribe_merged_audio(
+            audio_path, run_id=run_id, transcriber=transcriber, cache=cache
+        )
+    except TranscriberError as exc:
         raise click.ClickException(str(exc)) from exc
 
     click.echo(result.model_dump_json(indent=2))
