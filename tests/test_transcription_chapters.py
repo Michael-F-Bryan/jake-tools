@@ -31,7 +31,7 @@ import pytest
 from claude_agent_sdk import ClaudeAgentOptions, Message, ResultMessage
 from click.testing import CliRunner
 
-from jake_tools.claude import ClaudeAgent, ClaudeAgentError
+from jake_tools.claude import AgentSpec, ClaudeAgent, ClaudeAgentError
 from jake_tools.cli import main
 from jake_tools.transcription.cache import RunCache
 from jake_tools.transcription.chapters import (
@@ -300,6 +300,129 @@ async def test_chapterise_raises_when_still_degenerate_after_one_retry() -> None
 
     # Exactly one retry - not fabricated boundaries, not an unbounded loop.
     assert len(fake.calls) == 2
+
+
+# --- slow: real-LLM integration test ------------------------------------------
+#
+# Everything above proves the deterministic post-processing is right
+# (`_repair_boundaries`/`_spans_from_boundaries` guarantee the partition
+# invariant regardless of what the model returns) using a fake agent that
+# only ever replays what the test already wrote down. None of it proves the
+# chapterisation prompt actually finds real topic boundaries. This makes
+# real `claude-sonnet-5` calls (`--slow`, skipped by default - see
+# `pyproject.toml`'s `slow` marker, `effort="low"` to bound cost) against a
+# deliberately messy raw-ASR fixture with three clearly distinct topics, and
+# checks observable properties of the real reply rather than exact
+# boundaries, since LLM output is nondeterministic. Run with
+# `uv run pytest --slow -k slow tests/test_transcription_chapters.py`.
+
+_THREE_TOPIC_UTTERANCES = [
+    # Topic 1 (indexes 0-9): Q3 budget review.
+    "Okay, so, um, let's kick off with the budget review for Q3, uh, spend is tracking about eight percent over plan.",
+    "Eight percent, that's, uh, mostly the vendor contract right?",
+    "Yeah, the ven- the vendor contract renewal came in higher than, uh, we forecast.",
+    "Okay. Do we need to, um, flag that to finance this week?",
+    "I think so, yeah. I'll send the, uh, variance report over today.",
+    "Cool. Anything else on the budget side before we move on?",
+    "Just that the marketing line item is under spend, so it kind of nets out.",
+    "Good, good. Okay, uh, I think that covers the budget stuff.",
+    "Yep, agreed. Q3 numbers are basically on track once you net it out.",
+    "Great, let's, uh, move on then.",
+    # Topic 2 (indexes 10-19): backend hiring plan.
+    "So, uh, next up, hiring. We've got two open reqs for backend engineers.",
+    "Right, and, um, one of those is backfilling Sam's role, yeah?",
+    "Correct, and the other is, uh, a net-new headcount for the platform team.",
+    "Okay. How's the, uh, the candidate pipeline looking so far?",
+    "We've got three candidates in final rounds, should have offers out by, uh, next Friday.",
+    "Nice. Do we, um, need budget approval for the net-new one still?",
+    "No, that was already approved back in, uh, the Q2 planning cycle.",
+    "Perfect, that makes it easier. Any concerns from the, uh, hiring managers?",
+    "Not really, just the usual, uh, timeline pressure to close before the holidays.",
+    "Makes sense. Okay, I think hiring's in good shape.",
+    # Topic 3 (indexes 20-29): the office move.
+    "Last thing, uh, the office move. Facilities confirmed the new floor is ready December first.",
+    "December first, okay. Is that, um, still the date we told everyone?",
+    "Yeah, that lines up with what went out in the, uh, all-hands email.",
+    "Good. Do we need to, uh, coordinate the IT setup separately?",
+    "IT's already scheduled to do the network drops the week before, so we're covered.",
+    "Great, and what about, um, the parking situation at the new building?",
+    "There's a, uh, dedicated garage, should be more spots than we had before, honestly.",
+    "That's a relief, honestly. Okay, uh, anything else on the move?",
+    "Just that we should, uh, send a reminder email the week before the move.",
+    "Agreed, I'll draft that. Okay, uh, I think that's everything for today.",
+]
+
+
+def _three_topic_transcript() -> RawTranscript:
+    utterances = [
+        Utterance(
+            start=float(index) * 20.0,
+            end=float(index) * 20.0 + 18.0,
+            speaker="SPEAKER_00" if index % 2 == 0 else "SPEAKER_01",
+            text=text,
+        )
+        for index, text in enumerate(_THREE_TOPIC_UTTERANCES)
+    ]
+    return RawTranscript(clips=[], utterances=utterances, audio_sha256=None)
+
+
+_GENERIC_TITLES = {
+    "discussion",
+    "introduction",
+    "general discussion",
+    "meeting",
+    "chapter",
+    "untitled",
+    "misc",
+    "miscellaneous",
+}
+
+
+@pytest.mark.slow
+async def test_live_chapterise_splits_three_distinct_topics_into_different_chapters() -> (
+    None
+):
+    transcript = _three_topic_transcript()
+    agent = ClaudeAgent(defaults=AgentSpec(effort="low"))
+
+    chapters = await chapterise(transcript, agent=agent)
+
+    assert 2 <= len(chapters) <= 5
+
+    # Partition invariant: already enforced deterministically in code
+    # (`_repair_boundaries`/`_spans_from_boundaries`), but assert it holds
+    # for this real reply too.
+    covered: list[int] = []
+    for span in chapters:
+        assert span.start_utterance <= span.end_utterance
+        covered.extend(range(span.start_utterance, span.end_utterance + 1))
+    assert covered == list(range(len(_THREE_TOPIC_UTTERANCES)))
+
+    def chapter_index_of(utterance_index: int) -> int:
+        for chapter_index, span in enumerate(chapters):
+            if span.start_utterance <= utterance_index <= span.end_utterance:
+                return chapter_index
+        raise AssertionError(f"utterance {utterance_index} not covered by any chapter")
+
+    # A representative utterance from the middle of each topic - robust to
+    # the model landing a boundary a few utterances early or late, but still
+    # requires the three topics to end up in genuinely different chapters.
+    topic_chapters = {
+        chapter_index_of(4),  # mid budget review
+        chapter_index_of(14),  # mid hiring plan
+        chapter_index_of(24),  # mid office move
+    }
+    assert len(topic_chapters) == 3, (
+        f"the three distinct topics did not land in three distinct chapters: "
+        f"{[(span.title, span.start_utterance, span.end_utterance) for span in chapters]!r}"
+    )
+
+    for span in chapters:
+        title = span.title.strip()
+        assert title != ""
+        assert title.casefold() not in _GENERIC_TITLES
+
+    print("chapters:", [span.model_dump() for span in chapters])
 
 
 # --- run_chapterisation: cache orchestration ---------------------------------

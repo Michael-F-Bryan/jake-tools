@@ -22,7 +22,7 @@ import pytest
 from claude_agent_sdk import ClaudeAgentOptions, Message, ResultMessage
 from click.testing import CliRunner
 
-from jake_tools.claude import ClaudeAgent, ClaudeAgentError
+from jake_tools.claude import AgentSpec, ClaudeAgent, ClaudeAgentError
 from jake_tools.cli import main
 from jake_tools.transcription.cache import RunCache
 from jake_tools.transcription.models import (
@@ -445,6 +445,117 @@ async def test_medium_confidence_corroboration_accepts_a_genuine_word_boundary_m
 
     assert resolved.utterances[0].speaker == "Ed Chen"
     assert requests == []
+
+
+# --- slow: real-LLM integration test ------------------------------------------
+#
+# Everything above proves `resolve`'s plumbing is right (assignments beat
+# the LLM, confidence thresholds gate acceptance, corroboration is
+# word-bounded) using a fake agent that only ever replays what the test
+# already wrote down. None of it proves the resolution prompt actually
+# teaches the model E18's requirement: read Michael's own varied phrasing in
+# the Meeting Prep free text - not just an extracted bullet list - and use
+# it to identify clusters, while still refusing to guess when the evidence
+# genuinely doesn't support a name. This makes one real `claude-sonnet-5`
+# call (`--slow`, skipped by default - see `pyproject.toml`'s `slow`
+# marker); the audio boundary (`AudioTool.cut`) stays faked throughout, as
+# it is not under test here. Run with
+# `uv run pytest --slow -k slow tests/test_transcription_speakers.py`.
+
+
+@pytest.mark.slow
+async def test_live_resolve_follows_natural_meeting_prep_hints_and_never_guesses(
+    tmp_path: Path,
+) -> None:
+    note = _note(
+        attendees=["Ada Lovelace", "Grace Hopper", "Charles Babbage"],
+        meeting_prep_body=(
+            "Ada kicked the meeting off with the roadmap review. Also, the "
+            "person who says 'good morning' at the start is Grace.\n"
+        ),
+    )
+    transcript = RawTranscript(
+        clips=[],
+        utterances=[
+            Utterance(
+                start=0.0,
+                end=5.0,
+                speaker="SPEAKER_00",
+                text=(
+                    "Alright everyone, let's get started with today's sync. "
+                    "I want to cover the roadmap for Q3 before we dive into "
+                    "the budget numbers."
+                ),
+            ),
+            Utterance(
+                start=5.0,
+                end=8.0,
+                speaker="SPEAKER_01",
+                text=(
+                    "Good morning, everyone! Thanks so much for joining on "
+                    "short notice."
+                ),
+            ),
+            Utterance(start=8.0, end=8.5, speaker="SPEAKER_02", text="Yeah."),
+            Utterance(
+                start=9.0,
+                end=13.0,
+                speaker="SPEAKER_00",
+                text=(
+                    "So the first item is the pilot deployment timeline, "
+                    "which is slipping into September."
+                ),
+            ),
+            Utterance(start=13.0, end=13.4, speaker="SPEAKER_02", text="Mm."),
+            Utterance(
+                start=14.0,
+                end=17.0,
+                speaker="SPEAKER_01",
+                text=(
+                    "I can take an action item to follow up with the vendor "
+                    "about that slip."
+                ),
+            ),
+            Utterance(start=17.0, end=17.3, speaker="SPEAKER_02", text="Right."),
+        ],
+        audio_sha256=None,
+    )
+    agent = ClaudeAgent(defaults=AgentSpec(effort="low"))
+    audio_tool = FakeAudioTool()
+
+    resolved, requests = await resolve(
+        note,
+        transcript,
+        agent=agent,
+        assignments=[],
+        audio_tool=audio_tool,
+        merged_audio=tmp_path / "merged.m4a",
+        snippet_dir=tmp_path / "snippets",
+    )
+
+    resolved_speaker_by_cluster = dict.fromkeys(
+        u.speaker for u in transcript.utterances
+    )
+    for original, updated in zip(
+        transcript.utterances, resolved.utterances, strict=True
+    ):
+        if resolved_speaker_by_cluster[original.speaker] is None:
+            resolved_speaker_by_cluster[original.speaker] = updated.speaker
+
+    # The hints determine these clusters, however Michael happened to phrase
+    # them in the Meeting Prep prose.
+    assert resolved_speaker_by_cluster["SPEAKER_00"] == "Ada Lovelace"
+    assert resolved_speaker_by_cluster["SPEAKER_01"] == "Grace Hopper"
+
+    # SPEAKER_02 has nothing but one-word filler utterances and no hint
+    # points to it anywhere - never-guess must leave it unresolved (still
+    # its cluster id, not a name) and surfaced as a snippet request, not
+    # silently assigned to the one remaining attendee.
+    assert resolved_speaker_by_cluster["SPEAKER_02"] == "SPEAKER_02"
+    assert [request.cluster for request in requests] == ["SPEAKER_02"]
+    assert audio_tool.cut_calls  # the (faked) snippet cutting actually ran
+
+    print("unresolved requests:", [r.model_dump() for r in requests])
 
 
 # --- note.append_diarisation_hints: the sanctioned Meeting Prep write -------

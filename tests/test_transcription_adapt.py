@@ -29,7 +29,7 @@ from claude_agent_sdk import (
 )
 from click.testing import CliRunner
 
-from jake_tools.claude import ClaudeAgent
+from jake_tools.claude import AgentSpec, ClaudeAgent
 from jake_tools.cli import main
 from jake_tools.transcription.adapt import (
     NoFallbackAgentError,
@@ -450,6 +450,64 @@ async def test_adapt_transcript_raises_without_an_agent_when_nothing_parses(
 
     with pytest.raises(NoFallbackAgentError):
         await adapt_module.adapt_transcript(path, agent=None)
+
+
+# --- slow: real-LLM integration test ------------------------------------------
+#
+# Everything above proves the *routing* is right (deterministic parsers
+# preferred, LLM fallback reached only when neither matches, the raw
+# document embedded verbatim in the prompt). None of it proves the LLM
+# fallback's prompt actually teaches the model to restructure without
+# paraphrasing - a fake only ever replays what the test already wrote down.
+# This makes one real `claude-sonnet-5` call (`--slow`, skipped by default -
+# see `pyproject.toml`'s `slow` marker) against the Gemini-shaped sample
+# above and checks observable properties of the real reply: non-empty
+# utterances, the exact speaker-label set from the source, non-decreasing
+# ordering, and - the load-bearing rule for this stage - that a handful of
+# distinctive phrases from the source survive as utterance text verbatim,
+# since a paraphrasing adapter would poison the pipeline's factual record.
+# Run with `uv run pytest --slow -k slow tests/test_transcription_adapt.py`.
+
+
+@pytest.mark.slow
+async def test_live_adapt_transcript_restructures_the_gemini_excerpt_preserving_wording(
+    tmp_path: Path,
+) -> None:
+    agent = ClaudeAgent(defaults=AgentSpec(effort="low"))
+    path = tmp_path / "gemini_notes.md"
+    path.write_text(_GEMINI_EXCERPT_SAMPLE)
+
+    result = await adapt_module.adapt_transcript(path, agent=agent)
+
+    assert result.clips == []
+    assert result.audio_sha256 is None
+    assert len(result.utterances) > 0
+
+    # Speaker labels pass through verbatim: exactly the label set present in
+    # the source, no invented or dropped speakers.
+    speakers = {u.speaker for u in result.utterances}
+    assert speakers == {"Speaker A", "Speaker B"}
+
+    # Non-decreasing start ordering, per the module's documented contract.
+    starts = [u.start for u in result.utterances]
+    assert starts == sorted(starts)
+
+    # Wording preserved verbatim - restructuring must never paraphrase. Pick
+    # a handful of distinctive phrases straight from the source and require
+    # each to survive, unaltered, as some utterance's text.
+    all_text = " ".join(u.text for u in result.utterances)
+    for phrase in (
+        "Hey, Speaker B. How are you?",
+        "I'm not too bad",
+        "I'm good",
+        "Good to hear",
+    ):
+        assert phrase in all_text, (
+            f"{phrase!r} missing from adapted text (paraphrased or dropped): "
+            f"{all_text!r}"
+        )
+
+    print("adapted transcript:", result.model_dump_json(indent=2))
 
 
 # --- CLI: `jake-tools transcript adapt` -------------------------------------
