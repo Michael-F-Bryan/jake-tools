@@ -11,7 +11,6 @@ When in doubt, run `jake-tools <command> --help` for current flags.
 ```text
 src/jake_tools/
   cli/           # Click commands (keep thin)
-  transcripts/   # obsidian-recording / youtube / teams-meeting recipes
   claude.py      # Claude Agent SDK wrapper — the only LLM seam
   prompting.py   # typed Jinja prompts bound to a response model
   newsletters.py # SharePoint Graph client
@@ -50,7 +49,8 @@ uv run pytest -q
 - Ruff rules: `E`, `F`, `I`, `UP`, `B`, `SIM`, `C4` (see `pyproject.toml`).
 - Pyright must pass (`pyrightconfig.json`).
 - All LLM calls go through `ClaudeAgent` in `claude.py`. Nothing else imports
-  `claude_agent_sdk` directly.
+  `claude_agent_sdk` directly. No command currently calls the LLM; the seam
+  and the conventions below stand for the next one that does.
 - Commands that call the LLM use the `@agent` decorator in `cli/options.py`
   (adds `--model` and `--effort`) and `@coro`, applied closest to the callback,
   which runs the async callback with `asyncio.run`. `@agent` resolves the
@@ -63,8 +63,8 @@ uv run pytest -q
 - `AgentSpec.tools` defaults to an empty tuple, which is genuinely tool-less.
   Never pass `tools=None` to `ClaudeAgentOptions`: the SDK then omits `--tools`
   and the agent inherits Claude Code's full default toolset.
-- Tests inject a fake at the `run_query` seam (`tests/agent_fakes.py`), so
-  prompt rendering, schema injection, and usage accounting stay real.
+- Tests inject a fake at the `run_query` seam (see `tests/test_claude_agent.py`),
+  so prompt rendering, schema injection, and usage accounting stay real.
 - `cli/context.py`'s `AppContext` carries factories for every client a CLI
   command builds (`agent_factory`, `clockify_client_factory`,
   `jira_client_factory`, `newsletter_client_factory`). CLI tests inject fakes
@@ -77,50 +77,12 @@ uv run pytest -q
 | ------------------ | ----------------------------------------------------- |
 | `uv`                | dependency management and script runner                |
 | `claude-agent-sdk`  | LLM calls; drives the local `claude` CLI               |
-| `ffmpeg`, `scribe`  | `transcript obsidian-recording` audio pipeline         |
-| `yt-dlp`            | YouTube caption and metadata source adapter            |
 | `az` (Azure CLI)    | `newsletter` commands (Microsoft Graph token)          |
 
 If a required external tool is missing, report the blocker. Do not mock
 preflight checks or skip them silently.
 
 ## Commands
-
-### `transcript`
-
-```bash
-jake-tools transcript obsidian-recording NOTE.md
-jake-tools transcript obsidian-recording --dry-run --json NOTE.md
-jake-tools transcript obsidian-recording --work-dir _working/obsidian/NOTE NOTE.md
-jake-tools transcript polish TRANSCRIPT.txt
-jake-tools transcript youtube 'https://www.youtube.com/watch?v=VIDEO_ID' --out-dir _working/youtube/VIDEO_ID
-jake-tools transcript teams-meeting --out-dir _working/teams/EVENT --event-id EVENT_ID
-```
-
-Four subcommands, one operator-shaped group (organised by task, not by
-implementation detail):
-
-- `obsidian-recording` requires local `ffmpeg` and `scribe` executables.
-  Rewrites the Obsidian note in place only after note verification passes;
-  `--dry-run` runs the full pipeline (transcription, speaker mapping,
-  polish, chaptering, minutes) without that final write. Output sections:
-  `## Meeting Notes`, `## Chapters`, `## Transcript`. Without `--work-dir`,
-  intermediate artefacts live in a temp dir that is gone by the time the
-  command returns.
-- `polish` writes polished text to stdout only.
-- `youtube` and `teams-meeting` require `--out-dir` and always write every
-  intermediate artefact plus a `manifest.json` there. A vault note is
-  written only after note verification passes (`--vault-note`, or
-  `--write-vault` for the default DUM-C destination on `teams-meeting`);
-  `--dry-run` skips that write.
-
-`obsidian-recording`, `polish`, and `youtube` accept `--model` and `--effort`
-via the `@agent` decorator. `teams-meeting` does not call an LLM.
-
-`jake-tools transcribe ...` is a hidden, deprecated alias forwarding to
-`transcript obsidian-recording` / `transcript polish` — the same Click
-command objects, so it cannot drift from `transcript`. Prefer `transcript`
-in new scripts.
 
 ### `clockify`
 
@@ -154,5 +116,5 @@ Requires `az login` to the CSU tenant for a Graph access token.
 ## Boundaries
 
 - Do not commit secrets, tokens, or credentials.
-- `transcript` writes to Obsidian notes, and `newsletter` writes to SharePoint,
-  by design. `--dry-run` suppresses those writes where the command offers it.
+- `newsletter` writes to SharePoint by design. `--dry-run` suppresses those
+  writes where the command offers it.

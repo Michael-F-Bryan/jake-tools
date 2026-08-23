@@ -18,8 +18,8 @@ def _usage() -> Usage:
 def test_ai_stage_stats_json_is_flattened_and_nested_identically_to_before() -> None:
     """Guard test: captured from the pre-refactor `@computed_field` output.
 
-    Transcript manifests retain this shape, so the flattened keys and the
-    nested ``usage`` object must both survive the serializer implementation.
+    Serialised stats retain this shape, so the flattened keys and the nested
+    ``usage`` object must both survive the serializer implementation.
     """
     stats = AIStageStats(stage="scout", usage=_usage())
 

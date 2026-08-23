@@ -24,10 +24,10 @@ class Minutes(BaseModel):
 
 
 class MinutesPrompt(StructuredPrompt[Minutes]):
-    template = "Summarise:\n{{ transcript }}"
+    template = "Summarise:\n{{ notes }}"
     response_model = Minutes
 
-    transcript: str
+    notes: str
 
 
 def _result(
@@ -97,7 +97,7 @@ async def test_run_renders_a_prompt_object() -> None:
     fake = RecordingQuery(_assistant("ok"), _result())
     agent = ClaudeAgent(run_query=fake)
 
-    await agent.run(MinutesPrompt(transcript="hello there"))
+    await agent.run(MinutesPrompt(notes="hello there"))
 
     assert "hello there" in fake.calls[0][0]
 
@@ -109,9 +109,7 @@ async def test_run_structured_parses_structured_output() -> None:
     )
     agent = ClaudeAgent(run_query=fake)
 
-    minutes, reply = await agent.run_structured(
-        MinutesPrompt(transcript="a transcript")
-    )
+    minutes, reply = await agent.run_structured(MinutesPrompt(notes="some notes"))
 
     assert minutes == Minutes(summary="we shipped", actions=["ship more"])
     assert reply.usage.api_calls == 1
@@ -121,7 +119,7 @@ async def test_run_structured_sends_the_response_model_schema() -> None:
     fake = RecordingQuery(_result(structured_output={"summary": "s", "actions": []}))
     agent = ClaudeAgent(run_query=fake)
 
-    await agent.run_structured(MinutesPrompt(transcript="a transcript"))
+    await agent.run_structured(MinutesPrompt(notes="some notes"))
 
     assert fake.only_options.output_format == {
         "type": "json_schema",
@@ -143,7 +141,7 @@ async def test_run_structured_without_structured_output_raises_with_context() ->
     agent = ClaudeAgent(run_query=fake)
 
     with pytest.raises(ClaudeAgentError) as excinfo:
-        await agent.run_structured(MinutesPrompt(transcript="a transcript"))
+        await agent.run_structured(MinutesPrompt(notes="some notes"))
 
     message = str(excinfo.value)
     assert "Minutes" in message

@@ -7,9 +7,9 @@
     ],
     "exclude": [
         "**/__pycache__",
-        ".venv",
-        ".worktrees",
-        "_working"
+        "**/.*",
+        "_working",
+        "**/node_modules"
     ],
     "typeCheckingMode": "standard"
 }

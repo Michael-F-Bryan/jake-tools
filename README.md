@@ -25,66 +25,6 @@ all manually at any time with:
 uv run pre-commit run --all-files
 ```
 
-## Choosing a model
-
-Commands that call an LLM take `--model` (a Claude model ID) and `--effort`.
-Calls go through the Claude Agent SDK, which drives the local `claude` CLI, so
-the same credentials and quota apply as when you run Claude Code by hand.
-
-```bash
-jake-tools transcript polish --model claude-opus-4-8 --effort high TRANSCRIPT.txt
-```
-
-## Transcribing Obsidian recordings
-
-```bash
-jake-tools transcript obsidian-recording NOTE.md
-jake-tools transcript obsidian-recording --dry-run --json NOTE.md
-jake-tools transcript obsidian-recording --work-dir _working/obsidian/NOTE NOTE.md
-```
-
-The Obsidian recording pipeline always writes the same shape:
-
-- `## Meeting Notes` with high-level dot points
-- `## Chapters` with timestamps
-- `## Transcript` with polished transcript text grouped by chapter
-
-This command expects local `ffmpeg` and `scribe` executables to be available.
-It rewrites `NOTE.md` in place only after note verification passes; `--dry-run`
-runs the full pipeline (transcription, speaker mapping, polish, chaptering,
-minutes) without that final write. Without `--work-dir`, intermediate
-artefacts (audio, transcripts, chapters, a manifest) live in a temporary
-directory that is gone once the command returns; pass `--work-dir` to keep
-them for inspection, matching the youtube/teams-meeting `--out-dir` convention.
-
-`jake-tools transcribe ...` still works as a hidden, deprecated alias for
-`jake-tools transcript obsidian-recording` / `jake-tools transcript polish` —
-switch existing scripts to `transcript` when convenient.
-
-## Creating source notes from YouTube
-
-```bash
-jake-tools transcript youtube \
-  'https://www.youtube.com/watch?v=VIDEO_ID' \
-  --out-dir _working/youtube/VIDEO_ID
-
-jake-tools transcript youtube \
-  'https://www.youtube.com/watch?v=VIDEO_ID' \
-  --out-dir _working/youtube/VIDEO_ID \
-  --vault-note "$HOME/Documents/Vault/3 Resources/VIDEO_TITLE.md"
-```
-
-The command prefers authored captions in the requested language, then automatic
-captions. It keeps selected public metadata, raw captions, raw and polished
-transcripts, the rendered note, and a concise manifest under `--out-dir`. Vault
-writes occur only after verification passes and only when `--vault-note` is
-supplied without `--dry-run`.
-
-Source notes contain provenance frontmatter, a summary callout, key points,
-chapter summaries, clickable YouTube timestamps, and the polished transcript.
-Videos without suitable captions currently fail explicitly rather than silently
-starting a local audio transcription.
-
 ## Jira to Clockify sync
 
 ```bash

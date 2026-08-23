@@ -60,8 +60,8 @@ def _flatten_usage(
 ) -> dict[str, Any]:
     """Duplicate ``usage``'s scalar fields at the top level alongside it.
 
-    Transcript manifests expose flat keys for quick inspection while retaining
-    the nested ``usage`` object so Pydantic can rehydrate the model unchanged.
+    Serialised stats expose flat keys for quick inspection while retaining the
+    nested ``usage`` object so Pydantic can rehydrate the model unchanged.
     """
     extra = {key: value for key, value in dumped["usage"].items() if key not in exclude}
     return {**dumped, **extra}
