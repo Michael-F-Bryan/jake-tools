@@ -60,3 +60,60 @@ The command requires:
 For unattended runs, inject these values through the scheduler's secret
 environment or resolve `op://` references with `op run`. Do not persist the API
 tokens or depend on an interactive 1Password unlock in cron.
+
+## Transcription
+
+```bash
+jake-tools transcribe "2 Areas/Sunfish/2026-08-11 Team Sync.md"
+jake-tools transcribe "...md" --assign "SPEAKER_03=Nikki Staltari"
+jake-tools transcribe "...md" --assign "SPEAKER_04=Unknown" --finalise
+```
+
+The command runs the full meeting-transcription pipeline over one Obsidian
+prep note in a single call: merges and transcribes the note's audio embeds
+(or adapts a pre-diarised Gemini/Teams transcript embed when there's no
+audio), resolves diarisation clusters to attendee names, chapterises the
+raw transcript, polishes each chapter's dialogue, writes the meeting summary
+and Discussion Notes, and integrates every product into the note. `##
+Chapters` and `## Transcript` are replaced wholesale on every run; the `>
+[!summary]` callout and `## Discussion Notes` merge against a human's prior
+edits instead of overwriting them.
+
+If speaker resolution can't confidently name every voice, the command prints
+`{"status": "needs_input", "requests": [...]}` and exits with code 3 rather
+than guess. Each request carries a couple of short audio snippets and the
+surrounding resolved dialogue, for a human to identify (relayed over
+Discord, or asked directly). Re-run with `--assign "SPEAKER_03=Name"` to
+answer one cluster (repeatable), or `--assign "SPEAKER_04=Unknown"
+--finalise` to give up on whatever's left and proceed anyway. Every stage
+checks the run cache first, so a re-run resumes rather than repeating
+finished work — ASR/diarisation in particular is never redone once cached.
+
+The individual pipeline stages are also available as `transcript` plumbing
+sub-commands, each reading and writing the same run cache the porcelain
+uses — useful for debugging one stage or re-running part of a pipeline by
+hand:
+
+- `transcript merge-audio` — merge a note's audio embeds into one recording
+- `transcript asr` — local ASR + diarisation into the raw transcript
+- `transcript adapt` — adapt a pre-diarised text transcript instead
+- `transcript speakers` — resolve diarisation clusters to attendee names
+- `transcript chapterise` — split the raw transcript into topic-based chapters
+- `transcript polish` — clean up each chapter's dialogue, then check it adversarially
+- `transcript minutes` — generate the meeting summary and Discussion Notes
+- `transcript integrate` — write this run's products into the note
+
+The command requires:
+
+- `ffmpeg`/`ffprobe` on `PATH` (`brew install ffmpeg`) to merge and cut audio
+- the Obsidian CLI (`obsidian`) on `PATH`, with the vault open, to resolve
+  audio and transcript embeds
+- `HF_TOKEN` for pyannote's gated diarisation model — only needed for a
+  fresh ASR run over new audio; a cached run, or a run over a pre-diarised
+  transcript source, needs neither ffmpeg nor a token
+
+A coordinating agent without direct access to Michael's judgement can ask
+Jake (his Hermes agent) for supporting context — which prep note to run
+against, how to answer a `needs_input` request — via
+`hermes chat --quiet --query '...'` (`--resume <session_id>` to continue a
+session).

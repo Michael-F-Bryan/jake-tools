@@ -1,0 +1,183 @@
+"""``jake-tools transcribe`` - the composed transcription porcelain.
+
+One command, the full product set: merges/transcribes (or adapts), resolves
+speakers, chapterises, polishes, generates minutes, and writes the note - or
+pauses non-interactively with the same `needs_input` contract `transcript
+speakers` uses, for a coordinating agent to relay (e.g. over Discord) and
+resume. All composition logic lives in `transcription/pipeline.py`; this
+module only parses flags into options objects and delegates, per the
+CLI-options memo (E19) - the same shape as every command in
+``cli/transcript.py``.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import click
+
+from ..claude import ClaudeAgentError
+from ..transcription.adapt import AdaptError
+from ..transcription.asr import TranscriberError
+from ..transcription.audio import AudioToolError
+from ..transcription.chapters import ChaptersError
+from ..transcription.integrate import IntegrateError
+from ..transcription.minutes import MinutesError
+from ..transcription.obsidian import ObsidianCliError
+from ..transcription.pipeline import PipelineError, PipelineFactories, run_pipeline
+from ..transcription.polish import PolishError
+from ..transcription.speakers import SpeakersError, SpeakersResponse
+from .options import AgentOptions, agent_options, coro
+from .transcript import NEEDS_INPUT_EXIT_CODE
+from .transcript_options import (
+    AudioOptions,
+    CacheOptions,
+    ObsidianOptions,
+    TranscriberOptions,
+    audio_options,
+    cache_options,
+    obsidian_options,
+    transcriber_options,
+)
+
+# Every domain error a composed stage can raise, mapped to a clean
+# `ClickException` - the same precedent every `transcript` sub-command
+# follows (domain errors + `ClaudeAgentError` -> `ClickException`), just
+# gathered from every stage this porcelain composes instead of just one.
+_STAGE_ERRORS: tuple[type[Exception], ...] = (
+    PipelineError,
+    SpeakersError,
+    ChaptersError,
+    PolishError,
+    MinutesError,
+    IntegrateError,
+    AdaptError,
+    TranscriberError,
+    AudioToolError,
+    ObsidianCliError,
+    ClaudeAgentError,
+)
+
+
+@click.command("transcribe")
+@agent_options
+@obsidian_options
+@audio_options
+@transcriber_options
+@cache_options
+@click.argument(
+    "note_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False, readable=True),
+)
+@click.option(
+    "--assign",
+    "assign",
+    multiple=True,
+    metavar="CLUSTER=NAME",
+    help=(
+        'Confirm one speaker cluster, e.g. --assign "SPEAKER_03=Nikki '
+        'Staltari" (repeatable) - the same contract `transcript speakers '
+        "--assign` uses. Use this to resume a run that stopped for "
+        "needs_input."
+    ),
+)
+@click.option(
+    "--finalise",
+    "finalise",
+    is_flag=True,
+    help=(
+        "Map any speaker clusters still unresolved after --assign and the "
+        'LLM\'s own proposals to "Unknown", instead of asking for more '
+        "input."
+    ),
+)
+@click.option(
+    "--max-concurrency",
+    "max_concurrency",
+    type=int,
+    default=4,
+    show_default=True,
+    help="Maximum number of chapters polished concurrently.",
+)
+@coro
+async def transcribe(
+    note_path: Path,
+    assign: tuple[str, ...],
+    finalise: bool,
+    max_concurrency: int,
+    agent_options: AgentOptions,
+    obsidian_options: ObsidianOptions,
+    audio_options: AudioOptions,
+    transcriber_options: TranscriberOptions,
+    cache_options: CacheOptions,
+) -> None:
+    """Run the full meeting-transcription pipeline over NOTE_PATH.
+
+    One flow, full product set, no partial modes: merges NOTE_PATH's audio
+    embeds and transcribes them (or adapts a pre-diarised transcript embed
+    when there's no audio), resolves speakers, chapterises, polishes,
+    generates the meeting summary and Discussion Notes, and writes every
+    product into the note - the same eight stages `transcript merge-audio` /
+    `asr` / `adapt` / `speakers` / `chapterise` / `polish` / `minutes` /
+    `integrate` run individually, composed into one call. Every stage
+    consults the run cache first, so a re-run resumes rather than redoing
+    finished work (ASR/diarisation in particular - the expensive, HF-gated
+    step - is never repeated once cached).
+
+    If speaker resolution can't confidently name every cluster, this prints
+    `{"status": "needs_input", "run_id": ..., "requests": [...]}` and exits
+    with code 3 - byte-identical to `transcript speakers`' own contract, the
+    same one a coordinating agent already knows how to relay (e.g. over
+    Discord) and answer. Re-run with more `--assign "SPEAKER_03=Name"` flags
+    to supply an answer, or `--assign "...=Unknown" --finalise` to give up on
+    the rest and proceed anyway.
+
+    On success, prints a `RunReport` as JSON and exits 0: the run id, chapter
+    count, the ratio of "Unknown"-speaker turns to total polished turns, the
+    fixer's issues (from `polish_issues.json`), and the `IntegrationReport`
+    describing what changed in the note. This report is informational, never
+    gating - Michael's own skim of the note is the acceptance test; the
+    report just says where to aim it.
+
+    `--model`/`--effort` apply to every LLM call this run makes (chapterise
+    still defaults to `--effort low` when `--effort` isn't given, the same
+    default `transcript chapterise` applies, on the grounds that boundary
+    proposal is a cheap-model job).
+
+    A coordinating agent with no direct access to Michael's judgement can ask
+    Jake (his Hermes agent) for supporting context - which prep note to run
+    against, how to answer a needs_input request - via
+    `hermes chat --quiet --query '...'` (`--resume <session_id>` to continue
+    a session).
+    """
+    factories = PipelineFactories(
+        vault=obsidian_options.vault_client,
+        audio_tool=audio_options.audio_tool,
+        transcriber=transcriber_options.transcriber,
+        agent=agent_options.agent,
+        cache=cache_options.run_cache,
+    )
+
+    try:
+        outcome = await run_pipeline(
+            note_path,
+            factories,
+            agent_options.spec(),
+            assignments=assign,
+            finalise=finalise,
+            max_concurrency=max_concurrency,
+        )
+    except _STAGE_ERRORS as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if outcome.status == "needs_input":
+        # Byte-identical to `transcript speakers`' own needs_input payload:
+        # same model, same fields, same indent.
+        payload = SpeakersResponse(
+            status="needs_input", run_id=outcome.run_id or "", requests=outcome.requests
+        )
+        click.echo(payload.model_dump_json(indent=2))
+        raise click.exceptions.Exit(NEEDS_INPUT_EXIT_CODE)
+
+    assert outcome.report is not None  # "complete" always carries a report
+    click.echo(outcome.report.model_dump_json(indent=2))
