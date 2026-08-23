@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import functools
 import json
-from typing import Any, cast
+from typing import Any
 
 import click
 from pydantic import BaseModel
@@ -33,8 +33,10 @@ class ClockifyOptions(BaseModel):
 
     Set by the ``clockify`` group callback and carried on ``ctx.obj`` — the
     one seam Click's own dispatch requires, since group-level flags are
-    parsed before any subcommand runs. It holds nothing but the flag values
-    themselves; every subcommand builds its own client from it explicitly.
+    parsed before any subcommand runs. The ``clockify_options`` decorator
+    below is the only thing that reads it back; subcommands themselves just
+    receive it as a typed argument and build their own client from it
+    explicitly.
     """
 
     api_key: str | None
@@ -110,8 +112,31 @@ def jira_options(func: Any) -> Any:
     return wrapper
 
 
-def _clockify_options(ctx: click.Context) -> ClockifyOptions:
-    return cast(ClockifyOptions, ctx.obj)
+def clockify_options(func: Any) -> Any:
+    """Inject the :class:`ClockifyOptions` the ``clockify`` group resolved.
+
+    ``--api-key``/``--api-base-url`` are group-level flags shared by several
+    subcommands, so the ``clockify`` group callback is the only place that
+    parses them; it stores the built :class:`ClockifyOptions` on ``ctx.obj``
+    because Click's own group-to-subcommand dispatch has no other way to
+    thread that state down. This decorator is the single place that reads
+    it back, so handlers themselves never touch ``ctx`` or ``ctx.obj`` for
+    this — they just receive a typed argument, like every other options
+    decorator here.
+    """
+
+    @click.pass_context
+    @functools.wraps(func)
+    def wrapper(ctx: click.Context, *args: Any, **kwargs: Any) -> Any:
+        if not isinstance(ctx.obj, ClockifyOptions):
+            raise RuntimeError(
+                "clockify_options requires running under the `clockify` "
+                "group, which sets ctx.obj to a ClockifyOptions before any "
+                f"subcommand runs (got {ctx.obj!r})"
+            )
+        return ctx.invoke(func, *args, clockify_options=ctx.obj, **kwargs)
+
+    return wrapper
 
 
 @click.group()
@@ -172,6 +197,7 @@ def jira_name(key: str, summary: str, kind: str, as_json: bool) -> None:
 
 
 @clockify.command("jira-sync")
+@clockify_options
 @jira_options
 @click.option(
     "--apply/--dry-run",
@@ -204,6 +230,7 @@ def jira_name(key: str, summary: str, kind: str, as_json: bool) -> None:
 @click.pass_context
 def jira_sync(
     ctx: click.Context,
+    clockify_options: ClockifyOptions,
     jira_options: JiraOptions,
     apply_changes: bool,
     as_json: bool,
@@ -219,7 +246,7 @@ def jira_sync(
     regardless of assignee. The command never deletes records.
     """
     try:
-        clockify_api = _clockify_options(ctx).inventory_client()
+        clockify_api = clockify_options.inventory_client()
         jira_api = jira_options.inventory_client()
         snapshot = prepare_jira_sync(
             clockify=clockify_api,
@@ -265,12 +292,12 @@ def jira_sync(
 
 
 @clockify.command()
+@clockify_options
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
-@click.pass_context
-def whoami(ctx: click.Context, as_json: bool) -> None:
+def whoami(clockify_options: ClockifyOptions, as_json: bool) -> None:
     """Show the Clockify user for the configured API key."""
     try:
-        client = _clockify_options(ctx).inventory_client()
+        client = clockify_options.inventory_client()
         user = client.get_user()
     except ClockifyError as exc:
         raise click.ClickException(str(exc)) from exc

@@ -4,7 +4,7 @@ import json
 
 from click.testing import CliRunner
 
-from jake_tools.cli.clockify import ClockifyOptions, JiraOptions, clockify
+from jake_tools.cli.clockify import ClockifyOptions, JiraOptions, clockify, whoami
 from jake_tools.clockify import (
     CLOCKIFY_API_ROOT,
     ClockifyClientRecord,
@@ -166,6 +166,22 @@ def test_api_base_url_falls_back_to_the_default_root(monkeypatch) -> None:
     assert captured == [
         ClockifyOptions(api_key="test-key", api_base_url=CLOCKIFY_API_ROOT)
     ]
+
+
+def test_clockify_options_decorator_errors_clearly_outside_the_group() -> None:
+    """``clockify_options`` reads ``ctx.obj`` itself, not the handler.
+
+    Regression guard for the bare-``cast`` version of this seam: invoking a
+    ``clockify_options``-decorated command without going through the
+    ``clockify`` group (which is the only place ``ctx.obj`` gets set) must
+    fail with a clear, typed error naming the group requirement, not an
+    ``AttributeError`` from treating ``None`` as a ``ClockifyOptions``.
+    """
+    result = CliRunner().invoke(whoami, [])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, RuntimeError)
+    assert "clockify` group" in str(result.exception)
 
 
 def test_jira_name_renders_project_without_key_and_task_with_key() -> None:

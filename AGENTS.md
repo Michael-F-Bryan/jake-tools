@@ -77,9 +77,12 @@ uv run pytest -q
   directly at the top of the function. The one exception is `clockify`'s
   `--api-key`/`--api-base-url`, which are group-level flags shared by several
   subcommands: Click only threads group state to subcommands via `ctx.obj`,
-  so the group callback builds the `ClockifyOptions` once and subcommands
-  read it from there — still a single typed value with no factories, not a
-  context-object seam.
+  so the group callback builds the `ClockifyOptions` once and stores it
+  there — but handlers still never touch `ctx.obj` themselves. A
+  `clockify_options` decorator (`cli/clockify.py`) is the one place that
+  reads it back and injects it as a typed argument, the same shape as every
+  other options decorator; it's a single typed value with no factories, not
+  a context-object seam.
 - CLI tests stay thin: they monkeypatch the constructor method on an options
   model (e.g. `ClockifyOptions.inventory_client`) or the client/orchestration
   symbol in the CLI module, and assert flag parsing and delegation. Real
