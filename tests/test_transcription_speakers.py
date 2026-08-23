@@ -362,6 +362,91 @@ async def test_medium_confidence_requires_hint_corroboration(tmp_path: Path) -> 
     assert [r.cluster for r in requests] == ["SPEAKER_01"]
 
 
+async def test_medium_confidence_corroboration_rejects_unrelated_substring_matches(
+    tmp_path: Path,
+) -> None:
+    """Reviewer repro: a short first name that happens to be a substring of
+    an unrelated word ("ada" in "Canada", "ed" in "needed") must NOT count
+    as corroboration - that's the exact misattribution-poisons-the-record
+    scenario the never-guess rule exists to prevent."""
+    note = _note(
+        attendees=["Ada Lovelace", "Ed Chen"],
+        diarisation_hints=["The vendor is based in Canada", "We needed more time"],
+    )
+    transcript = RawTranscript(
+        clips=[],
+        utterances=[
+            Utterance(start=0.0, end=1.0, speaker="SPEAKER_00", text="Let's begin."),
+            Utterance(start=1.0, end=2.0, speaker="SPEAKER_01", text="Sounds good."),
+        ],
+        audio_sha256=None,
+    )
+    agent, _fake = _fake_agent(
+        [
+            {
+                "cluster": "SPEAKER_00",
+                "name": "Ada Lovelace",
+                "confidence": "medium",
+                "reasoning": "would spuriously match 'Canada'",
+            },
+            {
+                "cluster": "SPEAKER_01",
+                "name": "Ed Chen",
+                "confidence": "medium",
+                "reasoning": "would spuriously match 'needed'",
+            },
+        ]
+    )
+
+    resolved, requests = await resolve(
+        note,
+        transcript,
+        agent=agent,
+        assignments=[],
+        audio_tool=FakeAudioTool(),
+        merged_audio=tmp_path / "merged.m4a",
+        snippet_dir=tmp_path / "snippets",
+    )
+
+    assert resolved.utterances[0].speaker == "SPEAKER_00"
+    assert resolved.utterances[1].speaker == "SPEAKER_01"
+    assert {r.cluster for r in requests} == {"SPEAKER_00", "SPEAKER_01"}
+
+
+async def test_medium_confidence_corroboration_accepts_a_genuine_word_boundary_match(
+    tmp_path: Path,
+) -> None:
+    note = _note(attendees=["Ed Chen"], diarisation_hints=["Ed was very quiet today"])
+    transcript = RawTranscript(
+        clips=[],
+        utterances=[Utterance(start=0.0, end=1.0, speaker="SPEAKER_00", text="Hi.")],
+        audio_sha256=None,
+    )
+    agent, _fake = _fake_agent(
+        [
+            {
+                "cluster": "SPEAKER_00",
+                "name": "Ed Chen",
+                "confidence": "medium",
+                "reasoning": "hint names Ed directly",
+            }
+        ]
+    )
+
+    resolved, requests = await resolve(
+        note,
+        transcript,
+        agent=agent,
+        assignments=[],
+        audio_tool=FakeAudioTool(),
+        merged_audio=tmp_path / "merged.m4a",
+        snippet_dir=tmp_path / "snippets",
+    )
+
+    assert resolved.utterances[0].speaker == "Ed Chen"
+    assert requests == []
+
+
 # --- note.append_diarisation_hints: the sanctioned Meeting Prep write -------
 
 
@@ -586,11 +671,64 @@ async def test_run_speaker_resolution_assign_unknown_and_finalise_resolves(
     assert SpeakerAssignment(cluster="SPEAKER_01", name="Unknown") in (
         stored_assignments.assignments
     )
-    # The LLM-confirmed mapping is recorded as a Meeting Prep hint; "Unknown"
-    # is not (there's nothing to hint about).
+    # The Meeting Prep write is scoped to human-confirmed (--assign)
+    # mappings only, per the E15 ruling: SPEAKER_00 was resolved by the LLM
+    # alone (never --assign'd), so it must NOT be written, even though it's
+    # in resolved_transcript.json. "Unknown" is never written either.
     note_text = note_path.read_text()
-    assert "Ada Lovelace was SPEAKER_00" in note_text
+    assert "Ada Lovelace was SPEAKER_00" not in note_text
     assert "Unknown was SPEAKER_01" not in note_text
+
+
+async def test_run_speaker_resolution_writes_hints_only_for_assigned_clusters(
+    tmp_path: Path,
+) -> None:
+    """The other half of the E15 scoping: an --assign'd mapping IS written
+    to Meeting Prep, in the same run where an LLM-only mapping is not."""
+    cache = RunCache(tmp_path / "cache")
+    cache.store(
+        "run-1",
+        "raw_transcript",
+        RawTranscript(
+            clips=[],
+            utterances=[
+                Utterance(start=0.0, end=1.0, speaker="SPEAKER_00", text="hi"),
+                Utterance(start=1.0, end=2.0, speaker="SPEAKER_01", text="there"),
+            ],
+            audio_sha256=None,
+        ),
+    )
+    # SPEAKER_00 is confirmed by Michael via --assign; SPEAKER_01 is resolved
+    # by the LLM alone.
+    agent, _fake = _fake_agent(
+        [
+            {
+                "cluster": "SPEAKER_01",
+                "name": "Grace Hopper",
+                "confidence": "high",
+                "reasoning": "clear",
+            }
+        ]
+    )
+    note_path = _cache_note(tmp_path)
+
+    result = await run_speaker_resolution(
+        note_path,
+        "run-1",
+        assign=("SPEAKER_00=Ada Lovelace",),
+        finalise=False,
+        agent=agent,
+        audio_tool=FakeAudioTool(),
+        cache=cache,
+    )
+
+    assert result.status == "resolved"
+    resolved = cache.load("run-1", "resolved_transcript", RawTranscript)
+    assert resolved is not None
+    assert [u.speaker for u in resolved.utterances] == ["Ada Lovelace", "Grace Hopper"]
+    note_text = note_path.read_text()
+    assert "Ada Lovelace was SPEAKER_00" in note_text  # --assign'd: written
+    assert "Grace Hopper was SPEAKER_01" not in note_text  # LLM-only: not written
 
 
 async def test_run_speaker_resolution_persists_assignments_across_calls(

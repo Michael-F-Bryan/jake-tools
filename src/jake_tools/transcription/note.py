@@ -188,7 +188,13 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
-_MEETING_PREP_HEADING = "meeting prep"
+MEETING_PREP_HEADING = "meeting prep"
+"""The Meeting Prep section's heading text, lower-cased for comparison.
+
+Public (not ``_``-prefixed) because `transcription/speakers.py` matches the
+same heading to pull the section body for its LLM prompt — sharing this
+constant keeps the two in sync if the heading text ever changes.
+"""
 
 
 def append_diarisation_hints(path: Path, lines: Sequence[str]) -> bool:
@@ -223,7 +229,7 @@ def append_diarisation_hints(path: Path, lines: Sequence[str]) -> bool:
             index
             for index, section in enumerate(sections)
             if section.heading is not None
-            and section.heading.strip().lower() == _MEETING_PREP_HEADING
+            and section.heading.strip().lower() == MEETING_PREP_HEADING
         ),
         None,
     )

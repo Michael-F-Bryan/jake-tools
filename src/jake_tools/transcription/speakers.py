@@ -24,13 +24,18 @@ every resolvable cluster substituted and a list of requests for the rest.
 :func:`run_speaker_resolution` is the orchestration the CLI command drives:
 it loads/merges/stores the run cache state around one call to
 :func:`resolve`, and — only once every cluster is resolved — stores
-``resolved_transcript.json`` and appends newly confirmed mappings as
-Meeting Prep hint bullets (:func:`~.note.append_diarisation_hints`, the one
-sanctioned write into that human-owned section).
+``resolved_transcript.json`` and appends **``--assign``-sourced** mappings
+as Meeting Prep hint bullets (:func:`~.note.append_diarisation_hints`, the
+one sanctioned write into that human-owned section). Per the interview
+record's E15 decision, that write is scoped to identifications Michael
+makes during the interactive snippet session — an LLM-only resolution,
+however high its confidence, lands in ``resolved_transcript.json`` but
+never in the note.
 """
 
 from __future__ import annotations
 
+import re
 import textwrap
 from collections.abc import Sequence
 from pathlib import Path
@@ -43,7 +48,7 @@ from ..prompting import StructuredPrompt
 from .audio import AudioTool
 from .cache import RunCache
 from .models import RawTranscript, SnippetRequest, SpeakerAssignment, Utterance
-from .note import ParsedNote, append_diarisation_hints, parse_note
+from .note import MEETING_PREP_HEADING, ParsedNote, append_diarisation_hints, parse_note
 
 # The cache name `transcript asr`/`transcript adapt` store `RawTranscript`
 # under — the same contract `cli/transcript.py` uses, duplicated here rather
@@ -252,17 +257,22 @@ def _corroborated_by_hint(name: str, hints: Sequence[str]) -> bool:
 
     Hints are Michael's own shorthand ("Grace did most of the talking"), not
     full-name citations, so corroboration checks per-word overlap rather
-    than requiring the whole name as a substring.
+    than requiring the whole name as a substring. Matching is word-bounded
+    (`\\bword\\b`), not a bare substring check — "ada" must not corroborate
+    from "Canada", nor "ed" from "needed".
     """
     name_words = {word.lower() for word in name.split() if word}
-    return any(any(word in hint.lower() for word in name_words) for hint in hints)
+    return any(
+        any(re.search(rf"\b{re.escape(word)}\b", hint.lower()) for word in name_words)
+        for hint in hints
+    )
 
 
 def _meeting_prep_body(note: ParsedNote) -> str:
     for section in note.sections:
         if (
             section.heading is not None
-            and section.heading.strip().lower() == "meeting prep"
+            and section.heading.strip().lower() == MEETING_PREP_HEADING
         ):
             return section.body
     return ""
@@ -436,16 +446,23 @@ def _recording_phrase(note: ParsedNote) -> str:
     return f"in the {text} recording" if text else "in this recording"
 
 
-def _new_hint_lines(
-    note: ParsedNote, before: RawTranscript, after: RawTranscript
+def _hint_lines_for_assignments(
+    note: ParsedNote, assignments: Sequence[SpeakerAssignment]
 ) -> list[str]:
-    mapping: dict[str, str] = {}
-    for original, resolved in zip(before.utterances, after.utterances, strict=True):
-        if resolved.speaker != original.speaker and resolved.speaker != _UNKNOWN:
-            mapping[original.speaker] = resolved.speaker
+    """Hint bullets for HUMAN-confirmed mappings only.
+
+    Per the interview record's E15 decision, the sanctioned Meeting Prep
+    write is scoped to identifications Michael makes during the interactive
+    snippet session (`--assign`) — never an LLM-only resolution, however
+    high its confidence. `append_diarisation_hints` is idempotent, so it's
+    safe to pass every non-"Unknown" assignment on record each call, not
+    just ones new to this invocation.
+    """
     phrase = _recording_phrase(note)
     return [
-        f"{name} was {cluster} {phrase}" for cluster, name in sorted(mapping.items())
+        f"{assignment.name} was {assignment.cluster} {phrase}"
+        for assignment in sorted(assignments, key=lambda item: item.cluster)
+        if assignment.name != _UNKNOWN
     ]
 
 
@@ -469,9 +486,11 @@ async def run_speaker_resolution(
     `needs_input` response with their `SnippetRequest`s and stores nothing
     further (the assignments merge above already persisted). If `finalise`
     is set, remaining clusters are mapped to "Unknown". Either way, once
-    nothing is left unresolved: `resolved_transcript.json` is cached,
-    newly confirmed name mappings are appended as Meeting Prep hint
-    bullets, and a `resolved` response is returned.
+    nothing is left unresolved: `resolved_transcript.json` is cached, and
+    every non-"Unknown" `--assign`-sourced mapping is appended as a Meeting
+    Prep hint bullet (LLM-only resolutions are cached but never written to
+    the note — see the module docstring), before a `resolved` response is
+    returned.
     """
     note = parse_note(note_path)
     transcript = cache.load(run_id, RAW_TRANSCRIPT_CACHE_NAME, RawTranscript)
@@ -506,7 +525,7 @@ async def run_speaker_resolution(
 
     cache.store(run_id, RESOLVED_TRANSCRIPT_CACHE_NAME, resolved)
 
-    hint_lines = _new_hint_lines(note, transcript, resolved)
+    hint_lines = _hint_lines_for_assignments(note, merged_assignments)
     if hint_lines:
         append_diarisation_hints(Path(note.path), hint_lines)
 
