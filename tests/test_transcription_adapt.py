@@ -107,41 +107,42 @@ def test_parse_vtt_returns_none_for_text_with_no_webvtt_header() -> None:
     assert parse_vtt("just some prose, no structure at all.\n") is None
 
 
-# A real (speaker-redacted) Teams `.vtt` export, obtained from Jake (Michael's
-# Hermes agent) via `hermes chat` during this plan's implementation. Confirms
-# `parse_vtt` against genuine structure rather than the brief's hypothesis:
-# opaque UUID cue identifiers before the timing line, cue text wrapped across
-# multiple physical lines, and a long utterance split across several
-# consecutive same-speaker cues (`/53-0` etc. — not merged back together,
-# same as ASR's segment-per-cue philosophy in `asr.align`).
-_REAL_TEAMS_VTT = """WEBVTT
+# A synthetic fixture faithful to the structure of a real Teams `.vtt` export
+# Jake (Michael's Hermes agent) retrieved via `hermes chat` and described
+# during this plan's implementation, 2026-08-23: opaque UUID cue identifiers
+# before the timing line, cue text wrapped across multiple physical lines,
+# and a long utterance split across several consecutive same-speaker cues
+# (`/53-0` etc. — not merged back together, same as ASR's segment-per-cue
+# philosophy in `asr.align`). Structure verified against the real sample;
+# the UUID and dialogue content here are synthesised, not copied from it.
+_TEAMS_VTT_SAMPLE = """WEBVTT
 
-16ce95e3-8716-4a74-bbb9-c68e47d6fcc5/5-0
+00000000-0000-4000-8000-000000000000/5-0
 00:00:03.456 --> 00:00:03.976
 <v Speaker A>Yeah, there we go.</v>
 
-16ce95e3-8716-4a74-bbb9-c68e47d6fcc5/6-0
+00000000-0000-4000-8000-000000000000/6-0
 00:00:05.656 --> 00:00:06.056
 <v Speaker B>It'll break.</v>
 
-16ce95e3-8716-4a74-bbb9-c68e47d6fcc5/20-0
+00000000-0000-4000-8000-000000000000/20-0
 00:00:19.310 --> 00:00:22.750
 <v Speaker A>Yeah. Good. How are you? Yep.
 You're coming from this weekend.</v>
 
-16ce95e3-8716-4a74-bbb9-c68e47d6fcc5/53-0
+00000000-0000-4000-8000-000000000000/53-0
 00:00:23.830 --> 00:00:29.882
 <v Speaker B>Oh God, it was a long weekend.
 I'm gonna give you that. Like, yeah, like,</v>
 
-16ce95e3-8716-4a74-bbb9-c68e47d6fcc5/24-0
+00000000-0000-4000-8000-000000000000/24-0
 00:00:25.990 --> 00:00:26.110
 <v Speaker A>Yeah.</v>
 """
 
 
-def test_parse_vtt_handles_a_real_redacted_teams_export() -> None:
-    utterances = parse_vtt(_REAL_TEAMS_VTT)
+def test_parse_vtt_handles_a_teams_export_shaped_sample() -> None:
+    utterances = parse_vtt(_TEAMS_VTT_SAMPLE)
     assert utterances is not None
 
     assert utterances == [
@@ -364,22 +365,24 @@ async def test_adapt_transcript_falls_back_to_the_llm_for_an_unparseable_documen
     )  # the raw document is embedded verbatim
 
 
-# A real (speaker-redacted) excerpt of a Google Meet "Notes by Gemini"
-# transcript document, obtained from Jake via `hermes chat` during this
-# plan's implementation. It's *not* one-line-per-turn like the brief
-# hypothesised: a `### HH:MM:SS` heading covers a whole block of dialogue,
-# and multiple speakers' bold `**Name:**` turns appear inline in one
-# paragraph rather than one per line. Both deterministic parsers correctly
-# refuse it (`parse_vtt`: no `WEBVTT` header; `parse_named_lines`: the first
-# non-blank line is a markdown heading, not a speaker line) — this is
-# exactly the shape the LLM fallback exists for: real structure, verbatim
-# words, just not fixed-pattern-parseable.
-_REAL_GEMINI_EXCERPT = (
+# A synthetic fixture faithful to the structure of a real Google Meet "Notes
+# by Gemini" transcript document Jake retrieved via `hermes chat` and
+# described during this plan's implementation, 2026-08-23. It's *not*
+# one-line-per-turn like the brief hypothesised: a `### HH:MM:SS` heading
+# covers a whole block of dialogue, and multiple speakers' bold `**Name:**`
+# turns appear inline in one paragraph rather than one per line. Both
+# deterministic parsers correctly refuse it (`parse_vtt`: no `WEBVTT`
+# header; `parse_named_lines`: the first non-blank line is a markdown
+# heading, not a speaker line) — this is exactly the shape the LLM fallback
+# exists for: real structure, verbatim words, just not fixed-pattern-
+# parseable. Structure verified against the real sample; the date/time and
+# dialogue content here are synthesised, not copied from it.
+_GEMINI_EXCERPT_SAMPLE = (
     "# \U0001f4d6 Transcript\n"
     "\n"
-    "### Jun 18, 2026\n"
+    "### Jan 1, 2031\n"
     "\n"
-    "## Meeting Jun 18, 2026 at 10:52 IST-Transcript\n"
+    "## Meeting Jan 1, 2031 at 12:00 UTC-Transcript\n"
     "\n"
     "### 00:00:01\n"
     "\n"
@@ -389,12 +392,12 @@ _REAL_GEMINI_EXCERPT = (
 )
 
 
-def test_real_gemini_excerpt_is_rejected_by_both_deterministic_parsers() -> None:
-    assert parse_vtt(_REAL_GEMINI_EXCERPT) is None
-    assert parse_named_lines(_REAL_GEMINI_EXCERPT) is None
+def test_gemini_excerpt_sample_is_rejected_by_both_deterministic_parsers() -> None:
+    assert parse_vtt(_GEMINI_EXCERPT_SAMPLE) is None
+    assert parse_named_lines(_GEMINI_EXCERPT_SAMPLE) is None
 
 
-async def test_adapt_transcript_sends_a_real_gemini_excerpt_verbatim_to_the_llm(
+async def test_adapt_transcript_sends_the_gemini_excerpt_sample_verbatim_to_the_llm(
     tmp_path: Path,
 ) -> None:
     payload = {
@@ -416,7 +419,7 @@ async def test_adapt_transcript_sends_a_real_gemini_excerpt_verbatim_to_the_llm(
     fake = _RecordingQuery(_structured_result(payload))
     agent = ClaudeAgent(run_query=fake)
     path = tmp_path / "gemini_notes.md"
-    path.write_text(_REAL_GEMINI_EXCERPT)
+    path.write_text(_GEMINI_EXCERPT_SAMPLE)
 
     result = await adapt_module.adapt_transcript(path, agent=agent)
 
