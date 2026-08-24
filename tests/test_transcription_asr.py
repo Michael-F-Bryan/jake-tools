@@ -265,6 +265,8 @@ def _transcriber_probe(transcriber_options: TranscriberOptions) -> None:
         f"hf_token={transcriber_options.hf_token} "
         f"asr_model={transcriber_options.asr_model} "
         f"diarisation_model={transcriber_options.diarisation_model} "
+        f"diarisation_device={transcriber_options.diarisation_device} "
+        f"num_speakers={transcriber_options.num_speakers} "
         f"asr_chunk_duration={transcriber_options.asr_chunk_duration} "
         f"asr_chunk_overlap={transcriber_options.asr_chunk_overlap} "
         f"memory_budget_bytes={transcriber_options.memory_budget_bytes}"
@@ -281,6 +283,10 @@ def test_transcriber_options_decorator_builds_options_from_flags() -> None:
             "custom/asr",
             "--diarisation-model",
             "custom/diarisation",
+            "--diarisation-device",
+            "cpu",
+            "--num-speakers",
+            "2",
             "--asr-chunk-duration",
             "60",
             "--asr-chunk-overlap",
@@ -293,7 +299,8 @@ def test_transcriber_options_decorator_builds_options_from_flags() -> None:
     assert result.exit_code == 0
     assert result.output == (
         "hf_token=hf_fake_token asr_model=custom/asr diarisation_model=custom/diarisation "
-        "asr_chunk_duration=60.0 asr_chunk_overlap=5.0 memory_budget_bytes=1000000000\n"
+        "diarisation_device=cpu num_speakers=2 asr_chunk_duration=60.0 "
+        "asr_chunk_overlap=5.0 memory_budget_bytes=1000000000\n"
     )
 
 
@@ -308,6 +315,8 @@ def test_transcriber_options_decorator_defaults_chunking_and_memory_budget_flags
     result = CliRunner().invoke(_transcriber_probe, ["--hf-token", "hf_fake_token"])
 
     assert result.exit_code == 0
+    assert "diarisation_device=auto" in result.output
+    assert "num_speakers=None" in result.output
     assert f"asr_chunk_duration={DEFAULT_ASR_CHUNK_DURATION}" in result.output
     assert f"asr_chunk_overlap={DEFAULT_ASR_CHUNK_OVERLAP}" in result.output
     assert "memory_budget_bytes=None" in result.output
@@ -375,7 +384,7 @@ def test_transcribe_merged_audio_transcribes_and_caches_on_a_cache_miss(
     assert cache.load("run-1", "raw_transcript", RawTranscript) == fake.result
 
 
-def test_transcribe_merged_audio_returns_cached_result_without_calling_transcriber(
+def test_transcribe_merged_audio_rejects_legacy_cache_without_provenance(
     tmp_path: Path,
 ) -> None:
     audio = tmp_path / "merged.m4a"
@@ -391,8 +400,8 @@ def test_transcribe_merged_audio_returns_cached_result_without_calling_transcrib
         audio, run_id="run-1", transcriber=fake, cache=cache
     )
 
-    assert result == cached_result
-    assert fake.calls == []
+    assert result == fake.result
+    assert fake.calls == [audio]
 
 
 # --- CLI: `transcript asr` delegation ---------------------------------------
@@ -523,6 +532,9 @@ class _FakePyannotePipeline:
     def __init__(self, turns: list[tuple[float, float, str]]) -> None:
         self._turns = turns
         self.call_args: list[object] = []
+
+    def to(self, device: object) -> _FakePyannotePipeline:
+        return self
 
     def __call__(self, file: object) -> SimpleNamespace:
         self.call_args.append(file)
@@ -842,6 +854,9 @@ def test_local_transcriber_maps_diarisation_runtime_error_to_accelerator_out_of_
     call (e.g. torch's MPS allocator's own fail-fast cap tripping)."""
 
     class _RaisingPipeline:
+        def to(self, device: object) -> _RaisingPipeline:
+            return self
+
         def __call__(self, file: object) -> object:
             raise RuntimeError("MPS backend out of memory")
 
@@ -920,7 +935,7 @@ def test_local_transcriber_produces_nonempty_monotonic_utterances(
     if not hf_token:
         pytest.fail(
             "HF_TOKEN must be set (and belong to an account that has "
-            "accepted pyannote/speaker-diarization-3.1's licence) to run "
+            "accepted pyannote/speaker-diarization-community-1's licence) to run "
             "the live ASR+diarisation test."
         )
 

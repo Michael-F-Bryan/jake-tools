@@ -191,7 +191,10 @@ async def transcribe(
         # Byte-identical to `transcript speakers`' own needs_input payload:
         # same model, same fields, same indent.
         payload = SpeakersResponse(
-            status="needs_input", run_id=outcome.run_id or "", requests=outcome.requests
+            status="needs_input",
+            run_id=outcome.run_id or "",
+            requests=outcome.requests,
+            timings=outcome.timings,
         )
         click.echo(payload.model_dump_json(indent=2))
         raise click.exceptions.Exit(NEEDS_INPUT_EXIT_CODE)

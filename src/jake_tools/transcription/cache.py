@@ -13,6 +13,8 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from .models import StageTiming, StageTimingLog
+
 _DEFAULT_ROOT = Path.home() / "Library" / "Caches" / "jake-tools" / "transcription"
 _CHUNK_SIZE = 1024 * 1024
 
@@ -61,6 +63,18 @@ class RunCache:
         if not path.exists():
             return None
         return path.read_text()
+
+    def record_timing(self, run_id: str, timing: StageTiming) -> None:
+        """Append one durable timing record to the run's local-stage log."""
+        log = self.load(run_id, "timings", StageTimingLog)
+        if log is None:
+            log = StageTimingLog()
+        log.stages.append(timing)
+        self.store(run_id, "timings", log)
+
+    def load_timings(self, run_id: str) -> list[StageTiming]:
+        log = self.load(run_id, "timings", StageTimingLog)
+        return [] if log is None else log.stages
 
     def _model_path(self, run_id: str, name: str) -> Path:
         return self.run_dir(run_id) / f"{name}.json"

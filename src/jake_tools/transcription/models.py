@@ -13,9 +13,33 @@ Timestamp fields are meeting-relative seconds throughout; rendering to
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class StageTiming(BaseModel):
+    """Durable timing and provenance for one local pipeline stage."""
+
+    stage: str
+    started_at: datetime
+    ended_at: datetime
+    elapsed_seconds: float
+    cache_hit: bool = False
+    device: str | None = None
+    model: str | None = None
+    config: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+    media_duration_seconds: float | None = None
+    rtf: float | None = None
+    api_rate_cost: float = 0.0
+
+
+class StageTimingLog(BaseModel):
+    """The append-only local-stage timing document in a run cache."""
+
+    stages: list[StageTiming] = Field(default_factory=list)
+
 
 NoteContext = Literal["meeting", "ops-log"]
 """Which kind of Obsidian note a run is producing. Detection lands in plan 002."""
@@ -54,6 +78,11 @@ class RawTranscript(BaseModel):
     audio_sha256: str | None = (
         None  # hash of the merged audio; None for pre-diarised sources
     )
+    asr_model: str | None = None
+    diarisation_model: str | None = None
+    diarisation_device: str | None = None
+    num_speakers: int | None = None
+    timings: list[StageTiming] = Field(default_factory=list)
 
 
 class SpeakerAssignment(BaseModel):

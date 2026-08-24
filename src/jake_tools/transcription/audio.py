@@ -27,14 +27,16 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .cache import RunCache, sha256_of
-from .models import SourceClip
+from .models import SourceClip, StageTiming
 from .note import ParsedNote
 from .obsidian import VaultClient
 
@@ -253,6 +255,7 @@ class MergeAudioResult(BaseModel):
     merged_path: str
     audio_sha256: str
     clips: list[SourceClip]
+    timings: list[StageTiming] = Field(default_factory=list)
 
 
 def merge_note_audio(
@@ -273,6 +276,8 @@ def merge_note_audio(
     happens in a scratch directory first; the result is then copied into its
     final, hash-keyed run directory.
     """
+    started = time.monotonic()
+    started_at = datetime.now(UTC)
     audio_embeds = [
         (index, embed.split("|", 1)[0])
         for index, embed in enumerate(note.embeds)
@@ -300,9 +305,21 @@ def merge_note_audio(
         merged_path = cache.run_dir(run_id) / "merged.m4a"
         shutil.copyfile(staged, merged_path)
 
+    timing = StageTiming(
+        stage="merge",
+        started_at=started_at,
+        ended_at=datetime.now(UTC),
+        elapsed_seconds=max(0.0, time.monotonic() - started),
+        cache_hit=False,
+        config={"clip_count": len(clips)},
+        media_duration_seconds=sum(clip.duration_seconds for clip in clips),
+        api_rate_cost=0.0,
+    )
+    cache.record_timing(run_id, timing)
     return MergeAudioResult(
         run_id=run_id,
         merged_path=str(merged_path),
         audio_sha256=audio_sha256,
         clips=clips,
+        timings=cache.load_timings(run_id),
     )

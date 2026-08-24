@@ -70,7 +70,7 @@ from .cache import RunCache, sha256_of
 from .chapters import run_chapterisation
 from .integrate import IntegrationReport, load_products, run_integrate
 from .minutes import run_minutes
-from .models import PolishedChapter, RawTranscript, SnippetRequest
+from .models import PolishedChapter, RawTranscript, SnippetRequest, StageTiming
 from .note import ParsedNote, parse_note
 from .obsidian import VaultClient
 from .polish import run_polish
@@ -141,6 +141,7 @@ class RunReport(BaseModel):
     unknown_turn_ratio: float  # Unknown-speaker turns / total polished turns
     fixer_issues: list[str]  # from polish_issues.json
     integration: IntegrationReport
+    timings: list[StageTiming] = Field(default_factory=list)
 
 
 class PipelineOutcome(BaseModel):
@@ -156,7 +157,13 @@ class PipelineOutcome(BaseModel):
     status: Literal["complete", "needs_input"]
     run_id: str | None = None
     requests: list[SnippetRequest] = Field(default_factory=list)
+    timings: list[StageTiming] = Field(default_factory=list)
     report: RunReport | None = None
+
+
+def _known_speaker_count(note: ParsedNote) -> int | None:
+    attendees = {attendee.strip() for attendee in note.attendees if attendee.strip()}
+    return len(attendees) or None
 
 
 def _embed_target(embed: str) -> str:
@@ -221,6 +228,7 @@ async def _acquire_raw_transcript(
             run_id=run_id,
             transcriber=transcriber,
             cache=cache,
+            num_speakers=_known_speaker_count(note),
         )
         if raw.clips != merge_result.clips:
             corrected = raw.model_copy(update={"clips": merge_result.clips})
@@ -295,7 +303,10 @@ async def run_pipeline(
     )
     if speakers_result.status == "needs_input":
         return PipelineOutcome(
-            status="needs_input", run_id=run_id, requests=speakers_result.requests
+            status="needs_input",
+            run_id=run_id,
+            requests=speakers_result.requests,
+            timings=cache.load_timings(run_id),
         )
 
     chapter_spec = (
@@ -327,5 +338,6 @@ async def run_pipeline(
         unknown_turn_ratio=_unknown_turn_ratio(products.chapters),
         fixer_issues=polish_result.issues,
         integration=integration,
+        timings=cache.load_timings(run_id),
     )
     return PipelineOutcome(status="complete", run_id=run_id, report=report)

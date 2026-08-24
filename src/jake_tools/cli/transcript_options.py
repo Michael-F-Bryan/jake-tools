@@ -33,6 +33,7 @@ from ..transcription.asr import (
     DEFAULT_ASR_CHUNK_OVERLAP,
     DEFAULT_ASR_MODEL,
     DEFAULT_DIARISATION_MODEL,
+    DiarisationDevice,
     LocalTranscriber,
     Transcriber,
 )
@@ -91,15 +92,19 @@ class TranscriberOptions(BaseModel):
     hf_token: str | None
     asr_model: str
     diarisation_model: str
+    diarisation_device: DiarisationDevice
+    num_speakers: int | None
     asr_chunk_duration: float
     asr_chunk_overlap: float
     memory_budget_bytes: int | None
 
-    def transcriber(self) -> Transcriber:
+    def transcriber(self, *, num_speakers: int | None = None) -> Transcriber:
         return LocalTranscriber(
             hf_token=self.hf_token,
             asr_model=self.asr_model,
             diarisation_model=self.diarisation_model,
+            diarisation_device=self.diarisation_device,
+            num_speakers=(self.num_speakers if num_speakers is None else num_speakers),
             asr_chunk_duration=self.asr_chunk_duration,
             asr_chunk_overlap=self.asr_chunk_overlap,
             memory_budget_bytes=self.memory_budget_bytes,
@@ -206,6 +211,21 @@ def transcriber_options(func: F) -> F:
         help="pyannote-audio pipeline id (or local path) for speaker diarisation.",
     )
     @click.option(
+        "--diarisation-device",
+        "diarisation_device",
+        type=click.Choice(["auto", "cpu", "mps"], case_sensitive=True),
+        default="auto",
+        show_default=True,
+        help="Diarisation device. auto uses MPS only when it is available.",
+    )
+    @click.option(
+        "--num-speakers",
+        "num_speakers",
+        type=click.IntRange(min=1),
+        default=None,
+        help="Known speaker count; omitted means unconstrained diarisation.",
+    )
+    @click.option(
         "--asr-chunk-duration",
         "asr_chunk_duration",
         type=float,
@@ -243,6 +263,8 @@ def transcriber_options(func: F) -> F:
             hf_token=kwargs.pop("hf_token"),
             asr_model=kwargs.pop("asr_model"),
             diarisation_model=kwargs.pop("diarisation_model"),
+            diarisation_device=kwargs.pop("diarisation_device"),
+            num_speakers=kwargs.pop("num_speakers"),
             asr_chunk_duration=kwargs.pop("asr_chunk_duration"),
             asr_chunk_overlap=kwargs.pop("asr_chunk_overlap"),
             memory_budget_bytes=kwargs.pop("memory_budget_bytes"),

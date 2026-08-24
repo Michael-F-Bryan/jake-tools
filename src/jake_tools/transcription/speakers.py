@@ -51,7 +51,13 @@ from ..claude import ClaudeAgent
 from ..prompting import StructuredPrompt
 from .audio import AudioTool
 from .cache import RunCache
-from .models import RawTranscript, SnippetRequest, SpeakerAssignment, Utterance
+from .models import (
+    RawTranscript,
+    SnippetRequest,
+    SpeakerAssignment,
+    StageTiming,
+    Utterance,
+)
 from .note import MEETING_PREP_HEADING, ParsedNote, append_diarisation_hints, parse_note
 
 # The cache name `transcript asr`/`transcript adapt` store `RawTranscript`
@@ -443,6 +449,7 @@ class SpeakersResponse(BaseModel):
     status: Literal["needs_input", "resolved"]
     run_id: str
     requests: list[SnippetRequest] = Field(default_factory=list)
+    timings: list[StageTiming] = Field(default_factory=list)
 
 
 def parse_assign(raw: str) -> SpeakerAssignment:
@@ -596,7 +603,12 @@ async def run_speaker_resolution(
     )
 
     if requests and not finalise:
-        return SpeakersResponse(status="needs_input", run_id=run_id, requests=requests)
+        return SpeakersResponse(
+            status="needs_input",
+            run_id=run_id,
+            requests=requests,
+            timings=cache.load_timings(run_id),
+        )
 
     if requests:  # --finalise: whatever is left becomes "Unknown"
         resolved = _finalise_unknown(resolved, requests)
@@ -609,4 +621,9 @@ async def run_speaker_resolution(
     if hint_lines:
         append_diarisation_hints(Path(note.path), hint_lines)
 
-    return SpeakersResponse(status="resolved", run_id=run_id, requests=[])
+    return SpeakersResponse(
+        status="resolved",
+        run_id=run_id,
+        requests=[],
+        timings=cache.load_timings(run_id),
+    )

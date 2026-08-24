@@ -31,13 +31,18 @@ from click.testing import CliRunner
 
 from jake_tools.claude import AgentSpec, ClaudeAgent, ClaudeAgentError
 from jake_tools.cli import main
-from jake_tools.transcription.asr import Transcriber, TranscriberError
+from jake_tools.transcription.asr import (
+    DEFAULT_ASR_MODEL,
+    DEFAULT_DIARISATION_MODEL,
+    Transcriber,
+    TranscriberError,
+)
 from jake_tools.transcription.audio import (
     AudioEmbedResolutionError,
     AudioTool,
     NoAudioEmbedsError,
 )
-from jake_tools.transcription.cache import RunCache
+from jake_tools.transcription.cache import RunCache, sha256_of
 from jake_tools.transcription.integrate import IntegrationReport
 from jake_tools.transcription.models import (
     RawTranscript,
@@ -173,10 +178,22 @@ class FakeTranscriber:
     def __init__(self, result: RawTranscript) -> None:
         self._result = result
         self.calls: list[Path] = []
+        self.speaker_counts: list[int | None] = []
 
-    def transcribe(self, audio: Path) -> RawTranscript:
+    def transcribe(
+        self, audio: Path, *, num_speakers: int | None = None
+    ) -> RawTranscript:
         self.calls.append(audio)
-        return self._result
+        self.speaker_counts.append(num_speakers)
+        return self._result.model_copy(
+            update={
+                "audio_sha256": sha256_of(audio),
+                "asr_model": DEFAULT_ASR_MODEL,
+                "diarisation_model": DEFAULT_DIARISATION_MODEL,
+                "diarisation_device": "cpu",
+                "num_speakers": 2,
+            }
+        )
 
 
 def _unexpected_transcriber() -> Transcriber:
@@ -401,6 +418,8 @@ async def test_run_pipeline_happy_path_audio_ramp_writes_all_four_sections_in_or
     assert outcome.report is not None
     assert outcome.report.chapters == 2
     assert outcome.report.integration.sections
+    assert [timing.stage for timing in outcome.report.timings] == ["merge"]
+    assert transcriber.speaker_counts == [2]
 
     # Clips provenance: the real per-source clips from `merge_note_audio`
     # replaced the transcriber's fabricated whole-file pseudo-clip.

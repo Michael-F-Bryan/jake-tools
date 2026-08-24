@@ -41,17 +41,19 @@ enough words in a segment to give every genuine speaker at least one — see
 from __future__ import annotations
 
 import gc
+import inspect
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import mlx.core as mx
 import torch
 from parakeet_mlx import from_pretrained as parakeet_from_pretrained
 from pyannote.audio import Pipeline
+from pydantic import BaseModel
 
 # torchcodec's own `decoders/__init__.py` re-exports `AudioDecoder` from the
 # private-looking `_audio_decoder` submodule without an `__all__`, which
@@ -64,10 +66,11 @@ from torchcodec.decoders import (
 
 from .cache import RunCache, sha256_of
 from .memory_watchdog import MemoryWatchdog, default_memory_budget_bytes
-from .models import RawTranscript, SourceClip, Utterance
+from .models import RawTranscript, SourceClip, StageTiming, Utterance
 
 DEFAULT_ASR_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
-DEFAULT_DIARISATION_MODEL = "pyannote/speaker-diarization-3.1"
+DEFAULT_DIARISATION_MODEL = "pyannote/speaker-diarization-community-1"
+DiarisationDevice = Literal["auto", "cpu", "mps"]
 
 # parakeet-mlx's Conformer encoder runs full self-attention over the whole
 # input in one shot when `chunk_duration` is unset — fine for short clips,
@@ -141,8 +144,7 @@ class AcceleratorOutOfMemoryError(TranscriberError):
         super().__init__(f"{stage} failed, possibly out of accelerator memory: {cause}")
 
 
-@dataclass(frozen=True)
-class AsrSegment:
+class AsrSegment(BaseModel):
     """One timestamped span of recognised speech, before diarisation."""
 
     start: float
@@ -150,13 +152,32 @@ class AsrSegment:
     text: str
 
 
-@dataclass(frozen=True)
-class DiarisedTurn:
+class DiarisedTurn(BaseModel):
     """One time-labelled speaker turn from the diarisation pipeline."""
 
     start: float
     end: float
     speaker: str
+
+
+class AsrCheckpoint(BaseModel):
+    """Content/config-bound ASR output that can be resumed independently."""
+
+    audio_sha256: str
+    model: str
+    chunk_duration: float
+    chunk_overlap: float
+    segments: list[AsrSegment]
+
+
+class DiarisationCheckpoint(BaseModel):
+    """Content/config-bound diarisation output that can be resumed independently."""
+
+    audio_sha256: str
+    model: str
+    device: Literal["cpu", "mps"]
+    num_speakers: int | None
+    turns: list[DiarisedTurn]
 
 
 class Transcriber(Protocol):
@@ -180,6 +201,8 @@ class LocalTranscriber:
         diarisation_model: str = DEFAULT_DIARISATION_MODEL,
         asr_chunk_duration: float = DEFAULT_ASR_CHUNK_DURATION,
         asr_chunk_overlap: float = DEFAULT_ASR_CHUNK_OVERLAP,
+        diarisation_device: DiarisationDevice = "auto",
+        num_speakers: int | None = None,
         memory_budget_bytes: int | None = None,
     ) -> None:
         self._hf_token = hf_token
@@ -187,6 +210,8 @@ class LocalTranscriber:
         self._diarisation_model = diarisation_model
         self._asr_chunk_duration = asr_chunk_duration
         self._asr_chunk_overlap = asr_chunk_overlap
+        self._diarisation_device: DiarisationDevice = diarisation_device
+        self._num_speakers = num_speakers
         # None means "use the shared ~60%-of-RAM default" — resolved lazily
         # via _resolve_memory_budget_bytes() rather than here, so the
         # default always reflects the machine actually running
@@ -207,7 +232,17 @@ class LocalTranscriber:
             else default_memory_budget_bytes()
         )
 
-    def transcribe(self, audio: Path) -> RawTranscript:
+    @property
+    def diarisation_device(self) -> DiarisationDevice:
+        return self._diarisation_device
+
+    @property
+    def num_speakers(self) -> int | None:
+        return self._num_speakers
+
+    def transcribe(
+        self, audio: Path, *, num_speakers: int | None = None
+    ) -> RawTranscript:
         if not self._hf_token:
             raise MissingHfTokenError(self._diarisation_model)
 
@@ -220,11 +255,15 @@ class LocalTranscriber:
         # of a first real run) are this watchdog's real partners in
         # safety, not redundant with it. Stopped in `finally` so a
         # normal-or-failed run doesn't leave the poll thread running.
+        speaker_count = self._num_speakers if num_speakers is None else num_speakers
+        selected_device = select_diarisation_device(self._diarisation_device)
         watchdog = MemoryWatchdog(budget_bytes=self._resolve_memory_budget_bytes())
         watchdog.start()
         try:
             asr_segments = self._run_asr(audio)
-            diarised_turns = self._run_diarisation(audio)
+            diarised_turns = self._run_diarisation(
+                audio, device=selected_device, num_speakers=speaker_count
+            )
         finally:
             watchdog.stop()
         utterances = align(asr_segments, diarised_turns)
@@ -247,7 +286,208 @@ class LocalTranscriber:
             ],
             utterances=utterances,
             audio_sha256=sha256_of(audio),
+            asr_model=self._asr_model,
+            diarisation_model=self._diarisation_model,
+            diarisation_device=selected_device,
+            num_speakers=speaker_count,
         )
+
+    def transcribe_cached(
+        self,
+        audio: Path,
+        *,
+        run_id: str,
+        cache: RunCache,
+        num_speakers: int | None = None,
+    ) -> RawTranscript:
+        """Run or resume ASR and diarisation from independent checkpoints."""
+        audio_sha256 = sha256_of(audio)
+        speaker_count = self._num_speakers if num_speakers is None else num_speakers
+        device = select_diarisation_device(self._diarisation_device)
+        asr_checkpoint = cache.load(run_id, "asr_checkpoint", AsrCheckpoint)
+        asr_valid = asr_checkpoint is not None and (
+            asr_checkpoint.audio_sha256 == audio_sha256
+            and asr_checkpoint.model == self._asr_model
+            and asr_checkpoint.chunk_duration == self._asr_chunk_duration
+            and asr_checkpoint.chunk_overlap == self._asr_chunk_overlap
+        )
+        if not asr_valid:
+            asr_checkpoint = self._run_cached_asr(audio, run_id, cache, audio_sha256)
+        else:
+            assert asr_checkpoint is not None
+            _record_timing(
+                cache,
+                run_id,
+                _timing(
+                    "ASR",
+                    started=time.monotonic(),
+                    cache_hit=True,
+                    model=self._asr_model,
+                    config={
+                        "chunk_duration": self._asr_chunk_duration,
+                        "chunk_overlap": self._asr_chunk_overlap,
+                    },
+                    media_duration=_duration(asr_checkpoint.segments),
+                ),
+            )
+        assert asr_checkpoint is not None
+
+        diarisation_checkpoint = cache.load(
+            run_id, "diarisation_checkpoint", DiarisationCheckpoint
+        )
+        diarisation_valid = diarisation_checkpoint is not None and (
+            diarisation_checkpoint.audio_sha256 == audio_sha256
+            and diarisation_checkpoint.model == self._diarisation_model
+            and diarisation_checkpoint.device == device
+            and diarisation_checkpoint.num_speakers == speaker_count
+        )
+        if not diarisation_valid:
+            diarisation_checkpoint = self._run_cached_diarisation(
+                audio,
+                run_id,
+                cache,
+                audio_sha256,
+                device=device,
+                num_speakers=speaker_count,
+            )
+        else:
+            assert diarisation_checkpoint is not None
+            _record_timing(
+                cache,
+                run_id,
+                _timing(
+                    "diarisation",
+                    started=time.monotonic(),
+                    cache_hit=True,
+                    device=device,
+                    model=self._diarisation_model,
+                    config={"num_speakers": speaker_count},
+                    media_duration=_duration(diarisation_checkpoint.turns),
+                ),
+            )
+        assert diarisation_checkpoint is not None
+
+        cached = cache.load(run_id, _RAW_TRANSCRIPT_NAME, RawTranscript)
+        raw_valid = cached is not None and (
+            cached.audio_sha256 == audio_sha256
+            and cached.asr_model == self._asr_model
+            and cached.diarisation_model == self._diarisation_model
+            and cached.diarisation_device == device
+            and cached.num_speakers == speaker_count
+        )
+        if raw_valid:
+            assert cached is not None
+            return cached.model_copy(update={"timings": cache.load_timings(run_id)})
+
+        started = time.monotonic()
+        started_at = datetime.now(UTC)
+        raw = RawTranscript(
+            clips=[
+                SourceClip(
+                    path=str(audio),
+                    offset_seconds=0.0,
+                    duration_seconds=max(
+                        _duration(asr_checkpoint.segments),
+                        _duration(diarisation_checkpoint.turns),
+                    ),
+                )
+            ],
+            utterances=align(asr_checkpoint.segments, diarisation_checkpoint.turns),
+            audio_sha256=audio_sha256,
+            asr_model=self._asr_model,
+            diarisation_model=self._diarisation_model,
+            diarisation_device=device,
+            num_speakers=speaker_count,
+        )
+        _record_timing(
+            cache,
+            run_id,
+            _timing(
+                "alignment/checkpoint promotion",
+                started=started,
+                started_at=started_at,
+                model=self._diarisation_model,
+                device=device,
+                config={"num_speakers": speaker_count},
+                media_duration=raw.clips[0].duration_seconds,
+            ),
+        )
+        raw = raw.model_copy(update={"timings": cache.load_timings(run_id)})
+        cache.store(run_id, _RAW_TRANSCRIPT_NAME, raw)
+        return raw
+
+    def _run_cached_asr(
+        self, audio: Path, run_id: str, cache: RunCache, audio_sha256: str
+    ) -> AsrCheckpoint:
+        started = time.monotonic()
+        started_at = datetime.now(UTC)
+        try:
+            segments = self._run_asr(audio)
+            checkpoint = AsrCheckpoint(
+                audio_sha256=audio_sha256,
+                model=self._asr_model,
+                chunk_duration=self._asr_chunk_duration,
+                chunk_overlap=self._asr_chunk_overlap,
+                segments=segments,
+            )
+            cache.store(run_id, "asr_checkpoint", checkpoint)
+            return checkpoint
+        finally:
+            _record_timing(
+                cache,
+                run_id,
+                _timing(
+                    "ASR",
+                    started=started,
+                    started_at=started_at,
+                    model=self._asr_model,
+                    config={
+                        "chunk_duration": self._asr_chunk_duration,
+                        "chunk_overlap": self._asr_chunk_overlap,
+                    },
+                    media_duration=_duration(locals().get("segments", [])),
+                ),
+            )
+
+    def _run_cached_diarisation(
+        self,
+        audio: Path,
+        run_id: str,
+        cache: RunCache,
+        audio_sha256: str,
+        *,
+        device: Literal["cpu", "mps"],
+        num_speakers: int | None,
+    ) -> DiarisationCheckpoint:
+        started = time.monotonic()
+        started_at = datetime.now(UTC)
+        try:
+            turns = self._run_diarisation(
+                audio, device=device, num_speakers=num_speakers
+            )
+            checkpoint = DiarisationCheckpoint(
+                audio_sha256=audio_sha256,
+                model=self._diarisation_model,
+                device=device,
+                num_speakers=num_speakers,
+                turns=turns,
+            )
+            cache.store(run_id, "diarisation_checkpoint", checkpoint)
+            return checkpoint
+        finally:
+            _record_timing(
+                cache,
+                run_id,
+                _timing(
+                    "diarisation",
+                    started=started,
+                    started_at=started_at,
+                    device=device,
+                    model=self._diarisation_model,
+                    config={"num_speakers": num_speakers},
+                    media_duration=_duration(locals().get("turns", [])),
+                ),
+            )
 
     def _run_asr(self, audio: Path) -> list[AsrSegment]:
         # Fail-fast rather than grow unbounded — see the
@@ -306,7 +546,13 @@ class LocalTranscriber:
         _log_stage(f"ASR complete in {time.monotonic() - started:.1f}s")
         return segments
 
-    def _run_diarisation(self, audio: Path) -> list[DiarisedTurn]:
+    def _run_diarisation(
+        self,
+        audio: Path,
+        *,
+        device: Literal["cpu", "mps"],
+        num_speakers: int | None,
+    ) -> list[DiarisedTurn]:
         # See DEFAULT_MPS_MEMORY_FRACTION: torch's MPS allocator's own
         # fail-fast cap, set immediately before the stage that uses it.
         torch.mps.set_per_process_memory_fraction(DEFAULT_MPS_MEMORY_FRACTION)
@@ -322,7 +568,7 @@ class LocalTranscriber:
         # length — confirmed by reading that class, and empirically by
         # running this pipeline end-to-end against the same ~31-minute
         # meeting recording that broke parakeet (see task-004-report.md).
-        pipeline = Pipeline.from_pretrained(
+        pipeline: Any = Pipeline.from_pretrained(
             self._diarisation_model, token=self._hf_token
         )
         if pipeline is None:
@@ -330,8 +576,11 @@ class LocalTranscriber:
                 f"could not load diarisation pipeline {self._diarisation_model!r} "
                 "(pyannote returned no pipeline for this checkpoint)"
             )
+        pipeline.to(torch.device(device))
 
-        # Decode the whole file to an in-memory waveform ourselves rather
+        # A plain ProgressHook-compatible callable is intentionally used here:
+        # pyannote invokes it for segmentation, embeddings, and clustering.
+        progress_hook = _DiarisationProgressHook()
         # than handing pyannote a bare path: pyannote's own path-based
         # decoding (via torchcodec) crops the file per-inference-window and
         # asserts each crop returned within 1 sample of the expected count.
@@ -346,9 +595,15 @@ class LocalTranscriber:
         # minutes of mono float32 — nothing like parakeet's O(n^2) blowup)
         # sidesteps the assertion entirely.
         samples = AudioDecoder(audio).get_all_samples()
+        kwargs: dict[str, object] = {}
+        if num_speakers is not None:
+            kwargs["num_speakers"] = num_speakers
+        if _accepts_hook(pipeline):
+            kwargs["hook"] = progress_hook
         try:
             output: Any = pipeline(
-                {"waveform": samples.data, "sample_rate": samples.sample_rate}
+                {"waveform": samples.data, "sample_rate": samples.sample_rate},
+                **kwargs,
             )
         except RuntimeError as exc:
             raise AcceleratorOutOfMemoryError("diarisation", exc) from exc
@@ -359,6 +614,95 @@ class LocalTranscriber:
         ]
         _log_stage(f"diarisation complete in {time.monotonic() - started:.1f}s")
         return turns
+
+
+class _DiarisationProgressHook:
+    """Rate-limited pyannote hook that keeps stderr useful and quiet."""
+
+    def __init__(self) -> None:
+        self._last_logged = 0.0
+        self._last_step: str | None = None
+
+    def __call__(
+        self,
+        step_name: str,
+        step_artifact: Any,
+        file: Any = None,
+        completed: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        now = time.monotonic()
+        finished = completed is not None and total is not None and completed >= total
+        changed = step_name != self._last_step
+        if not changed and not finished and now - self._last_logged < 1.0:
+            return
+        progress = (
+            f" {completed}/{total}"
+            if completed is not None and total is not None
+            else ""
+        )
+        _log_stage(f"diarisation progress: {step_name}{progress}")
+        self._last_logged = now
+        self._last_step = step_name
+
+
+def _accepts_hook(pipeline: Any) -> bool:
+    try:
+        parameters = inspect.signature(pipeline.__call__).parameters.values()
+    except TypeError, ValueError:
+        return True
+    return any(
+        parameter.name == "hook" or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def select_diarisation_device(requested: DiarisationDevice) -> Literal["cpu", "mps"]:
+    """Resolve a requested device without silently falling back."""
+    mps_available = bool(torch.backends.mps.is_available())
+    if requested == "mps" and not mps_available:
+        raise TranscriberError(
+            "diarisation device 'mps' was requested but MPS is unavailable"
+        )
+    if requested == "auto":
+        return "mps" if mps_available else "cpu"
+    return requested
+
+
+def _duration(items: Sequence[Any]) -> float:
+    return max((float(item.end) for item in items), default=0.0)
+
+
+def _timing(
+    stage: str,
+    *,
+    started: float,
+    cache_hit: bool = False,
+    device: str | None = None,
+    model: str | None = None,
+    config: dict[str, str | int | float | bool | None] | None = None,
+    media_duration: float | None = None,
+    started_at: datetime | None = None,
+) -> StageTiming:
+    ended = time.monotonic()
+    elapsed = max(0.0, ended - started)
+    return StageTiming(
+        stage=stage,
+        started_at=started_at or datetime.now(UTC),
+        ended_at=datetime.now(UTC),
+        elapsed_seconds=elapsed,
+        cache_hit=cache_hit,
+        device=device,
+        model=model,
+        config=config or {},
+        media_duration_seconds=media_duration,
+        rtf=(elapsed / media_duration if media_duration else None),
+        api_rate_cost=0.0,
+    )
+
+
+def _record_timing(cache: RunCache, run_id: str, timing: StageTiming) -> None:
+    cache.record_timing(run_id, timing)
 
 
 def _log_stage(message: str) -> None:
@@ -538,18 +882,38 @@ def transcribe_merged_audio(
     run_id: str,
     transcriber: Transcriber,
     cache: RunCache,
+    num_speakers: int | None = None,
 ) -> RawTranscript:
-    """Idempotent ASR+diarisation for one run, cached as `raw_transcript.json`.
+    """Run local stages from independent checkpoints, with safe legacy handling."""
+    if isinstance(transcriber, LocalTranscriber):
+        return transcriber.transcribe_cached(
+            audio,
+            run_id=run_id,
+            cache=cache,
+            num_speakers=num_speakers,
+        )
 
-    Consults the cache first: a hit is returned as-is without ever calling
-    `transcriber` — so a re-run of an already-transcribed run doesn't need a
-    working `HF_TOKEN` or a model download. The cache is a convenience; the
-    audio stays the authority, so a cache miss always transcribes fresh.
-    """
+    audio_sha256 = sha256_of(audio)
     cached = cache.load(run_id, _RAW_TRANSCRIPT_NAME, RawTranscript)
-    if cached is not None:
-        return cached
+    if cached is not None and (
+        cached.audio_sha256 == audio_sha256
+        and cached.asr_model is not None
+        and cached.diarisation_model is not None
+        and cached.diarisation_device is not None
+    ):
+        return cached.model_copy(update={"timings": cache.load_timings(run_id)})
 
-    result = transcriber.transcribe(audio)
+    transcribe: Any = transcriber.transcribe
+    parameters = inspect.signature(transcribe).parameters.values()
+    accepts_speaker_count = any(
+        parameter.name == "num_speakers"
+        or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    result = (
+        transcribe(audio, num_speakers=num_speakers)
+        if accepts_speaker_count
+        else transcribe(audio)
+    )
     cache.store(run_id, _RAW_TRANSCRIPT_NAME, result)
     return result

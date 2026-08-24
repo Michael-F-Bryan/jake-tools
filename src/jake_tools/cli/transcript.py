@@ -134,9 +134,18 @@ def asr(
     cache = cache_options.run_cache()
 
     try:
-        result = transcribe_merged_audio(
-            audio_path, run_id=run_id, transcriber=transcriber, cache=cache
-        )
+        if transcriber_options.num_speakers is None:
+            result = transcribe_merged_audio(
+                audio_path, run_id=run_id, transcriber=transcriber, cache=cache
+            )
+        else:
+            result = transcribe_merged_audio(
+                audio_path,
+                run_id=run_id,
+                transcriber=transcriber,
+                cache=cache,
+                num_speakers=transcriber_options.num_speakers,
+            )
     except TranscriberError as exc:
         raise click.ClickException(str(exc)) from exc
 
