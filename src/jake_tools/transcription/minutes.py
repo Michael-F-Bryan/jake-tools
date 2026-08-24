@@ -48,9 +48,9 @@ from pydantic import BaseModel
 from ..cache_models import CacheEnvelope
 from ..claude import AgentSpec, ClaudeAgent
 from ..prompting import StructuredPrompt
-from .cache import RunCache
+from .cache import RunCache, stable_hash
 from .models import PolishedChapter
-from .note import parse_note
+from .note import human_owned_note_context, parse_note
 from .obsidian import VaultClient
 from .polish import POLISHED_CACHE_NAME, PolishedChapterList, build_lexicon
 
@@ -261,8 +261,13 @@ async def run_minutes(
         "minutes",
         inputs={
             "polished": polished.model_dump(mode="json"),
-            "note": note.model_dump(mode="json"),
+            "human_context": human_owned_note_context(note),
             "lexicon": lexicon,
+        },
+        input_hashes={
+            "polished": stable_hash(polished.model_dump(mode="json")),
+            "human_context": stable_hash(human_owned_note_context(note)),
+            "lexicon": stable_hash(lexicon),
         },
         config={
             "agent": stage_agent.defaults.model_dump(mode="json"),
@@ -271,9 +276,16 @@ async def run_minutes(
         },
     )
     cached = cache.load(run_id, MINUTES_CACHE_NAME, MinutesResult)
-    if cached is not None and cache.load_manifest(run_id, "minutes") == manifest:
+    current_manifest = cache.load_manifest(run_id, "minutes")
+    if (
+        cached is not None
+        and cache.manifest_matches(current_manifest, manifest)
+        and current_manifest is not None
+        and current_manifest.output_hash == stable_hash(cached.model_dump(mode="json"))
+    ):
         stage_agent.record_cache_hit()
         return cached
+    cache.invalidate_artefacts(run_id, {"minutes", "minutes.manifest"})
     response = await generate_minutes(
         polished.chapters, note.attendees, lexicon, stage_agent
     )
@@ -284,5 +296,10 @@ async def run_minutes(
         discussion_notes=response.discussion_notes,
     )
     cache.store(run_id, MINUTES_CACHE_NAME, result)
-    cache.store_manifest(run_id, manifest)
+    cache.store_manifest(
+        run_id,
+        manifest.model_copy(
+            update={"output_hash": stable_hash(result.model_dump(mode="json"))}
+        ),
+    )
     return result

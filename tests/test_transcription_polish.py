@@ -48,7 +48,7 @@ from click.testing import CliRunner
 
 from jake_tools.claude import AgentSpec, ClaudeAgent, ClaudeAgentError
 from jake_tools.cli import main
-from jake_tools.transcription.cache import RunCache
+from jake_tools.transcription.cache import RunCache, stable_hash
 from jake_tools.transcription.chapters import ChapterList
 from jake_tools.transcription.models import (
     ChapterSpan,
@@ -57,7 +57,12 @@ from jake_tools.transcription.models import (
     RawTranscript,
     Utterance,
 )
-from jake_tools.transcription.note import NoteSection, ParsedNote, parse_note
+from jake_tools.transcription.note import (
+    NoteSection,
+    ParsedNote,
+    human_owned_note_context,
+    parse_note,
+)
 from jake_tools.transcription.polish import (
     ChapterFixPrompt,
     ChapterFixResponse,
@@ -891,8 +896,14 @@ async def test_run_polish_with_chapter_flag_merges_into_an_existing_polished_jso
             inputs={
                 "resolved_transcript": transcript.model_dump(mode="json"),
                 "chapters": chapters.model_dump(mode="json"),
-                "note": note.model_dump(mode="json"),
+                "human_context": human_owned_note_context(note),
                 "lexicon": lexicon,
+            },
+            input_hashes={
+                "resolved_transcript": stable_hash(transcript.model_dump(mode="json")),
+                "chapters": stable_hash(chapters.model_dump(mode="json")),
+                "human_context": stable_hash(human_owned_note_context(note)),
+                "lexicon": stable_hash(lexicon),
             },
             config={
                 "agent": agent.defaults.model_dump(mode="json"),
@@ -901,6 +912,20 @@ async def test_run_polish_with_chapter_flag_merges_into_an_existing_polished_jso
                 "polish_schema": PolishedChapterResponse.model_json_schema(),
                 "review_schema": ChapterFixResponse.model_json_schema(),
             },
+        ),
+    )
+    current_manifest = cache.load_manifest("run-1", "polish")
+    assert current_manifest is not None
+    cache.store_manifest(
+        "run-1",
+        current_manifest.model_copy(
+            update={
+                "output_hash": stable_hash(
+                    PolishedChapterList(chapters=original_chapters).model_dump(
+                        mode="json"
+                    )
+                )
+            }
         ),
     )
 

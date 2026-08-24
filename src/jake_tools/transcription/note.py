@@ -87,6 +87,56 @@ def render_body(sections: list[NoteSection]) -> str:
     return "".join(parts)
 
 
+def human_owned_note_context(note: ParsedNote) -> dict[str, Any]:
+    """Return note inputs that are allowed to invalidate model products.
+
+    Integration owns the summary callout and the Discussion Notes, Chapters,
+    and Transcript sections. Their bytes must not enter a polish/minutes
+    manifest or every successful integration would make the next run cold.
+    """
+    generated_headings = {"discussion notes", "chapters", "transcript"}
+    sections: list[dict[str, Any]] = []
+    generated_level: int | None = None
+    for section in note.sections:
+        if generated_level is not None:
+            if section.heading is None or section.level > generated_level:
+                continue
+            generated_level = None
+        heading = section.heading.strip().casefold() if section.heading else None
+        if heading in generated_headings:
+            generated_level = section.level
+            continue
+        body = section.body
+        if section.heading is None:
+            body = _without_summary_callout(body)
+        sections.append(
+            {"heading": section.heading, "level": section.level, "body": body}
+        )
+    return {
+        "context": note.context,
+        "frontmatter": note.frontmatter,
+        "attendees": note.attendees,
+        "diarisation_hints": note.diarisation_hints,
+        "embeds": note.embeds,
+        "sections": sections,
+    }
+
+
+def _without_summary_callout(body: str) -> str:
+    lines = body.splitlines(keepends=True)
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        if lines[index].lstrip().startswith("> [!summary]"):
+            index += 1
+            while index < len(lines) and lines[index].lstrip().startswith(">"):
+                index += 1
+            continue
+        kept.append(lines[index])
+        index += 1
+    return "".join(kept)
+
+
 def parse_note(path: Path) -> ParsedNote:
     """Parse the note at ``path`` into attendees, hints, embeds, and sections."""
     text = path.read_text()

@@ -8,14 +8,17 @@ integrate step reads its tier-b baseline back out of the same cache.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..ai_usage import AICallTelemetry, AITelemetry, AITotals, TelemetrySink
 from ..cache_models import CacheEnvelope
@@ -38,6 +41,8 @@ class StageManifest(CacheEnvelope):
     stage: str
     input_hash: str
     config_hash: str
+    input_hashes: dict[str, str] = Field(default_factory=dict)
+    output_hash: str | None = None
 
 
 class CacheTelemetrySink:
@@ -127,22 +132,23 @@ class RunCache:
         return CacheTelemetrySink(self, run_id)
 
     def record_ai_call(self, run_id: str, record: AICallTelemetry) -> None:
-        telemetry = self.load_resumable(run_id, "ai_telemetry", AITelemetry)
-        if telemetry is None:
-            telemetry = AITelemetry(calls=[], stages=[], totals=AITotals())
-        next_attempt = (
-            max(
-                (
-                    call.attempt
-                    for call in telemetry.calls
-                    if call.stage == record.stage
-                ),
-                default=0,
+        with _exclusive_file_lock(self._telemetry_lock_path(run_id)):
+            telemetry = self.load_resumable(run_id, "ai_telemetry", AITelemetry)
+            if telemetry is None:
+                telemetry = AITelemetry(calls=[], stages=[], totals=AITotals())
+            next_attempt = (
+                max(
+                    (
+                        call.attempt
+                        for call in telemetry.calls
+                        if call.stage == record.stage and call.scope == record.scope
+                    ),
+                    default=0,
+                )
+                + 1
             )
-            + 1
-        )
-        telemetry.append(record.model_copy(update={"attempt": next_attempt}))
-        self.store(run_id, "ai_telemetry", telemetry)
+            telemetry.append(record.model_copy(update={"attempt": next_attempt}))
+            self.store(run_id, "ai_telemetry", telemetry)
 
     def load_manifest(self, run_id: str, stage: str) -> StageManifest | None:
         return self.load(run_id, f"{stage}.manifest", StageManifest)
@@ -156,11 +162,22 @@ class RunCache:
         *,
         inputs: dict[str, Any],
         config: dict[str, Any],
+        input_hashes: dict[str, str] | None = None,
     ) -> StageManifest:
         return StageManifest(
             stage=stage,
             input_hash=stable_hash(inputs),
             config_hash=stable_hash(config),
+            input_hashes=input_hashes or {},
+        )
+
+    @staticmethod
+    def manifest_matches(left: StageManifest | None, right: StageManifest) -> bool:
+        return left is not None and (
+            left.stage == right.stage
+            and left.input_hash == right.input_hash
+            and left.config_hash == right.config_hash
+            and left.input_hashes == right.input_hashes
         )
 
     def invalidate_artefacts(self, run_id: str, names: set[str]) -> list[str]:
@@ -229,6 +246,21 @@ class RunCache:
 
     def _text_path(self, run_id: str, name: str) -> Path:
         return self.run_dir(run_id) / f"{name}.txt"
+
+    def _telemetry_lock_path(self, run_id: str) -> Path:
+        return self.run_dir(run_id) / "ai_telemetry.lock"
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path) -> Iterator[None]:
+    """Serialize one durable read-modify-write across threads and processes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _atomic_write(path: Path, content: str) -> None:

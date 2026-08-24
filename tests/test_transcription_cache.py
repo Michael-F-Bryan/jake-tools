@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
-from jake_tools.ai_usage import AITelemetry
+from jake_tools.ai_usage import AICallTelemetry, AITelemetry, CallStatus, Usage
 from jake_tools.transcription.cache import RunCache, sha256_of
 from jake_tools.transcription.models import SourceClip, StageTimingLog
 
@@ -119,3 +120,58 @@ def test_sha256_of_matches_hashlib_for_small_file(tmp_path: Path) -> None:
     expected = hashlib.sha256(fixture.read_bytes()).hexdigest()
 
     assert sha256_of(fixture) == expected
+
+
+def test_record_ai_call_concurrent_writers_retain_all_calls_and_sum_cost(
+    tmp_path: Path,
+) -> None:
+    cache = RunCache(tmp_path)
+    records = [
+        AICallTelemetry(
+            stage="polish-generation",
+            scope=f"chapter-{index}",
+            status="success",
+            usage=Usage(input_tokens=1, estimated_cost_usd=0.01),
+        )
+        for index in range(16)
+    ]
+
+    with ThreadPoolExecutor(max_workers=len(records)) as executor:
+        list(
+            executor.map(lambda record: cache.record_ai_call("run-1", record), records)
+        )
+
+    telemetry = cache.load("run-1", "ai_telemetry", AITelemetry)
+    assert telemetry is not None
+    assert len(telemetry.calls) == len(records)
+    assert telemetry.totals.estimated_cost_usd == pytest.approx(0.16)
+
+
+def test_record_ai_call_attempts_are_scoped_not_completion_order(
+    tmp_path: Path,
+) -> None:
+    cache = RunCache(tmp_path)
+
+    events: list[tuple[str, CallStatus, float]] = [
+        ("chapter-1", "error", 0.1),
+        ("chapter-0", "success", 0.2),
+        ("chapter-1", "success", 0.3),
+    ]
+    for scope, status, cost in events:
+        cache.record_ai_call(
+            "run-1",
+            AICallTelemetry(
+                stage="polish-generation",
+                scope=scope,
+                status=status,
+                usage=Usage(estimated_cost_usd=cost),
+            ),
+        )
+
+    telemetry = cache.load("run-1", "ai_telemetry", AITelemetry)
+    assert telemetry is not None
+    assert [(call.scope, call.attempt) for call in telemetry.calls] == [
+        ("chapter-1", 1),
+        ("chapter-0", 1),
+        ("chapter-1", 2),
+    ]

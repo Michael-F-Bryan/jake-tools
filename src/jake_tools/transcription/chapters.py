@@ -39,7 +39,7 @@ from pydantic import BaseModel, TypeAdapter
 from ..cache_models import CacheEnvelope
 from ..claude import AgentSpec, ClaudeAgent
 from ..prompting import StructuredPrompt
-from .cache import RunCache
+from .cache import RunCache, stable_hash
 from .models import ChapterSpan, RawTranscript, Utterance
 from .speakers import RESOLVED_TRANSCRIPT_CACHE_NAME
 
@@ -417,6 +417,9 @@ async def run_chapterisation(
     manifest = cache.stage_manifest(
         "chapterise",
         inputs={"resolved_transcript": transcript.model_dump(mode="json")},
+        input_hashes={
+            "resolved_transcript": stable_hash(transcript.model_dump(mode="json"))
+        },
         config={
             "agent": stage_agent.defaults.model_dump(mode="json"),
             "prompt": ChapterisationPrompt.template,
@@ -425,13 +428,21 @@ async def run_chapterisation(
         },
     )
     cached = cache.load(run_id, CHAPTERS_CACHE_NAME, ChapterList)
-    if cached is not None and cache.load_manifest(run_id, "chapterise") == manifest:
+    current_manifest = cache.load_manifest(run_id, "chapterise")
+    if (
+        cached is not None
+        and cache.manifest_matches(current_manifest, manifest)
+        and current_manifest is not None
+        and current_manifest.output_hash == stable_hash(cached.model_dump(mode="json"))
+    ):
         stage_agent.record_cache_hit()
         return cached.chapters
-    if cached is not None or cache.load_manifest(run_id, "chapterise") is not None:
+    if cached is not None or current_manifest is not None:
         cache.invalidate_artefacts(
             run_id,
             {
+                "chapters",
+                "chapterise.manifest",
                 "polished",
                 "polish_issues",
                 "polish.manifest",
@@ -441,6 +452,12 @@ async def run_chapterisation(
         )
 
     chapters = await chapterise(transcript, agent=stage_agent)
-    cache.store(run_id, CHAPTERS_CACHE_NAME, ChapterList(chapters=chapters))
-    cache.store_manifest(run_id, manifest)
+    chapter_list = ChapterList(chapters=chapters)
+    cache.store(run_id, CHAPTERS_CACHE_NAME, chapter_list)
+    cache.store_manifest(
+        run_id,
+        manifest.model_copy(
+            update={"output_hash": stable_hash(chapter_list.model_dump(mode="json"))}
+        ),
+    )
     return chapters

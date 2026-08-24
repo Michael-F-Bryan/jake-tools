@@ -44,7 +44,7 @@ from pydantic import BaseModel
 
 from ..claude import ClaudeAgent
 from ..prompting import StructuredPrompt
-from .cache import RunCache
+from .cache import RunCache, stable_hash
 from .models import RawTranscript, Utterance
 
 _UNKNOWN_SPEAKER = "Unknown"
@@ -300,6 +300,7 @@ async def run_adapt(
     manifest = cache.stage_manifest(
         "adapt",
         inputs={"source_text": document},
+        input_hashes={"source_text": stable_hash(document)},
         config={
             "agent": stage_agent.defaults.model_dump(mode="json"),
             "prompt": AdaptTranscriptPrompt.template,
@@ -307,14 +308,26 @@ async def run_adapt(
         },
     )
     cached = cache.load_resumable(run_id, "raw_transcript", RawTranscript)
-    if cached is not None and cache.load_manifest(run_id, "adapt") == manifest:
+    current_manifest = cache.load_manifest(run_id, "adapt")
+    if (
+        cached is not None
+        and cache.manifest_matches(current_manifest, manifest)
+        and current_manifest is not None
+        and current_manifest.output_hash == stable_hash(cached.model_dump(mode="json"))
+    ):
         stage_agent.record_cache_hit()
         return cached
-    if cached is not None or cache.load_manifest(run_id, "adapt") is not None:
+    if cached is not None or current_manifest is not None:
+        cache.invalidate_artefacts(run_id, {"raw_transcript", "adapt.manifest"})
         cache.invalidate_downstream(
             run_id, reason="adapt input or configuration changed"
         )
     adapted = await adapt_transcript(path, agent=stage_agent)
     cache.store(run_id, "raw_transcript", adapted)
-    cache.store_manifest(run_id, manifest)
+    cache.store_manifest(
+        run_id,
+        manifest.model_copy(
+            update={"output_hash": stable_hash(adapted.model_dump(mode="json"))}
+        ),
+    )
     return adapted

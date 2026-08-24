@@ -160,6 +160,7 @@ class ClaudeAgent:
         spec: AgentSpec | None = None,
         *,
         stage: str | None = None,
+        scope: str | None = None,
     ) -> Reply:
         rendered = prompt if isinstance(prompt, str) else prompt.render()
         options = self.defaults.merge(spec).to_options()
@@ -167,13 +168,14 @@ class ClaudeAgent:
         try:
             text, result = await self._collect(rendered, options)
         except ClaudeAgentError as exc:
-            self._record_error(stage_name, options, exc)
+            self._record_error(stage_name, options, exc, scope=scope)
             raise
         except Exception as exc:
             self._record_error(
                 stage_name,
                 options,
                 ClaudeAgentError(f"agent call failed before a result: {exc}"),
+                scope=scope,
             )
             raise
         if result.is_error:
@@ -183,9 +185,11 @@ class ClaudeAgent:
                 f"errors={_error_of(result)!r})",
                 usage=_usage_of(result),
             )
-            self._record_result(stage_name, options, result, status="error")
+            self._record_result(
+                stage_name, options, result, status="error", scope=scope
+            )
             raise error
-        self._record_result(stage_name, options, result, status="success")
+        self._record_result(stage_name, options, result, status="success", scope=scope)
         return Reply.from_result(result, text)
 
     async def run_structured[TModel: BaseModel](
@@ -194,6 +198,7 @@ class ClaudeAgent:
         spec: AgentSpec | None = None,
         *,
         stage: str | None = None,
+        scope: str | None = None,
     ) -> tuple[TModel, Reply]:
         response_model = cast(type[TModel], prompt.response_model)
         options = self.defaults.merge(spec).to_options(
@@ -203,13 +208,14 @@ class ClaudeAgent:
         try:
             text, result = await self._collect(prompt.render(), options)
         except ClaudeAgentError as exc:
-            self._record_error(stage_name, options, exc)
+            self._record_error(stage_name, options, exc, scope=scope)
             raise
         except Exception as exc:
             self._record_error(
                 stage_name,
                 options,
                 ClaudeAgentError(f"agent call failed before a result: {exc}"),
+                scope=scope,
             )
             raise
         if result.is_error:
@@ -219,14 +225,18 @@ class ClaudeAgent:
                 f"stop_reason={result.stop_reason!r}, errors={_error_of(result)!r})",
                 usage=_usage_of(result),
             )
-            self._record_result(stage_name, options, result, status="error")
+            self._record_result(
+                stage_name, options, result, status="error", scope=scope
+            )
             raise error
         try:
             parsed = _parse_structured(result, response_model)
         except Exception:
-            self._record_result(stage_name, options, result, status="error")
+            self._record_result(
+                stage_name, options, result, status="error", scope=scope
+            )
             raise
-        self._record_result(stage_name, options, result, status="success")
+        self._record_result(stage_name, options, result, status="success", scope=scope)
         return parsed, Reply.from_result(result, text)
 
     def record_cache_hit(self, *, stage: str | None = None) -> None:
@@ -236,12 +246,17 @@ class ClaudeAgent:
             )
 
     def _record_error(
-        self, stage: str, options: ClaudeAgentOptions, error: ClaudeAgentError
+        self,
+        stage: str,
+        options: ClaudeAgentOptions,
+        error: ClaudeAgentError,
+        *,
+        scope: str | None,
     ) -> None:
         if self.telemetry_sink is None:
             return
         self.telemetry_sink.record_call(
-            AICallTelemetry(stage=stage, status="error", usage=error.usage)
+            AICallTelemetry(stage=stage, scope=scope, status="error", usage=error.usage)
         )
 
     def _record_result(
@@ -251,11 +266,14 @@ class ClaudeAgent:
         result: ResultMessage,
         *,
         status: Literal["success", "error"],
+        scope: str | None,
     ) -> None:
         if self.telemetry_sink is None:
             return
         self.telemetry_sink.record_call(
-            _telemetry_of(result, stage=stage, status=status, model=options.model)
+            _telemetry_of(
+                result, stage=stage, status=status, model=options.model, scope=scope
+            )
         )
 
     async def _collect(
@@ -305,6 +323,8 @@ def _usage_of(result: ResultMessage) -> Usage:
     raw = result.usage or {}
     return Usage(
         model=_model_of(result),
+        provider=_provider_of(result),
+        model_usage=dict(result.model_usage or {}),
         api_calls=result.num_turns,
         input_tokens=_count(raw, "input_tokens"),
         output_tokens=_count(raw, "output_tokens"),
@@ -315,13 +335,15 @@ def _usage_of(result: ResultMessage) -> Usage:
 
 
 def _model_of(result: ResultMessage) -> str | None:
-    return next(iter(result.model_usage), None) if result.model_usage else None
+    if not result.model_usage or len(result.model_usage) != 1:
+        return None
+    return next(iter(result.model_usage))
 
 
 def _provider_of(result: ResultMessage) -> str | None:
-    if not result.model_usage:
+    if not result.model_usage or len(result.model_usage) != 1:
         return None
-    value = result.model_usage.get(_model_of(result) or "")
+    value = next(iter(result.model_usage.values()))
     if isinstance(value, dict):
         provider = value.get("provider")
         return provider if isinstance(provider, str) else None
@@ -334,9 +356,10 @@ def _telemetry_of(
     stage: str,
     status: Literal["success", "error"],
     model: str | None,
+    scope: str | None,
 ) -> AICallTelemetry:
     usage = _usage_of(result)
-    if usage.model is None:
+    if usage.model is None and not result.model_usage:
         usage = usage.model_copy(update={"model": model})
     cache_creation_5m_tokens = _cache_bucket(
         result.usage or {}, "ephemeral_5m_input_tokens"
@@ -346,9 +369,10 @@ def _telemetry_of(
     )
     return AICallTelemetry(
         stage=stage,
+        scope=scope,
         status=status,
         usage=usage,
-        provider=_provider_of(result),
+        provider=usage.provider,
         duration_ms=result.duration_ms,
         duration_api_ms=result.duration_api_ms,
         cache_creation_5m_tokens=cache_creation_5m_tokens,

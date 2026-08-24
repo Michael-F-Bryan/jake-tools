@@ -102,3 +102,25 @@ def test_usage_add_drops_model_when_only_one_side_has_one() -> None:
     b = Usage(model=None, input_tokens=5)
 
     assert (a + b).model is None
+
+
+def test_usage_preserves_complete_multi_model_mapping() -> None:
+    usage = Usage(
+        model_usage={
+            "model-a": {
+                "provider": "provider-a",
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "cost_usd": 0.1,
+            },
+            "model-b": {
+                "provider": "provider-b",
+                "input_tokens": 20,
+                "output_tokens": 4,
+                "cost_usd": 0.2,
+            },
+        }
+    )
+
+    assert usage.model_usage["model-a"]["provider"] == "provider-a"
+    assert usage.model_usage["model-b"]["cost_usd"] == 0.2

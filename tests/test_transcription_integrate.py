@@ -22,7 +22,8 @@ import pytest
 from click.testing import CliRunner
 
 from jake_tools.cli import main
-from jake_tools.transcription.cache import RunCache
+from jake_tools.transcription.cache import RunCache, StageManifest, stable_hash
+from jake_tools.transcription.chapters import ChapterList
 from jake_tools.transcription.integrate import (
     BASELINE_NOTES_NAME,
     BASELINE_SUMMARY_NAME,
@@ -42,11 +43,17 @@ from jake_tools.transcription.integrate import (
 )
 from jake_tools.transcription.minutes import MINUTES_CACHE_NAME, MinutesResult
 from jake_tools.transcription.models import (
+    ChapterSpan,
     PolishedChapter,
     PolishedTurn,
+    RawTranscript,
     TranscriptProducts,
 )
-from jake_tools.transcription.note import parse_note, split_raw_frontmatter
+from jake_tools.transcription.note import (
+    human_owned_note_context,
+    parse_note,
+    split_raw_frontmatter,
+)
 from jake_tools.transcription.polish import POLISHED_CACHE_NAME, PolishedChapterList
 
 # `jake_tools.cli`'s __init__ rebinds the name `transcript` to the Click
@@ -114,6 +121,68 @@ def _products(
         meeting_summary=summary,
         discussion_notes=notes,
         chapters=chapters if chapters is not None else [_chapter()],
+    )
+
+
+def _store_current_product_provenance(
+    note_path: Path,
+    cache: RunCache,
+    run_id: str,
+    chapters: list[PolishedChapter],
+    summary: str = "s",
+    notes: str = "- b",
+) -> None:
+    note = parse_note(note_path)
+    raw = RawTranscript(clips=[], utterances=[])
+    chapter_list = ChapterList(
+        chapters=[
+            ChapterSpan(
+                title=chapter.title,
+                start_utterance=0,
+                end_utterance=0,
+                start_seconds=chapter.start_seconds,
+            )
+            for chapter in chapters
+        ]
+    )
+    polished = PolishedChapterList(chapters=chapters)
+    minutes = MinutesResult(
+        run_id=run_id, meeting_summary=summary, discussion_notes=notes
+    )
+    human_hash = stable_hash(human_owned_note_context(note))
+    lexicon_hash = "fixture-lexicon"
+    cache.store(run_id, "resolved_transcript", raw)
+    cache.store(run_id, "chapters", chapter_list)
+    cache.store(run_id, POLISHED_CACHE_NAME, polished)
+    cache.store(run_id, MINUTES_CACHE_NAME, minutes)
+    cache.store_manifest(
+        run_id,
+        StageManifest(
+            stage="polish",
+            input_hash="polish-input",
+            config_hash="polish-config",
+            input_hashes={
+                "resolved_transcript": stable_hash(raw.model_dump(mode="json")),
+                "chapters": stable_hash(chapter_list.model_dump(mode="json")),
+                "human_context": human_hash,
+                "lexicon": lexicon_hash,
+            },
+            output_hash=stable_hash(polished.model_dump(mode="json")),
+        ),
+    )
+    cache.store_manifest(
+        run_id,
+        StageManifest(
+            stage="minutes",
+            input_hash="minutes-input",
+            config_hash="minutes-config",
+            input_hashes={
+                "polished": stable_hash(polished.model_dump(mode="json")),
+                "human_context": human_hash,
+                "lexicon": lexicon_hash,
+            },
+            output_hash=stable_hash(minutes.model_dump(mode="json")),
+        ),
     )
 
 
@@ -963,9 +1032,9 @@ def test_load_products_raises_missing_polished_chapters_error(tmp_path: Path) ->
 def test_load_products_raises_missing_minutes_error(tmp_path: Path) -> None:
     note_path = _write_note(tmp_path, MEETING_PREP_ONLY)
     cache = RunCache(tmp_path / "cache")
-    cache.store(
-        "run-1", POLISHED_CACHE_NAME, PolishedChapterList(chapters=[_chapter()])
-    )
+    chapters = [_chapter()]
+    _store_current_product_provenance(note_path, cache, "run-1", chapters)
+    cache.invalidate_artefacts("run-1", {"minutes", "minutes.manifest"})
 
     with pytest.raises(MissingMinutesError) as excinfo:
         load_products(note_path, "run-1", cache)
@@ -974,18 +1043,31 @@ def test_load_products_raises_missing_minutes_error(tmp_path: Path) -> None:
     assert "transcript minutes" in str(excinfo.value)
 
 
+def test_load_products_refuses_products_without_current_manifests(
+    tmp_path: Path,
+) -> None:
+    note_path = _write_note(tmp_path, MEETING_PREP_ONLY)
+    cache = RunCache(tmp_path / "cache")
+    cache.store(
+        "run-1", POLISHED_CACHE_NAME, PolishedChapterList(chapters=[_chapter()])
+    )
+    cache.store(
+        "run-1",
+        MINUTES_CACHE_NAME,
+        MinutesResult(run_id="run-1", meeting_summary="s", discussion_notes="- b"),
+    )
+
+    with pytest.raises(MissingPolishedChaptersError):
+        load_products(note_path, "run-1", cache)
+
+
 def test_load_products_assembles_context_and_products_from_the_cache(
     tmp_path: Path,
 ) -> None:
     note_path = _write_note(tmp_path, MEETING_PREP_ONLY)
     cache = RunCache(tmp_path / "cache")
     chapters = [_chapter()]
-    cache.store("run-1", POLISHED_CACHE_NAME, PolishedChapterList(chapters=chapters))
-    cache.store(
-        "run-1",
-        MINUTES_CACHE_NAME,
-        MinutesResult(run_id="run-1", meeting_summary="s", discussion_notes="- b"),
-    )
+    _store_current_product_provenance(note_path, cache, "run-1", chapters)
 
     products = load_products(note_path, "run-1", cache)
 
@@ -1078,15 +1160,13 @@ def test_integrate_cli_runs_end_to_end_and_writes_the_note(tmp_path: Path) -> No
     note_path = _write_note(tmp_path, MEETING_PREP_ONLY)
     cache = RunCache(tmp_path / "cache")
     chapters = [_chapter()]
-    cache.store("run-1", POLISHED_CACHE_NAME, PolishedChapterList(chapters=chapters))
-    cache.store(
+    _store_current_product_provenance(
+        note_path,
+        cache,
         "run-1",
-        MINUTES_CACHE_NAME,
-        MinutesResult(
-            run_id="run-1",
-            meeting_summary="A real summary.",
-            discussion_notes="- A real point\n",
-        ),
+        chapters,
+        summary="A real summary.",
+        notes="- A real point\n",
     )
 
     result = CliRunner().invoke(

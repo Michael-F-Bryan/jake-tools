@@ -41,7 +41,7 @@ from pydantic import BaseModel, Field
 from ..cache_models import CacheEnvelope
 from ..claude import AgentSpec, ClaudeAgent, ClaudeAgentError
 from ..prompting import StructuredPrompt
-from .cache import RunCache
+from .cache import RunCache, stable_hash
 from .chapters import CHAPTERS_CACHE_NAME, ChapterList
 from .models import (
     ChapterSpan,
@@ -51,7 +51,7 @@ from .models import (
     RawTranscript,
     Utterance,
 )
-from .note import ParsedNote, parse_note, render_body
+from .note import ParsedNote, human_owned_note_context, parse_note, render_body
 from .obsidian import VaultClient
 from .speakers import RESOLVED_TRANSCRIPT_CACHE_NAME
 
@@ -401,6 +401,10 @@ async def _polish_one_chapter(
 
     raw_lines = _render_utterances(utterances, start_index=span.start_utterance)
     lexicon_list = list(lexicon)
+    scope = (
+        f"chapter:{span.start_utterance}-{span.end_utterance}:"
+        f"{stable_hash(raw_lines)[:16]}"
+    )
 
     polish_response, _reply = await agent.for_stage("polish-generation").run_structured(
         PolishPrompt(
@@ -410,6 +414,7 @@ async def _polish_one_chapter(
         ),
         spec,
         stage="polish-generation",
+        scope=scope,
     )
     polish_has_provenance = any(
         turn.source_turn_indices for turn in polish_response.turns
@@ -437,6 +442,7 @@ async def _polish_one_chapter(
         ),
         spec,
         stage="polish-review",
+        scope=scope,
     )
     fix_has_provenance = any(
         turn.source_turn_indices for turn in fix_response.turns
@@ -576,8 +582,14 @@ async def run_polish(
         inputs={
             "resolved_transcript": transcript.model_dump(mode="json"),
             "chapters": chapter_list.model_dump(mode="json"),
-            "note": note.model_dump(mode="json"),
+            "human_context": human_owned_note_context(note),
             "lexicon": lexicon,
+        },
+        input_hashes={
+            "resolved_transcript": stable_hash(transcript.model_dump(mode="json")),
+            "chapters": stable_hash(chapter_list.model_dump(mode="json")),
+            "human_context": stable_hash(human_owned_note_context(note)),
+            "lexicon": stable_hash(lexicon),
         },
         config={
             "agent": stage_agent.defaults.model_dump(mode="json"),
@@ -589,16 +601,16 @@ async def run_polish(
     )
 
     current_manifest = cache.load_manifest(run_id, "polish")
-    if chapter is None and current_manifest != manifest:
-        cache.invalidate_artefacts(run_id, {"minutes", "minutes.manifest"})
-
     if chapter is None:
         existing = cache.load(run_id, POLISHED_CACHE_NAME, PolishedChapterList)
         existing_issues = cache.load(run_id, POLISH_ISSUES_CACHE_NAME, PolishIssueList)
         if (
             existing is not None
             and existing_issues is not None
-            and cache.load_manifest(run_id, "polish") == manifest
+            and cache.manifest_matches(current_manifest, manifest)
+            and current_manifest is not None
+            and current_manifest.output_hash
+            == stable_hash(existing.model_dump(mode="json"))
         ):
             stage_agent.for_stage("polish-generation").record_cache_hit()
             stage_agent.for_stage("polish-review").record_cache_hit()
@@ -608,6 +620,16 @@ async def run_polish(
                 issue_count=len(existing_issues.issues),
                 issues=existing_issues.issues,
             )
+        cache.invalidate_artefacts(
+            run_id,
+            {
+                "polished",
+                "polish_issues",
+                "polish.manifest",
+                "minutes",
+                "minutes.manifest",
+            },
+        )
         new_chapters, new_issues = await polish_chapters(
             transcript, spans, note, vault, stage_agent, max_concurrency=max_concurrency
         )
@@ -621,11 +643,26 @@ async def run_polish(
         if (
             existing is None
             or len(existing.chapters) != len(spans)
-            or cache.load_manifest(run_id, "polish") != manifest
+            or not cache.manifest_matches(current_manifest, manifest)
+            or current_manifest is None
+            or current_manifest.output_hash
+            != stable_hash(existing.model_dump(mode="json"))
         ):
             raise MissingPolishedChaptersError(run_id)
 
-        cache.invalidate_artefacts(run_id, {"minutes", "minutes.manifest"})
+        existing_issue_list = cache.load(
+            run_id, POLISH_ISSUES_CACHE_NAME, PolishIssueList
+        )
+        cache.invalidate_artefacts(
+            run_id,
+            {
+                "polished",
+                "polish_issues",
+                "polish.manifest",
+                "minutes",
+                "minutes.manifest",
+            },
+        )
         new_chapters, new_issues = await polish_chapters(
             transcript,
             [spans[chapter]],
@@ -638,9 +675,6 @@ async def run_polish(
         final_chapters = list(existing.chapters)
         final_chapters[chapter] = new_chapters[0]
 
-        existing_issue_list = cache.load(
-            run_id, POLISH_ISSUES_CACHE_NAME, PolishIssueList
-        )
         existing_issues = (
             existing_issue_list.issues if existing_issue_list is not None else []
         )
@@ -654,7 +688,16 @@ async def run_polish(
         run_id, POLISHED_CACHE_NAME, PolishedChapterList(chapters=final_chapters)
     )
     cache.store(run_id, POLISH_ISSUES_CACHE_NAME, PolishIssueList(issues=final_issues))
-    cache.store_manifest(run_id, manifest)
+    cache.store_manifest(
+        run_id,
+        manifest.model_copy(
+            update={
+                "output_hash": stable_hash(
+                    PolishedChapterList(chapters=final_chapters).model_dump(mode="json")
+                )
+            }
+        ),
+    )
 
     return PolishResponse(
         run_id=run_id,

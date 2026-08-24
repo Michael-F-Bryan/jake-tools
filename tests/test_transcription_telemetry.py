@@ -183,6 +183,30 @@ def test_cache_creation_1h_and_5m_buckets_are_preserved(tmp_path: Path) -> None:
     assert record.cache_write_tokens == 11
 
 
+def test_multi_model_result_keeps_mapping_without_first_model_attribution(
+    tmp_path: Path,
+) -> None:
+    cache = RunCache(tmp_path)
+    model_usage = {
+        "model-a": {"provider": "provider-a", "inputTokens": 10, "costUSD": 0.1},
+        "model-b": {"provider": "provider-b", "outputTokens": 20, "costUSD": 0.2},
+    }
+    result = _result(payload={"ok": True})
+    result.model_usage = cast(Any, model_usage)
+    agent = ClaudeAgent(run_query=RoutingQuery(result)).with_telemetry(
+        cache.telemetry_sink("run-multi")
+    )
+
+    asyncio.run(agent.run("prompt", stage="minutes"))
+
+    telemetry = cache.load("run-multi", "ai_telemetry", AITelemetry)
+    assert telemetry is not None
+    record = telemetry.calls[0]
+    assert record.model is None
+    assert record.provider is None
+    assert record.usage.model_usage == model_usage
+
+
 def test_chapterise_retry_records_separate_attempts_and_sums_cost(
     tmp_path: Path,
 ) -> None:

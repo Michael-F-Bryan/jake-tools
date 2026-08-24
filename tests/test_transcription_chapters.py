@@ -33,7 +33,7 @@ from click.testing import CliRunner
 
 from jake_tools.claude import AgentSpec, ClaudeAgent, ClaudeAgentError
 from jake_tools.cli import main
-from jake_tools.transcription.cache import RunCache
+from jake_tools.transcription.cache import RunCache, StageManifest
 from jake_tools.transcription.chapters import (
     CHAPTERS_ADAPTER,
     MIN_CHAPTER_SECONDS,
@@ -777,7 +777,23 @@ async def test_run_chapterisation_stores_chapters_json_and_returns_them(
     assert loaded.chapters == chapters
 
 
-# --- CLI: delegation, prerequisite error, and the effort="low" default -----
+async def test_run_chapterisation_removes_stale_output_before_failed_regeneration(
+    tmp_path: Path,
+) -> None:
+    cache = RunCache(tmp_path / "cache")
+    cache.store("run-1", "resolved_transcript", _transcript(4))
+    cache.store("run-1", "chapters", ChapterList(chapters=[]))
+    cache.store_manifest(
+        "run-1", StageManifest(stage="chapterise", input_hash="old", config_hash="old")
+    )
+    fake = ScriptedQuery(None, None)
+    agent = ClaudeAgent(run_query=fake)
+
+    with pytest.raises(ClaudeAgentError):
+        await run_chapterisation("run-1", agent=agent, cache=cache)
+
+    assert cache.load("run-1", "chapters", ChapterList) is None
+    assert cache.load_manifest("run-1", "chapterise") is None
 
 
 def _cache_with_resolved_transcript(tmp_path: Path, count: int = 4) -> Path:

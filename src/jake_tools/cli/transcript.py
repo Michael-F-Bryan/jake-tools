@@ -30,6 +30,7 @@ from ..transcription.audio import (
     NoAudioEmbedsError,
     merge_note_audio,
 )
+from ..transcription.cache import stable_hash
 from ..transcription.chapters import (
     CHAPTERS_ADAPTER,
     ChaptersError,
@@ -226,6 +227,7 @@ async def adapt(
             manifest = cache.stage_manifest(
                 "adapt",
                 inputs={"source_text": document},
+                input_hashes={"source_text": stable_hash(document)},
                 config={
                     "agent": stage_agent.defaults.model_dump(mode="json"),
                     "prompt": AdaptTranscriptPrompt.template,
@@ -235,20 +237,34 @@ async def adapt(
             cached = cache.load_resumable(
                 run_id, _RAW_TRANSCRIPT_CACHE_NAME, RawTranscript
             )
-            if cached is not None and cache.load_manifest(run_id, "adapt") == manifest:
+            current_manifest = cache.load_manifest(run_id, "adapt")
+            if (
+                cached is not None
+                and cache.manifest_matches(current_manifest, manifest)
+                and current_manifest is not None
+                and current_manifest.output_hash
+                == stable_hash(cached.model_dump(mode="json"))
+            ):
                 stage_agent.record_cache_hit()
                 result = cached
             else:
-                if (
-                    cached is not None
-                    or cache.load_manifest(run_id, "adapt") is not None
-                ):
+                if cached is not None or current_manifest is not None:
+                    cache.invalidate_artefacts(
+                        run_id, {"raw_transcript", "adapt.manifest"}
+                    )
                     cache.invalidate_downstream(
                         run_id, reason="adapt input or configuration changed"
                     )
                 result = await adapt_transcript(transcript_path, agent=stage_agent)
                 cache.store(run_id, _RAW_TRANSCRIPT_CACHE_NAME, result)
-                cache.store_manifest(run_id, manifest)
+                cache.store_manifest(
+                    run_id,
+                    manifest.model_copy(
+                        update={
+                            "output_hash": stable_hash(result.model_dump(mode="json"))
+                        }
+                    ),
+                )
     except (AdaptError, ClaudeAgentError) as exc:
         raise click.ClickException(str(exc)) from exc
 

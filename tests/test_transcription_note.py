@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from jake_tools.transcription.note import parse_note, render_body
+from jake_tools.transcription.note import (
+    NoteSection,
+    ParsedNote,
+    human_owned_note_context,
+    parse_note,
+    render_body,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 MEETING_NOTE = FIXTURES / "meeting_note.md"
@@ -53,6 +59,56 @@ def test_tagless_note_outside_dum_c_path_falls_back_to_meeting(
     note = parse_note(path)
 
     assert note.context == "meeting"
+
+
+def test_human_owned_note_context_excludes_generated_sections_and_summary() -> None:
+    note = ParsedNote(
+        path="note.md",
+        frontmatter={"Attendees": ["Ada"]},
+        context="meeting",
+        attendees=["Ada"],
+        diarisation_hints=[],
+        embeds=[],
+        sections=[
+            NoteSection(
+                heading=None,
+                level=0,
+                body="> [!summary]\n> old generated summary\n\nHuman preamble\n",
+            ),
+            NoteSection(heading="Meeting Prep", level=2, body="Human context\n"),
+            NoteSection(heading="Discussion Notes", level=2, body="old notes\n"),
+            NoteSection(heading="Chapters", level=2, body="old chapters\n"),
+            NoteSection(heading="Transcript", level=2, body="old transcript\n"),
+            NoteSection(heading="Generated chapter", level=3, body="old output\n"),
+        ],
+    )
+    changed = note.model_copy(
+        update={
+            "sections": [
+                note.sections[0],
+                note.sections[1].model_copy(update={"body": "Changed human context\n"}),
+                *note.sections[2:],
+            ]
+        }
+    )
+    generated_only = note.model_copy(
+        update={
+            "sections": [
+                note.sections[0].model_copy(
+                    update={"body": "> [!summary]\n> new summary\n\nHuman preamble\n"}
+                ),
+                note.sections[1],
+                note.sections[2].model_copy(update={"body": "new notes\n"}),
+                note.sections[3].model_copy(update={"body": "new chapters\n"}),
+                note.sections[4].model_copy(update={"body": "new transcript\n"}),
+                note.sections[5].model_copy(update={"body": "new output\n"}),
+            ]
+        }
+    )
+
+    original_context = human_owned_note_context(note)
+    assert human_owned_note_context(generated_only) == original_context
+    assert human_owned_note_context(changed) != original_context
 
 
 def test_attendees_parse_with_wikilinks_stripped() -> None:

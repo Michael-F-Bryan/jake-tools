@@ -52,12 +52,14 @@ from typing import Literal
 from pydantic import BaseModel
 
 from ..cache_models import CacheEnvelope
-from .cache import RunCache
+from .cache import RunCache, StageManifest, stable_hash
+from .chapters import ChapterList
 from .minutes import MINUTES_CACHE_NAME, MinutesResult
 from .models import PolishedChapter, RawTranscript, TranscriptProducts
 from .note import (
     MEETING_PREP_HEADING,
     NoteSection,
+    human_owned_note_context,
     parse_note,
     render_body,
     split_raw_frontmatter,
@@ -655,6 +657,17 @@ def _callout_content(callout_block: str) -> str:
 # --- Step 3: run orchestration --------------------------------------------------
 
 
+def _manifest_proves_output(
+    manifest: StageManifest | None, stage: str, value: BaseModel
+) -> bool:
+    return (
+        manifest is not None
+        and manifest.stage == stage
+        and manifest.output_hash is not None
+        and manifest.output_hash == stable_hash(value.model_dump(mode="json"))
+    )
+
+
 def load_products(note_path: Path, run_id: str, cache: RunCache) -> TranscriptProducts:
     """Assemble `TranscriptProducts` from this run's cached polished chapters and minutes.
 
@@ -662,13 +675,39 @@ def load_products(note_path: Path, run_id: str, cache: RunCache) -> TranscriptPr
     other stage's `Missing*Error` convention.
     """
     polished = cache.load(run_id, POLISHED_CACHE_NAME, PolishedChapterList)
-    if polished is None:
+    polished_manifest = cache.load_manifest(run_id, "polish")
+    if polished is None or not _manifest_proves_output(
+        polished_manifest, "polish", polished
+    ):
         raise MissingPolishedChaptersError(run_id)
 
     minutes_result = cache.load(run_id, MINUTES_CACHE_NAME, MinutesResult)
-    if minutes_result is None:
+    minutes_manifest = cache.load_manifest(run_id, "minutes")
+    if minutes_result is None or not _manifest_proves_output(
+        minutes_manifest, "minutes", minutes_result
+    ):
         raise MissingMinutesError(run_id)
+
     raw = cache.load(run_id, "resolved_transcript", RawTranscript)
+    chapter_list = cache.load(run_id, "chapters", ChapterList)
+    note = parse_note(note_path)
+    human_context_hash = stable_hash(human_owned_note_context(note))
+    if raw is None or chapter_list is None:
+        raise MissingPolishedChaptersError(run_id)
+    if polished_manifest is None or polished_manifest.input_hashes != {
+        "resolved_transcript": stable_hash(raw.model_dump(mode="json")),
+        "chapters": stable_hash(chapter_list.model_dump(mode="json")),
+        "human_context": human_context_hash,
+        "lexicon": polished_manifest.input_hashes.get("lexicon", ""),
+    }:
+        raise MissingPolishedChaptersError(run_id)
+    if minutes_manifest is None or (
+        minutes_manifest.input_hashes.get("polished")
+        != stable_hash(polished.model_dump(mode="json"))
+        or minutes_manifest.input_hashes.get("human_context") != human_context_hash
+    ):
+        raise MissingMinutesError(run_id)
+
     if raw is not None:
         for chapter in polished.chapters:
             indices = sorted(

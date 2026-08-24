@@ -39,6 +39,10 @@ class Usage(BaseModel):
     """
 
     model: str | None = None
+    provider: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    model_usage: dict[str, Any] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
     api_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -60,6 +64,8 @@ class Usage(BaseModel):
             or self.cache_read_tokens
             or self.cache_write_tokens
             or self.model is not None
+            or self.provider is not None
+            or bool(self.model_usage)
         )
 
     def __add__(self, other: Usage) -> Usage:
@@ -73,6 +79,8 @@ class Usage(BaseModel):
             estimated_cost_usd = self.estimated_cost_usd + other.estimated_cost_usd
         return Usage(
             model=self.model if self.model == other.model else None,
+            provider=self.provider if self.provider == other.provider else None,
+            model_usage={**self.model_usage, **other.model_usage},
             api_calls=self.api_calls + other.api_calls,
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
@@ -129,6 +137,7 @@ class AICallTelemetry(BaseModel):
     """
 
     stage: str
+    scope: str | None = None
     attempt: int = 0
     status: CallStatus
     usage: Usage = Field(default_factory=Usage)
