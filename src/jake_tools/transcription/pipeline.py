@@ -55,12 +55,13 @@ from .asr import Transcriber, transcribe_merged_audio
 from .audio import AudioTool, merge_note_audio, run_id_for
 from .cache import RunCache, sha256_of
 from .chapters import run_chapterisation
-from .integrate import IntegrationReport, load_products, run_integrate
+from .integrate import IntegrationReport, load_products
 from .minutes import run_minutes
 from .models import PolishedChapter, RawTranscript, SnippetRequest, StageTiming
 from .note import ParsedNote, parse_note
 from .obsidian import VaultClient
 from .polish import run_polish
+from .product_review import export_product_review
 from .speakers import RAW_TRANSCRIPT_CACHE_NAME, run_speaker_resolution
 
 _AUDIO_SUFFIXES = (".m4a",)
@@ -145,12 +146,15 @@ class PipelineOutcome(BaseModel):
     two entry points' contracts identical.
     """
 
-    status: Literal["complete", "needs_input"]
+    status: Literal["complete", "needs_input", "review_required"]
     run_id: str | None = None
     requests: list[SnippetRequest] = Field(default_factory=list)
     timings: list[StageTiming] = Field(default_factory=list)
     telemetry: AITelemetry | None = None
     report: RunReport | None = None
+    review_id: str | None = None
+    candidate: str | None = None
+    pack: str | None = None
 
 
 def _known_speaker_count(note: ParsedNote) -> int | None:
@@ -266,11 +270,10 @@ async def run_pipeline(
        `chapterise`/`polish`/`minutes`/`integrate` never run this call.
     3. Chapterises (007, with the same `effort="low"` default `transcript
        chapterise` applies when `--effort` wasn't explicit), polishes (008),
-       generates minutes (009), and integrates (010) - the same four calls
-       `transcript chapterise`/`polish`/`minutes`/`integrate` make, wired
-       together instead of run by hand.
-    4. Assembles `RunReport` from the products just written and
-       `IntegrationReport` returned by `run_integrate`.
+       reviews minutes (009b), and exports an exact product candidate (011).
+       Canonical integration is deliberately not performed here.
+    4. Returns `review_required` with the review id, candidate, timings, and
+       AI telemetry. `needs_input` remains the earlier human checkpoint.
 
     `ctx_factories` supplies every dependency lazily (see `PipelineFactories`);
     `spec` carries `--model`/`--effort` through to every LLM stage's agent.
@@ -318,7 +321,7 @@ async def run_pipeline(
     chapter_agent = ClaudeAgent(defaults=chapter_spec, run_query=agent.run_query)
     await run_chapterisation(run_id, agent=chapter_agent, cache=cache)
 
-    polish_result = await run_polish(
+    await run_polish(
         note_path,
         run_id,
         chapter=None,
@@ -331,12 +334,11 @@ async def run_pipeline(
     await run_minutes(note_path, run_id, agent=agent, vault=vault, cache=cache)
 
     products = load_products(note_path, run_id, cache)
-    integration = run_integrate(note_path, products, cache=cache, run_id=run_id)
+    review_pack = export_product_review(note_path, run_id, cache=cache)
     resolved = cache.load(run_id, "resolved_transcript", RawTranscript)
     evidence_ratio, unknown_turns, unknown_words = _unknown_evidence(
         resolved if resolved is not None else RawTranscript(clips=[], utterances=[])
     )
-
     telemetry = cache.load(run_id, "ai_telemetry", AITelemetry)
     report = RunReport(
         run_id=run_id,
@@ -352,11 +354,20 @@ async def run_pipeline(
         ),
         resolved_unknown_turns=unknown_turns,
         resolved_unknown_words=unknown_words,
-        fixer_issues=polish_result.issues,
-        integration=integration,
+        fixer_issues=[],
+        integration=IntegrationReport(
+            run_id=run_id, note_path=str(note_path), sections=[]
+        ),
         timings=cache.load_timings(run_id),
         telemetry=telemetry,
     )
     return PipelineOutcome(
-        status="complete", run_id=run_id, telemetry=telemetry, report=report
+        status="review_required",
+        run_id=run_id,
+        timings=cache.load_timings(run_id),
+        telemetry=telemetry,
+        report=report,
+        review_id=review_pack.review_id,
+        candidate=review_pack.candidate_path,
+        pack=str(cache.run_dir(run_id) / "product_review.json"),
     )

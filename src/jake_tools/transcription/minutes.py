@@ -39,11 +39,12 @@ the prompt teaches the model to write minutes the way Michael wants.
 
 from __future__ import annotations
 
+import re
 import textwrap
 from collections.abc import Sequence
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..cache_models import CacheEnvelope
 from ..claude import AgentSpec, ClaudeAgent
@@ -56,6 +57,8 @@ from .polish import POLISHED_CACHE_NAME, PolishedChapterList, build_lexicon
 
 # The cache name `transcript minutes` stores its output under.
 MINUTES_CACHE_NAME = "minutes"
+MINUTES_REVIEW_CACHE_NAME = "minutes_review"
+MINUTES_DRAFT_CACHE_NAME = "minutes_draft"
 
 
 class MinutesError(RuntimeError):
@@ -81,6 +84,29 @@ class MinutesResponse(BaseModel):
 
     meeting_summary: str
     discussion_notes: str
+
+
+class MinutesReviewResponse(BaseModel):
+    """A fresh adversarial review's complete corrected minutes."""
+
+    meeting_summary: str
+    discussion_notes: str
+    issues: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class MinutesReviewResult(CacheEnvelope):
+    """Strict provenance and output of the minutes-review stage."""
+
+    run_id: str
+    input_hash: str
+    draft_sha256: str
+    lexicon_sha256: str
+    polished_sha256: str
+    meeting_summary: str
+    discussion_notes: str
+    issues: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class MinutesPrompt(StructuredPrompt[MinutesResponse]):
@@ -176,6 +202,56 @@ class MinutesPrompt(StructuredPrompt[MinutesResponse]):
     chapters_text: str
 
 
+class MinutesDraftResult(CacheEnvelope):
+    """The generation output retained so reviewer resume stays content-bound."""
+
+    run_id: str
+    meeting_summary: str
+    discussion_notes: str
+
+
+class MinutesReviewPrompt(StructuredPrompt[MinutesReviewResponse]):
+    template = textwrap.dedent("""\
+        You are the fresh, adversarial minutes-quality reviewer. You did not
+        write the draft below. Compare it against the exact polished chapters
+        and the meeting lexicon, then return the COMPLETE corrected
+        `meeting_summary` and `discussion_notes`, never a diff.
+
+        Check every claim for entailment and modality. Do not promote one
+        speaker's proposal or tentative statement to "both agreed", a
+        decision, an action, or an owner. Preserve the distinction between
+        proposed, tentative, agreed, decided, action, risk, and unresolved.
+        Preserve owners, numbers, names, and uncertainty. Flag unsupported or
+        suspect proper nouns rather than inventing a confident correction.
+
+        Discussion Notes must be terse chronological nested bullets in the
+        author's style: a top-level discussion topic followed by indented
+        supporting bullets. Do not create global Decisions, Actions, Risks,
+        or Open questions buckets, and do not add a heading. Use Australian
+        English. Report semantic issues and warnings separately, including
+        anything that needs confirmation against the audio or a term.
+        There are no automatic web lookups and web lookup cannot prove what
+        the audio said.
+
+        Lexicon (candidate terms only; not proof): {{ lexicon | json }}
+
+        Exact polished chapters, in order:
+        {{ chapters_text }}
+
+        Draft meeting summary:
+        {{ meeting_summary }}
+
+        Draft Discussion Notes:
+        {{ discussion_notes }}
+        """)
+    response_model = MinutesReviewResponse
+
+    lexicon: list[str]
+    chapters_text: str
+    meeting_summary: str
+    discussion_notes: str
+
+
 def _render_chapters(chapters: Sequence[PolishedChapter]) -> str:
     parts: list[str] = []
     for chapter in chapters:
@@ -207,8 +283,42 @@ async def generate_minutes(
             chapters_text=_render_chapters(chapters),
         ),
         spec,
-        stage="minutes",
+        stage="minutes-generation",
     )
+    return response
+
+
+def _validate_review_shape(response: MinutesReviewResponse) -> None:
+    if not response.meeting_summary.strip():
+        raise MinutesError("minutes reviewer returned an empty meeting summary")
+    notes = response.discussion_notes.strip()
+    if not notes or "## Discussion Notes" in notes:
+        raise MinutesError("minutes reviewer returned invalid Discussion Notes shape")
+    if not any(
+        re.match(r"^[-*]\s+", line) for line in notes.splitlines() if line.strip()
+    ):
+        raise MinutesError("minutes reviewer returned no Markdown topic bullets")
+
+
+async def review_minutes(
+    chapters: Sequence[PolishedChapter],
+    draft: MinutesResponse,
+    lexicon: Sequence[str],
+    agent: ClaudeAgent,
+    spec: AgentSpec | None = None,
+) -> MinutesReviewResponse:
+    """Run the independent minutes review against exact chapters and lexicon."""
+    response, _reply = await agent.for_stage("minutes-review").run_structured(
+        MinutesReviewPrompt(
+            lexicon=list(lexicon),
+            chapters_text=_render_chapters(chapters),
+            meeting_summary=draft.meeting_summary,
+            discussion_notes=draft.discussion_notes,
+        ),
+        spec,
+        stage="minutes-review",
+    )
+    _validate_review_shape(response)
     return response
 
 
@@ -254,9 +364,7 @@ async def run_minutes(
         raise MissingPolishedChaptersError(run_id)
 
     lexicon = build_lexicon(note, vault)
-    stage_agent = agent.for_stage("minutes").with_telemetry(
-        cache.telemetry_sink(run_id)
-    )
+    stage_agent = agent.with_telemetry(cache.telemetry_sink(run_id))
     manifest = cache.stage_manifest(
         "minutes",
         inputs={
@@ -273,33 +381,125 @@ async def run_minutes(
             "agent": stage_agent.defaults.model_dump(mode="json"),
             "prompt": MinutesPrompt.template,
             "response_schema": MinutesResponse.model_json_schema(),
+            "review_prompt": MinutesReviewPrompt.template,
+            "review_schema": MinutesReviewResponse.model_json_schema(),
         },
     )
     cached = cache.load(run_id, MINUTES_CACHE_NAME, MinutesResult)
+    cached_review = cache.load(run_id, MINUTES_REVIEW_CACHE_NAME, MinutesReviewResult)
+    cached_draft = cache.load(run_id, MINUTES_DRAFT_CACHE_NAME, MinutesDraftResult)
     current_manifest = cache.load_manifest(run_id, "minutes")
+    review_manifest = cache.stage_manifest(
+        "minutes-review",
+        inputs={"polished": polished.model_dump(mode="json"), "lexicon": lexicon},
+        input_hashes={
+            "polished": stable_hash(polished.model_dump(mode="json")),
+            "lexicon": stable_hash(lexicon),
+        },
+        config={
+            "agent": stage_agent.defaults.model_dump(mode="json"),
+            "prompt": MinutesReviewPrompt.template,
+            "response_schema": MinutesReviewResponse.model_json_schema(),
+        },
+    )
+    current_review_manifest = cache.load_manifest(run_id, "minutes-review")
     if (
         cached is not None
+        and cached_review is not None
+        and cached_draft is not None
+        and cached_review.draft_sha256
+        == stable_hash(cached_draft.model_dump(mode="json"))
+        and cached_review.input_hash
+        == stable_hash(
+            {
+                "polished": polished.model_dump(mode="json"),
+                "lexicon": lexicon,
+            }
+        )
+        and cached_review.lexicon_sha256 == stable_hash(lexicon)
+        and cached_review.polished_sha256
+        == stable_hash(polished.model_dump(mode="json"))
         and cache.manifest_matches(current_manifest, manifest)
+        and cache.manifest_matches(current_review_manifest, review_manifest)
         and current_manifest is not None
+        and current_review_manifest is not None
         and current_manifest.output_hash == stable_hash(cached.model_dump(mode="json"))
+        and current_review_manifest.output_hash
+        == stable_hash(cached_review.model_dump(mode="json"))
     ):
-        stage_agent.record_cache_hit()
+        stage_agent.for_stage("minutes-generation").record_cache_hit()
+        stage_agent.for_stage("minutes-review").record_cache_hit()
         return cached
-    cache.invalidate_artefacts(run_id, {"minutes", "minutes.manifest"})
-    response = await generate_minutes(
-        polished.chapters, note.attendees, lexicon, stage_agent
-    )
-
-    result = MinutesResult(
-        run_id=run_id,
-        meeting_summary=response.meeting_summary,
-        discussion_notes=response.discussion_notes,
-    )
-    cache.store(run_id, MINUTES_CACHE_NAME, result)
-    cache.store_manifest(
+    cache.invalidate_artefacts(
         run_id,
-        manifest.model_copy(
-            update={"output_hash": stable_hash(result.model_dump(mode="json"))}
-        ),
+        {
+            "minutes",
+            "minutes.manifest",
+            MINUTES_REVIEW_CACHE_NAME,
+            MINUTES_DRAFT_CACHE_NAME,
+            "minutes-review.manifest",
+        },
     )
-    return result
+    try:
+        response = await generate_minutes(
+            polished.chapters, note.attendees, lexicon, stage_agent
+        )
+        draft_result = MinutesDraftResult(
+            run_id=run_id,
+            meeting_summary=response.meeting_summary,
+            discussion_notes=response.discussion_notes,
+        )
+        reviewed = await review_minutes(
+            polished.chapters, response, lexicon, stage_agent
+        )
+        result = MinutesResult(
+            run_id=run_id,
+            meeting_summary=reviewed.meeting_summary,
+            discussion_notes=reviewed.discussion_notes,
+        )
+        review_result = MinutesReviewResult(
+            run_id=run_id,
+            input_hash=stable_hash(
+                {
+                    "polished": polished.model_dump(mode="json"),
+                    "lexicon": lexicon,
+                }
+            ),
+            draft_sha256=stable_hash(draft_result.model_dump(mode="json")),
+            lexicon_sha256=stable_hash(lexicon),
+            polished_sha256=stable_hash(polished.model_dump(mode="json")),
+            meeting_summary=reviewed.meeting_summary,
+            discussion_notes=reviewed.discussion_notes,
+            issues=reviewed.issues,
+            warnings=reviewed.warnings,
+        )
+        cache.store(run_id, MINUTES_DRAFT_CACHE_NAME, draft_result)
+        cache.store(run_id, MINUTES_REVIEW_CACHE_NAME, review_result)
+        cache.store_manifest(
+            run_id,
+            review_manifest.model_copy(
+                update={
+                    "output_hash": stable_hash(review_result.model_dump(mode="json"))
+                }
+            ),
+        )
+        cache.store(run_id, MINUTES_CACHE_NAME, result)
+        cache.store_manifest(
+            run_id,
+            manifest.model_copy(
+                update={"output_hash": stable_hash(result.model_dump(mode="json"))}
+            ),
+        )
+        return result
+    except Exception:
+        cache.invalidate_artefacts(
+            run_id,
+            {
+                "minutes",
+                "minutes.manifest",
+                MINUTES_REVIEW_CACHE_NAME,
+                MINUTES_DRAFT_CACHE_NAME,
+                "minutes-review.manifest",
+            },
+        )
+        raise

@@ -73,11 +73,25 @@ The command runs the full meeting-transcription pipeline over one Obsidian
 prep note in a single call: merges and transcribes the note's audio embeds
 (or adapts a pre-diarised Gemini/Teams transcript embed when there's no
 audio), resolves diarisation clusters to attendee names, chapterises the
-raw transcript, polishes each chapter's dialogue, writes the meeting summary
-and Discussion Notes, and integrates every product into the note. `##
-Chapters` and `## Transcript` are replaced wholesale on every run; the `>
-[!summary]` callout and `## Discussion Notes` merge against a human's prior
-edits instead of overwriting them.
+raw transcript, polishes each chapter's dialogue, reviews the minutes with a
+fresh adversarial pass, and exports an exact product candidate. It stops with
+`status: "review_required"` and exit code 4; it never mutates the canonical
+note until the human accepts that exact candidate.
+
+Review and apply the candidate explicitly:
+
+```bash
+jake-tools transcript review product export "...md" --run-id RUN_ID
+jake-tools transcript review product decide "...md" --run-id RUN_ID \
+  --review-id REVIEW_ID --decision accept --reviewer "Michael Bryan"
+jake-tools transcript integrate "...md" --run-id RUN_ID
+```
+
+`transcript integrate` is fail-closed: it checks the full source, artefact,
+manifest, policy, note-base, renderer, and candidate-byte hashes before any
+note, baseline, or deletion-fingerprint write. `## Chapters` and `## Transcript`
+remain pipeline-owned; the summary callout and `## Discussion Notes` preserve
+human edits through the existing three-way merge.
 
 If speaker resolution can't confidently name every voice, the command prints
 `{"status": "needs_input", "requests": [...]}` and exits with code 3 rather
@@ -103,7 +117,9 @@ hand:
 - `transcript chapterise` — split the raw transcript into topic-based chapters
 - `transcript polish` — clean up each chapter's dialogue, then check it adversarially
 - `transcript minutes` — generate the meeting summary and Discussion Notes
-- `transcript integrate` — write this run's products into the note
+- `transcript review product export` — export the exact candidate and checks
+- `transcript review product decide` — record accept/reject for that candidate
+- `transcript integrate` — apply only the accepted exact candidate
 
 The command requires:
 

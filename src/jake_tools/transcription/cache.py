@@ -213,6 +213,7 @@ class RunCache:
             "polished",
             "polish_issues",
             "minutes",
+            "minutes_draft",
             "review",
             "candidate",
             "decision",
@@ -288,6 +289,11 @@ def _atomic_write(path: Path, content: str) -> None:
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Atomically write UTF-8 text and fsync its containing directory."""
+    _atomic_write(path, content)
 
 
 def sha256_of(path: Path) -> str:

@@ -23,6 +23,7 @@ import json
 import re
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -66,6 +67,20 @@ from jake_tools.transcription.speakers import SpeakersError, SpeakersResponse
 # - fetch the actual modules via importlib to monkeypatch their bindings.
 transcribe_cli = importlib.import_module("jake_tools.cli.transcribe")
 transcript_cli = importlib.import_module("jake_tools.cli.transcript")
+pipeline_module = importlib.import_module("jake_tools.transcription.pipeline")
+
+
+@pytest.fixture(autouse=True)
+def _stop_pipeline_before_canonical_apply(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        pipeline_module,
+        "export_product_review",
+        lambda note_path, run_id, cache: SimpleNamespace(
+            review_id=f"review-{run_id}",
+            candidate_path=str(cache.run_dir(run_id) / "product_review_candidate.md"),
+        ),
+    )
+
 
 _ATTENDEES = ["Ada Lovelace", "Grace Hopper"]
 
@@ -350,7 +365,11 @@ _DEFAULT_MINUTES = {
     "MinutesResponse": {
         "meeting_summary": "A short fictional summary of the meeting.",
         "discussion_notes": "- Talked about the budget\n\t- Came in under budget\n",
-    }
+    },
+    "MinutesReviewResponse": {
+        "meeting_summary": "A short fictional summary of the meeting.",
+        "discussion_notes": "- Talked about the budget\n\t- Came in under budget\n",
+    },
 }
 
 
@@ -414,10 +433,10 @@ async def test_run_pipeline_happy_path_audio_ramp_writes_all_four_sections_in_or
 
     outcome = await run_pipeline(note_path, factories, AgentSpec())
 
-    assert outcome.status == "complete"
+    assert outcome.status == "review_required"
     assert outcome.report is not None
     assert outcome.report.chapters == 2
-    assert outcome.report.integration.sections
+    assert outcome.report.integration.sections == []
     assert [timing.stage for timing in outcome.report.timings] == ["merge"]
     assert transcriber.speaker_counts == [2]
 
@@ -428,19 +447,10 @@ async def test_run_pipeline_happy_path_audio_ramp_writes_all_four_sections_in_or
     assert [clip.path for clip in stored.clips] == [str(clip_a), str(clip_b)]
 
     text = note_path.read_text()
-    assert "[!summary]" in text
-    assert "## Discussion Notes" in text
-    assert "## Chapters" in text
-    assert "## Transcript" in text
-    # Exemplar order: preamble summary -> Meeting Prep -> Discussion Notes ->
-    # Chapters -> Transcript.
-    assert (
-        text.index("[!summary]")
-        < text.index("## Meeting Prep")
-        < text.index("## Discussion Notes")
-        < text.index("## Chapters")
-        < text.index("## Transcript")
-    )
+    assert "## Meeting Prep" in text
+    assert "## Discussion Notes" not in text
+    assert "## Chapters" not in text
+    assert "## Transcript" not in text
 
 
 # --- needs-input: CLI contract equality with `transcript speakers` ----------
@@ -478,6 +488,32 @@ def test_transcribe_needs_input_contract_matches_transcript_speakers(
     assert plumbing_result.exit_code == transcript_cli.NEEDS_INPUT_EXIT_CODE
     assert porcelain_result.exit_code not in (0, 1)
     assert json.loads(porcelain_result.output) == json.loads(plumbing_result.output)
+
+
+def test_transcribe_review_required_preserves_note_and_exits_four(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    note_path = tmp_path / "note.md"
+    note_path.write_text("placeholder")
+    before = note_path.read_bytes()
+
+    async def fake_run_pipeline(*args: object, **kwargs: object) -> PipelineOutcome:
+        return PipelineOutcome(
+            status="review_required",
+            run_id="run-1",
+            review_id="review-1",
+            candidate="/cache/run-1/product_review_candidate.md",
+            pack="/cache/run-1/product_review.json",
+        )
+
+    monkeypatch.setattr(transcribe_cli, "run_pipeline", fake_run_pipeline)
+    result = CliRunner().invoke(main, ["transcribe", str(note_path)])
+
+    assert result.exit_code == transcribe_cli.REVIEW_REQUIRED_EXIT_CODE
+    payload = json.loads(result.output)
+    assert payload["status"] == "review_required"
+    assert payload["review_id"] == "review-1"
+    assert note_path.read_bytes() == before
 
 
 # --- resume: fake transcriber called once across two invocations ------------
@@ -543,7 +579,7 @@ async def test_run_pipeline_resume_after_assign_does_not_repeat_asr(
     second = await run_pipeline(
         note_path, factories, AgentSpec(), assignments=("SPEAKER_01=Grace Hopper",)
     )
-    assert second.status == "complete"
+    assert second.status == "review_required"
     assert len(transcriber.calls) == 1  # still one: ASR was never repeated
     assert first.run_id == second.run_id
 
@@ -599,7 +635,7 @@ async def test_run_pipeline_transcript_ramp_never_constructs_a_transcriber(
 
     outcome = await run_pipeline(note_path, factories, AgentSpec())
 
-    assert outcome.status == "complete"
+    assert outcome.status == "review_required"
     stored = cache.load(outcome.run_id or "", "raw_transcript", RawTranscript)
     assert stored is not None
     assert stored.audio_sha256 is None  # a text source, never a hashed audio one
@@ -665,7 +701,7 @@ async def test_run_pipeline_prefers_the_audio_ramp_when_both_embeds_present(
 
     outcome = await run_pipeline(note_path, factories, AgentSpec())
 
-    assert outcome.status == "complete"
+    assert outcome.status == "review_required"
     assert len(transcriber.calls) == 1
     stored = cache.load(outcome.run_id or "", "raw_transcript", RawTranscript)
     assert stored is not None
@@ -734,7 +770,7 @@ async def test_run_pipeline_unknown_turn_ratio_reflects_the_polished_turns(
         finalise=True,
     )
 
-    assert outcome.status == "complete"
+    assert outcome.status == "review_required"
     assert outcome.report is not None
     assert outcome.report.unknown_turn_ratio == pytest.approx(2 / 6)
 
@@ -913,7 +949,7 @@ async def test_live_transcribe_produces_all_four_sections_with_attendee_only_spe
         note_path, factories, AgentSpec(effort="low"), finalise=True
     )
 
-    assert outcome.status == "complete", outcome.model_dump()
+    assert outcome.status == "review_required", outcome.model_dump()
     assert outcome.report is not None
     print("run report:", outcome.report.model_dump_json(indent=2))
 

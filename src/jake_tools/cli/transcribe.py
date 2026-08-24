@@ -31,9 +31,10 @@ from ..transcription.note import NoteParseError
 from ..transcription.obsidian import ObsidianCliError
 from ..transcription.pipeline import PipelineError, PipelineFactories, run_pipeline
 from ..transcription.polish import PolishError
+from ..transcription.product_review import ProductReviewError
 from ..transcription.speakers import SpeakersError, SpeakersResponse
 from .options import AgentOptions, agent_options, coro
-from .transcript import NEEDS_INPUT_EXIT_CODE
+from .transcript import NEEDS_INPUT_EXIT_CODE, REVIEW_REQUIRED_EXIT_CODE
 from .transcript_options import (
     AudioOptions,
     CacheOptions,
@@ -63,6 +64,7 @@ _STAGE_ERRORS: tuple[type[Exception], ...] = (
     PolishError,
     MinutesError,
     IntegrateError,
+    ProductReviewError,
     AdaptError,
     TranscriberError,
     AudioToolError,
@@ -220,6 +222,10 @@ async def transcribe(
         )
         click.echo(payload.model_dump_json(indent=2))
         raise click.exceptions.Exit(NEEDS_INPUT_EXIT_CODE)
+
+    if outcome.status == "review_required":
+        click.echo(outcome.model_dump_json(indent=2))
+        raise click.exceptions.Exit(REVIEW_REQUIRED_EXIT_CODE)
 
     assert outcome.report is not None  # "complete" always carries a report
     click.echo(outcome.report.model_dump_json(indent=2))

@@ -44,6 +44,7 @@ rather than approximated.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -52,7 +53,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from ..cache_models import CacheEnvelope
-from .cache import RunCache, StageManifest, stable_hash
+from .cache import RunCache, StageManifest, atomic_write_text, stable_hash
 from .chapters import ChapterList
 from .minutes import MINUTES_CACHE_NAME, MinutesResult
 from .models import PolishedChapter, RawTranscript, TranscriptProducts
@@ -322,6 +323,17 @@ class IntegrationReport(BaseModel):
     run_id: str
     note_path: str
     sections: list[SectionOutcome]
+
+
+class IntegrationPlan(BaseModel):
+    """Complete candidate and deferred cache state produced without writes."""
+
+    report: IntegrationReport
+    candidate_text: str
+    baseline_summary: str
+    baseline_notes: str
+    deleted_summary: list[str]
+    deleted_notes: list[str]
 
 
 class DeletedFingerprints(CacheEnvelope):
@@ -730,14 +742,14 @@ def load_products(note_path: Path, run_id: str, cache: RunCache) -> TranscriptPr
     )
 
 
-def run_integrate(
+def plan_integrate(
     note_path: Path,
     products: TranscriptProducts,
     *,
     cache: RunCache,
     run_id: str,
-) -> IntegrationReport:
-    """Write `products` into `note_path`'s tier-owned sections and return a report.
+) -> IntegrationPlan:
+    """Plan the exact integration candidate without mutating note or cache.
 
     1. Parses the note, and independently re-derives its body from the raw
        file text via `split_raw_frontmatter` - if these two disagree
@@ -939,22 +951,70 @@ def run_integrate(
             "touches it."
         )
 
-    # Only now, with every guard passed, is anything actually written:
-    # the note file first, then the tier-b baselines and deleted-
-    # fingerprint sets - never before, and never if a guard raised above.
+    # The caller decides whether this exact candidate has been reviewed.  Do
+    # not write here: product review export and accepted apply must share this
+    # renderer and the same deferred baseline state.
     new_text = frontmatter_prefix + render_body(sections)
-    note_path.write_text(new_text)
-    cache.store_text(run_id, BASELINE_SUMMARY_NAME, new_baseline_summary)
-    cache.store_text(run_id, BASELINE_NOTES_NAME, new_baseline_notes)
-    cache.store(
-        run_id,
-        DELETED_SUMMARY_NAME,
-        DeletedFingerprints(fingerprints=sorted(new_deleted_summary)),
+    report = IntegrationReport(
+        run_id=run_id, note_path=str(note_path), sections=outcomes
     )
-    cache.store(
-        run_id,
-        DELETED_NOTES_NAME,
-        DeletedFingerprints(fingerprints=sorted(new_deleted_notes)),
+    return IntegrationPlan(
+        report=report,
+        candidate_text=new_text,
+        baseline_summary=new_baseline_summary,
+        baseline_notes=new_baseline_notes,
+        deleted_summary=sorted(new_deleted_summary),
+        deleted_notes=sorted(new_deleted_notes),
     )
 
-    return IntegrationReport(run_id=run_id, note_path=str(note_path), sections=outcomes)
+
+def apply_integration_plan(
+    note_path: Path,
+    plan: IntegrationPlan,
+    *,
+    cache: RunCache,
+    run_id: str,
+) -> IntegrationReport:
+    """Atomically apply a previously reviewed exact candidate and verify it."""
+    expected = hashlib.sha256(plan.candidate_text.encode("utf-8")).hexdigest()
+    atomic_write_text(note_path, plan.candidate_text)
+    actual = hashlib.sha256(note_path.read_bytes()).hexdigest()
+    if actual != expected:
+        raise ReconstructionError(
+            f"{note_path}: post-write candidate hash {actual} did not match "
+            f"accepted hash {expected}; recover from the accepted candidate "
+            "in the run cache before retrying."
+        )
+    try:
+        cache.store_text(run_id, BASELINE_SUMMARY_NAME, plan.baseline_summary)
+        cache.store_text(run_id, BASELINE_NOTES_NAME, plan.baseline_notes)
+        cache.store(
+            run_id,
+            DELETED_SUMMARY_NAME,
+            DeletedFingerprints(fingerprints=plan.deleted_summary),
+        )
+        cache.store(
+            run_id,
+            DELETED_NOTES_NAME,
+            DeletedFingerprints(fingerprints=plan.deleted_notes),
+        )
+    except Exception as exc:
+        raise ReconstructionError(
+            f"{note_path}: accepted note is written and hash-verified, but "
+            "integration baselines could not be persisted; preserve the "
+            f"accepted candidate and recover before retrying: {exc}"
+        ) from exc
+    return plan.report
+
+
+def run_integrate(
+    note_path: Path,
+    products: TranscriptProducts,
+    *,
+    cache: RunCache,
+    run_id: str,
+) -> IntegrationReport:
+    """Apply only an accepted exact product-review candidate."""
+    from .product_review import apply_accepted_product
+
+    return apply_accepted_product(note_path, products, run_id=run_id, cache=cache)

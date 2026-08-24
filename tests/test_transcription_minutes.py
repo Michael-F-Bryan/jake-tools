@@ -40,7 +40,10 @@ from jake_tools.transcription.cache import RunCache
 from jake_tools.transcription.chapters import CHAPTERS_CACHE_NAME, ChapterList
 from jake_tools.transcription.minutes import (
     MINUTES_CACHE_NAME,
+    MINUTES_REVIEW_CACHE_NAME,
+    MinutesError,
     MinutesResult,
+    MinutesReviewResult,
     MissingPolishedChaptersError,
     generate_minutes,
     run_minutes,
@@ -100,7 +103,20 @@ class ScriptedQuery:
     ) -> AsyncIterator[Message]:
         index = len(self.calls)
         self.calls.append((prompt, options))
-        payload = self._payloads[index]
+        if index >= len(self._payloads):
+            schema = options.output_format["schema"] if options.output_format else {}
+            if schema.get("title") == "MinutesReviewResponse":
+                prior = self._payloads[-1]
+                if not isinstance(prior, dict):
+                    raise IndexError(index)
+                payload = {
+                    "meeting_summary": prior.get("meeting_summary", "reviewed"),
+                    "discussion_notes": prior.get("discussion_notes", "- reviewed"),
+                }
+            else:
+                raise IndexError(index)
+        else:
+            payload = self._payloads[index]
 
         async def stream() -> AsyncIterator[Message]:
             yield _structured_result(payload)
@@ -359,8 +375,8 @@ async def test_minutes_prompt_is_built_from_the_fixers_output_not_the_pre_fix_po
         FIXTURES / "meeting_note.md", "run-1", agent=agent, vault=vault, cache=cache
     )
 
-    assert len(query.calls) == 3
-    minutes_prompt = query.calls[2][0]
+    assert len(query.calls) == 4
+    minutes_prompt = query.calls[3][0]
     assert "Sunfish" in minutes_prompt
     assert "Suncorp" not in minutes_prompt
 
@@ -416,6 +432,76 @@ async def test_run_minutes_stores_minutes_json_on_disk_and_returns_it(
     loaded = cache.load("run-1", MINUTES_CACHE_NAME, MinutesResult)
     assert loaded is not None
     assert loaded.discussion_notes == "- A bullet"
+
+
+async def test_run_minutes_persists_fresh_adversarial_review_and_uses_corrected_output(
+    tmp_path: Path,
+) -> None:
+    cache = RunCache(tmp_path / "cache")
+    chapters = [
+        _chapter("Opening", summary="Kickoff", turns=[("Ada Lovelace", "Let's begin.")])
+    ]
+    cache.store(
+        "run-review", POLISHED_CACHE_NAME, PolishedChapterList(chapters=chapters)
+    )
+    fake = ScriptedQuery(
+        {"meeting_summary": "Draft.", "discussion_notes": "- Draft topic"},
+        {
+            "meeting_summary": "Corrected.",
+            "discussion_notes": "- Chronological topic\n  - Proposed, not agreed.",
+            "issues": ["The draft overstated agreement."],
+            "warnings": ["Confirm the term against audio."],
+        },
+    )
+    result = await run_minutes(
+        FIXTURES / "meeting_note.md",
+        "run-review",
+        agent=ClaudeAgent(run_query=fake),
+        vault=_empty_vault(tmp_path),
+        cache=cache,
+    )
+
+    assert result.meeting_summary == "Corrected."
+    assert result.discussion_notes.startswith("- Chronological topic")
+    review = cache.load("run-review", MINUTES_REVIEW_CACHE_NAME, MinutesReviewResult)
+    assert review is not None
+    assert review.issues == ["The draft overstated agreement."]
+    assert len(fake.calls) == 2
+    await run_minutes(
+        FIXTURES / "meeting_note.md",
+        "run-review",
+        agent=ClaudeAgent(run_query=ScriptedQuery()),
+        vault=_empty_vault(tmp_path),
+        cache=cache,
+    )
+    assert len(fake.calls) == 2
+
+
+async def test_minutes_reviewer_failure_leaves_no_publishable_minutes(
+    tmp_path: Path,
+) -> None:
+    cache = RunCache(tmp_path / "cache")
+    cache.store(
+        "run-failure",
+        POLISHED_CACHE_NAME,
+        PolishedChapterList(
+            chapters=[_chapter("Opening", summary="Kickoff", turns=[("Ada", "hello")])]
+        ),
+    )
+    fake = ScriptedQuery(
+        {"meeting_summary": "Draft.", "discussion_notes": "- Draft topic"},
+        {"meeting_summary": "", "discussion_notes": "- bad"},
+    )
+    with pytest.raises(MinutesError):
+        await run_minutes(
+            FIXTURES / "meeting_note.md",
+            "run-failure",
+            agent=ClaudeAgent(run_query=fake),
+            vault=_empty_vault(tmp_path),
+            cache=cache,
+        )
+    assert cache.load("run-failure", MINUTES_CACHE_NAME, MinutesResult) is None
+    assert (cache.run_dir("run-failure") / "minutes.manifest.json").exists() is False
 
 
 async def test_run_minutes_passes_the_note_attendees_and_lexicon_through(

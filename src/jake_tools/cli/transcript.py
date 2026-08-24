@@ -42,6 +42,11 @@ from ..transcription.models import RawTranscript
 from ..transcription.note import NoteParseError, parse_note
 from ..transcription.obsidian import ObsidianCliError
 from ..transcription.polish import PolishError, run_polish
+from ..transcription.product_review import (
+    ProductReviewError,
+    decide_product_review,
+    export_product_review,
+)
 from ..transcription.speakers import SpeakersError, run_speaker_resolution
 from .options import AgentOptions, agent_options, coro
 from .transcript_options import (
@@ -64,11 +69,84 @@ _RAW_TRANSCRIPT_CACHE_NAME = "raw_transcript"
 # Stable contract: plan 011's porcelain and any coordinating agent branch on
 # it to know a Discord relay is needed before re-running with `--assign`.
 NEEDS_INPUT_EXIT_CODE = 3
+REVIEW_REQUIRED_EXIT_CODE = 4
 
 
 @click.group()
 def transcript() -> None:
     """Plumbing sub-commands for the meeting-transcription pipeline."""
+
+
+@transcript.group("review")
+def review() -> None:
+    """Inspect and record human acceptance of generated transcript products."""
+
+
+@review.group("product")
+def product_review() -> None:
+    """Review the exact candidate note before canonical integration."""
+
+
+@product_review.command("export")
+@cache_options
+@click.argument(
+    "note_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False, readable=True),
+)
+@click.option("--run-id", "run_id", required=True, help="Run cache identity to review.")
+def product_review_export(
+    note_path: Path, run_id: str, cache_options: CacheOptions
+) -> None:
+    """Render NOTE_PATH into a read-only product-review candidate and pack."""
+    try:
+        pack = export_product_review(note_path, run_id, cache=cache_options.run_cache())
+    except (ProductReviewError, NoteParseError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(pack.model_dump_json(indent=2))
+
+
+@product_review.command("decide")
+@cache_options
+@click.argument(
+    "note_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False, readable=True),
+)
+@click.option("--run-id", "run_id", required=True, help="Run cache identity to decide.")
+@click.option(
+    "--review-id", "review_id", required=True, help="Exact exported review id."
+)
+@click.option(
+    "--decision",
+    type=click.Choice(["accept", "reject"], case_sensitive=True),
+    required=True,
+)
+@click.option("--reviewer", required=True, help="Human reviewer name.")
+@click.option(
+    "--reason", default=None, help="Required for rejection; optional for acceptance."
+)
+def product_review_decide(
+    note_path: Path,
+    run_id: str,
+    review_id: str,
+    decision: str,
+    reviewer: str,
+    reason: str | None,
+    cache_options: CacheOptions,
+) -> None:
+    """Record acceptance or rejection for one exact exported candidate."""
+    try:
+        result = decide_product_review(
+            note_path,
+            run_id,
+            review_id=review_id,
+            decision=decision,  # type: ignore[arg-type]
+            reviewer=reviewer,
+            reason=reason,
+            cache=cache_options.run_cache(),
+        )
+    except (ProductReviewError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(result.model_dump_json(indent=2))
 
 
 @transcript.command("telemetry")
@@ -594,27 +672,26 @@ def integrate(
     run_id: str,
     cache_options: CacheOptions,
 ) -> None:
-    """Write this run's products into NOTE_PATH's tier-owned sections.
+    """Apply the accepted exact product candidate into NOTE_PATH.
 
-    Reads the cached polished chapters and minutes for RUN_ID (from
-    `transcript polish` and `transcript minutes`; errors naming whichever
-    prerequisite hasn't run yet), then writes them into the note: `##
-    Chapters` and `## Transcript` are replaced wholesale (pipeline-owned),
-    while the `> [!summary]` callout and `## Discussion Notes` go through a
-    three-way textual merge against this run id's cached baseline - never
-    an LLM - so a human edit is preserved verbatim rather than clobbered.
-    Frontmatter and `## Meeting Prep` are never touched here.
+       Reads the cached polished chapters and minutes for RUN_ID (from
+       `transcript polish` and `transcript minutes`; errors naming whichever
+       prerequisite hasn't run yet), then requires an accepted `transcript review product export` pack and
+    decision bound to the exact source, manifests, current note bytes, and
+    complete candidate render. It refuses before any note/baseline/fingerprint
+    mutation when that binding is missing or stale. The accepted candidate is
+    written atomically and read back by hash; `## Chapters` and `## Transcript`
+    remain pipeline-owned, while the summary callout and `## Discussion Notes`
+    retain the existing three-way merge semantics.
 
-    Makes no LLM calls. Prints the resulting `IntegrationReport` (sections
-    created/replaced/merged/appended, human-preserved unit counts) as
-    JSON.
+       Makes no LLM calls. Prints the resulting `IntegrationReport` as JSON.
     """
     cache = cache_options.run_cache()
 
     try:
         products = load_products(note_path, run_id, cache)
         report = run_integrate(note_path, products, cache=cache, run_id=run_id)
-    except (IntegrateError, NoteParseError) as exc:
+    except (IntegrateError, ProductReviewError, NoteParseError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     click.echo(report.model_dump_json(indent=2))

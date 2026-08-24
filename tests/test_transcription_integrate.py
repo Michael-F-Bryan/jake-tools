@@ -34,12 +34,13 @@ from jake_tools.transcription.integrate import (
     MissingMinutesError,
     MissingPolishedChaptersError,
     ReconstructionError,
+    apply_integration_plan,
     format_timestamp,
     load_products,
+    plan_integrate,
     render_chapter_index,
     render_summary_callout,
     render_transcript,
-    run_integrate,
 )
 from jake_tools.transcription.minutes import MINUTES_CACHE_NAME, MinutesResult
 from jake_tools.transcription.models import (
@@ -61,6 +62,22 @@ from jake_tools.transcription.polish import POLISHED_CACHE_NAME, PolishedChapter
 # fetch the actual module via importlib to monkeypatch its bindings.
 transcript_cli = importlib.import_module("jake_tools.cli.transcript")
 integrate_module = importlib.import_module("jake_tools.transcription.integrate")
+
+
+def run_integrate(
+    note_path: Path,
+    products: TranscriptProducts,
+    *,
+    cache: RunCache,
+    run_id: str,
+) -> IntegrationReport:
+    """Exercise renderer/merge tests without bypassing public apply in production."""
+    return apply_integration_plan(
+        note_path,
+        plan_integrate(note_path, products, cache=cache, run_id=run_id),
+        cache=cache,
+        run_id=run_id,
+    )
 
 
 # --- fixtures/helpers ----------------------------------------------------------
@@ -1156,7 +1173,9 @@ def test_integrate_cli_reports_a_missing_prerequisite_as_a_clean_click_exception
     assert "transcript polish" in result.output
 
 
-def test_integrate_cli_runs_end_to_end_and_writes_the_note(tmp_path: Path) -> None:
+def test_integrate_cli_refuses_without_an_accepted_product_review(
+    tmp_path: Path,
+) -> None:
     note_path = _write_note(tmp_path, MEETING_PREP_ONLY)
     cache = RunCache(tmp_path / "cache")
     chapters = [_chapter()]
@@ -1169,6 +1188,7 @@ def test_integrate_cli_runs_end_to_end_and_writes_the_note(tmp_path: Path) -> No
         notes="- A real point\n",
     )
 
+    before = note_path.read_bytes()
     result = CliRunner().invoke(
         main,
         [
@@ -1182,18 +1202,6 @@ def test_integrate_cli_runs_end_to_end_and_writes_the_note(tmp_path: Path) -> No
         ],
     )
 
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert payload["run_id"] == "run-1"
-    headings = {section["heading"] for section in payload["sections"]}
-    assert headings == {
-        "summary callout",
-        "Discussion Notes",
-        "Chapters",
-        "Transcript",
-    }
-
-    text = note_path.read_text()
-    assert "A real summary." in text
-    assert "A real point" in text
-    assert "**Ada Lovelace:** Let's begin." in text
+    assert result.exit_code != 0, result.output
+    assert "accepted product review" in result.output
+    assert note_path.read_bytes() == before
