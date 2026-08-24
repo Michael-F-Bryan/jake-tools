@@ -40,11 +40,16 @@ enough words in a segment to give every genuine speaker at least one — see
 
 from __future__ import annotations
 
+import gc
+import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+import mlx.core as mx
+import torch
 from parakeet_mlx import from_pretrained as parakeet_from_pretrained
 from pyannote.audio import Pipeline
 
@@ -58,6 +63,7 @@ from torchcodec.decoders import (
 )
 
 from .cache import RunCache, sha256_of
+from .memory_watchdog import MemoryWatchdog, default_memory_budget_bytes
 from .models import RawTranscript, SourceClip, Utterance
 
 DEFAULT_ASR_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
@@ -78,6 +84,20 @@ DEFAULT_DIARISATION_MODEL = "pyannote/speaker-diarization-3.1"
 # own CLI defaults.
 DEFAULT_ASR_CHUNK_DURATION = 120.0
 DEFAULT_ASR_CHUNK_OVERLAP = 15.0
+
+# Chunking bounds parakeet's memory growth but doesn't cap the size of any
+# single allocation — an oversized chunk (or pyannote's own inference
+# window, below) should still fail with a catchable exception rather than
+# grow unbounded. `mx.set_memory_limit` and `torch.mps.set_per_process_
+# memory_fraction` are each library's fail-fast form: MLX raises once an
+# allocation would exceed the limit and RAM+swap are exhausted; torch's
+# MPS allocator raises an out-of-memory error the same way. Both are set
+# to the same ~60% policy the memory watchdog uses (see
+# `memory_watchdog.DEFAULT_MEMORY_BUDGET_FRACTION`) — belt-and-braces, not
+# a substitute for the watchdog: these only catch the accelerator-side
+# share of an allocation, and yesterday's crash showed at least part of a
+# runaway grows as ordinary swappable CPU memory these caps never see.
+DEFAULT_MPS_MEMORY_FRACTION = 0.6
 
 UNKNOWN_SPEAKER = "SPEAKER_UNKNOWN"
 """Speaker id for an ASR segment with no overlapping diarised turn at all."""
@@ -140,19 +160,34 @@ class LocalTranscriber:
         diarisation_model: str = DEFAULT_DIARISATION_MODEL,
         asr_chunk_duration: float = DEFAULT_ASR_CHUNK_DURATION,
         asr_chunk_overlap: float = DEFAULT_ASR_CHUNK_OVERLAP,
+        memory_budget_bytes: int | None = None,
     ) -> None:
         self._hf_token = hf_token
         self._asr_model = asr_model
         self._diarisation_model = diarisation_model
         self._asr_chunk_duration = asr_chunk_duration
         self._asr_chunk_overlap = asr_chunk_overlap
+        # None means "use the watchdog's own ~60%-of-RAM default" — resolved
+        # lazily in MemoryWatchdog rather than here, so the default always
+        # reflects the machine actually running `transcribe()`.
+        self._memory_budget_bytes = memory_budget_bytes
 
     def transcribe(self, audio: Path) -> RawTranscript:
         if not self._hf_token:
             raise MissingHfTokenError(self._diarisation_model)
 
-        asr_segments = self._run_asr(audio)
-        diarised_turns = self._run_diarisation(audio)
+        # Must start before model loading: the watchdog exists precisely
+        # because a runaway allocation during/after model load is what
+        # kernel-panicked the machine on a real acceptance run (see the
+        # memory_watchdog module docstring). Stopped in `finally` so a
+        # normal-or-failed run doesn't leave the poll thread running.
+        watchdog = MemoryWatchdog(budget_bytes=self._memory_budget_bytes)
+        watchdog.start()
+        try:
+            asr_segments = self._run_asr(audio)
+            diarised_turns = self._run_diarisation(audio)
+        finally:
+            watchdog.stop()
         utterances = align(asr_segments, diarised_turns)
 
         # `RawTranscript.clips` records provenance for one clip covering the
@@ -176,25 +211,63 @@ class LocalTranscriber:
         )
 
     def _run_asr(self, audio: Path) -> list[AsrSegment]:
+        # Fail-fast rather than grow unbounded — see the
+        # DEFAULT_MPS_MEMORY_FRACTION comment for why this and the MPS cap
+        # below exist alongside chunking and the process-level watchdog.
+        mx.set_memory_limit(default_memory_budget_bytes())
+
+        _log_stage("ASR starting")
+        started = time.monotonic()
         model = parakeet_from_pretrained(self._asr_model)
+        sample_rate = model.preprocessor_config.sample_rate
+
+        def _log_chunk_progress(current_samples: int, total_samples: int) -> None:
+            _log_stage(
+                f"ASR progress: {current_samples / sample_rate:.0f}s / "
+                f"{total_samples / sample_rate:.0f}s"
+            )
+
         # Chunked: parakeet-mlx transparently windows long audio (bounded
         # memory) and stitches the result back into file-relative
         # timestamps with de-duplicated overlap text — see the
         # DEFAULT_ASR_CHUNK_DURATION comment above for why this is required
-        # rather than optional.
+        # rather than optional. `chunk_callback` is parakeet-mlx's own
+        # per-chunk progress hook (called with sample offsets before each
+        # chunk is processed) — cheap, so wired straight to stage logging
+        # rather than built up into anything more elaborate.
         result = model.transcribe(
             audio,
             chunk_duration=self._asr_chunk_duration,
             overlap_duration=self._asr_chunk_overlap,
+            chunk_callback=_log_chunk_progress,
         )
-        return [
+        segments = [
             AsrSegment(
                 start=sentence.start, end=sentence.end, text=sentence.text.strip()
             )
             for sentence in result.sentences
         ]
 
+        # Sequential peaks: parakeet's model + decoded audio and pyannote's
+        # models + decoded waveform are each large enough on their own;
+        # never needing both live at once is what keeps the process's peak
+        # memory to one stage's cost instead of the sum. `del` drops our
+        # only references before the diarisation pipeline loads;
+        # `mx.clear_cache()` releases MLX's own buffer cache on top of
+        # that (Python's refcounting alone doesn't touch it).
+        del model, result
+        gc.collect()
+        mx.clear_cache()
+        _log_stage(f"ASR complete in {time.monotonic() - started:.1f}s")
+        return segments
+
     def _run_diarisation(self, audio: Path) -> list[DiarisedTurn]:
+        # See DEFAULT_MPS_MEMORY_FRACTION: torch's MPS allocator's own
+        # fail-fast cap, set immediately before the stage that uses it.
+        torch.mps.set_per_process_memory_fraction(DEFAULT_MPS_MEMORY_FRACTION)
+
+        _log_stage("diarisation starting")
+        started = time.monotonic()
         # Unlike parakeet's raw Conformer encoder, pyannote's segmentation
         # and embedding models don't run one whole-file forward pass:
         # `pyannote.audio.core.inference.Inference` (which the diarisation
@@ -232,10 +305,23 @@ class LocalTranscriber:
             {"waveform": samples.data, "sample_rate": samples.sample_rate}
         )
         annotation: Any = output.speaker_diarization
-        return [
+        turns = [
             DiarisedTurn(start=turn.start, end=turn.end, speaker=str(speaker))
             for turn, _, speaker in annotation.itertracks(yield_label=True)
         ]
+        _log_stage(f"diarisation complete in {time.monotonic() - started:.1f}s")
+        return turns
+
+
+def _log_stage(message: str) -> None:
+    """Flushed stderr line for one pipeline-stage transition.
+
+    A run that dies mid-stage (the original incident's stderr log was
+    completely empty) should still leave a trail on disk showing which
+    stage it reached — hence the unconditional flush rather than relying
+    on Python's default buffering to get there eventually.
+    """
+    print(f"[transcribe] {message}", file=sys.stderr, flush=True)
 
 
 def _overlap(segment: AsrSegment, turn: DiarisedTurn) -> float:

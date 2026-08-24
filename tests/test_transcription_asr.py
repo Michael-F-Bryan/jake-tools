@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -442,10 +443,16 @@ class _FakeAlignedResult:
 
 class _FakeParakeetModel:
     """Fake parakeet-mlx model: records how `.transcribe()` was called
-    instead of running real MLX inference."""
+    instead of running real MLX inference. `chunk_progress` simulates two
+    `chunk_callback` invocations (parakeet-mlx's own per-chunk progress
+    hook — see `_run_asr`), so tests can assert it's wired to stage
+    logging without a real chunked encode."""
 
-    def __init__(self, sentences: list[_FakeAlignedSentence]) -> None:
+    def __init__(
+        self, sentences: list[_FakeAlignedSentence], *, sample_rate: int = 16000
+    ) -> None:
         self._sentences = sentences
+        self.preprocessor_config = SimpleNamespace(sample_rate=sample_rate)
         self.transcribe_calls: list[dict[str, object]] = []
 
     def transcribe(
@@ -454,6 +461,7 @@ class _FakeParakeetModel:
         *,
         chunk_duration: float | None = None,
         overlap_duration: float = 15.0,
+        chunk_callback: Callable[[int, int], None] | None = None,
     ) -> _FakeAlignedResult:
         self.transcribe_calls.append(
             {
@@ -462,6 +470,9 @@ class _FakeParakeetModel:
                 "overlap_duration": overlap_duration,
             }
         )
+        if chunk_callback is not None:
+            sample_rate = self.preprocessor_config.sample_rate
+            chunk_callback(sample_rate * 100, sample_rate * 200)
         return _FakeAlignedResult(self._sentences)
 
 
@@ -576,6 +587,113 @@ def test_local_transcriber_enables_parakeets_own_chunking_for_long_audio(
     ]
     starts = [u.start for u in result.utterances]
     assert starts == sorted(starts)  # meeting-relative, monotonic
+
+
+# --- LocalTranscriber: memory hardening (caps, cleanup, stage logging) ------
+
+
+def test_local_transcriber_caps_accelerator_memory_before_each_stage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`mx.set_memory_limit`/`torch.mps.set_per_process_memory_fraction` give
+    MLX and torch's MPS allocator a fail-fast ceiling instead of letting an
+    oversized allocation grow unbounded (see `DEFAULT_MPS_MEMORY_FRACTION`).
+    Both must be set — the MLX one before ASR loads its model, the MPS one
+    before diarisation loads its pipeline."""
+    fake_model = _FakeParakeetModel([_FakeAlignedSentence(0.0, 1.0, "hi")])
+    fake_pipeline = _FakePyannotePipeline([(0.0, 1.0, "SPEAKER_00")])
+    monkeypatch.setattr(
+        asr_module, "parakeet_from_pretrained", lambda model_id: fake_model
+    )
+    monkeypatch.setattr(
+        asr_module.Pipeline,
+        "from_pretrained",
+        lambda checkpoint, token=None: fake_pipeline,
+    )
+    monkeypatch.setattr(asr_module, "AudioDecoder", _FakeAudioDecoder)
+    mx_limit_calls: list[int] = []
+    mps_fraction_calls: list[float] = []
+    monkeypatch.setattr(asr_module.mx, "set_memory_limit", mx_limit_calls.append)
+    monkeypatch.setattr(
+        asr_module.torch.mps,
+        "set_per_process_memory_fraction",
+        mps_fraction_calls.append,
+    )
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+
+    LocalTranscriber(hf_token="fake-token").transcribe(audio)
+
+    assert mx_limit_calls == [asr_module.default_memory_budget_bytes()]
+    assert mps_fraction_calls == [asr_module.DEFAULT_MPS_MEMORY_FRACTION]
+
+
+def test_local_transcriber_clears_mlx_cache_before_diarisation_pipeline_loads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Sequential peaks: parakeet's model must be released and MLX's buffer
+    cache cleared before the diarisation pipeline loads, not after — so the
+    two models' memory footprints never have to coexist. Asserted via call
+    order between `mx.clear_cache` and `Pipeline.from_pretrained`, both real
+    collaborators of the method under test rather than its own internals."""
+    order: list[str] = []
+    fake_model = _FakeParakeetModel([_FakeAlignedSentence(0.0, 1.0, "hi")])
+    fake_pipeline = _FakePyannotePipeline([(0.0, 1.0, "SPEAKER_00")])
+
+    def _fake_from_pretrained(
+        checkpoint: str, token: str | None = None
+    ) -> _FakePyannotePipeline:
+        order.append("Pipeline.from_pretrained")
+        return fake_pipeline
+
+    monkeypatch.setattr(
+        asr_module, "parakeet_from_pretrained", lambda model_id: fake_model
+    )
+    monkeypatch.setattr(asr_module.Pipeline, "from_pretrained", _fake_from_pretrained)
+    monkeypatch.setattr(asr_module, "AudioDecoder", _FakeAudioDecoder)
+    monkeypatch.setattr(
+        asr_module.mx, "clear_cache", lambda: order.append("mx.clear_cache")
+    )
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+
+    LocalTranscriber(hf_token="fake-token").transcribe(audio)
+
+    assert order == ["mx.clear_cache", "Pipeline.from_pretrained"]
+
+
+def test_local_transcriber_logs_flushed_stage_progress_to_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stage-progress lines are the only trail a run leaves if it dies
+    mid-stage — the real incident's stderr log was completely empty. This
+    asserts each stage's start/complete line lands on stderr, plus
+    parakeet-mlx's own per-chunk progress hook (`chunk_callback`) being
+    wired through to the same logging."""
+    fake_model = _FakeParakeetModel([_FakeAlignedSentence(0.0, 1.0, "hi")])
+    fake_pipeline = _FakePyannotePipeline([(0.0, 1.0, "SPEAKER_00")])
+    monkeypatch.setattr(
+        asr_module, "parakeet_from_pretrained", lambda model_id: fake_model
+    )
+    monkeypatch.setattr(
+        asr_module.Pipeline,
+        "from_pretrained",
+        lambda checkpoint, token=None: fake_pipeline,
+    )
+    monkeypatch.setattr(asr_module, "AudioDecoder", _FakeAudioDecoder)
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+
+    LocalTranscriber(hf_token="fake-token").transcribe(audio)
+
+    stderr = capsys.readouterr().err
+    assert "[transcribe] ASR starting" in stderr
+    assert "[transcribe] ASR progress:" in stderr
+    assert "[transcribe] ASR complete in" in stderr
+    assert "[transcribe] diarisation starting" in stderr
+    assert "[transcribe] diarisation complete in" in stderr
 
 
 # --- LocalTranscriber: missing HF_TOKEN -------------------------------------
