@@ -48,11 +48,36 @@ from typing import Any, Protocol
 from parakeet_mlx import from_pretrained as parakeet_from_pretrained
 from pyannote.audio import Pipeline
 
+# torchcodec's own `decoders/__init__.py` re-exports `AudioDecoder` from the
+# private-looking `_audio_decoder` submodule without an `__all__`, which
+# pyright can't see as public — this is still torchcodec's documented,
+# stable import path (and the one pyannote's own `io.py` uses internally),
+# not an internal implementation detail we're reaching past.
+from torchcodec.decoders import (
+    AudioDecoder,  # pyright: ignore[reportPrivateImportUsage]
+)
+
 from .cache import RunCache, sha256_of
 from .models import RawTranscript, SourceClip, Utterance
 
 DEFAULT_ASR_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
 DEFAULT_DIARISATION_MODEL = "pyannote/speaker-diarization-3.1"
+
+# parakeet-mlx's Conformer encoder runs full self-attention over the whole
+# input in one shot when `chunk_duration` is unset — fine for short clips,
+# but its memory cost grows with the *square* of audio length. A real
+# ~31-minute meeting blew this up into a 34GB single Metal allocation
+# (against a ~9GB ceiling on the machine that hit it). `chunk_duration`/
+# `overlap_duration` are parakeet-mlx's own answer: `model.transcribe(...)`
+# splits long audio into overlapping windows, runs each separately (bounded
+# memory regardless of file length), and stitches the results back into one
+# `AlignedResult` with file-relative timestamps and de-duplicated overlap
+# text (`parakeet_mlx.alignment.merge_longest_contiguous` /
+# `merge_longest_common_subsequence`) — so this is the library's own
+# chunking mechanism, not a hand-rolled one. 120s/15s match parakeet-mlx's
+# own CLI defaults.
+DEFAULT_ASR_CHUNK_DURATION = 120.0
+DEFAULT_ASR_CHUNK_OVERLAP = 15.0
 
 UNKNOWN_SPEAKER = "SPEAKER_UNKNOWN"
 """Speaker id for an ASR segment with no overlapping diarised turn at all."""
@@ -113,10 +138,14 @@ class LocalTranscriber:
         hf_token: str | None,
         asr_model: str = DEFAULT_ASR_MODEL,
         diarisation_model: str = DEFAULT_DIARISATION_MODEL,
+        asr_chunk_duration: float = DEFAULT_ASR_CHUNK_DURATION,
+        asr_chunk_overlap: float = DEFAULT_ASR_CHUNK_OVERLAP,
     ) -> None:
         self._hf_token = hf_token
         self._asr_model = asr_model
         self._diarisation_model = diarisation_model
+        self._asr_chunk_duration = asr_chunk_duration
+        self._asr_chunk_overlap = asr_chunk_overlap
 
     def transcribe(self, audio: Path) -> RawTranscript:
         if not self._hf_token:
@@ -148,7 +177,16 @@ class LocalTranscriber:
 
     def _run_asr(self, audio: Path) -> list[AsrSegment]:
         model = parakeet_from_pretrained(self._asr_model)
-        result = model.transcribe(audio)
+        # Chunked: parakeet-mlx transparently windows long audio (bounded
+        # memory) and stitches the result back into file-relative
+        # timestamps with de-duplicated overlap text — see the
+        # DEFAULT_ASR_CHUNK_DURATION comment above for why this is required
+        # rather than optional.
+        result = model.transcribe(
+            audio,
+            chunk_duration=self._asr_chunk_duration,
+            overlap_duration=self._asr_chunk_overlap,
+        )
         return [
             AsrSegment(
                 start=sentence.start, end=sentence.end, text=sentence.text.strip()
@@ -157,6 +195,15 @@ class LocalTranscriber:
         ]
 
     def _run_diarisation(self, audio: Path) -> list[DiarisedTurn]:
+        # Unlike parakeet's raw Conformer encoder, pyannote's segmentation
+        # and embedding models don't run one whole-file forward pass:
+        # `pyannote.audio.core.inference.Inference` (which the diarisation
+        # pipeline uses internally for both) always processes audio through
+        # a fixed-duration `SlidingWindow` (`Inference.slide`/`__call__`),
+        # so memory is bounded by the window size regardless of file
+        # length — confirmed by reading that class, and empirically by
+        # running this pipeline end-to-end against the same ~31-minute
+        # meeting recording that broke parakeet (see task-004-report.md).
         pipeline = Pipeline.from_pretrained(
             self._diarisation_model, token=self._hf_token
         )
@@ -165,10 +212,26 @@ class LocalTranscriber:
                 f"could not load diarisation pipeline {self._diarisation_model!r} "
                 "(pyannote returned no pipeline for this checkpoint)"
             )
-        # pyannote's own return type is `Any | Iterator[tuple[Any, Any]]` (it
-        # supports both single-file and batched calls) — the single-file
-        # case actually returns a `pyannote.core.Annotation`.
-        annotation: Any = pipeline(str(audio))
+
+        # Decode the whole file to an in-memory waveform ourselves rather
+        # than handing pyannote a bare path: pyannote's own path-based
+        # decoding (via torchcodec) crops the file per-inference-window and
+        # asserts each crop returned within 1 sample of the expected count.
+        # Real meeting recordings (AAC, via plan 003's ffmpeg merge) can
+        # have a few thousand samples' worth of encoder priming delay at
+        # the very start, which blew that assertion on the first window of
+        # a real ~31-minute meeting (`ValueError: requested chunk [...]
+        # resulted in 477184 samples instead of the expected 480000
+        # samples`) — a real failure on real audio, not a synthetic one.
+        # pyannote's waveform-dict input path pads instead of asserting, so
+        # decoding once upfront (linear in file length, ~350MB for 31
+        # minutes of mono float32 — nothing like parakeet's O(n^2) blowup)
+        # sidesteps the assertion entirely.
+        samples = AudioDecoder(audio).get_all_samples()
+        output: Any = pipeline(
+            {"waveform": samples.data, "sample_rate": samples.sample_rate}
+        )
+        annotation: Any = output.speaker_diarization
         return [
             DiarisedTurn(start=turn.start, end=turn.end, speaker=str(speaker))
             for turn, _, speaker in annotation.itertracks(yield_label=True)

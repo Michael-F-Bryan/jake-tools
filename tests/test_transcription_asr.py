@@ -16,6 +16,7 @@ import importlib
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import click
 import pytest
@@ -23,7 +24,10 @@ from click.testing import CliRunner
 
 from jake_tools.cli import main
 from jake_tools.cli.transcript_options import TranscriberOptions, transcriber_options
+from jake_tools.transcription import asr as asr_module
 from jake_tools.transcription.asr import (
+    DEFAULT_ASR_CHUNK_DURATION,
+    DEFAULT_ASR_CHUNK_OVERLAP,
     UNKNOWN_SPEAKER,
     AsrSegment,
     DiarisedTurn,
@@ -416,6 +420,162 @@ def test_transcript_asr_requires_run_id(tmp_path: Path) -> None:
 
     assert result.exit_code != 0
     assert "run-id" in result.output.lower()
+
+
+# --- LocalTranscriber: chunked ASR for long audio ---------------------------
+
+
+class _FakeAlignedSentence:
+    """Shaped like `parakeet_mlx.alignment.AlignedSentence` (start/end/text
+    are the only attributes `_run_asr` reads)."""
+
+    def __init__(self, start: float, end: float, text: str) -> None:
+        self.start = start
+        self.end = end
+        self.text = text
+
+
+class _FakeAlignedResult:
+    def __init__(self, sentences: list[_FakeAlignedSentence]) -> None:
+        self.sentences = sentences
+
+
+class _FakeParakeetModel:
+    """Fake parakeet-mlx model: records how `.transcribe()` was called
+    instead of running real MLX inference."""
+
+    def __init__(self, sentences: list[_FakeAlignedSentence]) -> None:
+        self._sentences = sentences
+        self.transcribe_calls: list[dict[str, object]] = []
+
+    def transcribe(
+        self,
+        path: Path,
+        *,
+        chunk_duration: float | None = None,
+        overlap_duration: float = 15.0,
+    ) -> _FakeAlignedResult:
+        self.transcribe_calls.append(
+            {
+                "path": path,
+                "chunk_duration": chunk_duration,
+                "overlap_duration": overlap_duration,
+            }
+        )
+        return _FakeAlignedResult(self._sentences)
+
+
+class _FakeDiarisationAnnotation:
+    def __init__(self, turns: list[tuple[float, float, str]]) -> None:
+        self._turns = turns
+
+    def itertracks(self, yield_label: bool = True) -> object:
+        for start, end, speaker in self._turns:
+            yield SimpleNamespace(start=start, end=end), None, speaker
+
+
+class _FakePyannotePipeline:
+    """Fake pyannote pipeline: records what it was called with instead of
+    running real diarisation inference. Shaped like pyannote-audio 4.x's
+    `DiarizeOutput` — a `.speaker_diarization` attribute holding the
+    overlap-inclusive `Annotation`, not a bare `Annotation` return value
+    (that was pyannote-audio 3.x's shape)."""
+
+    def __init__(self, turns: list[tuple[float, float, str]]) -> None:
+        self._turns = turns
+        self.call_args: list[object] = []
+
+    def __call__(self, file: object) -> SimpleNamespace:
+        self.call_args.append(file)
+        return SimpleNamespace(
+            speaker_diarization=_FakeDiarisationAnnotation(self._turns)
+        )
+
+
+class _FakeAudioSamples:
+    def __init__(self, data: object, sample_rate: int) -> None:
+        self.data = data
+        self.sample_rate = sample_rate
+
+
+class _FakeAudioDecoder:
+    """Fake `torchcodec.decoders.AudioDecoder` (constructed fresh per call,
+    same as the real one): always hands back the same canned samples
+    instead of running real audio decoding."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def get_all_samples(self) -> _FakeAudioSamples:
+        return _FakeAudioSamples(data="fake-waveform-tensor", sample_rate=48000)
+
+
+def test_local_transcriber_enables_parakeets_own_chunking_for_long_audio(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression test for the real-meeting failure: parakeet-mlx's Conformer
+    encoder runs full self-attention over the *entire* input in one shot
+    unless `chunk_duration` is passed to `model.transcribe(...)` — memory
+    cost grows with the square of audio length. A real ~31-minute meeting
+    turned an un-chunked encode into a single 34GB Metal allocation
+    (`[metal::malloc] Attempting to allocate 34091191040 bytes...`). This
+    asserts `LocalTranscriber` always passes `chunk_duration`/
+    `overlap_duration` through to parakeet's own chunking mechanism, rather
+    than silently falling back to whole-file mode — and that timestamps
+    coming back from a (simulated) chunked/stitched result stay
+    meeting-relative and monotonic once converted into `AsrSegment`s and
+    diarised utterances."""
+    # A sentence near 31 minutes in stands in for a chunk parakeet-mlx's
+    # own stitching (`merge_longest_contiguous`) already re-based onto
+    # file-relative time — well past what a single un-chunked window could
+    # safely encode without this fix.
+    fake_sentences = [
+        _FakeAlignedSentence(0.0, 4.0, " Hello there."),
+        _FakeAlignedSentence(1860.0, 1865.0, " Near the end of a long meeting."),
+    ]
+    fake_model = _FakeParakeetModel(fake_sentences)
+    fake_pipeline = _FakePyannotePipeline(
+        [(0.0, 4.0, "SPEAKER_00"), (1860.0, 1865.0, "SPEAKER_01")]
+    )
+    monkeypatch.setattr(
+        asr_module, "parakeet_from_pretrained", lambda model_id: fake_model
+    )
+    monkeypatch.setattr(
+        asr_module.Pipeline,
+        "from_pretrained",
+        lambda checkpoint, token=None: fake_pipeline,
+    )
+    monkeypatch.setattr(asr_module, "AudioDecoder", _FakeAudioDecoder)
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+
+    transcriber = LocalTranscriber(hf_token="fake-token")
+    result = transcriber.transcribe(audio)
+
+    assert fake_model.transcribe_calls == [
+        {
+            "path": audio,
+            "chunk_duration": DEFAULT_ASR_CHUNK_DURATION,
+            "overlap_duration": DEFAULT_ASR_CHUNK_OVERLAP,
+        }
+    ]
+    # Diarisation gets an in-memory waveform dict, not a bare path — see
+    # _run_diarisation's docstring comment for why (the real-meeting
+    # sample-count assertion failure this sidesteps).
+    assert fake_pipeline.call_args == [
+        {"waveform": "fake-waveform-tensor", "sample_rate": 48000}
+    ]
+    assert result.utterances == [
+        Utterance(start=0.0, end=4.0, speaker="SPEAKER_00", text="Hello there."),
+        Utterance(
+            start=1860.0,
+            end=1865.0,
+            speaker="SPEAKER_01",
+            text="Near the end of a long meeting.",
+        ),
+    ]
+    starts = [u.start for u in result.utterances]
+    assert starts == sorted(starts)  # meeting-relative, monotonic
 
 
 # --- LocalTranscriber: missing HF_TOKEN -------------------------------------
