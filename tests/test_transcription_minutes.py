@@ -37,6 +37,7 @@ from click.testing import CliRunner
 from jake_tools.claude import AgentSpec, ClaudeAgent, ClaudeAgentError
 from jake_tools.cli import main
 from jake_tools.transcription.cache import RunCache
+from jake_tools.transcription.chapters import CHAPTERS_CACHE_NAME, ChapterList
 from jake_tools.transcription.minutes import (
     MINUTES_CACHE_NAME,
     MinutesResult,
@@ -44,10 +45,21 @@ from jake_tools.transcription.minutes import (
     generate_minutes,
     run_minutes,
 )
-from jake_tools.transcription.models import PolishedChapter, PolishedTurn
+from jake_tools.transcription.models import (
+    ChapterSpan,
+    PolishedChapter,
+    PolishedTurn,
+    RawTranscript,
+    Utterance,
+)
 from jake_tools.transcription.note import NoteSection, ParsedNote
 from jake_tools.transcription.obsidian import VaultClient
-from jake_tools.transcription.polish import POLISHED_CACHE_NAME, PolishedChapterList
+from jake_tools.transcription.polish import (
+    POLISHED_CACHE_NAME,
+    PolishedChapterList,
+    run_polish,
+)
+from jake_tools.transcription.speakers import RESOLVED_TRANSCRIPT_CACHE_NAME
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -213,6 +225,32 @@ async def test_minutes_prompt_states_action_items_only_as_said_and_open_question
     assert "report it as open, naming the" in prompt
 
 
+async def test_minutes_prompt_states_the_grounding_rule_against_inferred_facts() -> (
+    None
+):
+    """Pins the grounding rule the acceptance review's F4/F5/F8/F19 findings
+    need: a real run inverted a date (flipping which financial year a
+    deduction fell in), invented an action item for the wrong person from a
+    garbled past-tense line, and stated a tax conclusion as confirmed when
+    the raw dialogue was actually unresolved. The rendered prompt must
+    forbid all of that, imperatively, not just discourage it."""
+
+    chapters = [_chapter("Opening", summary="s", turns=[("Ada", "hello")])]
+    fake = ScriptedQuery({"meeting_summary": "s", "discussion_notes": "- bullet"})
+    agent = ClaudeAgent(run_query=fake)
+
+    await generate_minutes(chapters, ["Ada"], [], agent)
+
+    prompt = " ".join(fake.calls[0][0].split())
+    assert "GROUNDING" in prompt
+    assert "Never invent or infer a date, a deadline, an owner, an amount" in prompt
+    assert "prefer to omit it, or report the ambiguity itself" in prompt
+    assert (
+        "never to the other participant, and never fold one speaker's "
+        "words into another's turn" in prompt
+    )
+
+
 async def test_generate_minutes_returns_the_agents_structured_reply() -> None:
     chapters = [_chapter("Opening", summary="s", turns=[("Ada", "hello")])]
     fake = ScriptedQuery(
@@ -228,6 +266,103 @@ async def test_generate_minutes_returns_the_agents_structured_reply() -> None:
     assert response.meeting_summary == "One sentence."
     assert response.discussion_notes == "- A bullet\n  - detail"
     assert len(fake.calls) == 1  # one StructuredPrompt call, not chunk-and-merge
+
+
+# --- seam: run_polish's fixer output, not its pre-fix polish, reaches minutes -
+
+
+async def test_minutes_prompt_is_built_from_the_fixers_output_not_the_pre_fix_polish(
+    tmp_path: Path,
+) -> None:
+    """Regression for the acceptance review's F9 ("the minutes stage
+    re-introduces content the fixer removed"): runs the real `run_polish`
+    (polish, then a fresh adversarial fix call) followed by the real
+    `run_minutes`, through `RunCache` exactly as `pipeline.py` chains them,
+    and inspects the actual prompt the minutes stage sent to the model.
+
+    The scripted polish deliberately writes the wrong, unrelated company
+    name "Suncorp"; the scripted fix call corrects it to "Sunfish" (the
+    shape of the acceptance run's F2/F9 findings). If minutes were built
+    from the polisher's pre-fix output - or from anything other than what
+    `run_polish` actually stored in `polished.json` - "Suncorp" would reach
+    the minutes prompt instead of the fixer's correction.
+    """
+    cache = RunCache(tmp_path / "cache")
+    cache.store(
+        "run-1",
+        RESOLVED_TRANSCRIPT_CACHE_NAME,
+        RawTranscript(
+            clips=[],
+            utterances=[
+                Utterance(
+                    start=0.0,
+                    end=2.0,
+                    speaker="Ada Lovelace",
+                    text="a dividend from Suncorp to the trust",
+                )
+            ],
+            audio_sha256=None,
+        ),
+    )
+    cache.store(
+        "run-1",
+        CHAPTERS_CACHE_NAME,
+        ChapterList(
+            chapters=[
+                ChapterSpan(
+                    title="Dividends",
+                    start_utterance=0,
+                    end_utterance=0,
+                    start_seconds=0.0,
+                )
+            ]
+        ),
+    )
+    # One chapter -> polish call, then fix call, in that deterministic
+    # order (no concurrency to race with a single chapter); then one more
+    # call for minutes. `ScriptedQuery` replays payloads by call order.
+    query = ScriptedQuery(
+        {
+            "summary": "Discussed a dividend.",
+            "turns": [
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "a dividend from Suncorp to the trust",
+                }
+            ],
+        },
+        {
+            "summary": "Discussed a dividend.",
+            "turns": [
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "a dividend from Sunfish to the trust",
+                }
+            ],
+            "issues": ["Corrected 'Suncorp' to the lexicon's 'Sunfish'."],
+        },
+        {"meeting_summary": "s", "discussion_notes": "- bullet"},
+    )
+    agent = ClaudeAgent(run_query=query)
+    vault = _empty_vault(tmp_path)
+
+    await run_polish(
+        FIXTURES / "meeting_note.md",
+        "run-1",
+        chapter=None,
+        max_concurrency=4,
+        agent=agent,
+        vault=vault,
+        cache=cache,
+    )
+    await run_minutes(
+        FIXTURES / "meeting_note.md", "run-1", agent=agent, vault=vault, cache=cache
+    )
+
+    assert len(query.calls) == 3
+    minutes_prompt = query.calls[2][0]
+    assert "Sunfish" in minutes_prompt
+    assert "Suncorp" not in minutes_prompt
 
 
 # --- run_minutes orchestration -------------------------------------------------
@@ -509,6 +644,33 @@ def _contains_any_marker(text: str, markers: Sequence[str]) -> bool:
     return any(_contains_marker(text, marker) for marker in markers)
 
 
+_NEGATION_BEFORE_DECISION_RE = re.compile(
+    r"\b(?:hasn'?t|has\s+not|haven'?t|have\s+not|not|never|no|isn'?t|wasn'?t)\b"
+    r"(?:\s+\w+){0,3}\s+$",
+    re.IGNORECASE,
+)
+
+
+def _contains_unnegated_decision_language(text: str, markers: Sequence[str]) -> bool:
+    """Like `_contains_any_marker`, but a marker preceded (within a few
+    words) by a negation does not count.
+
+    Reporting "hasn't been decided" is exactly the report-never-prescribe,
+    grounded behaviour these tests want - it restates what a speaker
+    literally said (e.g. "we haven't decided") - not decision language
+    sneaking onto a bullet that should report the alternatives as open. A
+    bare substring/word-boundary check on "decided" cannot tell those
+    apart; this looks at the words immediately before the match.
+    """
+    for marker in markers:
+        for match in re.finditer(rf"\b{re.escape(marker)}\b", text, re.IGNORECASE):
+            preceding = text[: match.start()]
+            if _NEGATION_BEFORE_DECISION_RE.search(preceding):
+                continue
+            return True
+    return False
+
+
 def test_bullet_items_folds_a_wrapped_continuation_into_its_bullet() -> None:
     text = "- Top bullet\n  - Sub bullet starts here\n    and wraps onto this line\n- Next top bullet"
 
@@ -692,7 +854,7 @@ async def test_live_minutes_report_facts_and_action_and_leave_the_open_question_
     assert alternative_items
     decision_markers = ("decided", "agreed")
     for item in alternative_items:
-        assert not _contains_any_marker(item, decision_markers), (
+        assert not _contains_unnegated_decision_language(item, decision_markers), (
             f"decision language found on the same bullet as the alternatives: {item!r}"
         )
 
@@ -701,6 +863,122 @@ async def test_live_minutes_report_facts_and_action_and_leave_the_open_question_
         assert marker not in lowered, (
             f"prescriptive marker {marker!r} found in real model output: {combined!r}"
         )
+
+    print("meeting_summary:", response.meeting_summary)
+    print("discussion_notes:", notes)
+
+
+# --- slow: grounding - no invented dates/owners, no misattribution ----------
+#
+# The acceptance review's F4/F5/F19 findings: a real run stated an
+# unresolved date as confirmed fact, invented an action item for the person
+# it was *asked of* rather than the person who actually committed to it,
+# and reported a fragmentary guess as a settled conclusion. This fixture
+# plants both shapes deliberately: a genuinely ambiguous date (the raw
+# dialogue itself gives two candidates and says nobody is sure), and an
+# action item whose owner (Rob Miller, who says "I'll ...") is a different
+# person from who it was addressed to (Michael Bryan, who only asked).
+
+_INVOICE_CHAPTER = _chapter(
+    "Supplier invoice payment date",
+    summary=(
+        "The group was unsure whether a supplier invoice was paid before "
+        "or after quarter end."
+    ),
+    turns=[
+        (
+            "Michael Bryan",
+            "Did we pay that supplier invoice before the end of the "
+            "quarter, or just after?",
+        ),
+        (
+            "Rob Miller",
+            "Honestly I'm not certain - the portal shows the twelfth, but "
+            "it might have actually gone through on the fourteenth, the "
+            "finance portal was glitching that day.",
+        ),
+        ("Michael Bryan", "Okay, let's check the bank statement to be sure."),
+    ],
+)
+_FOLLOWUP_CHAPTER = _chapter(
+    "Bank statement follow-up",
+    summary="Rob agreed to pull the bank statement to confirm the payment date.",
+    turns=[
+        (
+            "Michael Bryan",
+            "Can you pull the bank statement and confirm the exact date?",
+        ),
+        ("Rob Miller", "Yeah, I'll pull the statement and confirm by Friday."),
+    ],
+)
+
+
+def test_the_invoice_fixtures_ambiguity_and_ownership_are_honest() -> None:
+    """Guards the slow test's premise: the two candidate dates really are
+    both in the raw dialogue (so a check for both surviving is checking
+    genuine preservation, not something the model would say unprompted),
+    and it's Rob, not Michael, who actually commits to the follow-up action
+    (so a check that the action lands on Rob is checking real attribution,
+    not something trivially true regardless of who said what)."""
+
+    invoice_text = " ".join(turn.text for turn in _INVOICE_CHAPTER.turns).casefold()
+    assert "twelfth" in invoice_text
+    assert "fourteenth" in invoice_text
+
+    committing_turn = _FOLLOWUP_CHAPTER.turns[1]
+    assert committing_turn.speaker == "Rob Miller"
+    assert "i'll" in committing_turn.text.casefold()
+
+
+@pytest.mark.slow
+async def test_live_minutes_does_not_invent_a_confirmed_date_or_misattribute_the_action() -> (
+    None
+):
+    agent = ClaudeAgent(defaults=AgentSpec(effort="low"))
+
+    response = await generate_minutes(
+        [_INVOICE_CHAPTER, _FOLLOWUP_CHAPTER],
+        ["Michael Bryan", "Rob Miller"],
+        ["Michael Bryan", "Rob Miller"],
+        agent,
+    )
+
+    notes = response.discussion_notes
+    assert notes.strip() != ""
+
+    # Grounding on the ambiguous date: the raw dialogue gives two
+    # candidates and says nobody is sure which. The minutes must not
+    # assert exactly one of them as confirmed fact - either both survive
+    # (the ambiguity reported honestly) or neither does (omitted), but not
+    # exactly one, which would mean the model silently resolved an
+    # unresolved fact.
+    invoice_block = _topic_block(notes, "invoice")
+    day_mentions = {
+        match.lower()
+        for match in re.findall(
+            r"\b(twelfth|fourteenth|12th|14th)\b", invoice_block, re.IGNORECASE
+        )
+    }
+    assert len(day_mentions) != 1, (
+        f"minutes asserted exactly one of two candidate dates as fact when "
+        f"the transcript left it ambiguous: {invoice_block!r}"
+    )
+
+    # Grounding on ownership: the bank-statement action was Rob's ("I'll
+    # pull the statement"), not Michael's (who only asked for it, and who
+    # separately - and legitimately - proposed checking the statement
+    # himself back in the first chapter; that's a different, real bullet
+    # this check must not collide with). "pull" is the verb only Rob's
+    # actual commitment uses in the raw dialogue, so it isolates the
+    # delegated action from Michael's own, unrelated proposal.
+    items = _bullet_items(notes)
+    pull_items = [item for item in items if _contains_marker(item, "pull")]
+    assert pull_items, f"no bullet describes pulling the bank statement: {notes!r}"
+    assert all(_contains_marker(item, "Rob") for item in pull_items), (
+        f"a bullet about pulling the bank statement doesn't name Rob - the "
+        f"action looks misattributed away from who actually committed to "
+        f"it: {pull_items!r}"
+    )
 
     print("meeting_summary:", response.meeting_summary)
     print("discussion_notes:", notes)

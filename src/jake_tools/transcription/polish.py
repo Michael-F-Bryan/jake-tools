@@ -180,7 +180,9 @@ class ChapterFixResponse(PolishedChapterResponse):
 
     `issues` is for plan 011's run report - keep entries human-readable
     sentences, not codes. Empty when the polish under review was already
-    clean.
+    clean. `summary` inherits `PolishedChapterResponse`'s contract (a
+    reader-facing chapter summary) - `_polish_one_chapter` does not trust
+    it blindly when `issues` is empty, see its docstring.
     """
 
     issues: list[str]
@@ -245,11 +247,26 @@ class ChapterFixPrompt(StructuredPrompt[ChapterFixResponse]):
         - surviving fragments or split words the polish failed to repair
         - garbled or still-interleaved crosstalk
         - a term in the polish that doesn't match this lexicon of meeting
-          names and terms and looks like an uncorrected mishearing:
+          names and terms and looks like an uncorrected mishearing (e.g. an
+          unrelated real company name like "Suncorp" surviving when the
+          lexicon contains "Sunfish" is exactly this failure - fix it):
           {{ lexicon | json }}
         - meaning drift: any statement in the polish that the raw text
           does not support, or any substantive statement in the raw text
           that the polish dropped or waters down
+
+        The lexicon is authoritative for proper nouns. If the polish
+        already corrected a word to match a lexicon term, that correction
+        is settled - do NOT revert it back to the raw wording, even if the
+        raw wording is right there in the utterances below and looks like
+        a plausible word on its own. A raw ASR word merely existing in the
+        transcript is not evidence it is correct; the lexicon is. The same
+        rule runs the other way: never introduce, restore, or invent a
+        proper noun (a person, company, or place) that appears nowhere in
+        the lexicon above. A name that occurs only once in the raw
+        utterances, with no corroboration anywhere else in the transcript,
+        is more likely ASR noise than a real person - do not promote it to
+        a named individual in your corrected output.
 
         Meaning preservation is the invariant that matters most: the
         polish must rewrite form, never content. Fix whatever you find and
@@ -257,6 +274,14 @@ class ChapterFixPrompt(StructuredPrompt[ChapterFixResponse]):
         English sentence per issue you fixed, for a run report a human
         will read (an empty list if the polish under review was already
         clean - do not invent issues to have something to report).
+
+        `summary` must always read exactly like the polish's own summary
+        field: 1-3 sentences describing what this chapter covered, for a
+        reader's callout. Never write about this review itself - not the
+        lexicon, not what you changed or why, not phrases like "reviewed
+        the polish" or "returned unchanged" - that commentary belongs only
+        in `issues`, never in `summary`. If you found nothing to fix,
+        return the polish's summary verbatim.
 
         Chapter: {{ chapter_title }}
 
@@ -301,7 +326,19 @@ async def _polish_one_chapter(
 
     The fixer call is a brand-new `run_structured` invocation - never a
     follow-up turn on the polisher's conversation - and its corrected
-    output (not the polisher's) is what wins.
+    turns (not the polisher's) are what win.
+
+    `summary` is the one field this deliberately does NOT always take from
+    the fixer: when `fix_response.issues` is empty, the fixer found
+    nothing to fix, so there is no reason its `summary` should differ from
+    the polish's own - and a structural guard against a leaked-commentary
+    `summary` (the reviewer's own prose about the review shipping as the
+    chapter summary, e.g. "Reviewed the polish against the raw transcript
+    ... so the chapter is returned unchanged") is worth more here than
+    trusting the model to have followed the prompt's instruction not to
+    write it in the first place. When the fixer *did* find something to
+    fix, its `summary` is trusted, since it may have needed to change to
+    reflect a corrected turn.
     """
 
     raw_lines = _render_utterances(utterances)
@@ -327,10 +364,11 @@ async def _polish_one_chapter(
         spec,
     )
 
+    summary = fix_response.summary if fix_response.issues else polish_response.summary
     chapter = PolishedChapter(
         title=span.title,
         start_seconds=span.start_seconds,
-        summary=fix_response.summary,
+        summary=summary,
         turns=fix_response.turns,
     )
     issues = [f"{span.title}: {issue}" for issue in fix_response.issues]

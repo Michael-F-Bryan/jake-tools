@@ -331,6 +331,85 @@ async def test_polish_then_fix_are_two_separate_calls_and_fixer_sees_raw_and_pol
     ]
 
 
+async def test_fixer_meta_commentary_never_ships_as_the_chapter_summary_when_nothing_was_fixed(
+    tmp_path: Path,
+) -> None:
+    """Regression for the acceptance run's chapter-11 leak: the fixer found
+    nothing to fix (`issues == []`) but still wrote review commentary about
+    itself into `summary` - "Reviewed the polish against the raw
+    transcript... so the chapter is returned unchanged" shipped verbatim as
+    a user-facing chapter summary. When the fixer reports no issues, its
+    `summary` must never be trusted over the polish's own - this is exactly
+    the shape a real model produced.
+    """
+    transcript = _transcript(
+        [_utterance(0, "Ada Lovelace", "Let's talk about crosstalk handling.")]
+    )
+    span = ChapterSpan(
+        title="Crosstalk", start_utterance=0, end_utterance=0, start_seconds=0.0
+    )
+    leaked_commentary = (
+        "Reviewed the polish against the raw transcript. The raw text "
+        "contains heavily interleaved crosstalk that the lexicon does not "
+        "resolve cleanly, so there is a risk of meaning drift, but the "
+        "polish captures every substantive statement, so the chapter is "
+        "returned unchanged."
+    )
+    fake = ScriptedQuery(
+        {
+            "summary": "The team discussed how to handle crosstalk.",
+            "turns": [
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "Let's talk about crosstalk handling.",
+                }
+            ],
+        },
+        {
+            "summary": leaked_commentary,
+            "turns": [
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "Let's talk about crosstalk handling.",
+                }
+            ],
+            "issues": [],  # nothing flagged as needing a fix
+        },
+    )
+    agent = ClaudeAgent(run_query=fake)
+    note = _note(attendees=["Ada Lovelace"])
+    vault = _empty_vault(tmp_path)
+
+    chapters, issues = await polish_chapters(transcript, [span], note, vault, agent)
+
+    assert issues == []
+    assert chapters[0].summary == "The team discussed how to handle crosstalk."
+    assert leaked_commentary not in chapters[0].summary
+
+
+def test_fixer_prompt_states_the_lexicon_is_authoritative_over_reverting_a_correction() -> (
+    None
+):
+    """Pins the grounding rule the acceptance review's F2/F3/F22 findings
+    need: a real fixer reverted a lexicon-supported correction ("Xero")
+    back to a raw ASR artefact ("Jane"), and separately left an unrelated
+    real company name ("Suncorp") uncorrected despite the meeting's own
+    company ("Sunfish") sitting in the lexicon. The rendered prompt must
+    say, imperatively, not to do either."""
+
+    prompt = ChapterFixPrompt(
+        chapter_title="Opening",
+        lexicon=["Sunfish"],
+        raw_lines="Ada Lovelace: hello",
+        polished_summary="s",
+        polished_lines="Ada Lovelace: hello",
+    ).render()
+
+    normalised = " ".join(prompt.split())
+    assert "do NOT revert it back to the raw wording" in normalised
+    assert "never introduce, restore, or invent a proper noun" in normalised
+
+
 async def test_polish_chapters_passes_the_lexicon_into_the_polish_prompt(
     tmp_path: Path,
 ) -> None:
@@ -578,6 +657,62 @@ async def test_live_fixer_repairs_a_planted_defect_in_someone_elses_polish() -> 
 
     # The dropped substantive statement is restored.
     assert "certification" in text
+
+    print("fixer issues:", fix_response.issues)
+    print("fixed chapter:", fix_response.model_dump_json(indent=2))
+
+
+@pytest.mark.slow
+async def test_live_fixer_keeps_a_lexicon_supported_correction_instead_of_reverting_it() -> (
+    None
+):
+    """The opposite failure to the planted-defect test above: the polish
+    under review is already CORRECT (it already matched a raw ASR word
+    against the lexicon and fixed it), and the fixer's job here is to
+    leave it alone rather than "restore" the raw wording.
+
+    Regression for the acceptance review's F3/F22 shape: a real fixer
+    reverted the polish's correct "Xero" repair back to a raw ASR artefact
+    ("Jane") that occurred exactly once with no corroboration, on the
+    grounds that it was "unsupported" - even though a lexicon term
+    supported the correction it just undid. This plants the same shape
+    with fictional names so it doesn't reproduce the acceptance run's own
+    transcript content: a raw utterance names an accounting product,
+    mis-transcribed once as a plausible-looking name, that the polish
+    already corrected against the lexicon.
+    """
+
+    raw_lines = "SPEAKER_00: Once you're synced up in Karen Ledger, we should be able to lodge without any issues."
+    already_correct_turns = [
+        PolishedTurn(
+            speaker="SPEAKER_00",
+            text=(
+                "Once you're synced up in Beacon Ledger, we should be able "
+                "to lodge without any issues."
+            ),
+        )
+    ]
+    polished_summary = "Confirmed everything is synced in Beacon Ledger before lodging."
+    lexicon = ["Beacon Ledger"]
+    agent = ClaudeAgent(defaults=AgentSpec(effort="low"))
+
+    fix_response, _reply = await agent.run_structured(
+        ChapterFixPrompt(
+            chapter_title="Bookkeeping sync",
+            lexicon=lexicon,
+            raw_lines=raw_lines,
+            polished_summary=polished_summary,
+            polished_lines=_render_turns(already_correct_turns),
+        )
+    )
+
+    text = (fix_response.summary + " " + _render_turns(fix_response.turns)).casefold()
+
+    # The lexicon-supported correction must survive - not be reverted back
+    # to the raw ASR wording just because that wording is right there in
+    # the raw utterances.
+    assert "beacon ledger" in text
+    assert "karen ledger" not in text
 
     print("fixer issues:", fix_response.issues)
     print("fixed chapter:", fix_response.model_dump_json(indent=2))

@@ -16,7 +16,11 @@ stops and hands back, per the plan's STOP conditions) returns two fields:
 The report-never-prescribe rule is stated imperatively in the prompt
 (`MinutesPrompt.template`) and is a personality-level requirement, not a
 style nicety: weakening it is a regression even if the output "looks
-helpful". Wikilinks reuse `polish.py`'s `build_lexicon` (attendees, wikilink
+helpful". A second, equally imperative rule sits alongside it: GROUNDING -
+every bullet must trace to something a named speaker actually said, never
+an inferred date, owner, or action item, and never a statement folded onto
+the wrong speaker. Prefer omission over a confident guess. Wikilinks reuse
+`polish.py`'s `build_lexicon` (attendees, wikilink
 targets already in the note, vault note titles) as the candidate set -
 attendees are always linked, everything else only "plausibly", so link
 quality is tuned by tightening that lexicon, not by loosening the linking
@@ -99,13 +103,33 @@ class MinutesPrompt(StructuredPrompt[MinutesResponse]):
         during the meeting, attributed exactly as they said it (e.g. "Rob
         will work through available dates with Steve", "[[Nikki
         Staltari]] - update the CAD body-axis orientation to FRD") - never
-        invented, never synthesised from what "should" happen next.
+        invented, never synthesised from what "should" happen next, and
+        never attributed to whoever it was suggested to instead of
+        whoever actually said they'd do it. A past-tense or ambiguous
+        remark ("I've allocated it to an account") is not a future
+        commitment - do not turn it into one.
 
         When something was left undecided, report it as open, naming the
         alternatives that were actually discussed (e.g. "Long-term
         transport remains open: keep MAVLink, or bridge the internal bus
         through Zenoh / DDS") - never resolve it, and never suggest which
         alternative to pick.
+
+        GROUNDING, imperatively: every bullet must be traceable to
+        something a named speaker actually said in the chapters below.
+        Never invent or infer a date, a deadline, an owner, an amount, or
+        an action item that the transcript does not state, even when it
+        seems like the obvious implication - when the chapters leave
+        something ambiguous, unstated, or contradictory (e.g. two
+        different dates given for the same event), prefer to omit it, or
+        report the ambiguity itself, over silently picking one version and
+        presenting it as confirmed. Attribute every statement, quote, and
+        action to the speaker the chapters actually show saying it - never
+        to the other participant, and never fold one speaker's words into
+        another's turn. Use the wording and terminology already present in
+        the chapters below - do not substitute your own paraphrase for a
+        technical term, a name, or a figure that appears there; rephrase
+        only the surrounding sentence structure, never the substance.
 
         Structure the Discussion Notes as nested Markdown bullets, not
         prose: one top-level bullet per topic, broadly following the

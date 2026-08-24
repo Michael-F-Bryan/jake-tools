@@ -13,6 +13,20 @@ dropping duplicates, deriving each span's inclusive end from the next
 boundary - happens deterministically in code (`_repair_boundaries`,
 `_spans_from_boundaries`). Every utterance ends up in exactly one chapter;
 that invariant is enforced here rather than trusted to model arithmetic.
+
+`_render_utterances` includes each utterance's elapsed-time prefix
+(`MM:SS`), not just its index, so the model can actually judge how long a
+candidate chapter would span - utterance *count* is a catastrophic proxy
+for duration on heavily crosstalk-fragmented ASR, where a 30-second burst
+of interruptions produces as many utterances as two minutes of a clean
+monologue. After the model proposes boundaries, `_merge_short_spans` is a
+second deterministic backstop, mirroring `_repair_boundaries`'s asymmetric
+existing guard: `_RETRY_NOTE` catches a reply that is too coarse (collapses
+to one chapter), but nothing previously caught a reply that is too fine
+(many chapters under a minute). `_merge_short_spans` mechanically folds any
+chapter shorter than `MIN_CHAPTER_SECONDS` into its shorter-duration
+neighbour - never another LLM call - so a too-fine reply can no longer ship
+regardless of what the model returns.
 """
 
 from __future__ import annotations
@@ -49,6 +63,11 @@ class ChapterList(BaseModel):
 
     chapters: list[ChapterSpan]
 
+
+MIN_CHAPTER_SECONDS = 60.0
+"""Floor for a chapter's duration before `_merge_short_spans` folds it into
+a neighbour. Matches the prompt's own "spans minutes, not seconds"
+guidance - this is what actually enforces it when the model doesn't."""
 
 _RETRY_NOTE = (
     "Your previous answer collapsed the whole meeting into a single "
@@ -120,7 +139,11 @@ class ChapterisationPrompt(StructuredPrompt[ChapterisationResponse]):
         - Each `start_utterance` must be one of the utterance indexes shown
           below, and each index should be used at most once.
 
-        Transcript (utterance index | speaker: text):
+        Transcript (utterance index | elapsed time MM:SS | speaker: text) -
+        use the elapsed time to judge how long a candidate chapter would
+        actually span; utterance count is not a reliable proxy, since
+        crosstalk can fragment a short burst of interruptions into as many
+        utterances as minutes of a clean monologue:
         {{ transcript_lines }}
         {% if corrective_note %}
 
@@ -133,16 +156,32 @@ class ChapterisationPrompt(StructuredPrompt[ChapterisationResponse]):
     corrective_note: str = ""
 
 
+def _format_elapsed(seconds: float) -> str:
+    """`MM:SS` (or `H:MM:SS` past the first hour) for a meeting-relative offset."""
+
+    total_seconds = int(seconds)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
 def _render_utterances(utterances: Sequence[Utterance]) -> str:
-    """Compact index/speaker/text rendering - timestamps omitted to save tokens.
+    """Compact index/elapsed-time/speaker/text rendering.
 
     Utterance index is the contract between this rendering and the
     boundaries the model proposes; `start_seconds` is derived from it
-    afterwards, in code, not asked of the model.
+    afterwards, in code, not asked of the model. The elapsed-time column is
+    the actual duration signal the model needs to obey the prompt's "spans
+    minutes, not seconds" rule - without it, utterance count is the only
+    proxy available, and it is a bad one whenever crosstalk fragments the
+    ASR (see the module docstring).
     """
 
     return "\n".join(
-        f"{index} | {utterance.speaker}: {utterance.text}"
+        f"{index} | {_format_elapsed(utterance.start)} | {utterance.speaker}: "
+        f"{utterance.text}"
         for index, utterance in enumerate(utterances)
     )
 
@@ -220,6 +259,77 @@ def _spans_from_boundaries(
     return spans
 
 
+def _span_duration(
+    index: int, spans: Sequence[ChapterSpan], utterances: Sequence[Utterance]
+) -> float:
+    """How long `spans[index]` actually runs: to the next span's start, or
+    to the last utterance's end for the final span."""
+
+    if index + 1 < len(spans):
+        return spans[index + 1].start_seconds - spans[index].start_seconds
+    return utterances[-1].end - spans[index].start_seconds
+
+
+def _merge_spans(
+    spans: list[ChapterSpan], short_index: int, neighbour_index: int
+) -> list[ChapterSpan]:
+    """Fold `spans[short_index]` into `spans[neighbour_index]` (adjacent, either order).
+
+    The merged span keeps the *neighbour's* title - the short span
+    dissolves into an existing chapter's identity rather than renaming it,
+    since nothing here is asking the model for a new title.
+    """
+
+    lo, hi = sorted((short_index, neighbour_index))
+    merged = ChapterSpan(
+        title=spans[neighbour_index].title,
+        start_utterance=spans[lo].start_utterance,
+        end_utterance=spans[hi].end_utterance,
+        start_seconds=spans[lo].start_seconds,
+    )
+    return spans[:lo] + [merged] + spans[hi + 1 :]
+
+
+def _merge_short_spans(
+    spans: Sequence[ChapterSpan],
+    utterances: Sequence[Utterance],
+    *,
+    min_seconds: float = MIN_CHAPTER_SECONDS,
+) -> list[ChapterSpan]:
+    """Deterministically merge every chapter shorter than `min_seconds`.
+
+    Repeatedly finds the shortest surviving chapter; if it clears
+    `min_seconds`, stops. Otherwise merges it into whichever adjacent
+    neighbour is itself shorter (ties favour the earlier neighbour) - two
+    over-split chapters are more likely to be one over-split topic than
+    either is to belong with a neighbour that is already a healthy length.
+    Never merges below two chapters, mirroring `_RETRY_NOTE`'s "at least
+    two boundaries" floor on the too-coarse side. Pure post-processing, not
+    another model call: the one guard the review found nothing protecting.
+    """
+
+    result = list(spans)
+    while len(result) > 2:
+        durations = [_span_duration(i, result, utterances) for i in range(len(result))]
+        shortest_index = min(range(len(result)), key=lambda i: durations[i])
+        if durations[shortest_index] >= min_seconds:
+            break
+
+        if shortest_index == 0:
+            neighbour_index = 1
+        elif (
+            shortest_index == len(result) - 1
+            or durations[shortest_index - 1] <= durations[shortest_index + 1]
+        ):
+            neighbour_index = shortest_index - 1
+        else:
+            neighbour_index = shortest_index + 1
+
+        result = _merge_spans(result, shortest_index, neighbour_index)
+
+    return result
+
+
 async def chapterise(
     transcript: RawTranscript,
     *,
@@ -228,12 +338,13 @@ async def chapterise(
 ) -> list[ChapterSpan]:
     """Chapterise `transcript` into topic-based `ChapterSpan`s.
 
-    Renders a compact index/speaker/text view of the transcript (no
-    timestamps in the prompt - indexes are the contract) and asks the model
-    for chapter boundaries. Post-processing into spans is entirely
-    deterministic (see `_repair_boundaries`/`_spans_from_boundaries`):
-    every utterance ends up in exactly one chapter regardless of what the
-    model returned.
+    Renders a compact index/elapsed-time/speaker/text view of the
+    transcript and asks the model for chapter boundaries. Post-processing
+    into spans is entirely deterministic (see `_repair_boundaries`/
+    `_spans_from_boundaries`/`_merge_short_spans`): every utterance ends up
+    in exactly one chapter regardless of what the model returned, and no
+    chapter survives shorter than `MIN_CHAPTER_SECONDS` regardless of how
+    finely the model split the meeting.
 
     A degenerate reply (no boundaries, or boundaries that all collapse to
     a single chapter covering the whole meeting) gets one retry with a
@@ -259,7 +370,8 @@ async def chapterise(
     if len(boundaries) <= 1:
         raise DegenerateChaptersError()
 
-    return _spans_from_boundaries(boundaries, transcript.utterances)
+    spans = _spans_from_boundaries(boundaries, transcript.utterances)
+    return _merge_short_spans(spans, transcript.utterances)
 
 
 async def _propose_and_repair(

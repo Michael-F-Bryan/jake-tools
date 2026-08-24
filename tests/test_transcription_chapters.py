@@ -36,10 +36,13 @@ from jake_tools.cli import main
 from jake_tools.transcription.cache import RunCache
 from jake_tools.transcription.chapters import (
     CHAPTERS_ADAPTER,
+    MIN_CHAPTER_SECONDS,
     ChapterBoundary,
     ChapterList,
     DegenerateChaptersError,
     MissingResolvedTranscriptError,
+    _merge_short_spans,
+    _render_utterances,
     _repair_boundaries,
     _spans_from_boundaries,
     chapterise,
@@ -229,6 +232,138 @@ def test_repair_and_spans_partition_utterances_property() -> None:
             assert covered == list(range(utterance_count))
 
 
+# --- _render_utterances: the duration signal ---------------------------------
+
+
+def test_render_utterances_includes_elapsed_time_not_just_index() -> None:
+    utterances = [
+        Utterance(start=0.0, end=1.0, speaker="SPEAKER_00", text="hi"),
+        Utterance(start=125.0, end=126.0, speaker="SPEAKER_01", text="two minutes in"),
+        Utterance(start=3661.0, end=3662.0, speaker="SPEAKER_00", text="an hour plus"),
+    ]
+
+    rendered = _render_utterances(utterances)
+
+    assert "0 | 00:00 | SPEAKER_00: hi" in rendered
+    assert "1 | 02:05 | SPEAKER_01: two minutes in" in rendered
+    assert "2 | 1:01:01 | SPEAKER_00: an hour plus" in rendered
+
+
+# --- _merge_short_spans: the too-fine mechanical backstop --------------------
+
+
+def _utterances_with_last_end(count: int, last_end: float) -> list[Utterance]:
+    """`count` filler utterances; only the last one's `.end` is load-bearing
+    for `_span_duration` (used for the final span's duration)."""
+
+    return [
+        Utterance(
+            start=float(i), end=float(i) + 0.5, speaker="SPEAKER_00", text=f"u{i}"
+        )
+        for i in range(count - 1)
+    ] + [
+        Utterance(
+            start=float(count - 1), end=last_end, speaker="SPEAKER_00", text="last"
+        )
+    ]
+
+
+def test_merge_short_spans_merges_a_short_chapter_into_its_shorter_neighbour() -> None:
+    # Durations: A=100s, B=30s (short), C=130s, D=140s (via last_end=400).
+    # B's neighbours are A (100s) and C (130s) - the shorter one, A, wins.
+    spans = [
+        ChapterSpan(title="A", start_utterance=0, end_utterance=1, start_seconds=0.0),
+        ChapterSpan(title="B", start_utterance=2, end_utterance=2, start_seconds=100.0),
+        ChapterSpan(title="C", start_utterance=3, end_utterance=4, start_seconds=130.0),
+        ChapterSpan(title="D", start_utterance=5, end_utterance=5, start_seconds=260.0),
+    ]
+    utterances = _utterances_with_last_end(6, last_end=400.0)
+
+    merged = _merge_short_spans(spans, utterances)
+
+    assert [span.title for span in merged] == ["A", "C", "D"]
+    # B dissolved into A: A's span now covers B's utterances too, keeping
+    # A's own title and start rather than fabricating a new one.
+    assert merged[0] == ChapterSpan(
+        title="A", start_utterance=0, end_utterance=2, start_seconds=0.0
+    )
+    covered: list[int] = []
+    for span in merged:
+        covered.extend(range(span.start_utterance, span.end_utterance + 1))
+    assert covered == list(range(6))
+
+
+def test_merge_short_spans_never_merges_below_two_chapters() -> None:
+    # Both chapters are short (well under MIN_CHAPTER_SECONDS), but there
+    # are only two - the floor that mirrors `_RETRY_NOTE`'s "at least two
+    # boundaries" guard on the too-coarse side.
+    spans = [
+        ChapterSpan(title="A", start_utterance=0, end_utterance=0, start_seconds=0.0),
+        ChapterSpan(title="B", start_utterance=1, end_utterance=1, start_seconds=10.0),
+    ]
+    utterances = _utterances_with_last_end(2, last_end=15.0)
+
+    merged = _merge_short_spans(spans, utterances)
+
+    assert merged == spans
+
+
+def test_merge_short_spans_leaves_spans_at_or_above_the_floor_untouched() -> None:
+    spans = [
+        ChapterSpan(title="A", start_utterance=0, end_utterance=0, start_seconds=0.0),
+        ChapterSpan(
+            title="B",
+            start_utterance=1,
+            end_utterance=1,
+            start_seconds=MIN_CHAPTER_SECONDS,
+        ),
+        ChapterSpan(
+            title="C",
+            start_utterance=2,
+            end_utterance=2,
+            start_seconds=MIN_CHAPTER_SECONDS * 2,
+        ),
+    ]
+    utterances = _utterances_with_last_end(3, last_end=MIN_CHAPTER_SECONDS * 3)
+
+    merged = _merge_short_spans(spans, utterances)
+
+    assert merged == spans
+
+
+def test_merge_short_spans_collapses_a_chain_of_short_chapters_to_the_two_chapter_floor() -> (
+    None
+):
+    utterances = [
+        Utterance(
+            start=float(i) * 10.0,
+            end=float(i) * 10.0 + 5.0,
+            speaker="SPEAKER_00",
+            text=f"u{i}",
+        )
+        for i in range(6)
+    ]
+    # Six chapters, each 10s apart - every one shorter than the 60s floor.
+    spans = [
+        ChapterSpan(
+            title=f"C{i}",
+            start_utterance=i,
+            end_utterance=i,
+            start_seconds=float(i) * 10.0,
+        )
+        for i in range(6)
+    ]
+
+    merged = _merge_short_spans(spans, utterances)
+
+    assert len(merged) == 2  # the floor, not a duration guarantee here
+    covered: list[int] = []
+    for span in merged:
+        assert span.start_utterance <= span.end_utterance
+        covered.extend(range(span.start_utterance, span.end_utterance + 1))
+    assert covered == list(range(6))  # partition invariant survives the merge
+
+
 # --- chapterise(): happy path and retry/raise behaviour ----------------------
 
 
@@ -256,10 +391,12 @@ async def test_chapterise_happy_path_returns_spans_from_boundaries() -> None:
         ),
     ]
     assert len(fake.calls) == 1
-    # The prompt renders utterance index/speaker/text; timestamps are not
-    # the model's job — indexes are the contract.
+    # The prompt renders utterance index/elapsed-time/speaker/text - the
+    # model is not asked to compute timestamps, but it does need to see
+    # them to judge chapter length (the duration-blind rendering bug the
+    # adversarial review found).
     prompt_text = fake.calls[0][0]
-    assert "0 | SPEAKER_00: utterance 0" in prompt_text
+    assert "0 | 00:00 | SPEAKER_00: utterance 0" in prompt_text
 
 
 async def test_chapterise_retries_once_on_a_degenerate_reply_then_succeeds() -> None:
@@ -300,6 +437,49 @@ async def test_chapterise_raises_when_still_degenerate_after_one_retry() -> None
 
     # Exactly one retry - not fabricated boundaries, not an unbounded loop.
     assert len(fake.calls) == 2
+
+
+async def test_chapterise_merges_llm_proposed_boundaries_shorter_than_the_minimum_span() -> (
+    None
+):
+    """End-to-end: a model reply that over-splits (two chapters a few
+    seconds apart) gets mechanically merged by `chapterise`, the same
+    `_merge_short_spans` pass unit-tested above - the too-fine failure mode
+    the adversarial review found nothing guarding against."""
+
+    utterances = [
+        Utterance(start=0.0, end=4.0, speaker="SPEAKER_00", text="quick a"),
+        Utterance(start=5.0, end=9.0, speaker="SPEAKER_00", text="quick b"),
+        Utterance(start=10.0, end=65.0, speaker="SPEAKER_00", text="middle"),
+        Utterance(start=70.0, end=75.0, speaker="SPEAKER_00", text="tail 1"),
+        Utterance(start=140.0, end=145.0, speaker="SPEAKER_00", text="tail 2"),
+        Utterance(start=210.0, end=300.0, speaker="SPEAKER_00", text="tail 3"),
+    ]
+    transcript = RawTranscript(clips=[], utterances=utterances, audio_sha256=None)
+    fake = RecordingQuery(
+        {
+            "chapters": [
+                {"title": "Quick note A", "start_utterance": 0},
+                {"title": "Quick note B", "start_utterance": 1},
+                {"title": "Middle chunk", "start_utterance": 2},
+                {"title": "Long tail", "start_utterance": 3},
+            ]
+        }
+    )
+    agent = ClaudeAgent(run_query=fake)
+
+    chapters = await chapterise(transcript, agent=agent)
+
+    # Four proposed chapters, two of them 5s long - merged down to two,
+    # both clearing MIN_CHAPTER_SECONDS.
+    assert chapters == [
+        ChapterSpan(
+            title="Middle chunk", start_utterance=0, end_utterance=2, start_seconds=0.0
+        ),
+        ChapterSpan(
+            title="Long tail", start_utterance=3, end_utterance=5, start_seconds=70.0
+        ),
+    ]
 
 
 # --- slow: real-LLM integration test ------------------------------------------
@@ -421,6 +601,132 @@ async def test_live_chapterise_splits_three_distinct_topics_into_different_chapt
         title = span.title.strip()
         assert title != ""
         assert title.casefold() not in _GENERIC_TITLES
+
+    print("chapters:", [span.model_dump() for span in chapters])
+
+
+# A 20-utterance, ~20-second crosstalk burst about one narrow topic
+# (clarifying a budget number), immediately followed by a five-utterance,
+# ~220-second monologue about a completely different topic (a hiring
+# plan), then a short three-utterance wrap-up. Before the elapsed-time
+# rendering fix, the burst's utterance *count* (20, more than the
+# monologue's 5) was the model's only proxy for "how big a topic is" -
+# exactly backwards from its actual ~20s duration versus the monologue's
+# ~220s. This is the acceptance run's own failure shape (chapter 6: 29
+# utterances/73s vs chapter 10: 195 utterances/608s), reproduced small.
+_BURST_LINES = [
+    "Wait, that's how much?",
+    "Eight percent.",
+    "Over plan?",
+    "Over plan, yeah.",
+    "Eight percent over plan then.",
+    "Right.",
+    "That's rough.",
+    "Yeah, it is.",
+    "Is that the vendor contract thing?",
+    "The vendor contract thing.",
+    "Same as last time?",
+    "Basically the same.",
+    "Okay, noted.",
+    "Yep.",
+    "Moving on then?",
+    "Moving on.",
+    "Sure, go ahead.",
+    "Go ahead.",
+    "Okay.",
+    "Right, so, noted.",
+]
+_MONOLOGUE_LINES = [
+    "So switching to hiring - we've got two open reqs for backend "
+    "engineers, one of which is backfilling Sam's role and the other is a "
+    "net-new headcount for the platform team that finance already "
+    "approved back in the Q2 planning cycle.",
+    "We've got three candidates through the first round of interviews, "
+    "two of whom look strong on embedded systems work and one who's more "
+    "of a generalist, and we should have final offers ready to go out by "
+    "the end of next week.",
+    "The main risk right now is timeline pressure to close everything out "
+    "before the holidays, since a lot of candidates tend to go quiet once "
+    "December hits and start dates get pushed into the new year.",
+    "Facilities also confirmed separately that they can onboard two new "
+    "desks on the current floor without needing to expand into the annex, "
+    "so seating isn't going to be a blocker for whichever candidates we "
+    "bring on.",
+    "I'll send round the updated headcount tracker after this call so "
+    "everyone can see exactly where the two open reqs stand and who's "
+    "covering each interview loop this week.",
+]
+_WRAP_LINES = ["Okay, anything else?", "Nothing from me.", "Great, let's wrap here."]
+
+_BURST_COUNT = len(_BURST_LINES)
+_MONOLOGUE_START = _BURST_COUNT
+_WRAP_START = _MONOLOGUE_START + len(_MONOLOGUE_LINES)
+_TOTAL_UTTERANCES = _WRAP_START + len(_WRAP_LINES)
+
+
+def _burst_then_monologue_transcript() -> RawTranscript:
+    utterances: list[Utterance] = []
+    for i, text in enumerate(_BURST_LINES):
+        start = float(i)
+        utterances.append(
+            Utterance(
+                start=start,
+                end=start + 0.9,
+                speaker="SPEAKER_00" if i % 2 == 0 else "SPEAKER_01",
+                text=text,
+            )
+        )
+    monologue_starts = [25.0, 70.0, 115.0, 160.0, 205.0]
+    for start, text in zip(monologue_starts, _MONOLOGUE_LINES, strict=True):
+        utterances.append(
+            Utterance(start=start, end=start + 40.0, speaker="SPEAKER_00", text=text)
+        )
+    wrap_starts = [250.0, 255.0, 260.0]
+    for i, (start, text) in enumerate(zip(wrap_starts, _WRAP_LINES, strict=True)):
+        utterances.append(
+            Utterance(
+                start=start,
+                end=start + 3.0,
+                speaker="SPEAKER_00" if i % 2 == 0 else "SPEAKER_01",
+                text=text,
+            )
+        )
+    return RawTranscript(clips=[], utterances=utterances, audio_sha256=None)
+
+
+@pytest.mark.slow
+async def test_live_chapterise_keeps_a_short_crosstalk_burst_in_one_chapter() -> None:
+    transcript = _burst_then_monologue_transcript()
+    agent = ClaudeAgent(defaults=AgentSpec(effort="low"))
+
+    chapters = await chapterise(transcript, agent=agent)
+
+    # Partition invariant, for this real reply too.
+    covered: list[int] = []
+    for span in chapters:
+        assert span.start_utterance <= span.end_utterance
+        covered.extend(range(span.start_utterance, span.end_utterance + 1))
+    assert covered == list(range(_TOTAL_UTTERANCES))
+
+    def chapter_index_of(utterance_index: int) -> int:
+        for index, span in enumerate(chapters):
+            if span.start_utterance <= utterance_index <= span.end_utterance:
+                return index
+        raise AssertionError(f"utterance {utterance_index} not covered by any chapter")
+
+    # The short crosstalk burst must land in exactly one chapter, not be
+    # fragmented because it happens to have more utterances than the much
+    # longer monologue that follows it.
+    burst_chapters = {chapter_index_of(i) for i in range(_BURST_COUNT)}
+    assert len(burst_chapters) == 1, (
+        f"the ~20s crosstalk burst was split across multiple chapters: "
+        f"{[(s.title, s.start_utterance, s.end_utterance, s.start_seconds) for s in chapters]!r}"
+    )
+
+    # The hiring monologue is its own chapter, distinct from the burst -
+    # not merged away as if it were the small one.
+    monologue_chapter = chapter_index_of(_MONOLOGUE_START + 2)
+    assert monologue_chapter not in burst_chapters
 
     print("chapters:", [span.model_dump() for span in chapters])
 
