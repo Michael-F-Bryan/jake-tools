@@ -11,6 +11,7 @@ shared context state.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import click
@@ -299,13 +300,14 @@ async def adapt(
             result = await adapt_transcript(transcript_path, agent=agent)
         else:
             document = transcript_path.read_text(encoding="utf-8")
+            source_text_sha256 = hashlib.sha256(document.encode("utf-8")).hexdigest()
             stage_agent = agent.for_stage("adapt").with_telemetry(
                 cache.telemetry_sink(run_id)
             )
             manifest = cache.stage_manifest(
                 "adapt",
-                inputs={"source_text": document},
-                input_hashes={"source_text": stable_hash(document)},
+                inputs={"source_text": source_text_sha256},
+                input_hashes={"source_text": source_text_sha256},
                 config={
                     "agent": stage_agent.defaults.model_dump(mode="json"),
                     "prompt": AdaptTranscriptPrompt.template,

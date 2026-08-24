@@ -46,6 +46,7 @@ import pytest
 from claude_agent_sdk import ClaudeAgentOptions, Message, ResultMessage
 from click.testing import CliRunner
 
+from jake_tools.ai_usage import AITelemetry
 from jake_tools.claude import AgentSpec, ClaudeAgent, ClaudeAgentError
 from jake_tools.cli import main
 from jake_tools.transcription.cache import RunCache, stable_hash
@@ -75,6 +76,8 @@ from jake_tools.transcription.polish import (
     PolishedChapterResponse,
     PolishIssueList,
     PolishPrompt,
+    PolishValidationRepairPrompt,
+    PolishValidationRepairResponse,
     _render_turns,
     _render_utterances,
     build_lexicon,
@@ -337,6 +340,144 @@ async def test_polish_then_fix_are_two_separate_calls_and_fixer_sees_raw_and_pol
     assert issues == [
         "Opening: Reattached a split word: 'vel- ocity' became 'velocity'."
     ]
+
+
+async def test_invalid_fixer_output_gets_one_validation_repair_call_with_telemetry(
+    tmp_path: Path,
+) -> None:
+    transcript = _transcript([_utterance(0, "Ada Lovelace", "Hello there.")])
+    span = ChapterSpan(
+        title="Opening", start_utterance=0, end_utterance=0, start_seconds=0.0
+    )
+    fake = ScriptedQuery(
+        {
+            "summary": "Draft",
+            "turns": [
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "Hello there.",
+                    "source_turn_indices": [0],
+                }
+            ],
+            "dropped_source_turns": [],
+        },
+        {
+            "summary": "Invalid",
+            "turns": [
+                {
+                    "speaker": "Grace Hopper",
+                    "text": "Hello there.",
+                    "source_turn_indices": [0],
+                }
+            ],
+            "dropped_source_turns": [],
+            "issues": ["changed attribution"],
+        },
+        {
+            "summary": "Repaired",
+            "turns": [
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "Hello there.",
+                    "source_turn_indices": [0],
+                }
+            ],
+            "dropped_source_turns": [],
+            "issues": ["restored the source speaker"],
+        },
+    )
+    cache = RunCache(tmp_path / "cache")
+    agent = ClaudeAgent(run_query=fake).with_telemetry(cache.telemetry_sink("run-1"))
+
+    chapters, issues = await polish_chapters(
+        transcript,
+        [span],
+        _note(attendees=["Ada Lovelace"]),
+        _empty_vault(tmp_path),
+        agent,
+    )
+
+    assert len(fake.calls) == 3
+    repair_prompt = fake.calls[2][0]
+    assert "0 | 0.000-0.900 | Ada Lovelace: Hello there." in repair_prompt
+    assert "Grace Hopper" in repair_prompt
+    assert "does not match source speaker" in repair_prompt
+    assert chapters[0].turns[0].speaker == "Ada Lovelace"
+    assert issues == ["Opening: restored the source speaker"]
+    telemetry = cache.load("run-1", "ai_telemetry", AITelemetry)
+    assert telemetry is not None
+    assert [call.stage for call in telemetry.calls] == [
+        "polish-generation",
+        "polish-review",
+        "polish-validation-repair",
+    ]
+
+
+async def test_invalid_validation_repair_output_fails_closed_without_a_second_repair(
+    tmp_path: Path,
+) -> None:
+    transcript = _transcript([_utterance(0, "Ada Lovelace", "Hello there.")])
+    span = ChapterSpan(
+        title="Opening", start_utterance=0, end_utterance=0, start_seconds=0.0
+    )
+    fake = ScriptedQuery(
+        {
+            "summary": "Draft",
+            "turns": [
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "Hello there.",
+                    "source_turn_indices": [0],
+                }
+            ],
+        },
+        {
+            "summary": "Invalid",
+            "turns": [
+                {
+                    "speaker": "Grace Hopper",
+                    "text": "Hello there.",
+                    "source_turn_indices": [0],
+                }
+            ],
+            "issues": ["changed attribution"],
+        },
+        {
+            "summary": "Still invalid",
+            "turns": [
+                {
+                    "speaker": "Grace Hopper",
+                    "text": "Hello there.",
+                    "source_turn_indices": [0],
+                }
+            ],
+            "issues": ["could not repair"],
+        },
+    )
+
+    with pytest.raises(ValueError, match="speaker"):
+        await polish_chapters(
+            transcript,
+            [span],
+            _note(attendees=["Ada Lovelace"]),
+            _empty_vault(tmp_path),
+            ClaudeAgent(run_query=fake),
+        )
+    assert len(fake.calls) == 3
+
+
+def test_validation_repair_prompt_requires_full_indexed_timestamped_context() -> None:
+    prompt = PolishValidationRepairPrompt(
+        chapter_title="Opening",
+        raw_lines="0 | 0.000-1.000 | Ada: hello",
+        invalid_summary="bad",
+        invalid_lines="Grace: hello [0]",
+        invalid_dropped="[]",
+        validation_errors=["speaker mismatch"],
+    ).render()
+    assert "raw indexed and timestamped turns" in " ".join(prompt.split()).lower()
+    assert "speaker mismatch" in prompt
+    assert "invalid proposed chapter" in " ".join(prompt.split()).lower()
 
 
 async def test_polish_library_rejects_non_positive_max_concurrency(
@@ -928,8 +1069,10 @@ async def test_run_polish_with_chapter_flag_merges_into_an_existing_polished_jso
                 "agent": agent.defaults.model_dump(mode="json"),
                 "polish_prompt": PolishPrompt.template,
                 "review_prompt": ChapterFixPrompt.template,
+                "validation_repair_prompt": PolishValidationRepairPrompt.template,
                 "polish_schema": PolishedChapterResponse.model_json_schema(),
                 "review_schema": ChapterFixResponse.model_json_schema(),
+                "validation_repair_schema": PolishValidationRepairResponse.model_json_schema(),
             },
         ),
     )

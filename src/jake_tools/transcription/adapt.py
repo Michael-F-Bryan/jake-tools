@@ -36,6 +36,7 @@ documents in `models.py`.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import textwrap
 from pathlib import Path
@@ -288,7 +289,12 @@ async def adapt_transcript(
             raise NoFallbackAgentError(path)
         utterances = await _adapt_via_llm(text, agent)
 
-    return RawTranscript(clips=[], utterances=utterances, audio_sha256=None)
+    return RawTranscript(
+        clips=[],
+        utterances=utterances,
+        audio_sha256=None,
+        source_text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    )
 
 
 async def run_adapt(
@@ -296,11 +302,12 @@ async def run_adapt(
 ) -> RawTranscript:
     """Adapt and cache a text ramp only when its content/config manifest matches."""
     document = path.read_text(encoding="utf-8")
+    source_text_sha256 = hashlib.sha256(document.encode("utf-8")).hexdigest()
     stage_agent = agent.for_stage("adapt").with_telemetry(cache.telemetry_sink(run_id))
     manifest = cache.stage_manifest(
         "adapt",
-        inputs={"source_text": document},
-        input_hashes={"source_text": stable_hash(document)},
+        inputs={"source_text": source_text_sha256},
+        input_hashes={"source_text": source_text_sha256},
         config={
             "agent": stage_agent.defaults.model_dump(mode="json"),
             "prompt": AdaptTranscriptPrompt.template,

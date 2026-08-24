@@ -17,8 +17,8 @@ from typing import Literal
 from pydantic import ConfigDict, Field, model_validator
 
 from ..cache_models import CacheEnvelope
-from .asr import build_audio_stage_manifest
-from .cache import RunCache, atomic_write_text, sha256_of, stable_hash
+from .asr import validate_audio_stage_manifest
+from .cache import RunCache, StageManifest, atomic_write_text, sha256_of, stable_hash
 from .chapters import ChapterList
 from .integrate import IntegrationPlan, IntegrationReport, load_products, plan_integrate
 from .minutes import MINUTES_CACHE_NAME, MinutesResult, MinutesReviewResult
@@ -281,6 +281,33 @@ def _build_binding(
     )
 
 
+def _is_sha256(value: str | None) -> bool:
+    if value is None or len(value) != 64:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_adapt_stage_manifest(
+    manifest: StageManifest | None, raw: RawTranscript
+) -> bool:
+    """Validate the typed text-stage binding without accepting output-only fakes."""
+    if manifest is None:
+        return False
+    return (
+        manifest.schema_version == 1
+        and manifest.stage == "adapt"
+        and manifest.output_hash == stable_hash(raw.model_dump(mode="json"))
+        and _is_sha256(raw.source_text_sha256)
+        and manifest.input_hash == stable_hash({"source_text": raw.source_text_sha256})
+        and _is_sha256(manifest.config_hash)
+        and manifest.input_hashes == {"source_text": raw.source_text_sha256}
+    )
+
+
 def _validate_raw_stage(cache: RunCache, run_id: str, resolved: RawTranscript) -> bool:
     """Require a current typed raw-stage manifest before product review."""
     raw = cache.load(run_id, "raw_transcript", RawTranscript)
@@ -297,23 +324,10 @@ def _validate_raw_stage(cache: RunCache, run_id: str, resolved: RawTranscript) -
     ):
         return False
     if raw.audio_sha256 is not None:
-        if len(raw.audio_sha256) != 64:
+        if not _is_sha256(raw.audio_sha256):
             return False
-        try:
-            int(raw.audio_sha256, 16)
-        except ValueError:
-            return False
-        manifest = cache.load_manifest(run_id, "asr")
-        expected = build_audio_stage_manifest(raw)
-        return (
-            manifest is not None
-            and manifest.output_hash == expected.output_hash
-            and cache.manifest_matches(manifest, expected)
-        )
-    manifest = cache.load_manifest(run_id, "adapt")
-    return manifest is not None and manifest.output_hash == stable_hash(
-        raw.model_dump(mode="json")
-    )
+        return validate_audio_stage_manifest(cache.load_manifest(run_id, "asr"), raw)
+    return _validate_adapt_stage_manifest(cache.load_manifest(run_id, "adapt"), raw)
 
 
 def _validate_manifests(cache: RunCache, run_id: str) -> bool:

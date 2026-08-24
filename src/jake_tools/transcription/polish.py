@@ -197,6 +197,12 @@ class ChapterFixResponse(PolishedChapterResponse):
     issues: list[str]
 
 
+class PolishValidationRepairResponse(PolishedChapterResponse):
+    """A single bounded repair of a structurally invalid model proposal."""
+
+    issues: list[str]
+
+
 class PolishPrompt(StructuredPrompt[PolishedChapterResponse]):
     template = textwrap.dedent("""\
         You are polishing one chapter of a raw, unproofread meeting
@@ -319,6 +325,46 @@ class ChapterFixPrompt(StructuredPrompt[ChapterFixResponse]):
     polished_lines: str
 
 
+class PolishValidationRepairPrompt(StructuredPrompt[PolishValidationRepairResponse]):
+    template = textwrap.dedent("""\
+        Repair an invalid proposed polished chapter. Return the corrected full
+        chapter, not a diff, and one plain-English issue sentence per repair.
+
+        The raw indexed and timestamped turns below are the only source of
+        truth. Preserve exact source partition, source speaker attribution,
+        Unknown attribution, and the existing dropped-turn ledger rules. Do
+        not invent, drop, duplicate, or merge source turns unless the
+        deterministic errors below prove the proposed chapter violated a
+        rule and the raw evidence supports the correction.
+
+        Chapter: {{ chapter_title }}
+
+        Raw indexed and timestamped turns:
+        {{ raw_lines }}
+
+        Invalid proposed chapter:
+        Summary: {{ invalid_summary }}
+        Turns:
+        {{ invalid_lines }}
+        Dropped source-turn ledger:
+        {{ invalid_dropped }}
+
+        Exact deterministic validation errors:
+        {{ validation_errors | json }}
+
+        Return the complete corrected chapter. `summary` must remain a
+        reader-facing chapter summary, never commentary about this repair.
+        """)
+    response_model = PolishValidationRepairResponse
+
+    chapter_title: str
+    raw_lines: str
+    invalid_summary: str
+    invalid_lines: str
+    invalid_dropped: str
+    validation_errors: list[str]
+
+
 def validate_polished_chapter(
     chapter: PolishedChapter,
     source_utterances: Sequence[Utterance],
@@ -335,6 +381,7 @@ def validate_polished_chapter(
         raise ValueError("polish dropped-source provenance index is out of range")
     dropped_set = set(dropped)
     covered: list[int] = []
+    genuine_overlap_reflow = False
     for turn in chapter.turns:
         if not turn.source_turn_indices:
             raise ValueError("polish provenance is missing from an output turn")
@@ -342,11 +389,25 @@ def validate_polished_chapter(
         if indices != sorted(indices) or len(indices) != len(set(indices)):
             raise ValueError("polish provenance is not chronological")
         for previous, current in zip(indices, indices[1:], strict=False):
-            if any(index not in dropped_set for index in range(previous + 1, current)):
+            intervening = [
+                index
+                for index in range(previous + 1, current)
+                if index not in dropped_set
+            ]
+            if any(
+                not any(
+                    source_by_index[index].start < source_by_index[cited].end
+                    and source_by_index[cited].start < source_by_index[index].end
+                    for cited in indices
+                )
+                for index in intervening
+            ):
                 raise ValueError(
                     "a polished turn may merge only adjacent source turns unless "
-                    "intervening turns are explicitly dropped"
+                    "intervening turns are explicitly dropped or genuinely overlap"
                 )
+            if intervening:
+                genuine_overlap_reflow = True
         for index in indices:
             if index not in source_by_index:
                 raise ValueError(f"polish provenance index {index} is out of range")
@@ -359,20 +420,92 @@ def validate_polished_chapter(
             covered.append(index)
     if set(covered) & set(dropped) or set(covered) | set(dropped) != set(expected):
         raise ValueError("polish provenance does not form an exact source partition")
-    if covered != sorted(covered):
+    if covered != sorted(covered) and not genuine_overlap_reflow:
         raise ValueError("polish provenance is not chronological")
     return chapter
 
 
 def _render_utterances(utterances: Sequence[Utterance], *, start_index: int = 0) -> str:
     return "\n".join(
-        f"{start_index + index} | {u.speaker}: {u.text}"
+        f"{start_index + index} | {u.start:.3f}-{u.end:.3f} | {u.speaker}: {u.text}"
         for index, u in enumerate(utterances)
     )
 
 
 def _render_turns(turns: Sequence[PolishedTurn]) -> str:
     return "\n".join(f"{turn.speaker}: {turn.text}" for turn in turns)
+
+
+def _render_response_turns(response: PolishedChapterResponse) -> str:
+    return "\n".join(
+        f"{turn.speaker} [{','.join(str(index) for index in turn.source_turn_indices)}]: "
+        f"{turn.text}"
+        for turn in response.turns
+    )
+
+
+def _chapter_from_response(
+    span: ChapterSpan, response: PolishedChapterResponse
+) -> PolishedChapter:
+    return PolishedChapter(
+        title=span.title,
+        start_seconds=span.start_seconds,
+        summary=response.summary,
+        turns=response.turns,
+        dropped_source_turns=response.dropped_source_turns,
+    )
+
+
+async def _validate_or_repair_response(
+    response: PolishedChapterResponse,
+    span: ChapterSpan,
+    utterances: Sequence[Utterance],
+    *,
+    raw_lines: str,
+    agent: ClaudeAgent,
+    spec: AgentSpec | None,
+    scope: str,
+    force_validation: bool,
+    repair_allowed: bool,
+) -> tuple[PolishedChapterResponse, list[str], bool]:
+    has_provenance = any(turn.source_turn_indices for turn in response.turns) or bool(
+        response.dropped_source_turns
+    )
+    if not force_validation and not has_provenance:
+        return response, [], False
+    chapter = _chapter_from_response(span, response)
+    try:
+        validate_polished_chapter(
+            chapter,
+            utterances,
+            source_indices=range(span.start_utterance, span.end_utterance + 1),
+        )
+        return response, [], False
+    except ValueError as error:
+        if not repair_allowed:
+            raise
+        repair_response, _reply = await agent.for_stage(
+            "polish-validation-repair"
+        ).run_structured(
+            PolishValidationRepairPrompt(
+                chapter_title=span.title,
+                raw_lines=raw_lines,
+                invalid_summary=response.summary,
+                invalid_lines=_render_response_turns(response),
+                invalid_dropped=response.dropped_source_turns.__repr__(),
+                validation_errors=[str(error)],
+            ),
+            spec,
+            stage="polish-validation-repair",
+            scope=scope,
+        )
+        repaired_chapter = _chapter_from_response(span, repair_response)
+        validate_polished_chapter(
+            repaired_chapter,
+            utterances,
+            source_indices=range(span.start_utterance, span.end_utterance + 1),
+        )
+        return repair_response, repair_response.issues, True
 
 
 # --- Step 3: orchestration ----------------------------------------------------
@@ -422,21 +555,24 @@ async def _polish_one_chapter(
         stage="polish-generation",
         scope=scope,
     )
+    (
+        polish_response,
+        polish_repair_issues,
+        repair_used,
+    ) = await _validate_or_repair_response(
+        polish_response,
+        span,
+        utterances,
+        raw_lines=raw_lines,
+        agent=agent,
+        spec=spec,
+        scope=scope,
+        force_validation=False,
+        repair_allowed=True,
+    )
     polish_has_provenance = any(
         turn.source_turn_indices for turn in polish_response.turns
     ) or bool(polish_response.dropped_source_turns)
-    if polish_has_provenance:
-        validate_polished_chapter(
-            PolishedChapter(
-                title=span.title,
-                start_seconds=span.start_seconds,
-                summary=polish_response.summary,
-                turns=polish_response.turns,
-                dropped_source_turns=polish_response.dropped_source_turns,
-            ),
-            utterances,
-            source_indices=range(span.start_utterance, span.end_utterance + 1),
-        )
 
     fix_response, _reply = await agent.for_stage("polish-review").run_structured(
         ChapterFixPrompt(
@@ -450,30 +586,30 @@ async def _polish_one_chapter(
         stage="polish-review",
         scope=scope,
     )
-    fix_has_provenance = any(
-        turn.source_turn_indices for turn in fix_response.turns
-    ) or bool(fix_response.dropped_source_turns)
-    if polish_has_provenance and not fix_has_provenance:
-        raise ValueError("fixer response omitted required source provenance")
-
-    summary = fix_response.summary if fix_response.issues else polish_response.summary
-    chapter = PolishedChapter(
-        title=span.title,
-        start_seconds=span.start_seconds,
-        summary=summary,
-        turns=fix_response.turns,
-        dropped_source_turns=fix_response.dropped_source_turns,
+    (
+        fix_response,
+        _fix_repair_issues,
+        _fix_repair_used,
+    ) = await _validate_or_repair_response(
+        fix_response,
+        span,
+        utterances,
+        raw_lines=raw_lines,
+        agent=agent,
+        spec=spec,
+        scope=scope,
+        force_validation=polish_has_provenance,
+        repair_allowed=not repair_used,
     )
-    if (
-        any(turn.source_turn_indices for turn in fix_response.turns)
-        or fix_response.dropped_source_turns
-    ):
-        validate_polished_chapter(
-            chapter,
-            utterances,
-            source_indices=range(span.start_utterance, span.end_utterance + 1),
-        )
-    issues = [f"{span.title}: {issue}" for issue in fix_response.issues]
+
+    fix_issues = getattr(fix_response, "issues", [])
+    summary = fix_response.summary if fix_issues else polish_response.summary
+    chapter = _chapter_from_response(span, fix_response).model_copy(
+        update={"summary": summary}
+    )
+    issues = [
+        f"{span.title}: {issue}" for issue in (*polish_repair_issues, *fix_issues)
+    ]
     return chapter, issues
 
 
@@ -603,8 +739,10 @@ async def run_polish(
             "agent": stage_agent.defaults.model_dump(mode="json"),
             "polish_prompt": PolishPrompt.template,
             "review_prompt": ChapterFixPrompt.template,
+            "validation_repair_prompt": PolishValidationRepairPrompt.template,
             "polish_schema": PolishedChapterResponse.model_json_schema(),
             "review_schema": ChapterFixResponse.model_json_schema(),
+            "validation_repair_schema": PolishValidationRepairResponse.model_json_schema(),
         },
     )
 

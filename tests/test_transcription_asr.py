@@ -37,9 +37,10 @@ from jake_tools.transcription.asr import (
     MissingHfTokenError,
     TranscriberError,
     align,
+    build_audio_stage_manifest,
     transcribe_merged_audio,
 )
-from jake_tools.transcription.cache import RunCache
+from jake_tools.transcription.cache import RunCache, sha256_of
 from jake_tools.transcription.models import RawTranscript, SourceClip, Utterance
 
 # `jake_tools.cli`'s __init__ rebinds the name `transcript` to the Click
@@ -912,6 +913,93 @@ def test_cached_transcriber_checks_hf_token_before_asr_on_diarisation_cache_miss
         transcriber.transcribe_cached(
             audio, run_id="run-1", cache=RunCache(tmp_path / "cache")
         )
+
+
+def test_cached_transcriber_promoted_raw_manifest_hit_needs_no_checkpoints_or_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"audio")
+    cache = RunCache(tmp_path / "cache")
+    raw = RawTranscript(
+        clips=[SourceClip(path=str(audio), offset_seconds=0.0, duration_seconds=1.0)],
+        utterances=[Utterance(start=0.0, end=1.0, speaker="SPEAKER_00", text="hello")],
+        audio_sha256=sha256_of(audio),
+        asr_model=asr_module.DEFAULT_ASR_MODEL,
+        diarisation_model=asr_module.DEFAULT_DIARISATION_MODEL,
+        diarisation_device="cpu",
+        num_speakers=1,
+        asr_chunk_duration=DEFAULT_ASR_CHUNK_DURATION,
+        asr_chunk_overlap=DEFAULT_ASR_CHUNK_OVERLAP,
+    )
+    cache.store("run-1", "raw_transcript", raw)
+    cache.store_manifest("run-1", build_audio_stage_manifest(raw))
+    transcriber = LocalTranscriber(
+        hf_token=None, diarisation_device="cpu", num_speakers=1
+    )
+
+    def unexpected_asr(*args: object, **kwargs: object) -> object:
+        raise AssertionError("promoted raw cache must not rerun ASR")
+
+    def unexpected_diarisation(*args: object, **kwargs: object) -> object:
+        raise AssertionError("promoted raw cache must not rerun diarisation")
+
+    monkeypatch.setattr(transcriber, "_run_cached_asr", unexpected_asr)
+    monkeypatch.setattr(transcriber, "_run_cached_diarisation", unexpected_diarisation)
+
+    assert transcriber.transcribe_cached(audio, run_id="run-1", cache=cache) == raw
+
+
+def test_cached_transcriber_raw_manifest_mismatch_preflights_hf_before_asr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"audio")
+    cache = RunCache(tmp_path / "cache")
+    raw = RawTranscript(
+        clips=[],
+        utterances=[],
+        audio_sha256=sha256_of(audio),
+        asr_model=asr_module.DEFAULT_ASR_MODEL,
+        diarisation_model=asr_module.DEFAULT_DIARISATION_MODEL,
+        diarisation_device="cpu",
+        num_speakers=1,
+        asr_chunk_duration=DEFAULT_ASR_CHUNK_DURATION,
+        asr_chunk_overlap=DEFAULT_ASR_CHUNK_OVERLAP,
+    )
+    cache.store("run-1", "raw_transcript", raw)
+    cache.store_manifest(
+        "run-1",
+        build_audio_stage_manifest(raw).model_copy(
+            update={"input_hashes": {"audio_sha256": "f" * 64}}
+        ),
+    )
+    transcriber = LocalTranscriber(hf_token=None, diarisation_device="cpu")
+    monkeypatch.setattr(
+        transcriber,
+        "_run_cached_asr",
+        lambda *args, **kwargs: pytest.fail("ASR ran before HF preflight"),
+    )
+
+    with pytest.raises(MissingHfTokenError, match="HF_TOKEN"):
+        transcriber.transcribe_cached(audio, run_id="run-1", cache=cache)
+
+
+def test_audio_stage_manifest_rejects_incomplete_model_configuration() -> None:
+    raw = RawTranscript(
+        clips=[],
+        utterances=[],
+        audio_sha256="a" * 64,
+        asr_model=None,
+        diarisation_model="diarisation",
+        diarisation_device="cpu",
+        num_speakers=2,
+        asr_chunk_duration=120.0,
+        asr_chunk_overlap=15.0,
+    )
+
+    with pytest.raises(ValueError, match="ASR model"):
+        build_audio_stage_manifest(raw)
 
 
 # --- live: real LocalTranscriber --------------------------------------------

@@ -321,6 +321,47 @@ def test_polish_allows_a_ledger_authorised_gap_inside_a_merged_turn() -> None:
         )
 
 
+def test_polish_allows_nonadjacent_same_speaker_lineage_for_genuine_crosstalk() -> None:
+    source = [
+        Utterance(start=0.0, end=5.0, speaker="Ada", text="first"),
+        Utterance(start=4.0, end=6.0, speaker="Grace", text="overlap"),
+        Utterance(start=5.0, end=10.0, speaker="Ada", text="second"),
+    ]
+    chapter = PolishedChapter(
+        title="crosstalk",
+        start_seconds=0.0,
+        summary="s",
+        turns=[
+            PolishedTurn(speaker="Ada", text="merged", source_turn_indices=[0, 2]),
+            PolishedTurn(speaker="Grace", text="overlap", source_turn_indices=[1]),
+        ],
+    )
+
+    assert validate_polished_chapter(chapter, source) == chapter
+
+
+def test_polish_rejects_nonadjacent_lineage_when_intervening_turn_does_not_overlap() -> (
+    None
+):
+    source = [
+        Utterance(start=0.0, end=2.0, speaker="Ada", text="first"),
+        Utterance(start=3.0, end=4.0, speaker="Grace", text="separate"),
+        Utterance(start=8.0, end=10.0, speaker="Ada", text="second"),
+    ]
+    chapter = PolishedChapter(
+        title="gap",
+        start_seconds=0.0,
+        summary="s",
+        turns=[
+            PolishedTurn(speaker="Ada", text="merged", source_turn_indices=[0, 2]),
+            PolishedTurn(speaker="Grace", text="separate", source_turn_indices=[1]),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="intervening turns"):
+        validate_polished_chapter(chapter, source)
+
+
 def test_legacy_polish_without_provenance_is_readable_but_not_verified() -> None:
     chapter = PolishedChapter(
         title="legacy",

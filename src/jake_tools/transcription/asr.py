@@ -183,6 +183,7 @@ class DiarisationCheckpoint(CacheEnvelope):
 
 def build_audio_stage_manifest(raw: RawTranscript) -> StageManifest:
     """Describe the exact local model inputs and raw output for review binding."""
+    _require_complete_audio_raw(raw)
     local_config = {
         "asr_model": raw.asr_model,
         "asr_chunk_duration": raw.asr_chunk_duration,
@@ -200,6 +201,86 @@ def build_audio_stage_manifest(raw: RawTranscript) -> StageManifest:
             "local_config": stable_hash(local_config),
         },
         output_hash=stable_hash(raw.model_dump(mode="json")),
+    )
+
+
+def _is_sha256(value: str | None) -> bool:
+    if value is None or len(value) != 64:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
+
+
+def _require_complete_audio_raw(raw: RawTranscript) -> None:
+    if not _is_sha256(raw.audio_sha256):
+        raise ValueError("audio raw transcript requires a valid audio SHA-256")
+    if not raw.asr_model or not raw.asr_model.strip():
+        raise ValueError("audio raw transcript requires an ASR model")
+    if raw.asr_chunk_duration is None or raw.asr_chunk_duration <= 0:
+        raise ValueError("audio raw transcript requires ASR chunk duration")
+    if raw.asr_chunk_overlap is None or raw.asr_chunk_overlap < 0:
+        raise ValueError("audio raw transcript requires ASR chunk overlap")
+    if not raw.diarisation_model or not raw.diarisation_model.strip():
+        raise ValueError("audio raw transcript requires a diarisation model")
+    if raw.diarisation_device not in {"cpu", "mps"}:
+        raise ValueError("audio raw transcript requires a resolved diarisation device")
+    if raw.num_speakers is not None and raw.num_speakers < 1:
+        raise ValueError("audio raw transcript requires a positive speaker count")
+
+
+def _audio_raw_is_complete(raw: RawTranscript) -> bool:
+    try:
+        _require_complete_audio_raw(raw)
+    except ValueError:
+        return False
+    return True
+
+
+def validate_audio_stage_manifest(
+    manifest: StageManifest | None, raw: RawTranscript
+) -> bool:
+    """Validate every binding field of a promoted audio raw-stage manifest."""
+    try:
+        expected = build_audio_stage_manifest(raw)
+    except ValueError:
+        return False
+    return (
+        manifest is not None
+        and manifest.schema_version == 1
+        and manifest.stage == "asr"
+        and manifest.output_hash == expected.output_hash
+        and manifest.output_hash is not None
+        and _is_sha256(manifest.input_hash)
+        and _is_sha256(manifest.config_hash)
+        and manifest.input_hashes == expected.input_hashes
+        and manifest.input_hash == expected.input_hash
+        and manifest.config_hash == expected.config_hash
+    )
+
+
+def audio_raw_matches_configuration(
+    raw: RawTranscript | None,
+    *,
+    audio_sha256: str,
+    asr_model: str,
+    diarisation_model: str,
+    diarisation_device: str,
+    num_speakers: int | None,
+    asr_chunk_duration: float,
+    asr_chunk_overlap: float,
+) -> bool:
+    """Check a raw cache's model/source binding before any local inference."""
+    return raw is not None and (
+        raw.audio_sha256 == audio_sha256
+        and raw.asr_model == asr_model
+        and raw.diarisation_model == diarisation_model
+        and raw.diarisation_device == diarisation_device
+        and raw.num_speakers == num_speakers
+        and raw.asr_chunk_duration == asr_chunk_duration
+        and raw.asr_chunk_overlap == asr_chunk_overlap
     )
 
 
@@ -335,6 +416,26 @@ class LocalTranscriber:
         speaker_count = self._num_speakers if num_speakers is None else num_speakers
         device = select_diarisation_device(self._diarisation_device)
 
+        cached = cache.load_resumable(run_id, _RAW_TRANSCRIPT_NAME, RawTranscript)
+        raw_valid = audio_raw_matches_configuration(
+            cached,
+            audio_sha256=audio_sha256,
+            asr_model=self._asr_model,
+            diarisation_model=self._diarisation_model,
+            diarisation_device=device,
+            num_speakers=speaker_count,
+            asr_chunk_duration=self._asr_chunk_duration,
+            asr_chunk_overlap=self._asr_chunk_overlap,
+        )
+        if raw_valid:
+            assert cached is not None
+            raw_valid = validate_audio_stage_manifest(
+                cache.load_manifest(run_id, "asr"), cached
+            )
+        if raw_valid:
+            assert cached is not None
+            return cached.model_copy(update={"timings": cache.load_timings(run_id)})
+
         diarisation_checkpoint = cache.load_resumable(
             run_id, "diarisation_checkpoint", DiarisationCheckpoint
         )
@@ -409,20 +510,6 @@ class LocalTranscriber:
                 ),
             )
         assert diarisation_checkpoint is not None
-
-        cached = cache.load_resumable(run_id, _RAW_TRANSCRIPT_NAME, RawTranscript)
-        raw_valid = cached is not None and (
-            cached.audio_sha256 == audio_sha256
-            and cached.asr_model == self._asr_model
-            and cached.diarisation_model == self._diarisation_model
-            and cached.diarisation_device == device
-            and cached.num_speakers == speaker_count
-            and cached.asr_chunk_duration == self._asr_chunk_duration
-            and cached.asr_chunk_overlap == self._asr_chunk_overlap
-        )
-        if raw_valid and not (asr_recomputed or diarisation_recomputed):
-            assert cached is not None
-            return cached.model_copy(update={"timings": cache.load_timings(run_id)})
 
         started = time.monotonic()
         started_at = datetime.now(UTC)

@@ -7,6 +7,7 @@ import pytest
 from click.testing import CliRunner
 
 from jake_tools.cli import main
+from jake_tools.transcription.asr import build_audio_stage_manifest
 from jake_tools.transcription.cache import RunCache, StageManifest, stable_hash
 from jake_tools.transcription.chapters import ChapterList
 from jake_tools.transcription.integrate import run_integrate
@@ -32,6 +33,7 @@ from jake_tools.transcription.product_review import (
     ProductReviewExportError,
     ProductReviewRefusalError,
     ReviewBinding,
+    _validate_raw_stage,
     apply_accepted_product,
     decide_product_review,
     export_product_review,
@@ -103,6 +105,82 @@ def test_product_checks_separate_hard_failures_from_semantic_warnings() -> None:
     )
     assert checks.passed
     assert checks.semantic_warnings
+
+
+def test_text_raw_review_rejects_manifest_with_wrong_stage_even_when_output_matches(
+    tmp_path: Path,
+) -> None:
+    cache = RunCache(tmp_path / "cache")
+    raw = RawTranscript(
+        clips=[],
+        utterances=[Utterance(start=0.0, end=1.0, speaker="Ada", text="hello")],
+        source_text_sha256="4" * 64,
+    )
+    cache.store("run-1", "raw_transcript", raw)
+    cache.store_manifest(
+        "run-1",
+        StageManifest(
+            stage="asr",
+            input_hash="1" * 64,
+            config_hash="2" * 64,
+            input_hashes={"source_text": "3" * 64},
+            output_hash=stable_hash(raw.model_dump(mode="json")),
+        ),
+    )
+
+    assert not _validate_raw_stage(cache, "run-1", raw)
+
+
+def test_text_raw_review_rejects_manifest_with_mismatched_source_hash(
+    tmp_path: Path,
+) -> None:
+    cache = RunCache(tmp_path / "cache")
+    raw = RawTranscript(
+        clips=[],
+        utterances=[Utterance(start=0.0, end=1.0, speaker="Ada", text="hello")],
+        source_text_sha256="4" * 64,
+    )
+    cache.store("run-1", "raw_transcript", raw)
+    cache.store_manifest(
+        "run-1",
+        StageManifest(
+            stage="adapt",
+            input_hash="1" * 64,
+            config_hash="2" * 64,
+            input_hashes={"source_text": "not-a-source-hash"},
+            output_hash=stable_hash(raw.model_dump(mode="json")),
+        ),
+    )
+
+    assert not _validate_raw_stage(cache, "run-1", raw)
+
+
+def test_audio_raw_review_rejects_manifest_with_mismatched_source_hash(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.m4a"
+    source.write_bytes(b"audio")
+    cache = RunCache(tmp_path / "cache")
+    raw = RawTranscript(
+        clips=[SourceClip(path=str(source), offset_seconds=0.0, duration_seconds=1.0)],
+        utterances=[],
+        audio_sha256="a" * 64,
+        asr_model="asr",
+        diarisation_model="diarisation",
+        diarisation_device="cpu",
+        num_speakers=2,
+        asr_chunk_duration=120.0,
+        asr_chunk_overlap=15.0,
+    )
+    cache.store("run-1", "raw_transcript", raw)
+    cache.store_manifest(
+        "run-1",
+        build_audio_stage_manifest(raw).model_copy(
+            update={"input_hashes": {"audio_sha256": "b" * 64}}
+        ),
+    )
+
+    assert not _validate_raw_stage(cache, "run-1", raw)
 
 
 def test_nested_product_review_cli_is_reachable() -> None:

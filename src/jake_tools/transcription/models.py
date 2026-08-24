@@ -89,6 +89,7 @@ class RawTranscript(CacheEnvelope):
     audio_sha256: str | None = (
         None  # hash of the merged audio; None for pre-diarised sources
     )
+    source_text_sha256: str | None = None
     asr_model: str | None = None
     diarisation_model: str | None = None
     diarisation_device: str | None = None
