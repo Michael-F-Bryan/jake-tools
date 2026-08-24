@@ -32,6 +32,7 @@ class StageTiming(BaseModel):
     config: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
     media_duration_seconds: float | None = None
     rtf: float | None = None
+    # Local stages are explicitly zero API cost; this is not an invoice field.
     api_rate_cost: float = 0.0
     telemetry_schema_version: int = 1
 

@@ -387,6 +387,7 @@ async def _propose_and_repair(
             transcript_lines=transcript_lines, corrective_note=corrective_note
         ),
         spec,
+        stage="chapterise",
     )
     return _repair_boundaries(response.chapters, utterance_count)
 
@@ -409,6 +410,36 @@ async def run_chapterisation(
     if transcript is None:
         raise MissingResolvedTranscriptError(run_id)
 
-    chapters = await chapterise(transcript, agent=agent)
+    stage_agent = agent.for_stage("chapterise").with_telemetry(
+        cache.telemetry_sink(run_id)
+    )
+    manifest = cache.stage_manifest(
+        "chapterise",
+        inputs={"resolved_transcript": transcript.model_dump(mode="json")},
+        config={
+            "agent": stage_agent.defaults.model_dump(mode="json"),
+            "prompt": ChapterisationPrompt.template,
+            "response_schema": ChapterisationResponse.model_json_schema(),
+            "retry_note": _RETRY_NOTE,
+        },
+    )
+    cached = cache.load(run_id, CHAPTERS_CACHE_NAME, ChapterList)
+    if cached is not None and cache.load_manifest(run_id, "chapterise") == manifest:
+        stage_agent.record_cache_hit()
+        return cached.chapters
+    if cached is not None or cache.load_manifest(run_id, "chapterise") is not None:
+        cache.invalidate_artefacts(
+            run_id,
+            {
+                "polished",
+                "polish_issues",
+                "polish.manifest",
+                "minutes",
+                "minutes.manifest",
+            },
+        )
+
+    chapters = await chapterise(transcript, agent=stage_agent)
     cache.store(run_id, CHAPTERS_CACHE_NAME, ChapterList(chapters=chapters))
+    cache.store_manifest(run_id, manifest)
     return chapters

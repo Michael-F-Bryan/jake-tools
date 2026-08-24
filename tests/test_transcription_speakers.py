@@ -22,6 +22,7 @@ import pytest
 from claude_agent_sdk import ClaudeAgentOptions, Message, ResultMessage
 from click.testing import CliRunner
 
+from jake_tools.ai_usage import AITelemetry
 from jake_tools.claude import AgentSpec, ClaudeAgent, ClaudeAgentError
 from jake_tools.cli import main
 from jake_tools.transcription.cache import RunCache
@@ -800,6 +801,10 @@ async def test_run_speaker_resolution_needs_input_when_unresolved_and_not_finali
     assert audio_tool.cut_calls == []  # never cut against a nonexistent merged.m4a
     assert not (tmp_path / "cache" / "run-1" / "merged.m4a").exists()
     assert cache.load("run-1", "resolved_transcript", RawTranscript) is None
+    telemetry = cache.load("run-1", "ai_telemetry", AITelemetry)
+    assert telemetry is not None
+    assert telemetry.calls[0].stage == "speakers"
+    assert telemetry.calls[0].status == "success"
 
 
 async def test_run_speaker_resolution_assign_unknown_and_finalise_resolves(

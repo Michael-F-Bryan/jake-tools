@@ -143,11 +143,11 @@ async def transcribe(
     product into the note - the same eight stages `transcript merge-audio` /
     `asr` / `adapt` / `speakers` / `chapterise` / `polish` / `minutes` /
     `integrate` run individually, composed into one call. ASR/diarisation
-    (or adapt, on the text ramp) checks the run cache first, so the
-    needs_input -> `--assign` resume loop below never repeats that
-    expensive, HF-gated work - chapterise/polish/minutes currently re-run
-    their LLM calls on a repeat invocation of an already-complete run
-    (a known follow-up, not a resume-loop concern).
+    (or adapt, on the text ramp) checks the run cache first and model-backed
+    chapterise/polish/minutes products are reused only when their durable
+    content/config manifests match. A mismatch invalidates dependent
+    products before regeneration; telemetry remains durable across the
+    needs_input -> `--assign` resume loop.
 
     If speaker resolution can't confidently name every cluster, this prints
     `{"status": "needs_input", "run_id": ..., "requests": [...]}` and exits
@@ -216,6 +216,7 @@ async def transcribe(
             run_id=outcome.run_id or "",
             requests=outcome.requests,
             timings=outcome.timings,
+            telemetry=outcome.telemetry,
         )
         click.echo(payload.model_dump_json(indent=2))
         raise click.exceptions.Exit(NEEDS_INPUT_EXIT_CODE)

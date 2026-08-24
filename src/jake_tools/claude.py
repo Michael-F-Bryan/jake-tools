@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -23,7 +23,7 @@ from claude_agent_sdk import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 
-from .ai_usage import Usage
+from .ai_usage import AICallTelemetry, TelemetrySink, Usage
 from .prompting import Prompt, StructuredPrompt
 
 DEFAULT_MODEL = "claude-sonnet-5"
@@ -125,32 +125,137 @@ class ClaudeAgent:
 
     defaults: AgentSpec = field(default_factory=AgentSpec)
     run_query: QueryFn = field(default=cast(QueryFn, query))
+    telemetry_sink: TelemetrySink | None = None
+    stage: str | None = None
 
-    async def run(self, prompt: str | Prompt, spec: AgentSpec | None = None) -> Reply:
+    def with_telemetry(self, sink: TelemetrySink) -> ClaudeAgent:
+        """Bind a durable sink without changing the query seam."""
+        return ClaudeAgent(
+            defaults=self.defaults,
+            run_query=self.run_query,
+            telemetry_sink=sink,
+            stage=self.stage,
+        )
+
+    def for_stage(self, stage: str) -> ClaudeAgent:
+        """Carry explicit stage identity through a composed stage."""
+        return ClaudeAgent(
+            defaults=self.defaults,
+            run_query=self.run_query,
+            telemetry_sink=self.telemetry_sink,
+            stage=stage,
+        )
+
+    def with_defaults(self, defaults: AgentSpec) -> ClaudeAgent:
+        return ClaudeAgent(
+            defaults=defaults,
+            run_query=self.run_query,
+            telemetry_sink=self.telemetry_sink,
+            stage=self.stage,
+        )
+
+    async def run(
+        self,
+        prompt: str | Prompt,
+        spec: AgentSpec | None = None,
+        *,
+        stage: str | None = None,
+    ) -> Reply:
         rendered = prompt if isinstance(prompt, str) else prompt.render()
         options = self.defaults.merge(spec).to_options()
-        text, result = await self._collect(rendered, options)
+        stage_name = stage or self.stage or "unspecified"
+        try:
+            text, result = await self._collect(rendered, options)
+        except ClaudeAgentError as exc:
+            self._record_error(stage_name, options, exc)
+            raise
+        except Exception as exc:
+            self._record_error(
+                stage_name,
+                options,
+                ClaudeAgentError(f"agent call failed before a result: {exc}"),
+            )
+            raise
         if result.is_error:
-            raise ClaudeAgentError(
+            error = ClaudeAgentError(
                 f"agent call to model {options.model!r} failed "
                 f"(subtype={result.subtype!r}, stop_reason={result.stop_reason!r}, "
                 f"errors={_error_of(result)!r})",
                 usage=_usage_of(result),
             )
+            self._record_result(stage_name, options, result, status="error")
+            raise error
+        self._record_result(stage_name, options, result, status="success")
         return Reply.from_result(result, text)
 
     async def run_structured[TModel: BaseModel](
         self,
         prompt: StructuredPrompt[TModel],
         spec: AgentSpec | None = None,
+        *,
+        stage: str | None = None,
     ) -> tuple[TModel, Reply]:
         response_model = cast(type[TModel], prompt.response_model)
         options = self.defaults.merge(spec).to_options(
             output_schema=response_model.model_json_schema()
         )
-        text, result = await self._collect(prompt.render(), options)
-        return _parse_structured(result, response_model), Reply.from_result(
-            result, text
+        stage_name = stage or self.stage or "unspecified"
+        try:
+            text, result = await self._collect(prompt.render(), options)
+        except ClaudeAgentError as exc:
+            self._record_error(stage_name, options, exc)
+            raise
+        except Exception as exc:
+            self._record_error(
+                stage_name,
+                options,
+                ClaudeAgentError(f"agent call failed before a result: {exc}"),
+            )
+            raise
+        if result.is_error:
+            error = ClaudeAgentError(
+                f"expected {response_model.__name__} JSON from the agent but got an "
+                f"error result (subtype={result.subtype!r}, "
+                f"stop_reason={result.stop_reason!r}, errors={_error_of(result)!r})",
+                usage=_usage_of(result),
+            )
+            self._record_result(stage_name, options, result, status="error")
+            raise error
+        try:
+            parsed = _parse_structured(result, response_model)
+        except Exception:
+            self._record_result(stage_name, options, result, status="error")
+            raise
+        self._record_result(stage_name, options, result, status="success")
+        return parsed, Reply.from_result(result, text)
+
+    def record_cache_hit(self, *, stage: str | None = None) -> None:
+        if self.telemetry_sink is not None:
+            self.telemetry_sink.record_cache_hit(
+                stage=stage or self.stage or "unspecified", model=self.defaults.model
+            )
+
+    def _record_error(
+        self, stage: str, options: ClaudeAgentOptions, error: ClaudeAgentError
+    ) -> None:
+        if self.telemetry_sink is None:
+            return
+        self.telemetry_sink.record_call(
+            AICallTelemetry(stage=stage, status="error", usage=error.usage)
+        )
+
+    def _record_result(
+        self,
+        stage: str,
+        options: ClaudeAgentOptions,
+        result: ResultMessage,
+        *,
+        status: Literal["success", "error"],
+    ) -> None:
+        if self.telemetry_sink is None:
+            return
+        self.telemetry_sink.record_call(
+            _telemetry_of(result, stage=stage, status=status, model=options.model)
         )
 
     async def _collect(
@@ -199,13 +304,72 @@ def _error_of(result: ResultMessage) -> str | None:
 def _usage_of(result: ResultMessage) -> Usage:
     raw = result.usage or {}
     return Usage(
-        model=next(iter(result.model_usage), None) if result.model_usage else None,
+        model=_model_of(result),
         api_calls=result.num_turns,
         input_tokens=_count(raw, "input_tokens"),
         output_tokens=_count(raw, "output_tokens"),
         cache_read_tokens=_count(raw, "cache_read_input_tokens"),
-        cache_write_tokens=_count(raw, "cache_creation_input_tokens"),
-        estimated_cost_usd=result.total_cost_usd or 0.0,
+        cache_write_tokens=_cache_write_count(raw),
+        estimated_cost_usd=result.total_cost_usd,
+    )
+
+
+def _model_of(result: ResultMessage) -> str | None:
+    return next(iter(result.model_usage), None) if result.model_usage else None
+
+
+def _provider_of(result: ResultMessage) -> str | None:
+    if not result.model_usage:
+        return None
+    value = result.model_usage.get(_model_of(result) or "")
+    if isinstance(value, dict):
+        provider = value.get("provider")
+        return provider if isinstance(provider, str) else None
+    return None
+
+
+def _telemetry_of(
+    result: ResultMessage,
+    *,
+    stage: str,
+    status: Literal["success", "error"],
+    model: str | None,
+) -> AICallTelemetry:
+    usage = _usage_of(result)
+    if usage.model is None:
+        usage = usage.model_copy(update={"model": model})
+    cache_creation_5m_tokens = _cache_bucket(
+        result.usage or {}, "ephemeral_5m_input_tokens"
+    )
+    cache_creation_1h_tokens = _cache_bucket(
+        result.usage or {}, "ephemeral_1h_input_tokens"
+    )
+    return AICallTelemetry(
+        stage=stage,
+        status=status,
+        usage=usage,
+        provider=_provider_of(result),
+        duration_ms=result.duration_ms,
+        duration_api_ms=result.duration_api_ms,
+        cache_creation_5m_tokens=cache_creation_5m_tokens,
+        cache_creation_1h_tokens=cache_creation_1h_tokens,
+    )
+
+
+def _cache_bucket(raw: dict[str, Any], key: str) -> int:
+    nested = raw.get("cache_creation")
+    if isinstance(nested, dict):
+        return _count(nested, key)
+    suffix = key.removesuffix("_input_tokens")
+    return _count(raw, f"cache_creation_input_tokens_{suffix}")
+
+
+def _cache_write_count(raw: dict[str, Any]) -> int:
+    aggregate = _count(raw, "cache_creation_input_tokens")
+    if aggregate:
+        return aggregate
+    return _cache_bucket(raw, "ephemeral_5m_input_tokens") + _cache_bucket(
+        raw, "ephemeral_1h_input_tokens"
     )
 
 

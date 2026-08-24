@@ -15,8 +15,14 @@ from pathlib import Path
 
 import click
 
+from ..ai_usage import AITelemetry
 from ..claude import ClaudeAgent, ClaudeAgentError
-from ..transcription.adapt import AdaptError, adapt_transcript
+from ..transcription.adapt import (
+    AdaptedTranscript,
+    AdaptError,
+    AdaptTranscriptPrompt,
+    adapt_transcript,
+)
 from ..transcription.asr import TranscriberError, transcribe_merged_audio
 from ..transcription.audio import (
     AudioEmbedResolutionError,
@@ -31,6 +37,7 @@ from ..transcription.chapters import (
 )
 from ..transcription.integrate import IntegrateError, load_products, run_integrate
 from ..transcription.minutes import MinutesError, run_minutes
+from ..transcription.models import RawTranscript
 from ..transcription.note import NoteParseError, parse_note
 from ..transcription.obsidian import ObsidianCliError
 from ..transcription.polish import PolishError, run_polish
@@ -61,6 +68,21 @@ NEEDS_INPUT_EXIT_CODE = 3
 @click.group()
 def transcript() -> None:
     """Plumbing sub-commands for the meeting-transcription pipeline."""
+
+
+@transcript.command("telemetry")
+@cache_options
+@click.option(
+    "--run-id",
+    "run_id",
+    required=True,
+    help="Run id whose durable AI telemetry should be inspected.",
+)
+def telemetry(run_id: str, cache_options: CacheOptions) -> None:
+    """Print durable per-stage LLM usage and API-rate-equivalent totals."""
+    cache = cache_options.run_cache()
+    value = cache.load(run_id, "ai_telemetry", AITelemetry) or AITelemetry()
+    click.echo(value.model_dump_json(indent=2))
 
 
 @transcript.command("merge-audio")
@@ -192,12 +214,41 @@ async def adapt(
     cache = cache_options.run_cache()
 
     try:
-        result = await adapt_transcript(transcript_path, agent=agent)
+        if run_id is None:
+            result = await adapt_transcript(transcript_path, agent=agent)
+        else:
+            document = transcript_path.read_text(encoding="utf-8")
+            stage_agent = agent.for_stage("adapt").with_telemetry(
+                cache.telemetry_sink(run_id)
+            )
+            manifest = cache.stage_manifest(
+                "adapt",
+                inputs={"source_text": document},
+                config={
+                    "agent": stage_agent.defaults.model_dump(mode="json"),
+                    "prompt": AdaptTranscriptPrompt.template,
+                    "response_schema": AdaptedTranscript.model_json_schema(),
+                },
+            )
+            cached = cache.load_resumable(
+                run_id, _RAW_TRANSCRIPT_CACHE_NAME, RawTranscript
+            )
+            if cached is not None and cache.load_manifest(run_id, "adapt") == manifest:
+                stage_agent.record_cache_hit()
+                result = cached
+            else:
+                if (
+                    cached is not None
+                    or cache.load_manifest(run_id, "adapt") is not None
+                ):
+                    cache.invalidate_downstream(
+                        run_id, reason="adapt input or configuration changed"
+                    )
+                result = await adapt_transcript(transcript_path, agent=stage_agent)
+                cache.store(run_id, _RAW_TRANSCRIPT_CACHE_NAME, result)
+                cache.store_manifest(run_id, manifest)
     except (AdaptError, ClaudeAgentError) as exc:
         raise click.ClickException(str(exc)) from exc
-
-    if run_id is not None:
-        cache.store(run_id, _RAW_TRANSCRIPT_CACHE_NAME, result)
 
     click.echo(result.model_dump_json(indent=2))
 

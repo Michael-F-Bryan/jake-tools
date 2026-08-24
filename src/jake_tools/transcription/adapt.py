@@ -44,6 +44,7 @@ from pydantic import BaseModel
 
 from ..claude import ClaudeAgent
 from ..prompting import StructuredPrompt
+from .cache import RunCache
 from .models import RawTranscript, Utterance
 
 _UNKNOWN_SPEAKER = "Unknown"
@@ -252,7 +253,7 @@ class NoFallbackAgentError(AdaptError):
 
 async def _adapt_via_llm(document: str, agent: ClaudeAgent) -> list[Utterance]:
     adapted, _reply = await agent.run_structured(
-        AdaptTranscriptPrompt(document=document)
+        AdaptTranscriptPrompt(document=document), stage="adapt"
     )
     utterances = [
         Utterance(start=item.start, end=item.end, speaker=item.speaker, text=item.text)
@@ -288,3 +289,32 @@ async def adapt_transcript(
         utterances = await _adapt_via_llm(text, agent)
 
     return RawTranscript(clips=[], utterances=utterances, audio_sha256=None)
+
+
+async def run_adapt(
+    path: Path, *, run_id: str, agent: ClaudeAgent, cache: RunCache
+) -> RawTranscript:
+    """Adapt and cache a text ramp only when its content/config manifest matches."""
+    document = path.read_text(encoding="utf-8")
+    stage_agent = agent.for_stage("adapt").with_telemetry(cache.telemetry_sink(run_id))
+    manifest = cache.stage_manifest(
+        "adapt",
+        inputs={"source_text": document},
+        config={
+            "agent": stage_agent.defaults.model_dump(mode="json"),
+            "prompt": AdaptTranscriptPrompt.template,
+            "response_schema": AdaptedTranscript.model_json_schema(),
+        },
+    )
+    cached = cache.load_resumable(run_id, "raw_transcript", RawTranscript)
+    if cached is not None and cache.load_manifest(run_id, "adapt") == manifest:
+        stage_agent.record_cache_hit()
+        return cached
+    if cached is not None or cache.load_manifest(run_id, "adapt") is not None:
+        cache.invalidate_downstream(
+            run_id, reason="adapt input or configuration changed"
+        )
+    adapted = await adapt_transcript(path, agent=stage_agent)
+    cache.store(run_id, "raw_transcript", adapted)
+    cache.store_manifest(run_id, manifest)
+    return adapted

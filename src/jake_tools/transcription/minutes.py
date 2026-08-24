@@ -206,6 +206,7 @@ async def generate_minutes(
             chapters_text=_render_chapters(chapters),
         ),
         spec,
+        stage="minutes",
     )
     return response
 
@@ -252,7 +253,29 @@ async def run_minutes(
         raise MissingPolishedChaptersError(run_id)
 
     lexicon = build_lexicon(note, vault)
-    response = await generate_minutes(polished.chapters, note.attendees, lexicon, agent)
+    stage_agent = agent.for_stage("minutes").with_telemetry(
+        cache.telemetry_sink(run_id)
+    )
+    manifest = cache.stage_manifest(
+        "minutes",
+        inputs={
+            "polished": polished.model_dump(mode="json"),
+            "note": note.model_dump(mode="json"),
+            "lexicon": lexicon,
+        },
+        config={
+            "agent": stage_agent.defaults.model_dump(mode="json"),
+            "prompt": MinutesPrompt.template,
+            "response_schema": MinutesResponse.model_json_schema(),
+        },
+    )
+    cached = cache.load(run_id, MINUTES_CACHE_NAME, MinutesResult)
+    if cached is not None and cache.load_manifest(run_id, "minutes") == manifest:
+        stage_agent.record_cache_hit()
+        return cached
+    response = await generate_minutes(
+        polished.chapters, note.attendees, lexicon, stage_agent
+    )
 
     result = MinutesResult(
         run_id=run_id,
@@ -260,4 +283,5 @@ async def run_minutes(
         discussion_notes=response.discussion_notes,
     )
     cache.store(run_id, MINUTES_CACHE_NAME, result)
+    cache.store_manifest(run_id, manifest)
     return result

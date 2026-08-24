@@ -48,6 +48,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from ..ai_usage import AITelemetry
 from ..claude import ClaudeAgent
 from ..prompting import StructuredPrompt
 from .audio import AudioTool
@@ -222,6 +223,8 @@ async def resolve(
     Only present clusters are ever considered - a silent attendee (listed
     in Attendees but never a speaker) is never force-assigned to anything.
     """
+    if isinstance(agent, ClaudeAgent):
+        agent = agent.for_stage("speakers")
     has_audio = _has_mergeable_audio(transcript, merged_audio)
     _validate_corrections(transcript, note, corrections)
     assigned = {item.cluster: item.name for item in assignments}
@@ -510,6 +513,7 @@ class SpeakersResponse(BaseModel):
     run_id: str
     requests: list[SnippetRequest] = Field(default_factory=list)
     timings: list[StageTiming] = Field(default_factory=list)
+    telemetry: AITelemetry | None = None
 
 
 def parse_assign(raw: str) -> SpeakerAssignment:
@@ -853,10 +857,13 @@ async def run_speaker_resolution(
         )
 
     run_dir = cache.run_dir(run_id)
+    stage_agent = agent.for_stage("speakers").with_telemetry(
+        cache.telemetry_sink(run_id)
+    )
     resolved, requests = await resolve(
         note,
         transcript,
-        agent=agent,
+        agent=stage_agent,
         assignments=merged_assignments,
         corrections=merged_corrections,
         audio_tool=audio_tool,
@@ -870,6 +877,7 @@ async def run_speaker_resolution(
             run_id=run_id,
             requests=requests,
             timings=cache.load_timings(run_id),
+            telemetry=cache.load(run_id, "ai_telemetry", AITelemetry),
         )
 
     if requests:  # --finalise: whatever is left becomes "Unknown"
@@ -893,4 +901,5 @@ async def run_speaker_resolution(
         run_id=run_id,
         requests=[],
         timings=cache.load_timings(run_id),
+        telemetry=cache.load(run_id, "ai_telemetry", AITelemetry),
     )

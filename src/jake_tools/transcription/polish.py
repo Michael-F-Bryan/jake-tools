@@ -401,13 +401,14 @@ async def _polish_one_chapter(
     raw_lines = _render_utterances(utterances, start_index=span.start_utterance)
     lexicon_list = list(lexicon)
 
-    polish_response, _reply = await agent.run_structured(
+    polish_response, _reply = await agent.for_stage("polish-generation").run_structured(
         PolishPrompt(
             chapter_title=span.title,
             lexicon=lexicon_list,
             raw_lines=raw_lines,
         ),
         spec,
+        stage="polish-generation",
     )
     polish_has_provenance = any(
         turn.source_turn_indices for turn in polish_response.turns
@@ -425,7 +426,7 @@ async def _polish_one_chapter(
             source_indices=range(span.start_utterance, span.end_utterance + 1),
         )
 
-    fix_response, _reply = await agent.run_structured(
+    fix_response, _reply = await agent.for_stage("polish-review").run_structured(
         ChapterFixPrompt(
             chapter_title=span.title,
             lexicon=lexicon_list,
@@ -434,6 +435,7 @@ async def _polish_one_chapter(
             polished_lines=_render_turns(polish_response.turns),
         ),
         spec,
+        stage="polish-review",
     )
     fix_has_provenance = any(
         turn.source_turn_indices for turn in fix_response.turns
@@ -566,9 +568,47 @@ async def run_polish(
         raise MissingChaptersError(run_id)
     spans = chapter_list.chapters
 
+    stage_agent = agent.with_telemetry(cache.telemetry_sink(run_id))
+    lexicon = build_lexicon(note, vault)
+    manifest = cache.stage_manifest(
+        "polish",
+        inputs={
+            "resolved_transcript": transcript.model_dump(mode="json"),
+            "chapters": chapter_list.model_dump(mode="json"),
+            "note": note.model_dump(mode="json"),
+            "lexicon": lexicon,
+        },
+        config={
+            "agent": stage_agent.defaults.model_dump(mode="json"),
+            "polish_prompt": PolishPrompt.template,
+            "review_prompt": ChapterFixPrompt.template,
+            "polish_schema": PolishedChapterResponse.model_json_schema(),
+            "review_schema": ChapterFixResponse.model_json_schema(),
+        },
+    )
+
+    current_manifest = cache.load_manifest(run_id, "polish")
+    if chapter is None and current_manifest != manifest:
+        cache.invalidate_artefacts(run_id, {"minutes", "minutes.manifest"})
+
     if chapter is None:
+        existing = cache.load(run_id, POLISHED_CACHE_NAME, PolishedChapterList)
+        existing_issues = cache.load(run_id, POLISH_ISSUES_CACHE_NAME, PolishIssueList)
+        if (
+            existing is not None
+            and existing_issues is not None
+            and cache.load_manifest(run_id, "polish") == manifest
+        ):
+            stage_agent.for_stage("polish-generation").record_cache_hit()
+            stage_agent.for_stage("polish-review").record_cache_hit()
+            return PolishResponse(
+                run_id=run_id,
+                chapter_count=len(existing.chapters),
+                issue_count=len(existing_issues.issues),
+                issues=existing_issues.issues,
+            )
         new_chapters, new_issues = await polish_chapters(
-            transcript, spans, note, vault, agent, max_concurrency=max_concurrency
+            transcript, spans, note, vault, stage_agent, max_concurrency=max_concurrency
         )
         final_chapters = new_chapters
         final_issues = new_issues
@@ -577,15 +617,20 @@ async def run_polish(
             raise InvalidChapterIndexError(chapter, len(spans))
 
         existing = cache.load(run_id, POLISHED_CACHE_NAME, PolishedChapterList)
-        if existing is None or len(existing.chapters) != len(spans):
+        if (
+            existing is None
+            or len(existing.chapters) != len(spans)
+            or cache.load_manifest(run_id, "polish") != manifest
+        ):
             raise MissingPolishedChaptersError(run_id)
 
+        cache.invalidate_artefacts(run_id, {"minutes", "minutes.manifest"})
         new_chapters, new_issues = await polish_chapters(
             transcript,
             [spans[chapter]],
             note,
             vault,
-            agent,
+            stage_agent,
             max_concurrency=max_concurrency,
         )
 
@@ -608,6 +653,7 @@ async def run_polish(
         run_id, POLISHED_CACHE_NAME, PolishedChapterList(chapters=final_chapters)
     )
     cache.store(run_id, POLISH_ISSUES_CACHE_NAME, PolishIssueList(issues=final_issues))
+    cache.store_manifest(run_id, manifest)
 
     return PolishResponse(
         run_id=run_id,

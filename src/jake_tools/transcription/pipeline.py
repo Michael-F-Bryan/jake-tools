@@ -18,12 +18,12 @@ the plan's stated priority order.
 **Resume.** `run_speaker_resolution` (006) returns `needs_input` when
 clusters remain unresolved; this function stops there and returns a
 `needs_input` `PipelineOutcome` *before* chapterising/polishing/writing
-anything, so a re-invocation with more `--assign` values picks up from
-exactly that point. `transcribe_merged_audio` is the one stage with a real
-cache-hit skip built into its own library function (a rerun never re-pays
-for ASR/diarisation), so that is also the one guarantee this module makes
-about *not* redoing expensive work across invocations - see the module's
-"Known limitation" note below for the rest.
+anything. Local checkpoints and every model-backed product use durable,
+content/config-bound manifests: a valid hit replays the product without a
+model call, while a mismatch invalidates dependent products and regenerates
+them. The `ai_telemetry.json` audit document is append-only from the
+operator's perspective and survives needs_input, failures, retries, and
+later inspection.
 
 **Clips provenance.** `transcribe_merged_audio`'s `RawTranscript.clips`
 carries a single fabricated pseudo-clip for the whole merged file (asr.py's
@@ -37,20 +37,6 @@ reads it back for computation), so this is a data-quality fix with no
 behavioural effect - but it is one the maintenance notes explicitly called
 for, so it's done here rather than deferred.
 
-**Known limitation (reported, not fixed here - composition only).** Beyond
-the ASR skip above, `run_chapterisation`/`run_polish`/`run_minutes` do not
-themselves check the cache before making their LLM calls (only
-`transcribe_merged_audio` does) - so a *third* invocation of an
-already-`complete` run would redo those LLM calls rather than replaying the
-cached JSON. Adding a skip-if-cached wrapper around each call here would
-make that true, but it would also be exactly the kind of stage-owned logic
-the maintenance notes warn against duplicating in the porcelain ("any logic
-that creeps in here belongs in a stage"), so it is reported here as a
-candidate for a follow-up plan rather than patched into this module. The one
-resume story this module *is* required to get right - stopping at
-`needs_input` and resuming from there - is unaffected: chapterise/polish/
-minutes/integrate never run until speaker resolution is complete, so they
-only ever run once per completed run in that flow.
 """
 
 from __future__ import annotations
@@ -62,8 +48,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from ..ai_usage import AITelemetry
 from ..claude import AgentSpec, ClaudeAgent
-from .adapt import adapt_transcript
+from .adapt import run_adapt
 from .asr import Transcriber, transcribe_merged_audio
 from .audio import AudioTool, merge_note_audio, run_id_for
 from .cache import RunCache, sha256_of
@@ -131,9 +118,10 @@ class RunReport(BaseModel):
     """What one completed pipeline run produced, for Michael's skim.
 
     Informational only, never gating - nothing in `run_pipeline` inspects
-    these values to decide success or failure. Additive: new fields (timing,
-    `Reply.usage`-derived cost) can be layered on without breaking callers
-    that only read the ones that exist today.
+    these values to decide success or failure. Additive: timing and durable
+    API-rate-equivalent telemetry can be layered on without breaking callers
+    that only read the original fields. Costs are list-price/API-equivalent
+    estimates, not invoices or subscription marginal costs.
     """
 
     run_id: str
@@ -144,6 +132,7 @@ class RunReport(BaseModel):
     fixer_issues: list[str]  # from polish_issues.json
     integration: IntegrationReport
     timings: list[StageTiming] = Field(default_factory=list)
+    telemetry: AITelemetry | None = None
 
 
 class PipelineOutcome(BaseModel):
@@ -160,6 +149,7 @@ class PipelineOutcome(BaseModel):
     run_id: str | None = None
     requests: list[SnippetRequest] = Field(default_factory=list)
     timings: list[StageTiming] = Field(default_factory=list)
+    telemetry: AITelemetry | None = None
     report: RunReport | None = None
 
 
@@ -254,10 +244,7 @@ async def _acquire_raw_transcript(
     content_sha256 = sha256_of(transcript_path)
     run_id = run_id_for(Path(note.path), content_sha256)
 
-    cached = cache.load_resumable(run_id, RAW_TRANSCRIPT_CACHE_NAME, RawTranscript)
-    if cached is None:
-        adapted = await adapt_transcript(transcript_path, agent=agent)
-        cache.store(run_id, RAW_TRANSCRIPT_CACHE_NAME, adapted)
+    await run_adapt(transcript_path, run_id=run_id, agent=agent, cache=cache)
     return run_id
 
 
@@ -320,6 +307,7 @@ async def run_pipeline(
             run_id=run_id,
             requests=speakers_result.requests,
             timings=cache.load_timings(run_id),
+            telemetry=cache.load(run_id, "ai_telemetry", AITelemetry),
         )
 
     chapter_spec = (
@@ -349,6 +337,7 @@ async def run_pipeline(
         resolved if resolved is not None else RawTranscript(clips=[], utterances=[])
     )
 
+    telemetry = cache.load(run_id, "ai_telemetry", AITelemetry)
     report = RunReport(
         run_id=run_id,
         chapters=len(products.chapters),
@@ -366,5 +355,8 @@ async def run_pipeline(
         fixer_issues=polish_result.issues,
         integration=integration,
         timings=cache.load_timings(run_id),
+        telemetry=telemetry,
     )
-    return PipelineOutcome(status="complete", run_id=run_id, report=report)
+    return PipelineOutcome(
+        status="complete", run_id=run_id, telemetry=telemetry, report=report
+    )

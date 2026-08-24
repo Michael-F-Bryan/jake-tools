@@ -57,16 +57,19 @@ from jake_tools.transcription.models import (
     RawTranscript,
     Utterance,
 )
-from jake_tools.transcription.note import NoteSection, ParsedNote
+from jake_tools.transcription.note import NoteSection, ParsedNote, parse_note
 from jake_tools.transcription.polish import (
     ChapterFixPrompt,
+    ChapterFixResponse,
     ChapterPolishError,
     InvalidChapterIndexError,
     MissingChaptersError,
     MissingPolishedChaptersError,
     MissingResolvedTranscriptError,
     PolishedChapterList,
+    PolishedChapterResponse,
     PolishIssueList,
+    PolishPrompt,
     _render_turns,
     _render_utterances,
     build_lexicon,
@@ -876,6 +879,30 @@ async def test_run_polish_with_chapter_flag_merges_into_an_existing_polished_jso
     )
     agent = ClaudeAgent(run_query=fake)
     vault = _empty_vault(tmp_path)
+    note = parse_note(FIXTURES / "meeting_note.md")
+    transcript = cache.load("run-1", "resolved_transcript", RawTranscript)
+    chapters = cache.load("run-1", "chapters", ChapterList)
+    assert transcript is not None and chapters is not None
+    lexicon = build_lexicon(note, vault)
+    cache.store_manifest(
+        "run-1",
+        cache.stage_manifest(
+            "polish",
+            inputs={
+                "resolved_transcript": transcript.model_dump(mode="json"),
+                "chapters": chapters.model_dump(mode="json"),
+                "note": note.model_dump(mode="json"),
+                "lexicon": lexicon,
+            },
+            config={
+                "agent": agent.defaults.model_dump(mode="json"),
+                "polish_prompt": PolishPrompt.template,
+                "review_prompt": ChapterFixPrompt.template,
+                "polish_schema": PolishedChapterResponse.model_json_schema(),
+                "review_schema": ChapterFixResponse.model_json_schema(),
+            },
+        ),
+    )
 
     result = await run_polish(
         FIXTURES / "meeting_note.md",

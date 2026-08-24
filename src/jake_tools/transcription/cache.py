@@ -9,12 +9,15 @@ integrate step reads its tier-b baseline back out of the same cache.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel
 
+from ..ai_usage import AICallTelemetry, AITelemetry, TelemetrySink
 from .models import StageTiming, StageTimingLog, StaleState
 
 _DEFAULT_ROOT = Path.home() / "Library" / "Caches" / "jake-tools" / "transcription"
@@ -24,7 +27,34 @@ _RESUMABLE_NAMES = {
     "diarisation_checkpoint",
     "raw_transcript",
     "timings",
+    "ai_telemetry",
 }
+
+
+class StageManifest(BaseModel):
+    """Content/config provenance required before reusing a model artefact."""
+
+    schema_version: int = 1
+    stage: str
+    input_hash: str
+    config_hash: str
+
+
+class CacheTelemetrySink:
+    """Bind one run cache to the SDK seam without global mutable state."""
+
+    def __init__(self, cache: RunCache, run_id: str) -> None:
+        self.cache = cache
+        self.run_id = run_id
+
+    def record_call(self, record: AICallTelemetry) -> None:
+        self.cache.record_ai_call(self.run_id, record)
+
+    def record_cache_hit(self, *, stage: str, model: str | None = None) -> None:
+        self.cache.record_ai_call(
+            self.run_id,
+            AICallTelemetry.cache_hit(stage=stage, model=model),
+        )
 
 
 class RunCache:
@@ -72,9 +102,9 @@ class RunCache:
         """Load a local resumable artefact, invalidating partial/invalid state.
 
         Ordinary cache reads remain fail-closed: a corrupt non-resumable
-        product still raises. These four local artefacts are different because
-        they are recomputable checkpoints or telemetry, so a partial write
-        must become a cache miss rather than block recovery.
+        product still raises. These recomputable checkpoints and telemetry
+        documents are different because a partial write must become a cache
+        miss rather than block recovery.
         """
         if name not in _RESUMABLE_NAMES:
             return self.load(run_id, name, model_type)
@@ -92,6 +122,58 @@ class RunCache:
         if not path.exists():
             return None
         return path.read_text()
+
+    def telemetry_sink(self, run_id: str) -> TelemetrySink:
+        return CacheTelemetrySink(self, run_id)
+
+    def record_ai_call(self, run_id: str, record: AICallTelemetry) -> None:
+        telemetry = self.load_resumable(run_id, "ai_telemetry", AITelemetry)
+        if telemetry is None:
+            telemetry = AITelemetry()
+        next_attempt = (
+            max(
+                (
+                    call.attempt
+                    for call in telemetry.calls
+                    if call.stage == record.stage
+                ),
+                default=0,
+            )
+            + 1
+        )
+        telemetry.append(record.model_copy(update={"attempt": next_attempt}))
+        self.store(run_id, "ai_telemetry", telemetry)
+
+    def load_manifest(self, run_id: str, stage: str) -> StageManifest | None:
+        return self.load(run_id, f"{stage}.manifest", StageManifest)
+
+    def store_manifest(self, run_id: str, manifest: StageManifest) -> Path:
+        return self.store(run_id, f"{manifest.stage}.manifest", manifest)
+
+    def stage_manifest(
+        self,
+        stage: str,
+        *,
+        inputs: dict[str, Any],
+        config: dict[str, Any],
+    ) -> StageManifest:
+        return StageManifest(
+            stage=stage,
+            input_hash=stable_hash(inputs),
+            config_hash=stable_hash(config),
+        )
+
+    def invalidate_artefacts(self, run_id: str, names: set[str]) -> list[str]:
+        """Remove only named products and their manifests, preserving audit telemetry."""
+        run_dir = self.run_dir(run_id)
+        removed: list[str] = []
+        for name in names:
+            for suffix in (".json", ".txt"):
+                path = run_dir / f"{name}{suffix}"
+                if path.exists():
+                    path.unlink()
+                    removed.append(path.name)
+        return sorted(removed)
 
     def record_timing(self, run_id: str, timing: StageTiming) -> None:
         """Append one durable timing record to the run's local-stage log."""
@@ -118,10 +200,19 @@ class RunCache:
             "candidate",
             "decision",
         }
+        manifest_names = {
+            "chapterise.manifest",
+            "polish.manifest",
+            "minutes.manifest",
+        }
         removed: list[str] = []
         for path in run_dir.glob("*.json"):
-            if path.stem in names or any(
-                token in path.stem for token in ("review", "candidate", "decision")
+            if (
+                path.stem in names
+                or path.stem in manifest_names
+                or any(
+                    token in path.stem for token in ("review", "candidate", "decision")
+                )
             ):
                 path.unlink()
                 removed.append(path.name)
@@ -174,3 +265,9 @@ def sha256_of(path: Path) -> str:
         for chunk in iter(lambda: handle.read(_CHUNK_SIZE), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def stable_hash(value: Any) -> str:
+    """Hash canonical JSON so manifests bind exact typed inputs/configuration."""
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

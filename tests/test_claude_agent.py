@@ -261,7 +261,7 @@ async def test_missing_usage_is_zeroed_rather_than_crashing() -> None:
     reply = await ClaudeAgent(run_query=RecordingQuery(_result())).run("go")
 
     assert reply.usage.total_tokens == 0
-    assert reply.usage.estimated_cost_usd == 0.0
+    assert reply.usage.estimated_cost_usd is None
 
 
 class TestAgentSpecMerge:
