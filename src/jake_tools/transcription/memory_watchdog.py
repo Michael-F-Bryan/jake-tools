@@ -1,15 +1,41 @@
-"""Process-level memory watchdog: kill this process before the OS does.
+"""Process-level memory watchdog: a best-effort in-process backstop.
 
 The real-meeting acceptance run this guards against didn't just fail — it
 kernel-panicked the machine. A runaway allocation drove this process's
 anonymous memory into swap; swap grew to sixteen swapfiles until "LOW swap
 space" starved watchdogd, and the *kernel* panicked, not just the process.
-Metal's own allocator can reject a too-large allocation cleanly (a fast,
-catchable exception) — but that only covers wired GPU memory. Some of what
-blew up was ordinary swappable CPU-side memory, which Metal's allocator
-never sees and can't protect against. Watching this process's own resident
-memory and self-terminating before the OS runs out of options is the only
-thing that reliably keeps a bad run from taking the whole machine with it.
+
+**Honest scope**: this is a Python daemon thread sampling `resource.
+getrusage` every couple of seconds and calling `os._exit` if the result is
+over budget. That only helps if the thread actually gets scheduled with
+the GIL free. Under the exact conditions that caused the original panic —
+severe swap thrash, or a single blocking libc/Metal allocation call on the
+main thread that never releases the GIL — the OS scheduler can starve this
+thread indefinitely, so it may never sample or terminate before the kernel
+gives up first. This module does **not** reliably prevent a repeat of the
+original incident on its own; it is one layer among several, not the
+whole answer:
+
+- `mx.set_memory_limit`/`torch.mps.set_per_process_memory_fraction`
+  (`asr.py`) are synchronous, in the allocating call itself — they don't
+  depend on any thread being scheduled, so they're the more dependable
+  defense against the primary single-huge-allocation vector (the failure
+  mode this watchdog is weakest against, since Metal's own allocator
+  already rejects that case cleanly and gives a catchable exception).
+- Until a genuinely reliable bound exists — an out-of-process supervisor
+  (a sibling process polling RSS via `psutil`/`ps` and sending `SIGKILL`,
+  or an OS-enforced resource limit) — a first real run of any newly
+  widened workload should be watched from outside this process too (a
+  human or an external script watching swap/RSS, ready to force-kill).
+  Building that supervisor was raised and deliberately deferred as a
+  follow-up (not an oversight); it is the known gap this module doesn't
+  close.
+
+What this watchdog *does* add: coverage for the failure class the
+accelerator caps can't see at all — ordinary swappable CPU-side memory
+growth (part of what caused the original panic), which never goes through
+Metal's allocator. It's real protection for that gap, just not a
+guarantee, because it can only run when the scheduler lets it.
 """
 
 from __future__ import annotations
@@ -51,6 +77,19 @@ def current_rss_bytes() -> int:
     reports `ru_maxrss` in bytes (Linux reports kibibytes — irrelevant
     here, since the transcription pipeline this guards is
     macOS/Apple-Silicon-only).
+
+    **Tuning risk this creates**: because the mark only accumulates, a run
+    whose ASR stage legitimately peaked near the budget will start
+    diarisation already close to the trip point even though `_run_asr`'s
+    own cleanup (`del` + `gc.collect()` + `mx.clear_cache()`) genuinely
+    freed that memory — real current usage dropped, but the sampler can't
+    see that. The budget therefore behaves more like "60% of the worst
+    single stage plus whatever the next stage needs" than "60% of
+    steady-state usage," which makes a false-positive kill on a run with
+    real headroom left more likely than the raw 60% figure suggests. The
+    failure direction is the safe one (over-conservative, not
+    under-conservative) — but it's a real tuning consideration if the
+    budget ever needs lowering.
     """
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
@@ -79,12 +118,15 @@ class MemoryWatchdog:
     """Daemon-thread poll loop that kills this process if its resident
     memory crosses `budget_bytes`.
 
-    Start it before any model loading begins — model loading is exactly
-    where the un-chunked-ASR failure this guards against blew memory up —
-    and stop it once the risky work is done. `sampler` and `terminate` are
-    constructor seams: tests inject fakes for both so they can exercise the
-    budget comparison and termination path without touching real process
-    memory or actually killing the test process.
+    A best-effort in-process backstop, not a hard resource limit — see the
+    module docstring for what it can and can't guarantee (it can be
+    starved of scheduling under the exact swap-thrash conditions it exists
+    to catch). Start it before any model loading begins — model loading is
+    exactly where the un-chunked-ASR failure this guards against blew
+    memory up — and stop it once the risky work is done. `sampler` and
+    `terminate` are constructor seams: tests inject fakes for both so they
+    can exercise the budget comparison and termination path without
+    touching real process memory or actually killing the test process.
     """
 
     def __init__(

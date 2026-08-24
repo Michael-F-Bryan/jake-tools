@@ -121,6 +121,26 @@ class MissingHfTokenError(TranscriberError):
         )
 
 
+class AcceleratorOutOfMemoryError(TranscriberError):
+    """Raised when MLX/torch raise while running ASR or diarisation, most
+    likely because the fail-fast caps (`mx.set_memory_limit`/`torch.mps.
+    set_per_process_memory_fraction`, see `DEFAULT_MPS_MEMORY_FRACTION`)
+    tripped on an oversized allocation.
+
+    Neither library exposes a distinct exception type for "the cap
+    tripped" versus any other `RuntimeError` the call could raise, so this
+    wraps the underlying error rather than asserting with certainty it was
+    an out-of-memory condition — "possibly" in the message is deliberate,
+    not hedging for its own sake. Without this, a cap trip would surface
+    as a raw traceback through Click instead of a clean `ClickException`
+    the way `MissingHfTokenError` and the pipeline-load failure already
+    do (`cli/transcript.py`'s `except TranscriberError` already covers
+    this subclass — no CLI change needed to wire it up)."""
+
+    def __init__(self, stage: str, cause: Exception) -> None:
+        super().__init__(f"{stage} failed, possibly out of accelerator memory: {cause}")
+
+
 @dataclass(frozen=True)
 class AsrSegment:
     """One timestamped span of recognised speech, before diarisation."""
@@ -167,21 +187,40 @@ class LocalTranscriber:
         self._diarisation_model = diarisation_model
         self._asr_chunk_duration = asr_chunk_duration
         self._asr_chunk_overlap = asr_chunk_overlap
-        # None means "use the watchdog's own ~60%-of-RAM default" — resolved
-        # lazily in MemoryWatchdog rather than here, so the default always
-        # reflects the machine actually running `transcribe()`.
+        # None means "use the shared ~60%-of-RAM default" — resolved lazily
+        # via _resolve_memory_budget_bytes() rather than here, so the
+        # default always reflects the machine actually running
+        # `transcribe()`, and both the watchdog and the MLX cap below
+        # agree on one number instead of each computing their own.
         self._memory_budget_bytes = memory_budget_bytes
+
+    def _resolve_memory_budget_bytes(self) -> int:
+        """The byte budget the watchdog and `mx.set_memory_limit` both
+        enforce: an explicit constructor override if one was given, else
+        `default_memory_budget_bytes()`. A single method so the two
+        callers can't silently disagree the way they once did (the MLX
+        cap used to call the module default directly, ignoring a caller-
+        supplied override the watchdog already respected)."""
+        return (
+            self._memory_budget_bytes
+            if self._memory_budget_bytes is not None
+            else default_memory_budget_bytes()
+        )
 
     def transcribe(self, audio: Path) -> RawTranscript:
         if not self._hf_token:
             raise MissingHfTokenError(self._diarisation_model)
 
-        # Must start before model loading: the watchdog exists precisely
-        # because a runaway allocation during/after model load is what
-        # kernel-panicked the machine on a real acceptance run (see the
-        # memory_watchdog module docstring). Stopped in `finally` so a
+        # Must start before model loading: model loading is exactly where
+        # the real acceptance run's runaway allocation grew. This is a
+        # best-effort in-process backstop, not a guarantee — see the
+        # memory_watchdog module docstring for what it can't promise under
+        # GIL/scheduler starvation, and why the mx/torch caps below (and,
+        # until an out-of-process supervisor exists, external supervision
+        # of a first real run) are this watchdog's real partners in
+        # safety, not redundant with it. Stopped in `finally` so a
         # normal-or-failed run doesn't leave the poll thread running.
-        watchdog = MemoryWatchdog(budget_bytes=self._memory_budget_bytes)
+        watchdog = MemoryWatchdog(budget_bytes=self._resolve_memory_budget_bytes())
         watchdog.start()
         try:
             asr_segments = self._run_asr(audio)
@@ -214,7 +253,10 @@ class LocalTranscriber:
         # Fail-fast rather than grow unbounded — see the
         # DEFAULT_MPS_MEMORY_FRACTION comment for why this and the MPS cap
         # below exist alongside chunking and the process-level watchdog.
-        mx.set_memory_limit(default_memory_budget_bytes())
+        # Uses the same resolved budget the watchdog does (see
+        # _resolve_memory_budget_bytes) rather than the raw module
+        # default, so a caller-supplied override governs both.
+        mx.set_memory_limit(self._resolve_memory_budget_bytes())
 
         _log_stage("ASR starting")
         started = time.monotonic()
@@ -235,12 +277,15 @@ class LocalTranscriber:
         # per-chunk progress hook (called with sample offsets before each
         # chunk is processed) — cheap, so wired straight to stage logging
         # rather than built up into anything more elaborate.
-        result = model.transcribe(
-            audio,
-            chunk_duration=self._asr_chunk_duration,
-            overlap_duration=self._asr_chunk_overlap,
-            chunk_callback=_log_chunk_progress,
-        )
+        try:
+            result = model.transcribe(
+                audio,
+                chunk_duration=self._asr_chunk_duration,
+                overlap_duration=self._asr_chunk_overlap,
+                chunk_callback=_log_chunk_progress,
+            )
+        except RuntimeError as exc:
+            raise AcceleratorOutOfMemoryError("ASR", exc) from exc
         segments = [
             AsrSegment(
                 start=sentence.start, end=sentence.end, text=sentence.text.strip()
@@ -301,9 +346,12 @@ class LocalTranscriber:
         # minutes of mono float32 — nothing like parakeet's O(n^2) blowup)
         # sidesteps the assertion entirely.
         samples = AudioDecoder(audio).get_all_samples()
-        output: Any = pipeline(
-            {"waveform": samples.data, "sample_rate": samples.sample_rate}
-        )
+        try:
+            output: Any = pipeline(
+                {"waveform": samples.data, "sample_rate": samples.sample_rate}
+            )
+        except RuntimeError as exc:
+            raise AcceleratorOutOfMemoryError("diarisation", exc) from exc
         annotation: Any = output.speaker_diarization
         turns = [
             DiarisedTurn(start=turn.start, end=turn.end, speaker=str(speaker))

@@ -30,10 +30,12 @@ from jake_tools.transcription.asr import (
     DEFAULT_ASR_CHUNK_DURATION,
     DEFAULT_ASR_CHUNK_OVERLAP,
     UNKNOWN_SPEAKER,
+    AcceleratorOutOfMemoryError,
     AsrSegment,
     DiarisedTurn,
     LocalTranscriber,
     MissingHfTokenError,
+    TranscriberError,
     align,
     transcribe_merged_audio,
 )
@@ -262,7 +264,10 @@ def _transcriber_probe(transcriber_options: TranscriberOptions) -> None:
     click.echo(
         f"hf_token={transcriber_options.hf_token} "
         f"asr_model={transcriber_options.asr_model} "
-        f"diarisation_model={transcriber_options.diarisation_model}"
+        f"diarisation_model={transcriber_options.diarisation_model} "
+        f"asr_chunk_duration={transcriber_options.asr_chunk_duration} "
+        f"asr_chunk_overlap={transcriber_options.asr_chunk_overlap} "
+        f"memory_budget_bytes={transcriber_options.memory_budget_bytes}"
     )
 
 
@@ -276,13 +281,36 @@ def test_transcriber_options_decorator_builds_options_from_flags() -> None:
             "custom/asr",
             "--diarisation-model",
             "custom/diarisation",
+            "--asr-chunk-duration",
+            "60",
+            "--asr-chunk-overlap",
+            "5",
+            "--memory-budget-bytes",
+            "1000000000",
         ],
     )
 
     assert result.exit_code == 0
     assert result.output == (
-        "hf_token=hf_fake_token asr_model=custom/asr diarisation_model=custom/diarisation\n"
+        "hf_token=hf_fake_token asr_model=custom/asr diarisation_model=custom/diarisation "
+        "asr_chunk_duration=60.0 asr_chunk_overlap=5.0 memory_budget_bytes=1000000000\n"
     )
+
+
+def test_transcriber_options_decorator_defaults_chunking_and_memory_budget_flags() -> (
+    None
+):
+    """Unset, `--asr-chunk-duration`/`--asr-chunk-overlap` fall back to the
+    same constants `LocalTranscriber` itself defaults to, and
+    `--memory-budget-bytes` falls back to `None` (LocalTranscriber's own
+    "derive ~60% of RAM at run time" sentinel) — the CLI must not invent a
+    second, possibly-drifting default for any of the three."""
+    result = CliRunner().invoke(_transcriber_probe, ["--hf-token", "hf_fake_token"])
+
+    assert result.exit_code == 0
+    assert f"asr_chunk_duration={DEFAULT_ASR_CHUNK_DURATION}" in result.output
+    assert f"asr_chunk_overlap={DEFAULT_ASR_CHUNK_OVERLAP}" in result.output
+    assert "memory_budget_bytes=None" in result.output
 
 
 def test_transcriber_options_decorator_defaults_hf_token_to_none(
@@ -590,6 +618,19 @@ def test_local_transcriber_enables_parakeets_own_chunking_for_long_audio(
 
 
 # --- LocalTranscriber: memory hardening (caps, cleanup, stage logging) ------
+#
+# Every test below except `..._caps_accelerator_memory_before_each_stage`
+# deliberately leaves `mx.set_memory_limit`/`torch.mps.set_per_process_
+# memory_fraction` unmocked, so `LocalTranscriber.transcribe()` calls the
+# real MLX/torch APIs during these runs. This is intentional, not an
+# oversight: neither call loads a model or runs inference (confirmed by
+# direct smoke test - both are cheap, synchronous config calls against
+# already-initialised Metal/MPS device state), so it's within what "the
+# fast suite must not load models" was written to allow, and it doubles
+# as a smoke test that the real APIs exist and are callable on the
+# installed mlx/torch versions. Don't "fix" this by mocking them here -
+# that would silently drop that coverage. The wiring itself (which values
+# get passed) is asserted separately, with both calls mocked, below.
 
 
 def test_local_transcriber_caps_accelerator_memory_before_each_stage(
@@ -626,6 +667,65 @@ def test_local_transcriber_caps_accelerator_memory_before_each_stage(
 
     assert mx_limit_calls == [asr_module.default_memory_budget_bytes()]
     assert mps_fraction_calls == [asr_module.DEFAULT_MPS_MEMORY_FRACTION]
+
+
+def test_local_transcriber_honours_explicit_memory_budget_for_watchdog_and_mlx_cap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression test: `mx.set_memory_limit` used to always call the
+    module-level `default_memory_budget_bytes()` directly, ignoring a
+    caller-supplied `memory_budget_bytes` override that the watchdog
+    itself already respected — a caller lowering the budget got
+    inconsistent enforcement (watchdog at the caller's ceiling, MLX cap
+    still at the OS-computed 60% default). Asserts an explicit,
+    non-default budget reaches *both* `MemoryWatchdog` and the MLX cap,
+    via their real seams (the `MemoryWatchdog` binding `LocalTranscriber`
+    constructs from, and `mx.set_memory_limit` itself) rather than
+    inspecting `LocalTranscriber`'s own internals."""
+    explicit_budget = 1_234_567
+
+    class _RecordingMemoryWatchdog:
+        """Fake `MemoryWatchdog`: records the budget it was constructed
+        with; `start`/`stop` are no-ops so this never touches real
+        threading or process memory."""
+
+        instances: list[_RecordingMemoryWatchdog] = []
+
+        def __init__(self, *, budget_bytes: int | None = None) -> None:
+            self.budget_bytes = budget_bytes
+            _RecordingMemoryWatchdog.instances.append(self)
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    fake_model = _FakeParakeetModel([_FakeAlignedSentence(0.0, 1.0, "hi")])
+    fake_pipeline = _FakePyannotePipeline([(0.0, 1.0, "SPEAKER_00")])
+    monkeypatch.setattr(
+        asr_module, "parakeet_from_pretrained", lambda model_id: fake_model
+    )
+    monkeypatch.setattr(
+        asr_module.Pipeline,
+        "from_pretrained",
+        lambda checkpoint, token=None: fake_pipeline,
+    )
+    monkeypatch.setattr(asr_module, "AudioDecoder", _FakeAudioDecoder)
+    monkeypatch.setattr(asr_module, "MemoryWatchdog", _RecordingMemoryWatchdog)
+    mx_limit_calls: list[int] = []
+    monkeypatch.setattr(asr_module.mx, "set_memory_limit", mx_limit_calls.append)
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+
+    LocalTranscriber(
+        hf_token="fake-token", memory_budget_bytes=explicit_budget
+    ).transcribe(audio)
+
+    assert [w.budget_bytes for w in _RecordingMemoryWatchdog.instances] == [
+        explicit_budget
+    ]
+    assert mx_limit_calls == [explicit_budget]
 
 
 def test_local_transcriber_clears_mlx_cache_before_diarisation_pipeline_loads(
@@ -694,6 +794,75 @@ def test_local_transcriber_logs_flushed_stage_progress_to_stderr(
     assert "[transcribe] ASR complete in" in stderr
     assert "[transcribe] diarisation starting" in stderr
     assert "[transcribe] diarisation complete in" in stderr
+
+
+def test_local_transcriber_maps_asr_runtime_error_to_accelerator_out_of_memory_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A `RuntimeError` out of parakeet's `.transcribe()` (e.g. MLX's
+    fail-fast memory cap tripping) must not reach the CLI as a raw
+    traceback - it needs to become a `TranscriberError` for `cli/
+    transcript.py`'s existing `except TranscriberError` clause (already
+    wired for `MissingHfTokenError` et al.) to map it to a clean
+    `ClickException`. No CLI change was needed for this: the mapping
+    happens at the domain boundary, in `_run_asr` itself."""
+
+    class _RaisingParakeetModel:
+        preprocessor_config = SimpleNamespace(sample_rate=16000)
+
+        def transcribe(self, *args: object, **kwargs: object) -> object:
+            raise RuntimeError("[metal::malloc] Attempting to allocate too much")
+
+    fake_pipeline = _FakePyannotePipeline([(0.0, 1.0, "SPEAKER_00")])
+    monkeypatch.setattr(
+        asr_module,
+        "parakeet_from_pretrained",
+        lambda model_id: _RaisingParakeetModel(),
+    )
+    monkeypatch.setattr(
+        asr_module.Pipeline,
+        "from_pretrained",
+        lambda checkpoint, token=None: fake_pipeline,
+    )
+    monkeypatch.setattr(asr_module, "AudioDecoder", _FakeAudioDecoder)
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+
+    with pytest.raises(AcceleratorOutOfMemoryError, match="ASR") as exc_info:
+        LocalTranscriber(hf_token="fake-token").transcribe(audio)
+
+    assert isinstance(exc_info.value, TranscriberError)
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+
+def test_local_transcriber_maps_diarisation_runtime_error_to_accelerator_out_of_memory_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Same mapping, for a `RuntimeError` out of the diarisation pipeline
+    call (e.g. torch's MPS allocator's own fail-fast cap tripping)."""
+
+    class _RaisingPipeline:
+        def __call__(self, file: object) -> object:
+            raise RuntimeError("MPS backend out of memory")
+
+    fake_model = _FakeParakeetModel([_FakeAlignedSentence(0.0, 1.0, "hi")])
+    monkeypatch.setattr(
+        asr_module, "parakeet_from_pretrained", lambda model_id: fake_model
+    )
+    monkeypatch.setattr(
+        asr_module.Pipeline,
+        "from_pretrained",
+        lambda checkpoint, token=None: _RaisingPipeline(),
+    )
+    monkeypatch.setattr(asr_module, "AudioDecoder", _FakeAudioDecoder)
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+
+    with pytest.raises(AcceleratorOutOfMemoryError, match="diarisation") as exc_info:
+        LocalTranscriber(hf_token="fake-token").transcribe(audio)
+
+    assert isinstance(exc_info.value, TranscriberError)
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
 
 
 # --- LocalTranscriber: missing HF_TOKEN -------------------------------------

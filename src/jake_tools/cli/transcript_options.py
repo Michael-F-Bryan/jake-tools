@@ -29,6 +29,8 @@ import click
 from pydantic import BaseModel
 
 from ..transcription.asr import (
+    DEFAULT_ASR_CHUNK_DURATION,
+    DEFAULT_ASR_CHUNK_OVERLAP,
     DEFAULT_ASR_MODEL,
     DEFAULT_DIARISATION_MODEL,
     LocalTranscriber,
@@ -78,17 +80,29 @@ class TranscriberOptions(BaseModel):
     pretrained diarisation pipeline is a gated HuggingFace model. It is
     never logged or echoed; :class:`~..transcription.asr.LocalTranscriber`
     only refers to it as `HF_TOKEN` in error messages.
+
+    `memory_budget_bytes=None` means "let `LocalTranscriber` derive its own
+    ~60%-of-RAM default at run time" — the CLI flag exists so that default
+    is tunable without a code change if a real run shows it's wrong (it
+    hasn't been empirically validated against a real crash trace; see
+    task-004b's report), not because every caller needs to set it.
     """
 
     hf_token: str | None
     asr_model: str
     diarisation_model: str
+    asr_chunk_duration: float
+    asr_chunk_overlap: float
+    memory_budget_bytes: int | None
 
     def transcriber(self) -> Transcriber:
         return LocalTranscriber(
             hf_token=self.hf_token,
             asr_model=self.asr_model,
             diarisation_model=self.diarisation_model,
+            asr_chunk_duration=self.asr_chunk_duration,
+            asr_chunk_overlap=self.asr_chunk_overlap,
+            memory_budget_bytes=self.memory_budget_bytes,
         )
 
 
@@ -191,6 +205,37 @@ def transcriber_options(func: F) -> F:
         show_default=True,
         help="pyannote-audio pipeline id (or local path) for speaker diarisation.",
     )
+    @click.option(
+        "--asr-chunk-duration",
+        "asr_chunk_duration",
+        type=float,
+        default=DEFAULT_ASR_CHUNK_DURATION,
+        show_default=True,
+        help=(
+            "Chunk length, in seconds, for parakeet-mlx's own bounded-"
+            "memory ASR chunking. Lower to reduce peak ASR memory further "
+            "at the cost of more (overlapping) inference passes."
+        ),
+    )
+    @click.option(
+        "--asr-chunk-overlap",
+        "asr_chunk_overlap",
+        type=float,
+        default=DEFAULT_ASR_CHUNK_OVERLAP,
+        show_default=True,
+        help="Overlap, in seconds, between consecutive ASR chunks.",
+    )
+    @click.option(
+        "--memory-budget-bytes",
+        "memory_budget_bytes",
+        type=int,
+        default=None,
+        help=(
+            "Byte ceiling for the memory watchdog and MLX's accelerator "
+            "memory cap (default: ~60% of total physical RAM, computed at "
+            "run time - see LocalTranscriber/memory_watchdog)."
+        ),
+    )
     @click.pass_context
     @functools.wraps(func)
     def wrapper(ctx: click.Context, *args: Any, **kwargs: Any) -> Any:
@@ -198,6 +243,9 @@ def transcriber_options(func: F) -> F:
             hf_token=kwargs.pop("hf_token"),
             asr_model=kwargs.pop("asr_model"),
             diarisation_model=kwargs.pop("diarisation_model"),
+            asr_chunk_duration=kwargs.pop("asr_chunk_duration"),
+            asr_chunk_overlap=kwargs.pop("asr_chunk_overlap"),
+            memory_budget_bytes=kwargs.pop("memory_budget_bytes"),
         )
         return ctx.invoke(func, *args, transcriber_options=options, **kwargs)
 
