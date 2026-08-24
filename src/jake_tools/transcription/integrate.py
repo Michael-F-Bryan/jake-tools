@@ -49,8 +49,9 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
+from ..cache_models import CacheEnvelope
 from .cache import RunCache
 from .minutes import MINUTES_CACHE_NAME, MinutesResult
 from .models import PolishedChapter, RawTranscript, TranscriptProducts
@@ -321,7 +322,7 @@ class IntegrationReport(BaseModel):
     sections: list[SectionOutcome]
 
 
-class DeletedFingerprints(BaseModel):
+class DeletedFingerprints(CacheEnvelope):
     """Normalised fingerprints of tier-b units a human has deleted from one section.
 
     Loaded/stored as JSON via `RunCache.load`/`store` (`RunCache` needs a
@@ -334,7 +335,7 @@ class DeletedFingerprints(BaseModel):
     human retypes matching text back into the section (restoration).
     """
 
-    fingerprints: list[str] = Field(default_factory=list)
+    fingerprints: list[str]
 
 
 def _merge_tier_b(

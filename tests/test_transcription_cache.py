@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from jake_tools.ai_usage import AITelemetry
 from jake_tools.transcription.cache import RunCache, sha256_of
 from jake_tools.transcription.models import SourceClip, StageTimingLog
 
@@ -31,6 +32,50 @@ def test_load_of_corrupt_json_raises(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         cache.load("run-1", "clip", SourceClip)
+
+
+def test_load_of_valid_wrong_schema_raises(tmp_path: Path) -> None:
+    cache = RunCache(tmp_path)
+    path = cache.run_dir("run-1") / "timings.json"
+    path.write_text('{"wrong": 1}')
+
+    with pytest.raises(ValueError):
+        cache.load("run-1", "timings", StageTimingLog)
+
+
+def test_load_resumable_valid_wrong_schema_quarantines_it_as_a_cache_miss(
+    tmp_path: Path,
+) -> None:
+    cache = RunCache(tmp_path)
+    path = cache.run_dir("run-1") / "timings.json"
+    path.write_text('{"wrong": 1}')
+
+    assert cache.load_resumable("run-1", "timings", StageTimingLog) is None
+    assert not path.exists()
+
+
+def test_load_resumable_accepts_supported_legacy_timing_schema(
+    tmp_path: Path,
+) -> None:
+    cache = RunCache(tmp_path)
+    path = cache.run_dir("run-1") / "timings.json"
+    path.write_text('{"stages": []}')
+
+    assert cache.load_resumable("run-1", "timings", StageTimingLog) == StageTimingLog(
+        stages=[]
+    )
+    assert path.exists()
+
+
+def test_load_resumable_unsupported_schema_version_quarantines_it(
+    tmp_path: Path,
+) -> None:
+    cache = RunCache(tmp_path)
+    path = cache.run_dir("run-1") / "ai_telemetry.json"
+    path.write_text('{"schema_version": 2, "calls": [], "stages": [], "totals": {}}')
+
+    assert cache.load_resumable("run-1", "ai_telemetry", AITelemetry) is None
+    assert not path.exists()
 
 
 def test_load_resumable_corrupt_json_quarantines_it_as_a_cache_miss(

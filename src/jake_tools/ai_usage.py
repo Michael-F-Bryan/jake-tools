@@ -18,6 +18,8 @@ from pydantic import (
     model_serializer,
 )
 
+from .cache_models import CacheEnvelope
+
 if TYPE_CHECKING:
     from .claude import Reply
 
@@ -190,14 +192,13 @@ class AICallTelemetry(BaseModel):
         )
 
 
-class AITelemetry(BaseModel):
+class AITelemetry(CacheEnvelope):
     """The incrementally persisted AI telemetry document for one run."""
 
-    schema_version: int = 1
     cost_basis: str = COST_BASIS
-    calls: list[AICallTelemetry] = Field(default_factory=list)
-    stages: list[AIStageStats] = Field(default_factory=list)
-    totals: AITotals = Field(default_factory=AITotals)
+    calls: list[AICallTelemetry]
+    stages: list[AIStageStats]
+    totals: AITotals
 
     def append(self, record: AICallTelemetry) -> AITelemetry:
         self.calls.append(record)

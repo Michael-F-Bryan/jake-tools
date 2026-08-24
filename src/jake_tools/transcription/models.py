@@ -18,6 +18,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from ..cache_models import CacheEnvelope
+
 
 class StageTiming(BaseModel):
     """Durable timing and provenance for one local pipeline stage."""
@@ -37,13 +39,13 @@ class StageTiming(BaseModel):
     telemetry_schema_version: int = 1
 
 
-class StageTimingLog(BaseModel):
+class StageTimingLog(CacheEnvelope):
     """The append-only local-stage timing document in a run cache."""
 
-    stages: list[StageTiming] = Field(default_factory=list)
+    stages: list[StageTiming]
 
 
-class StaleState(BaseModel):
+class StaleState(CacheEnvelope):
     """Downstream artefacts invalidated by an upstream human correction."""
 
     reason: str
@@ -71,7 +73,7 @@ class Utterance(BaseModel):
     text: str
 
 
-class RawTranscript(BaseModel):
+class RawTranscript(CacheEnvelope):
     """The output of ASR+diarisation, before speakers are resolved.
 
     `utterances` is a total order by non-decreasing `start` (tiebroken by

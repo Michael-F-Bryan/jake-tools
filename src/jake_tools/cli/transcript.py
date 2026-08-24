@@ -15,7 +15,7 @@ from pathlib import Path
 
 import click
 
-from ..ai_usage import AITelemetry
+from ..ai_usage import AITelemetry, AITotals
 from ..claude import ClaudeAgent, ClaudeAgentError
 from ..transcription.adapt import (
     AdaptedTranscript,
@@ -81,7 +81,9 @@ def transcript() -> None:
 def telemetry(run_id: str, cache_options: CacheOptions) -> None:
     """Print durable per-stage LLM usage and API-rate-equivalent totals."""
     cache = cache_options.run_cache()
-    value = cache.load(run_id, "ai_telemetry", AITelemetry) or AITelemetry()
+    value = cache.load(run_id, "ai_telemetry", AITelemetry) or AITelemetry(
+        calls=[], stages=[], totals=AITotals()
+    )
     click.echo(value.model_dump_json(indent=2))
 
 

@@ -56,6 +56,16 @@ def test_auto_selects_cpu_when_mps_is_unavailable(
     assert select_diarisation_device("auto") == "cpu"
 
 
+def test_explicit_cpu_does_not_probe_mps(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        asr_module.torch.backends.mps,
+        "is_available",
+        lambda: pytest.fail("explicit CPU selection probed MPS"),
+    )
+
+    assert select_diarisation_device("cpu") == "cpu"
+
+
 def test_explicit_mps_refuses_to_fallback_when_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

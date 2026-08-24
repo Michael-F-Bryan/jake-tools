@@ -38,6 +38,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from ..cache_models import CacheEnvelope
 from ..claude import AgentSpec, ClaudeAgent, ClaudeAgentError
 from ..prompting import StructuredPrompt
 from .cache import RunCache
@@ -510,16 +511,16 @@ async def polish_chapters(
 # --- Step 4: run orchestration around one `transcript polish` invocation ----
 
 
-class PolishedChapterList(BaseModel):
+class PolishedChapterList(CacheEnvelope):
     """On-disk wrapper for `polished.json` (`RunCache.store` needs a `BaseModel`)."""
 
     chapters: list[PolishedChapter]
 
 
-class PolishIssueList(BaseModel):
+class PolishIssueList(CacheEnvelope):
     """On-disk wrapper for `polish_issues.json`."""
 
-    issues: list[str] = Field(default_factory=list)
+    issues: list[str]
 
 
 class PolishResponse(BaseModel):

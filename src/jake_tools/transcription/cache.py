@@ -17,7 +17,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ..ai_usage import AICallTelemetry, AITelemetry, TelemetrySink
+from ..ai_usage import AICallTelemetry, AITelemetry, AITotals, TelemetrySink
+from ..cache_models import CacheEnvelope
 from .models import StageTiming, StageTimingLog, StaleState
 
 _DEFAULT_ROOT = Path.home() / "Library" / "Caches" / "jake-tools" / "transcription"
@@ -31,10 +32,9 @@ _RESUMABLE_NAMES = {
 }
 
 
-class StageManifest(BaseModel):
+class StageManifest(CacheEnvelope):
     """Content/config provenance required before reusing a model artefact."""
 
-    schema_version: int = 1
     stage: str
     input_hash: str
     config_hash: str
@@ -129,7 +129,7 @@ class RunCache:
     def record_ai_call(self, run_id: str, record: AICallTelemetry) -> None:
         telemetry = self.load_resumable(run_id, "ai_telemetry", AITelemetry)
         if telemetry is None:
-            telemetry = AITelemetry()
+            telemetry = AITelemetry(calls=[], stages=[], totals=AITotals())
         next_attempt = (
             max(
                 (
@@ -179,7 +179,7 @@ class RunCache:
         """Append one durable timing record to the run's local-stage log."""
         log = self.load_resumable(run_id, "timings", StageTimingLog)
         if log is None:
-            log = StageTimingLog()
+            log = StageTimingLog(stages=[])
         log.stages.append(timing)
         self.store(run_id, "timings", log)
 

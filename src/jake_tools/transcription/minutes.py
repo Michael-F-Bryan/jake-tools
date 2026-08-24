@@ -45,6 +45,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from ..cache_models import CacheEnvelope
 from ..claude import AgentSpec, ClaudeAgent
 from ..prompting import StructuredPrompt
 from .cache import RunCache
@@ -214,7 +215,7 @@ async def generate_minutes(
 # --- run orchestration: cache state around one `minutes` call ---------------
 
 
-class MinutesResult(BaseModel):
+class MinutesResult(CacheEnvelope):
     """On-disk wrapper for `minutes.json`, and what the CLI prints to stdout.
 
     `MinutesResponse` is already a plain `BaseModel`, so nothing stops

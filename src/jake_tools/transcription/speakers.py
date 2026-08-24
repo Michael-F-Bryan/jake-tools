@@ -49,6 +49,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from ..ai_usage import AITelemetry
+from ..cache_models import CacheEnvelope
 from ..claude import ClaudeAgent
 from ..prompting import StructuredPrompt
 from .audio import AudioTool
@@ -113,10 +114,10 @@ class SpeakerCorrectionConflictError(SpeakersError):
     """Raised when durable human corrections contradict one another."""
 
 
-class CorrectionSet(BaseModel):
+class CorrectionSet(CacheEnvelope):
     """Typed durable range corrections plus their source identity."""
 
-    corrections: list[SpeakerCorrection] = Field(default_factory=list)
+    corrections: list[SpeakerCorrection]
     audio_sha256: str | None = None
     recording_identity: str | None = None
 
@@ -500,10 +501,10 @@ def _context_lines(
 # --- run orchestration: cache state around one `resolve` call ---------------
 
 
-class AssignmentSet(BaseModel):
+class AssignmentSet(CacheEnvelope):
     """The accumulated `--assign` overrides for one run, as cached JSON."""
 
-    assignments: list[SpeakerAssignment] = Field(default_factory=list)
+    assignments: list[SpeakerAssignment]
 
 
 class SpeakersResponse(BaseModel):

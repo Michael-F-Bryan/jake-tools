@@ -36,6 +36,7 @@ from collections.abc import Sequence
 
 from pydantic import BaseModel, TypeAdapter
 
+from ..cache_models import CacheEnvelope
 from ..claude import AgentSpec, ClaudeAgent
 from ..prompting import StructuredPrompt
 from .cache import RunCache
@@ -51,7 +52,7 @@ CHAPTERS_CACHE_NAME = "chapters"
 CHAPTERS_ADAPTER: TypeAdapter[list[ChapterSpan]] = TypeAdapter(list[ChapterSpan])
 
 
-class ChapterList(BaseModel):
+class ChapterList(CacheEnvelope):
     """On-disk wrapper for `chapters.json`.
 
     `chapterise`/`run_chapterisation`'s real output is a bare

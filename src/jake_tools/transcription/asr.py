@@ -64,6 +64,7 @@ from torchcodec.decoders import (
     AudioDecoder,  # pyright: ignore[reportPrivateImportUsage]
 )
 
+from ..cache_models import CacheEnvelope
 from .cache import RunCache, sha256_of
 from .memory_watchdog import MemoryWatchdog, default_memory_budget_bytes
 from .models import RawTranscript, SourceClip, StageTiming, Utterance
@@ -160,7 +161,7 @@ class DiarisedTurn(BaseModel):
     speaker: str
 
 
-class AsrCheckpoint(BaseModel):
+class AsrCheckpoint(CacheEnvelope):
     """Content/config-bound ASR output that can be resumed independently."""
 
     audio_sha256: str
@@ -170,7 +171,7 @@ class AsrCheckpoint(BaseModel):
     segments: list[AsrSegment]
 
 
-class DiarisationCheckpoint(BaseModel):
+class DiarisationCheckpoint(CacheEnvelope):
     """Content/config-bound diarisation output that can be resumed independently."""
 
     audio_sha256: str
@@ -697,6 +698,8 @@ def _accepts_hook(pipeline: Any) -> bool:
 
 def select_diarisation_device(requested: DiarisationDevice) -> Literal["cpu", "mps"]:
     """Resolve a requested device without silently falling back."""
+    if requested == "cpu":
+        return "cpu"
     mps_available = bool(torch.backends.mps.is_available())
     if requested == "mps" and not mps_available:
         raise TranscriberError(
