@@ -339,6 +339,25 @@ async def test_polish_then_fix_are_two_separate_calls_and_fixer_sees_raw_and_pol
     ]
 
 
+async def test_polish_library_rejects_non_positive_max_concurrency(
+    tmp_path: Path,
+) -> None:
+    transcript = _transcript([_utterance(0, "Ada Lovelace", "Hello.")])
+    span = ChapterSpan(
+        title="Opening", start_utterance=0, end_utterance=0, start_seconds=0.0
+    )
+
+    with pytest.raises(ValueError, match="max_concurrency"):
+        await polish_chapters(
+            transcript,
+            [span],
+            _note(attendees=["Ada Lovelace"]),
+            _empty_vault(tmp_path),
+            ClaudeAgent(run_query=ScriptedQuery({}, {})),
+            max_concurrency=0,
+        )
+
+
 async def test_fixer_meta_commentary_never_ships_as_the_chapter_summary_when_nothing_was_fixed(
     tmp_path: Path,
 ) -> None:
@@ -1096,6 +1115,29 @@ def test_polish_cli_defaults_chapter_to_none_and_max_concurrency_to_four(
     assert result.exit_code == 0, result.output
     assert captured["chapter"] is None
     assert captured["max_concurrency"] == 4
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_polish_cli_rejects_non_positive_max_concurrency(
+    value: str, tmp_path: Path
+) -> None:
+    result = CliRunner().invoke(
+        main,
+        [
+            "transcript",
+            "polish",
+            str(FIXTURES / "meeting_note.md"),
+            "--run-id",
+            "run-1",
+            "--max-concurrency",
+            value,
+            "--cache-root",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Invalid value for '--max-concurrency'" in result.output
 
 
 def test_polish_cli_reports_domain_errors_as_a_clean_click_exception(

@@ -328,15 +328,26 @@ def validate_polished_chapter(
     """Validate exact source coverage and attribution before promotion."""
     expected = list(source_indices or range(len(source_utterances)))
     source_by_index = dict(zip(expected, source_utterances, strict=True))
+    dropped = [item.source_turn_index for item in chapter.dropped_source_turns]
+    if len(dropped) != len(set(dropped)):
+        raise ValueError("polish dropped-source provenance is duplicated")
+    if any(index not in source_by_index for index in dropped):
+        raise ValueError("polish dropped-source provenance index is out of range")
+    dropped_set = set(dropped)
     covered: list[int] = []
     for turn in chapter.turns:
         if not turn.source_turn_indices:
             raise ValueError("polish provenance is missing from an output turn")
-        if turn.source_turn_indices != list(
-            range(min(turn.source_turn_indices), max(turn.source_turn_indices) + 1)
-        ):
-            raise ValueError("a polished turn may merge only adjacent source turns")
-        for index in turn.source_turn_indices:
+        indices = turn.source_turn_indices
+        if indices != sorted(indices) or len(indices) != len(set(indices)):
+            raise ValueError("polish provenance is not chronological")
+        for previous, current in zip(indices, indices[1:], strict=False):
+            if any(index not in dropped_set for index in range(previous + 1, current)):
+                raise ValueError(
+                    "a polished turn may merge only adjacent source turns unless "
+                    "intervening turns are explicitly dropped"
+                )
+        for index in indices:
             if index not in source_by_index:
                 raise ValueError(f"polish provenance index {index} is out of range")
             if index in covered:
@@ -346,11 +357,6 @@ def validate_polished_chapter(
                     f"polish output speaker {turn.speaker!r} does not match source speaker"
                 )
             covered.append(index)
-    dropped = [item.source_turn_index for item in chapter.dropped_source_turns]
-    if len(dropped) != len(set(dropped)):
-        raise ValueError("polish dropped-source provenance is duplicated")
-    if any(index not in source_by_index for index in dropped):
-        raise ValueError("polish dropped-source provenance index is out of range")
     if set(covered) & set(dropped) or set(covered) | set(dropped) != set(expected):
         raise ValueError("polish provenance does not form an exact source partition")
     if covered != sorted(covered):
@@ -493,6 +499,8 @@ async def polish_chapters(
     - a silently missing chapter is worse than an error.
     """
 
+    if max_concurrency < 1:
+        raise ValueError("max_concurrency must be at least 1")
     lexicon = build_lexicon(note, vault)
     semaphore = asyncio.Semaphore(max_concurrency)
 

@@ -51,7 +51,11 @@ from pydantic import BaseModel, Field
 from ..ai_usage import AITelemetry
 from ..claude import AgentSpec, ClaudeAgent
 from .adapt import run_adapt
-from .asr import Transcriber, transcribe_merged_audio
+from .asr import (
+    Transcriber,
+    build_audio_stage_manifest,
+    transcribe_merged_audio,
+)
 from .audio import AudioTool, merge_note_audio, run_id_for
 from .cache import RunCache, sha256_of
 from .chapters import run_chapterisation
@@ -60,7 +64,7 @@ from .minutes import run_minutes
 from .models import PolishedChapter, RawTranscript, SnippetRequest, StageTiming
 from .note import ParsedNote, parse_note
 from .obsidian import VaultClient
-from .polish import run_polish
+from .polish import PolishIssueList, run_polish
 from .product_review import export_product_review
 from .speakers import RAW_TRANSCRIPT_CACHE_NAME, run_speaker_resolution
 
@@ -238,6 +242,7 @@ async def _acquire_raw_transcript(
         if raw.clips != merge_result.clips:
             corrected = raw.model_copy(update={"clips": merge_result.clips})
             cache.store(run_id, RAW_TRANSCRIPT_CACHE_NAME, corrected)
+            cache.store_manifest(run_id, build_audio_stage_manifest(corrected))
         return run_id
 
     transcript_target = _transcript_embed_target(note)
@@ -330,6 +335,7 @@ async def run_pipeline(
         vault=vault,
         cache=cache,
     )
+    polish_issues = cache.load(run_id, "polish_issues", PolishIssueList)
 
     await run_minutes(note_path, run_id, agent=agent, vault=vault, cache=cache)
 
@@ -354,7 +360,7 @@ async def run_pipeline(
         ),
         resolved_unknown_turns=unknown_turns,
         resolved_unknown_words=unknown_words,
-        fixer_issues=[],
+        fixer_issues=polish_issues.issues if polish_issues is not None else [],
         integration=IntegrationReport(
             run_id=run_id, note_path=str(note_path), sections=[]
         ),

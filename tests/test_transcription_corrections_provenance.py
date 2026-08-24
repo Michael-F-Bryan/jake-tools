@@ -9,6 +9,7 @@ from jake_tools.cli import main
 from jake_tools.transcription.cache import RunCache
 from jake_tools.transcription.chapters import ChapterList
 from jake_tools.transcription.models import (
+    DroppedSourceTurn,
     PolishedChapter,
     PolishedTurn,
     RawTranscript,
@@ -143,6 +144,28 @@ async def test_partial_overlap_is_rejected(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_range_correction_must_contain_an_utterance(tmp_path: Path) -> None:
+    with pytest.raises(InvalidCorrectionError, match="no utterance"):
+        await resolve(
+            _note(),
+            _transcript(),
+            agent=_Agent([]),  # type: ignore[arg-type]
+            assignments=[],
+            corrections=[
+                SpeakerCorrection(
+                    cluster="SPEAKER_00",
+                    start_seconds=20,
+                    end_seconds=30,
+                    name="Ada Lovelace",
+                )
+            ],
+            audio_tool=_Audio(),  # type: ignore[arg-type]
+            merged_audio=tmp_path / "missing.m4a",
+            snippet_dir=tmp_path / "snippets",
+        )
+
+
 def test_conflicting_corrections_fail_but_identical_duplicates_are_idempotent() -> None:
     correction = parse_correct("SPEAKER_00=0-2=Ada Lovelace")
     assert _merge_corrections([correction], [correction]) == [correction]
@@ -249,6 +272,53 @@ def test_unknown_cannot_change_speaker_and_partition_is_exact() -> None:
     )
     with pytest.raises(ValueError, match="speaker"):
         validate_polished_chapter(bad, source)
+
+
+def test_polish_allows_a_ledger_authorised_gap_inside_a_merged_turn() -> None:
+    source = [_utterance(index, "Ada", f"source {index}") for index in range(42, 61)]
+    chapter = PolishedChapter(
+        title="replay",
+        start_seconds=0,
+        summary="s",
+        turns=[
+            PolishedTurn(
+                speaker="Ada",
+                text="merged",
+                source_turn_indices=list(range(42, 52)),
+            ),
+            PolishedTurn(
+                speaker="Ada",
+                text="continued",
+                source_turn_indices=[52, 55, 56, 57],
+            ),
+            PolishedTurn(
+                speaker="Ada",
+                text="closing",
+                source_turn_indices=[58, 59, 60],
+            ),
+        ],
+        dropped_source_turns=[
+            DroppedSourceTurn(
+                source_turn_index=53,
+                reason="unintelligible fragment with no recoverable substance",
+            ),
+            DroppedSourceTurn(
+                source_turn_index=54,
+                reason="unintelligible fragment with no recoverable substance",
+            ),
+        ],
+    )
+
+    assert (
+        validate_polished_chapter(chapter, source, source_indices=range(42, 61))
+        == chapter
+    )
+    with pytest.raises(ValueError, match="intervening turns"):
+        validate_polished_chapter(
+            chapter.model_copy(update={"dropped_source_turns": []}),
+            source,
+            source_indices=range(42, 61),
+        )
 
 
 def test_legacy_polish_without_provenance_is_readable_but_not_verified() -> None:

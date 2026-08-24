@@ -1205,3 +1205,81 @@ def test_integrate_cli_refuses_without_an_accepted_product_review(
     assert result.exit_code != 0, result.output
     assert "accepted product review" in result.output
     assert note_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("operation", "name"),
+    [
+        ("store_text", BASELINE_SUMMARY_NAME),
+        ("store_text", BASELINE_NOTES_NAME),
+        ("store", DELETED_SUMMARY_NAME),
+        ("store", DELETED_NOTES_NAME),
+    ],
+)
+def test_integration_cache_failure_rolls_back_note_and_all_cache_state(
+    operation: str,
+    name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    note = _write_note(tmp_path, MEETING_PREP_ONLY)
+    cache = RunCache(tmp_path / "cache")
+    run_id = "run-rollback"
+    run_dir = cache.run_dir(run_id)
+    original_note = note.read_bytes()
+    cache.store_text(run_id, BASELINE_SUMMARY_NAME, "old summary")
+    cache.store_text(run_id, BASELINE_NOTES_NAME, "old notes")
+    cache.store(
+        run_id,
+        DELETED_SUMMARY_NAME,
+        DeletedFingerprints(fingerprints=["old-summary"]),
+    )
+    cache.store(
+        run_id,
+        DELETED_NOTES_NAME,
+        DeletedFingerprints(fingerprints=["old-notes"]),
+    )
+    before_cache = {
+        path.name: path.read_bytes()
+        for path in run_dir.iterdir()
+        if path.name
+        in {
+            "baseline_summary.txt",
+            "baseline_notes.txt",
+            "deleted_summary.json",
+            "deleted_notes.json",
+        }
+    }
+
+    original_store_text = cache.store_text
+    original_store = cache.store
+
+    def fail_store_text(current_run_id: str, current_name: str, text: str) -> Path:
+        if operation == "store_text" and current_name == name:
+            raise OSError(f"injected failure for {current_name}")
+        return original_store_text(current_run_id, current_name, text)
+
+    def fail_store(current_run_id: str, current_name: str, value: object) -> Path:
+        if operation == "store" and current_name == name:
+            raise OSError(f"injected failure for {current_name}")
+        return original_store(current_run_id, current_name, value)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cache, "store_text", fail_store_text)
+    monkeypatch.setattr(cache, "store", fail_store)
+
+    with pytest.raises(ReconstructionError, match="rolled back"):
+        run_integrate(note, _products(), cache=cache, run_id=run_id)
+
+    assert note.read_bytes() == original_note
+    after_cache = {
+        path.name: path.read_bytes()
+        for path in run_dir.iterdir()
+        if path.name
+        in {
+            "baseline_summary.txt",
+            "baseline_notes.txt",
+            "deleted_summary.json",
+            "deleted_notes.json",
+        }
+    }
+    assert after_cache == before_cache

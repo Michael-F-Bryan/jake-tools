@@ -242,6 +242,27 @@ class RunCache:
         self.store(run_id, "stale", stale)
         return stale
 
+    def clear_stale_if_complete(self, run_id: str) -> bool:
+        """Clear invalidation state only after every dependent product exists."""
+        stale_path = self._model_path(run_id, "stale")
+        if not stale_path.exists():
+            return True
+        run_dir = self.run_dir(run_id)
+        required = (
+            "chapters.json",
+            "chapterise.manifest.json",
+            "polished.json",
+            "polish.manifest.json",
+            "minutes.json",
+            "minutes.manifest.json",
+            "minutes_review.json",
+            "minutes-review.manifest.json",
+        )
+        if any(not (run_dir / name).exists() for name in required):
+            return False
+        stale_path.unlink()
+        return True
+
     def _model_path(self, run_id: str, name: str) -> Path:
         return self.run_dir(run_id) / f"{name}.json"
 
@@ -264,14 +285,15 @@ def _exclusive_file_lock(path: Path) -> Iterator[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _atomic_write(path: Path, content: str) -> None:
+def _atomic_write(path: Path, content: str | bytes) -> None:
     """Replace a cache artefact only after its complete contents are durable."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
     try:
+        mode = "wb" if isinstance(content, bytes) else "w"
         with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
+            mode=mode,
+            encoding=None if isinstance(content, bytes) else "utf-8",
             dir=path.parent,
             prefix=f".{path.name}.",
             delete=False,
@@ -293,6 +315,11 @@ def _atomic_write(path: Path, content: str) -> None:
 
 def atomic_write_text(path: Path, content: str) -> None:
     """Atomically write UTF-8 text and fsync its containing directory."""
+    _atomic_write(path, content)
+
+
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Atomically restore exact bytes, including a previous note revision."""
     _atomic_write(path, content)
 
 

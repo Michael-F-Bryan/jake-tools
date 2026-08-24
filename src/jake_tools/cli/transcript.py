@@ -542,7 +542,7 @@ async def chapterise(
 @click.option(
     "--max-concurrency",
     "max_concurrency",
-    type=int,
+    type=click.IntRange(min=1),
     default=4,
     show_default=True,
     help="Maximum number of chapters polished concurrently.",

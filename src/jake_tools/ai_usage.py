@@ -30,6 +30,36 @@ COST_BASIS = (
 CallStatus = Literal["success", "error", "cache_hit"]
 
 
+def _merge_model_usage_values(left: Any, right: Any) -> Any:
+    """Merge provider usage payloads without losing repeated-model totals."""
+    if isinstance(left, dict) and isinstance(right, dict):
+        keys = left.keys() | right.keys()
+        return {
+            key: _merge_model_usage_values(left[key], right[key])
+            if key in left and key in right
+            else left[key]
+            if key in left
+            else right[key]
+            for key in keys
+        }
+    if (
+        isinstance(left, (int, float))
+        and not isinstance(left, bool)
+        and isinstance(right, (int, float))
+        and not isinstance(right, bool)
+    ):
+        return left + right
+    if left == right:
+        return left
+    # Provider metadata can legitimately disagree between calls; retaining the
+    # first value is safer than silently replacing earlier evidence.
+    return left
+
+
+def _merge_model_usage(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    return _merge_model_usage_values(left, right)
+
+
 class Usage(BaseModel):
     """What one agent call consumed.
 
@@ -80,7 +110,7 @@ class Usage(BaseModel):
         return Usage(
             model=self.model if self.model == other.model else None,
             provider=self.provider if self.provider == other.provider else None,
-            model_usage={**self.model_usage, **other.model_usage},
+            model_usage=_merge_model_usage(self.model_usage, other.model_usage),
             api_calls=self.api_calls + other.api_calls,
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,

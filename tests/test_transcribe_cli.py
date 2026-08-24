@@ -207,6 +207,8 @@ class FakeTranscriber:
                 "diarisation_model": DEFAULT_DIARISATION_MODEL,
                 "diarisation_device": "cpu",
                 "num_speakers": 2,
+                "asr_chunk_duration": 120.0,
+                "asr_chunk_overlap": 15.0,
             }
         )
 
@@ -520,8 +522,11 @@ def test_transcribe_review_required_preserves_note_and_exits_four(
 
 
 async def test_run_pipeline_resume_after_assign_does_not_repeat_asr(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from jake_tools.transcription.product_review import export_product_review
+
+    monkeypatch.setattr(pipeline_module, "export_product_review", export_product_review)
     note_path = _audio_note(tmp_path)
     clip_a = tmp_path / "clip_a.m4a"
     clip_b = tmp_path / "clip_b.m4a"
@@ -536,10 +541,62 @@ async def test_run_pipeline_resume_after_assign_does_not_repeat_asr(
         },
     )
     audio_tool = FakeAudioTool()
-    transcriber = FakeTranscriber(_raw_transcript())
+    transcriber = FakeTranscriber(
+        _raw_transcript().model_copy(
+            update={
+                "utterances": [
+                    _raw_transcript().utterances[0].model_copy(update={"end": 65.0}),
+                    _raw_transcript()
+                    .utterances[1]
+                    .model_copy(update={"start": 65.0, "end": 70.0}),
+                    _raw_transcript()
+                    .utterances[2]
+                    .model_copy(update={"start": 70.0, "end": 135.0}),
+                    _raw_transcript()
+                    .utterances[3]
+                    .model_copy(update={"start": 135.0, "end": 140.0}),
+                ]
+            }
+        )
+    )
+
     # SPEAKER_00 confidently resolves; SPEAKER_01 stays unresolved until
     # --assign fills it in on the second call.
-    query = RoutingQuery(
+    class ReviewableRoutingQuery(RoutingQuery):
+        def __call__(
+            self, *, prompt: str, options: ClaudeAgentOptions
+        ) -> AsyncIterator[Message]:
+            schema = options.output_format or {}
+            title = schema.get("schema", {}).get("title", "")
+            if title == "ChapterisationResponse":
+                self._payloads[title] = {
+                    "chapters": [
+                        {"title": "Opening", "start_utterance": 0},
+                        {"title": "Wrap-up", "start_utterance": 2},
+                    ]
+                }
+            elif title in {"PolishedChapterResponse", "ChapterFixResponse"}:
+                start = 2 if "\n2 |" in prompt else 0
+                speakers = ["Ada Lovelace", "Grace Hopper"]
+                self._payloads[title] = {
+                    "summary": "A short, fixed chapter summary.",
+                    "turns": [
+                        {
+                            "speaker": speaker,
+                            "text": f"Turn {start + index}.",
+                            "source_turn_indices": [start + index],
+                        }
+                        for index, speaker in enumerate(speakers)
+                    ],
+                    **(
+                        {"issues": ["kept exact source attribution"]}
+                        if title == "ChapterFixResponse"
+                        else {}
+                    ),
+                }
+            return super().__call__(prompt=prompt, options=options)
+
+    query = ReviewableRoutingQuery(
         {
             "SpeakerProposals": {
                 "proposals": [
@@ -582,6 +639,8 @@ async def test_run_pipeline_resume_after_assign_does_not_repeat_asr(
     assert second.status == "review_required"
     assert len(transcriber.calls) == 1  # still one: ASR was never repeated
     assert first.run_id == second.run_id
+    assert not (cache.run_dir(second.run_id or "") / "stale.json").exists()
+    assert (cache.run_dir(second.run_id or "") / "product_review.json").exists()
 
 
 # --- ramp selection: audio vs transcript vs neither -------------------------
@@ -747,7 +806,7 @@ async def test_run_pipeline_unknown_turn_ratio_reflects_the_polished_turns(
                     {"speaker": "Unknown", "text": "Something unclear was said."},
                     {"speaker": "Grace Hopper", "text": "Agreed, let's continue."},
                 ],
-                "issues": [],
+                "issues": ["removed a filler fragment"],
             },
             **_DEFAULT_MINUTES,
         }
@@ -773,6 +832,10 @@ async def test_run_pipeline_unknown_turn_ratio_reflects_the_polished_turns(
     assert outcome.status == "review_required"
     assert outcome.report is not None
     assert outcome.report.unknown_turn_ratio == pytest.approx(2 / 6)
+    assert outcome.report.fixer_issues == [
+        "Opening: removed a filler fragment",
+        "Wrap-up: removed a filler fragment",
+    ]
 
 
 # --- CLI layer: thin flag-parsing/delegation tests ---------------------------
@@ -830,6 +893,22 @@ def test_transcribe_cli_delegates_to_run_pipeline_and_prints_the_report(
     assert captured["assignments"] == ("SPEAKER_00=Ada Lovelace",)
     assert captured["finalise"] is True
     assert captured["max_concurrency"] == 2
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_transcribe_cli_rejects_non_positive_max_concurrency(
+    value: str, tmp_path: Path
+) -> None:
+    note_path = tmp_path / "note.md"
+    note_path.write_text("placeholder")
+
+    result = CliRunner().invoke(
+        main,
+        ["transcribe", str(note_path), "--max-concurrency", value],
+    )
+
+    assert result.exit_code != 0
+    assert "Invalid value for '--max-concurrency'" in result.output
 
 
 # One representative instance per error family `_STAGE_ERRORS` maps to a

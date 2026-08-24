@@ -896,6 +896,24 @@ def test_local_transcriber_transcribe_raises_missing_hf_token_error_without_a_to
         transcriber.transcribe(tmp_path / "does-not-need-to-exist.m4a")
 
 
+def test_cached_transcriber_checks_hf_token_before_asr_on_diarisation_cache_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"audio")
+    transcriber = LocalTranscriber(hf_token=None)
+
+    def unexpected_asr(*args: object, **kwargs: object) -> object:
+        raise AssertionError("ASR must not run before the HF preflight")
+
+    monkeypatch.setattr(transcriber, "_run_cached_asr", unexpected_asr)
+
+    with pytest.raises(MissingHfTokenError, match="HF_TOKEN"):
+        transcriber.transcribe_cached(
+            audio, run_id="run-1", cache=RunCache(tmp_path / "cache")
+        )
+
+
 # --- live: real LocalTranscriber --------------------------------------------
 
 

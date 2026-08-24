@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from jake_tools.ai_usage import AIStageStats, AITotals, Usage
 
 
@@ -124,3 +126,38 @@ def test_usage_preserves_complete_multi_model_mapping() -> None:
 
     assert usage.model_usage["model-a"]["provider"] == "provider-a"
     assert usage.model_usage["model-b"]["cost_usd"] == 0.2
+
+
+def test_usage_add_sums_nested_usage_for_the_same_model() -> None:
+    first = Usage(
+        model_usage={
+            "claude-opus-4-8": {
+                "provider": "anthropic",
+                "inputTokens": 10,
+                "outputTokens": 3,
+                "cacheReadInputTokens": 4,
+                "costUSD": 0.1,
+            }
+        }
+    )
+    second = Usage(
+        model_usage={
+            "claude-opus-4-8": {
+                "provider": "anthropic",
+                "inputTokens": 7,
+                "outputTokens": 2,
+                "cacheReadInputTokens": 6,
+                "costUSD": 0.2,
+            }
+        }
+    )
+
+    merged = first + second
+
+    assert merged.model_usage["claude-opus-4-8"] == {
+        "provider": "anthropic",
+        "inputTokens": 17,
+        "outputTokens": 5,
+        "cacheReadInputTokens": 10,
+        "costUSD": pytest.approx(0.3),
+    }

@@ -53,7 +53,13 @@ from typing import Literal
 from pydantic import BaseModel
 
 from ..cache_models import CacheEnvelope
-from .cache import RunCache, StageManifest, atomic_write_text, stable_hash
+from .cache import (
+    RunCache,
+    StageManifest,
+    atomic_write_bytes,
+    atomic_write_text,
+    stable_hash,
+)
 from .chapters import ChapterList
 from .minutes import MINUTES_CACHE_NAME, MinutesResult
 from .models import PolishedChapter, RawTranscript, TranscriptProducts
@@ -977,15 +983,26 @@ def apply_integration_plan(
 ) -> IntegrationReport:
     """Atomically apply a previously reviewed exact candidate and verify it."""
     expected = hashlib.sha256(plan.candidate_text.encode("utf-8")).hexdigest()
-    atomic_write_text(note_path, plan.candidate_text)
-    actual = hashlib.sha256(note_path.read_bytes()).hexdigest()
-    if actual != expected:
-        raise ReconstructionError(
-            f"{note_path}: post-write candidate hash {actual} did not match "
-            f"accepted hash {expected}; recover from the accepted candidate "
-            "in the run cache before retrying."
-        )
+    run_dir = cache.run_dir(run_id)
+    target_paths = {
+        run_dir / f"{BASELINE_SUMMARY_NAME}.txt",
+        run_dir / f"{BASELINE_NOTES_NAME}.txt",
+        run_dir / f"{DELETED_SUMMARY_NAME}.json",
+        run_dir / f"{DELETED_NOTES_NAME}.json",
+    }
+    previous_note = note_path.read_bytes()
+    previous_cache = {
+        path: path.read_bytes() if path.exists() else None for path in target_paths
+    }
+
     try:
+        atomic_write_text(note_path, plan.candidate_text)
+        actual = hashlib.sha256(note_path.read_bytes()).hexdigest()
+        if actual != expected:
+            raise ReconstructionError(
+                f"{note_path}: post-write candidate hash {actual} did not match "
+                f"accepted hash {expected}"
+            )
         cache.store_text(run_id, BASELINE_SUMMARY_NAME, plan.baseline_summary)
         cache.store_text(run_id, BASELINE_NOTES_NAME, plan.baseline_notes)
         cache.store(
@@ -999,10 +1016,21 @@ def apply_integration_plan(
             DeletedFingerprints(fingerprints=plan.deleted_notes),
         )
     except Exception as exc:
+        try:
+            atomic_write_bytes(note_path, previous_note)
+            for path, content in previous_cache.items():
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    atomic_write_bytes(path, content)
+        except Exception as rollback_exc:
+            raise ReconstructionError(
+                f"{note_path}: integration failed and rollback failed; "
+                f"manual recovery is required: {rollback_exc}"
+            ) from exc
         raise ReconstructionError(
-            f"{note_path}: accepted note is written and hash-verified, but "
-            "integration baselines could not be persisted; preserve the "
-            f"accepted candidate and recover before retrying: {exc}"
+            f"{note_path}: integration transaction rolled back after cache "
+            f"failure: {exc}"
         ) from exc
     return plan.report
 

@@ -65,7 +65,7 @@ from torchcodec.decoders import (
 )
 
 from ..cache_models import CacheEnvelope
-from .cache import RunCache, sha256_of
+from .cache import RunCache, StageManifest, sha256_of, stable_hash
 from .memory_watchdog import MemoryWatchdog, default_memory_budget_bytes
 from .models import RawTranscript, SourceClip, StageTiming, Utterance
 
@@ -179,6 +179,28 @@ class DiarisationCheckpoint(CacheEnvelope):
     device: Literal["cpu", "mps"]
     num_speakers: int | None
     turns: list[DiarisedTurn]
+
+
+def build_audio_stage_manifest(raw: RawTranscript) -> StageManifest:
+    """Describe the exact local model inputs and raw output for review binding."""
+    local_config = {
+        "asr_model": raw.asr_model,
+        "asr_chunk_duration": raw.asr_chunk_duration,
+        "asr_chunk_overlap": raw.asr_chunk_overlap,
+        "diarisation_model": raw.diarisation_model,
+        "diarisation_device": raw.diarisation_device,
+        "num_speakers": raw.num_speakers,
+    }
+    return StageManifest(
+        stage="asr",
+        input_hash=stable_hash({"audio_sha256": raw.audio_sha256, **local_config}),
+        config_hash=stable_hash(local_config),
+        input_hashes={
+            "audio_sha256": raw.audio_sha256 or "",
+            "local_config": stable_hash(local_config),
+        },
+        output_hash=stable_hash(raw.model_dump(mode="json")),
+    )
 
 
 class Transcriber(Protocol):
@@ -312,6 +334,20 @@ class LocalTranscriber:
         audio_sha256 = sha256_of(audio)
         speaker_count = self._num_speakers if num_speakers is None else num_speakers
         device = select_diarisation_device(self._diarisation_device)
+
+        diarisation_checkpoint = cache.load_resumable(
+            run_id, "diarisation_checkpoint", DiarisationCheckpoint
+        )
+        diarisation_valid = diarisation_checkpoint is not None and (
+            diarisation_checkpoint.audio_sha256 == audio_sha256
+            and diarisation_checkpoint.model == self._diarisation_model
+            and diarisation_checkpoint.device == device
+            and diarisation_checkpoint.num_speakers == speaker_count
+        )
+        diarisation_recomputed = not diarisation_valid
+        if diarisation_recomputed and not self._hf_token:
+            raise MissingHfTokenError(self._diarisation_model)
+
         asr_checkpoint = cache.load_resumable(run_id, "asr_checkpoint", AsrCheckpoint)
         asr_valid = asr_checkpoint is not None and (
             asr_checkpoint.audio_sha256 == audio_sha256
@@ -347,16 +383,6 @@ class LocalTranscriber:
             )
         assert asr_checkpoint is not None
 
-        diarisation_checkpoint = cache.load_resumable(
-            run_id, "diarisation_checkpoint", DiarisationCheckpoint
-        )
-        diarisation_valid = diarisation_checkpoint is not None and (
-            diarisation_checkpoint.audio_sha256 == audio_sha256
-            and diarisation_checkpoint.model == self._diarisation_model
-            and diarisation_checkpoint.device == device
-            and diarisation_checkpoint.num_speakers == speaker_count
-        )
-        diarisation_recomputed = not diarisation_valid
         if diarisation_recomputed:
             diarisation_checkpoint = self._run_cached_diarisation(
                 audio,
@@ -439,6 +465,7 @@ class LocalTranscriber:
         )
         raw = raw.model_copy(update={"timings": cache.load_timings(run_id)})
         cache.store(run_id, _RAW_TRANSCRIPT_NAME, raw)
+        cache.store_manifest(run_id, build_audio_stage_manifest(raw))
         return raw
 
     def _run_cached_asr(
@@ -959,4 +986,15 @@ def transcribe_merged_audio(
         else transcribe(audio)
     )
     cache.store(run_id, _RAW_TRANSCRIPT_NAME, result)
+    if result.audio_sha256 and all(
+        value is not None
+        for value in (
+            result.asr_model,
+            result.diarisation_model,
+            result.diarisation_device,
+            result.asr_chunk_duration,
+            result.asr_chunk_overlap,
+        )
+    ):
+        cache.store_manifest(run_id, build_audio_stage_manifest(result))
     return result

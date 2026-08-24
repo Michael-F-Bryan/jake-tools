@@ -17,6 +17,7 @@ from typing import Literal
 from pydantic import ConfigDict, Field, model_validator
 
 from ..cache_models import CacheEnvelope
+from .asr import build_audio_stage_manifest
 from .cache import RunCache, atomic_write_text, sha256_of, stable_hash
 from .chapters import ChapterList
 from .integrate import IntegrationPlan, IntegrationReport, load_products, plan_integrate
@@ -81,6 +82,7 @@ class ReviewBinding(CacheEnvelope):
     polished_sha256: str | None = None
     minutes_review_sha256: str | None = None
     minutes_draft_sha256: str | None = None
+    raw_stage_manifest_sha256: str | None = None
     manifest_sha256s: dict[str, str] = Field(default_factory=dict)
 
 
@@ -271,7 +273,46 @@ def _build_binding(
         polished_sha256=_stage_output_hash(cache, run_id, POLISHED_CACHE_NAME),
         minutes_review_sha256=_stage_output_hash(cache, run_id, "minutes_review"),
         minutes_draft_sha256=_stage_output_hash(cache, run_id, "minutes_draft"),
+        raw_stage_manifest_sha256=(
+            _cache_file_hash(cache, run_id, "asr.manifest")
+            or _cache_file_hash(cache, run_id, "adapt.manifest")
+        ),
         manifest_sha256s=manifests,
+    )
+
+
+def _validate_raw_stage(cache: RunCache, run_id: str, resolved: RawTranscript) -> bool:
+    """Require a current typed raw-stage manifest before product review."""
+    raw = cache.load(run_id, "raw_transcript", RawTranscript)
+    if raw is None:
+        return False
+    if (
+        raw.audio_sha256 != resolved.audio_sha256
+        or raw.asr_model != resolved.asr_model
+        or raw.diarisation_model != resolved.diarisation_model
+        or raw.diarisation_device != resolved.diarisation_device
+        or raw.num_speakers != resolved.num_speakers
+        or raw.asr_chunk_duration != resolved.asr_chunk_duration
+        or raw.asr_chunk_overlap != resolved.asr_chunk_overlap
+    ):
+        return False
+    if raw.audio_sha256 is not None:
+        if len(raw.audio_sha256) != 64:
+            return False
+        try:
+            int(raw.audio_sha256, 16)
+        except ValueError:
+            return False
+        manifest = cache.load_manifest(run_id, "asr")
+        expected = build_audio_stage_manifest(raw)
+        return (
+            manifest is not None
+            and manifest.output_hash == expected.output_hash
+            and cache.manifest_matches(manifest, expected)
+        )
+    manifest = cache.load_manifest(run_id, "adapt")
+    return manifest is not None and manifest.output_hash == stable_hash(
+        raw.model_dump(mode="json")
     )
 
 
@@ -303,7 +344,8 @@ def _validate_manifests(cache: RunCache, run_id: str) -> bool:
                     return False
         except ValueError:
             return False
-    return True
+    resolved = cache.load(run_id, "resolved_transcript", RawTranscript)
+    return resolved is not None and _validate_raw_stage(cache, run_id, resolved)
 
 
 def _check_products(
@@ -311,6 +353,8 @@ def _check_products(
     run_id: str,
     cache: RunCache,
     plan: IntegrationPlan,
+    *,
+    ignore_stale: bool = False,
 ) -> ProductReviewChecks:
     failures: list[str] = []
     warnings: list[str] = []
@@ -319,13 +363,9 @@ def _check_products(
     chapter_list = cache.load(run_id, "chapters", ChapterList)
     polished = cache.load(run_id, POLISHED_CACHE_NAME, PolishedChapterList)
     minutes_review = cache.load(run_id, "minutes_review", MinutesReviewResult)
-    source_ok = raw is not None and (
-        bool(raw.clips)
-        or bool(raw.audio_sha256)
-        or cache.load_manifest(run_id, "adapt") is not None
-    )
+    source_ok = raw is not None and _validate_raw_stage(cache, run_id, raw)
     if not source_ok:
-        failures.append("source/provenance is missing")
+        failures.append("local ASR/adapt stage provenance is missing")
 
     polished_ok = True
     cross_speaker_ok = True
@@ -461,7 +501,7 @@ def _check_products(
     if not shape_ok:
         failures.append("candidate note shape/source embed is invalid")
 
-    stale_ok = not (cache.run_dir(run_id) / "stale.json").exists()
+    stale_ok = ignore_stale or not (cache.run_dir(run_id) / "stale.json").exists()
     if not stale_ok:
         failures.append("run contains stale state")
     manifests_ok = _validate_manifests(cache, run_id) and minutes_review is not None
@@ -500,6 +540,9 @@ def export_product_review(
         products = load_products(note_path, run_id, cache)
         plan = plan_integrate(note_path, products, cache=cache, run_id=run_id)
         binding = _build_binding(note_path, run_id, cache, plan)
+        checks = _check_products(note_path, run_id, cache, plan, ignore_stale=True)
+        if checks.passed:
+            cache.clear_stale_if_complete(run_id)
         checks = _check_products(note_path, run_id, cache, plan)
         if not checks.passed:
             raise ProductReviewExportError(

@@ -29,6 +29,7 @@ from jake_tools.transcription.polish import POLISHED_CACHE_NAME, PolishedChapter
 from jake_tools.transcription.product_review import (
     ProductReviewChecks,
     ProductReviewDecision,
+    ProductReviewExportError,
     ProductReviewRefusalError,
     ReviewBinding,
     apply_accepted_product,
@@ -175,7 +176,13 @@ def test_export_and_apply_use_the_same_exact_candidate_bytes(tmp_path: Path) -> 
             Utterance(start=0.0, end=10.0, speaker="Ada", text="first"),
             Utterance(start=60.0, end=70.0, speaker="Ada", text="second"),
         ],
-        audio_sha256="merged-audio",
+        audio_sha256="a" * 64,
+        asr_model="asr-model",
+        diarisation_model="diar-model",
+        diarisation_device="cpu",
+        num_speakers=2,
+        asr_chunk_duration=120.0,
+        asr_chunk_overlap=15.0,
     )
     chapters = ChapterList(
         chapters=[
@@ -214,6 +221,7 @@ def test_export_and_apply_use_the_same_exact_candidate_bytes(tmp_path: Path) -> 
     note_model = parse_note(note)
     human_hash = stable_hash(human_owned_note_context(note_model))
     cache.store(run_id, "resolved_transcript", raw)
+    cache.store(run_id, "raw_transcript", raw)
     cache.store(run_id, "chapters", chapters)
     cache.store(run_id, POLISHED_CACHE_NAME, polished)
     cache.store(run_id, MINUTES_CACHE_NAME, minutes)
@@ -271,6 +279,39 @@ def test_export_and_apply_use_the_same_exact_candidate_bytes(tmp_path: Path) -> 
     )
 
     before = note.read_bytes()
+    with pytest.raises(ProductReviewExportError, match="local ASR"):
+        export_product_review(note, run_id, cache=cache)
+
+    local_config = {
+        "asr_model": raw.asr_model,
+        "asr_chunk_duration": raw.asr_chunk_duration,
+        "asr_chunk_overlap": raw.asr_chunk_overlap,
+        "diarisation_model": raw.diarisation_model,
+        "diarisation_device": raw.diarisation_device,
+        "num_speakers": raw.num_speakers,
+    }
+    cache.store_manifest(
+        run_id,
+        StageManifest(
+            stage="asr",
+            input_hash=stable_hash({"audio_sha256": raw.audio_sha256, **local_config}),
+            config_hash=stable_hash(local_config),
+            input_hashes={
+                "audio_sha256": raw.audio_sha256 or "",
+                "local_config": stable_hash(local_config),
+            },
+            output_hash=stable_hash(raw.model_dump(mode="json")),
+        ),
+    )
+    cache.store(
+        run_id,
+        "raw_transcript",
+        raw.model_copy(update={"asr_model": "manually-replaced"}),
+    )
+    with pytest.raises(ProductReviewExportError, match="local ASR"):
+        export_product_review(note, run_id, cache=cache)
+    cache.store(run_id, "raw_transcript", raw)
+
     pack = export_product_review(note, run_id, cache=cache)
     assert pack.checks.passed
     assert note.read_bytes() == before

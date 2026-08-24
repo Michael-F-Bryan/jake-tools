@@ -627,6 +627,7 @@ def _validate_corrections(
             or correction.end_seconds <= correction.start_seconds
         ):
             raise InvalidCorrectionError("--correct requires finite end > start")
+        matched = False
         for utterance in transcript.utterances:
             if utterance.speaker != correction.cluster:
                 continue
@@ -643,6 +644,13 @@ def _validate_corrections(
                     f"--correct range {correction.start_seconds}-{correction.end_seconds} "
                     f"has partial overlap with utterance {utterance.start}-{utterance.end}"
                 )
+            if contained:
+                matched = True
+        if not matched:
+            raise InvalidCorrectionError(
+                f"--correct range {correction.start_seconds}-{correction.end_seconds} "
+                "contains no utterance for the target cluster"
+            )
 
 
 def _apply_corrections(
