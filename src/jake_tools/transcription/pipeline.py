@@ -237,6 +237,9 @@ async def _acquire_raw_transcript(
             transcriber=transcriber,
             cache=cache,
             num_speakers=_known_speaker_count(note),
+            media_duration_seconds=sum(
+                clip.duration_seconds for clip in merge_result.clips
+            ),
         )
         if raw.clips != merge_result.clips:
             corrected = raw.model_copy(update={"clips": merge_result.clips})
@@ -251,7 +254,7 @@ async def _acquire_raw_transcript(
     content_sha256 = sha256_of(transcript_path)
     run_id = run_id_for(Path(note.path), content_sha256)
 
-    cached = cache.load(run_id, RAW_TRANSCRIPT_CACHE_NAME, RawTranscript)
+    cached = cache.load_resumable(run_id, RAW_TRANSCRIPT_CACHE_NAME, RawTranscript)
     if cached is None:
         adapted = await adapt_transcript(transcript_path, agent=agent)
         cache.store(run_id, RAW_TRANSCRIPT_CACHE_NAME, adapted)

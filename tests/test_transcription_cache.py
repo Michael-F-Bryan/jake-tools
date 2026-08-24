@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from jake_tools.transcription.cache import RunCache, sha256_of
-from jake_tools.transcription.models import SourceClip
+from jake_tools.transcription.models import SourceClip, StageTimingLog
 
 
 def test_store_then_load_returns_equal_model(tmp_path: Path) -> None:
@@ -31,6 +31,17 @@ def test_load_of_corrupt_json_raises(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         cache.load("run-1", "clip", SourceClip)
+
+
+def test_load_resumable_corrupt_json_quarantines_it_as_a_cache_miss(
+    tmp_path: Path,
+) -> None:
+    cache = RunCache(tmp_path)
+    path = cache.run_dir("run-1") / "timings.json"
+    path.write_text("{")
+
+    assert cache.load_resumable("run-1", "timings", StageTimingLog) is None
+    assert not path.exists()
 
 
 def test_store_text_then_load_text_round_trips(tmp_path: Path) -> None:

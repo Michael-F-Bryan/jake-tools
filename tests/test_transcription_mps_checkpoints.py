@@ -11,6 +11,7 @@ from jake_tools.cli.transcript_options import TranscriberOptions
 from jake_tools.transcription import asr as asr_module
 from jake_tools.transcription.asr import (
     DEFAULT_DIARISATION_MODEL,
+    AcceleratorOutOfMemoryError,
     AsrCheckpoint,
     AsrSegment,
     DiarisationCheckpoint,
@@ -195,6 +196,142 @@ def test_local_transcriber_reuses_asr_checkpoint_but_recomputes_stale_diarisatio
     )
 
 
+@pytest.mark.parametrize(
+    "malformed_name", ["asr_checkpoint", "diarisation_checkpoint", "raw_transcript"]
+)
+def test_local_transcriber_recomputes_after_a_truncated_checkpoint(
+    malformed_name: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"audio")
+    cache = RunCache(tmp_path / "cache")
+    cache.run_dir("run").joinpath(f"{malformed_name}.json").write_text("{")
+    transcriber = LocalTranscriber(
+        hf_token="token", diarisation_device="cpu", num_speakers=2
+    )
+    asr_calls = 0
+    diarisation_calls = 0
+
+    def run_asr(_: Path) -> list[AsrSegment]:
+        nonlocal asr_calls
+        asr_calls += 1
+        return [AsrSegment(start=0.0, end=2.0, text="fresh")]
+
+    def run_diarisation(_: Path, *, device: str, num_speakers: int | None):
+        nonlocal diarisation_calls
+        diarisation_calls += 1
+        return [DiarisedTurn(start=0.0, end=2.0, speaker="SPEAKER_00")]
+
+    monkeypatch.setattr(transcriber, "_run_asr", run_asr)
+    monkeypatch.setattr(transcriber, "_run_diarisation", run_diarisation)
+
+    result = transcribe_merged_audio(
+        audio, run_id="run", transcriber=transcriber, cache=cache
+    )
+
+    assert result.utterances[0].text == "fresh"
+    assert asr_calls == 1
+    assert diarisation_calls == 1
+    model_type = {
+        "asr_checkpoint": AsrCheckpoint,
+        "diarisation_checkpoint": DiarisationCheckpoint,
+        "raw_transcript": RawTranscript,
+    }[malformed_name]
+    assert cache.load("run", malformed_name, model_type) is not None
+
+
+def test_changed_asr_chunk_configuration_promotes_new_raw_transcript(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"audio")
+    cache = RunCache(tmp_path / "cache")
+    transcriber = LocalTranscriber(
+        hf_token="token",
+        diarisation_device="cpu",
+        asr_chunk_duration=120.0,
+        asr_chunk_overlap=15.0,
+    )
+
+    def run_asr(_: Path) -> list[AsrSegment]:
+        text = "old" if transcriber._asr_chunk_duration == 120.0 else "new"
+        return [AsrSegment(start=0.0, end=2.0, text=text)]
+
+    monkeypatch.setattr(transcriber, "_run_asr", run_asr)
+    monkeypatch.setattr(
+        transcriber,
+        "_run_diarisation",
+        lambda _, *, device, num_speakers: [
+            DiarisedTurn(start=0.0, end=2.0, speaker="SPEAKER_00")
+        ],
+    )
+
+    first = transcribe_merged_audio(
+        audio, run_id="run", transcriber=transcriber, cache=cache
+    )
+    transcriber._asr_chunk_duration = 60.0
+    second = transcribe_merged_audio(
+        audio, run_id="run", transcriber=transcriber, cache=cache
+    )
+
+    assert first.utterances[0].text == "old"
+    assert second.utterances[0].text == "new"
+    assert second.asr_chunk_duration == 60.0
+    assert second.asr_chunk_overlap == 15.0
+
+
+def test_cpu_diarisation_does_not_touch_the_mps_allocator(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pipeline = FakePipeline()
+    monkeypatch.setattr(
+        asr_module.Pipeline,
+        "from_pretrained",
+        lambda *args, **kwargs: pipeline,
+    )
+    monkeypatch.setattr(
+        asr_module,
+        "AudioDecoder",
+        lambda _: SimpleNamespace(
+            get_all_samples=lambda: SimpleNamespace(data="waveform", sample_rate=16000)
+        ),
+    )
+    monkeypatch.setattr(
+        asr_module.torch.mps,
+        "set_per_process_memory_fraction",
+        lambda _: pytest.fail("CPU diarisation touched the MPS allocator"),
+    )
+
+    transcriber = LocalTranscriber(hf_token="token", diarisation_device="cpu")
+    result = transcriber._run_diarisation(
+        tmp_path / "audio.m4a", device="cpu", num_speakers=None
+    )
+
+    assert result[0].speaker == "SPEAKER_00"
+
+
+def test_diarisation_placement_runtime_error_preserves_domain_cause(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class FailingPipeline(FakePipeline):
+        def to(self, device: object) -> FakePipeline:
+            raise RuntimeError("placement failed")
+
+    monkeypatch.setattr(
+        asr_module.Pipeline,
+        "from_pretrained",
+        lambda *args, **kwargs: FailingPipeline(),
+    )
+
+    transcriber = LocalTranscriber(hf_token="token", diarisation_device="cpu")
+    with pytest.raises(AcceleratorOutOfMemoryError) as exc_info:
+        transcriber._run_diarisation(
+            tmp_path / "audio.m4a", device="cpu", num_speakers=None
+        )
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+
 def test_stale_legacy_raw_transcript_is_not_reused(tmp_path: Path) -> None:
     audio = tmp_path / "audio.m4a"
     audio.write_bytes(b"audio")
@@ -248,3 +385,38 @@ def test_local_stage_timing_is_durable_and_has_zero_api_cost(
     }
     assert all(item.api_rate_cost == 0.0 for item in timings)
     assert result.timings
+
+
+def test_local_stage_rtf_uses_full_recording_duration_with_trailing_silence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"audio")
+    cache = RunCache(tmp_path / "cache")
+    transcriber = LocalTranscriber(hf_token="token", diarisation_device="cpu")
+    monkeypatch.setattr(
+        transcriber,
+        "_run_asr",
+        lambda _: [AsrSegment(start=0.0, end=2.0, text="spoken")],
+    )
+    monkeypatch.setattr(
+        transcriber,
+        "_run_diarisation",
+        lambda _, *, device, num_speakers: [
+            DiarisedTurn(start=0.0, end=2.0, speaker="SPEAKER_00")
+        ],
+    )
+
+    transcribe_merged_audio(
+        audio,
+        run_id="run",
+        transcriber=transcriber,
+        cache=cache,
+        media_duration_seconds=10.0,
+    )
+
+    timings = {timing.stage: timing for timing in cache.load_timings("run")}
+    assert timings["ASR"].media_duration_seconds == 10.0
+    assert timings["diarisation"].media_duration_seconds == 10.0
+    assert timings["ASR"].rtf is not None
+    assert timings["ASR"].rtf < 1.0

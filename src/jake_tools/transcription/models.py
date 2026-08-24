@@ -33,6 +33,7 @@ class StageTiming(BaseModel):
     media_duration_seconds: float | None = None
     rtf: float | None = None
     api_rate_cost: float = 0.0
+    telemetry_schema_version: int = 1
 
 
 class StageTimingLog(BaseModel):
@@ -89,6 +90,8 @@ class RawTranscript(BaseModel):
     diarisation_model: str | None = None
     diarisation_device: str | None = None
     num_speakers: int | None = None
+    asr_chunk_duration: float | None = None
+    asr_chunk_overlap: float | None = None
     timings: list[StageTiming] = Field(default_factory=list)
 
 

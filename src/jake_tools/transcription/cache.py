@@ -9,6 +9,8 @@ integrate step reads its tier-b baseline back out of the same cache.
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -17,6 +19,12 @@ from .models import StageTiming, StageTimingLog, StaleState
 
 _DEFAULT_ROOT = Path.home() / "Library" / "Caches" / "jake-tools" / "transcription"
 _CHUNK_SIZE = 1024 * 1024
+_RESUMABLE_NAMES = {
+    "asr_checkpoint",
+    "diarisation_checkpoint",
+    "raw_transcript",
+    "timings",
+}
 
 
 class RunCache:
@@ -50,13 +58,34 @@ class RunCache:
 
     def store(self, run_id: str, name: str, value: BaseModel) -> Path:
         path = self._model_path(run_id, name)
-        path.write_text(value.model_dump_json(indent=2))
+        _atomic_write(path, value.model_dump_json(indent=2))
         return path
 
     def store_text(self, run_id: str, name: str, text: str) -> Path:
         path = self._text_path(run_id, name)
-        path.write_text(text)
+        _atomic_write(path, text)
         return path
+
+    def load_resumable[TModel: BaseModel](
+        self, run_id: str, name: str, model_type: type[TModel]
+    ) -> TModel | None:
+        """Load a local resumable artefact, invalidating partial/invalid state.
+
+        Ordinary cache reads remain fail-closed: a corrupt non-resumable
+        product still raises. These four local artefacts are different because
+        they are recomputable checkpoints or telemetry, so a partial write
+        must become a cache miss rather than block recovery.
+        """
+        if name not in _RESUMABLE_NAMES:
+            return self.load(run_id, name, model_type)
+        path = self._model_path(run_id, name)
+        if not path.exists():
+            return None
+        try:
+            return model_type.model_validate_json(path.read_text())
+        except ValueError:
+            path.unlink(missing_ok=True)
+            return None
 
     def load_text(self, run_id: str, name: str) -> str | None:
         path = self._text_path(run_id, name)
@@ -66,14 +95,14 @@ class RunCache:
 
     def record_timing(self, run_id: str, timing: StageTiming) -> None:
         """Append one durable timing record to the run's local-stage log."""
-        log = self.load(run_id, "timings", StageTimingLog)
+        log = self.load_resumable(run_id, "timings", StageTimingLog)
         if log is None:
             log = StageTimingLog()
         log.stages.append(timing)
         self.store(run_id, "timings", log)
 
     def load_timings(self, run_id: str) -> list[StageTiming]:
-        log = self.load(run_id, "timings", StageTimingLog)
+        log = self.load_resumable(run_id, "timings", StageTimingLog)
         return [] if log is None else log.stages
 
     def invalidate_downstream(self, run_id: str, *, reason: str) -> StaleState:
@@ -109,6 +138,33 @@ class RunCache:
 
     def _text_path(self, run_id: str, name: str) -> Path:
         return self.run_dir(run_id) / f"{name}.txt"
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Replace a cache artefact only after its complete contents are durable."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def sha256_of(path: Path) -> str:

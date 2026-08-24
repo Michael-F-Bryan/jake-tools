@@ -151,18 +151,20 @@ async def transcribe(
 
     If speaker resolution can't confidently name every cluster, this prints
     `{"status": "needs_input", "run_id": ..., "requests": [...]}` and exits
-    with code 3 - byte-identical to `transcript speakers`' own contract, the
-    same one a coordinating agent already knows how to relay (e.g. over
+    with code 3 - the same status/run-id/requests/exit-code contract as
+    `transcript speakers`, with additive timing telemetry. This is the same
+    contract a coordinating agent already knows how to relay (e.g. over
     Discord) and answer. Re-run with more `--assign "SPEAKER_03=Name"` flags
     to supply an answer, or `--assign "...=Unknown" --finalise` to give up on
     the rest and proceed anyway.
 
     On success, prints a `RunReport` as JSON and exits 0: the run id, chapter
-    count, the ratio of "Unknown"-speaker turns to total polished turns, the
-    fixer's issues (from `polish_issues.json`), and the `IntegrationReport`
-    describing what changed in the note. This report is informational, never
-    gating - Michael's own skim of the note is the acceptance test; the
-    report just says where to aim it.
+    count, the ratio of "Unknown"-speaker turns to resolved source turns
+    when provenance is available (otherwise polished turns), the fixer's
+    issues (from `polish_issues.json`), and the `IntegrationReport` describing
+    what changed in the note. This report is informational, never gating -
+    Michael's own skim of the note is the acceptance test; the report just
+    says where to aim it.
 
     `--model`/`--effort` apply to every LLM call this run makes (chapterise
     still defaults to `--effort low` when `--effort` isn't given, the same
@@ -207,8 +209,8 @@ async def transcribe(
         raise click.ClickException(str(exc)) from exc
 
     if outcome.status == "needs_input":
-        # Byte-identical to `transcript speakers`' own needs_input payload:
-        # same model, same fields, same indent.
+        # Preserve the needs_input status/requests/exit semantics while
+        # allowing additive timing telemetry in the shared payload.
         payload = SpeakersResponse(
             status="needs_input",
             run_id=outcome.run_id or "",

@@ -813,7 +813,7 @@ async def run_speaker_resolution(
     returned.
     """
     note = parse_note(note_path)
-    transcript = cache.load(run_id, RAW_TRANSCRIPT_CACHE_NAME, RawTranscript)
+    transcript = cache.load_resumable(run_id, RAW_TRANSCRIPT_CACHE_NAME, RawTranscript)
     if transcript is None:
         raise MissingRawTranscriptError(run_id)
 

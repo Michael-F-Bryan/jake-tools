@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from jake_tools.transcription.models import (
     ChapterSpan,
     PolishedChapter,
@@ -36,6 +38,19 @@ def test_raw_transcript_audio_sha256_defaults_to_none() -> None:
     transcript = RawTranscript(clips=[], utterances=[])
     assert transcript.audio_sha256 is None
     assert RawTranscript.model_validate_json(transcript.model_dump_json()) == transcript
+
+
+def test_stage_timing_declares_its_additive_telemetry_schema_version() -> None:
+    from jake_tools.transcription.models import StageTiming
+
+    timing = StageTiming(
+        stage="ASR",
+        started_at=datetime(2026, 8, 24, tzinfo=UTC),
+        ended_at=datetime(2026, 8, 24, 0, 0, 1, tzinfo=UTC),
+        elapsed_seconds=1.0,
+    )
+
+    assert timing.telemetry_schema_version == 1
 
 
 def test_raw_transcript_preserves_clip_order_and_offsets() -> None:

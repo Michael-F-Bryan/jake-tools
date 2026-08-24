@@ -241,7 +241,11 @@ class LocalTranscriber:
         return self._num_speakers
 
     def transcribe(
-        self, audio: Path, *, num_speakers: int | None = None
+        self,
+        audio: Path,
+        *,
+        num_speakers: int | None = None,
+        media_duration_seconds: float | None = None,
     ) -> RawTranscript:
         if not self._hf_token:
             raise MissingHfTokenError(self._diarisation_model)
@@ -269,15 +273,15 @@ class LocalTranscriber:
         utterances = align(asr_segments, diarised_turns)
 
         # `RawTranscript.clips` records provenance for one clip covering the
-        # whole merged file (the per-source-clip breakdown from `merge-audio`
-        # isn't available here — this command only receives the merged
-        # audio path). Duration comes from the latest timestamp either model
-        # produced rather than probing the file directly: parakeet-mlx and
-        # pyannote already decode the file in whatever format it's in, and
-        # duplicating that (e.g. via `soundfile`, which doesn't support M4A)
-        # would just be a second, format-fragile way to learn the same fact.
+        # whole merged file. The composed pipeline passes the authoritative
+        # duration from `merge-audio`'s source clips; the timestamp fallback is
+        # retained only for direct legacy callers that have no source probe.
         ends = [item.end for item in (*asr_segments, *diarised_turns)]
-        duration = max(ends, default=0.0)
+        duration = (
+            media_duration_seconds
+            if media_duration_seconds is not None
+            else max(ends, default=0.0)
+        )
         return RawTranscript(
             clips=[
                 SourceClip(
@@ -290,6 +294,8 @@ class LocalTranscriber:
             diarisation_model=self._diarisation_model,
             diarisation_device=selected_device,
             num_speakers=speaker_count,
+            asr_chunk_duration=self._asr_chunk_duration,
+            asr_chunk_overlap=self._asr_chunk_overlap,
         )
 
     def transcribe_cached(
@@ -299,20 +305,28 @@ class LocalTranscriber:
         run_id: str,
         cache: RunCache,
         num_speakers: int | None = None,
+        media_duration_seconds: float | None = None,
     ) -> RawTranscript:
         """Run or resume ASR and diarisation from independent checkpoints."""
         audio_sha256 = sha256_of(audio)
         speaker_count = self._num_speakers if num_speakers is None else num_speakers
         device = select_diarisation_device(self._diarisation_device)
-        asr_checkpoint = cache.load(run_id, "asr_checkpoint", AsrCheckpoint)
+        asr_checkpoint = cache.load_resumable(run_id, "asr_checkpoint", AsrCheckpoint)
         asr_valid = asr_checkpoint is not None and (
             asr_checkpoint.audio_sha256 == audio_sha256
             and asr_checkpoint.model == self._asr_model
             and asr_checkpoint.chunk_duration == self._asr_chunk_duration
             and asr_checkpoint.chunk_overlap == self._asr_chunk_overlap
         )
-        if not asr_valid:
-            asr_checkpoint = self._run_cached_asr(audio, run_id, cache, audio_sha256)
+        asr_recomputed = not asr_valid
+        if asr_recomputed:
+            asr_checkpoint = self._run_cached_asr(
+                audio,
+                run_id,
+                cache,
+                audio_sha256,
+                media_duration_seconds=media_duration_seconds,
+            )
         else:
             assert asr_checkpoint is not None
             _record_timing(
@@ -327,12 +341,12 @@ class LocalTranscriber:
                         "chunk_duration": self._asr_chunk_duration,
                         "chunk_overlap": self._asr_chunk_overlap,
                     },
-                    media_duration=_duration(asr_checkpoint.segments),
+                    media_duration=media_duration_seconds,
                 ),
             )
         assert asr_checkpoint is not None
 
-        diarisation_checkpoint = cache.load(
+        diarisation_checkpoint = cache.load_resumable(
             run_id, "diarisation_checkpoint", DiarisationCheckpoint
         )
         diarisation_valid = diarisation_checkpoint is not None and (
@@ -341,7 +355,8 @@ class LocalTranscriber:
             and diarisation_checkpoint.device == device
             and diarisation_checkpoint.num_speakers == speaker_count
         )
-        if not diarisation_valid:
+        diarisation_recomputed = not diarisation_valid
+        if diarisation_recomputed:
             diarisation_checkpoint = self._run_cached_diarisation(
                 audio,
                 run_id,
@@ -349,6 +364,7 @@ class LocalTranscriber:
                 audio_sha256,
                 device=device,
                 num_speakers=speaker_count,
+                media_duration_seconds=media_duration_seconds,
             )
         else:
             assert diarisation_checkpoint is not None
@@ -362,20 +378,22 @@ class LocalTranscriber:
                     device=device,
                     model=self._diarisation_model,
                     config={"num_speakers": speaker_count},
-                    media_duration=_duration(diarisation_checkpoint.turns),
+                    media_duration=media_duration_seconds,
                 ),
             )
         assert diarisation_checkpoint is not None
 
-        cached = cache.load(run_id, _RAW_TRANSCRIPT_NAME, RawTranscript)
+        cached = cache.load_resumable(run_id, _RAW_TRANSCRIPT_NAME, RawTranscript)
         raw_valid = cached is not None and (
             cached.audio_sha256 == audio_sha256
             and cached.asr_model == self._asr_model
             and cached.diarisation_model == self._diarisation_model
             and cached.diarisation_device == device
             and cached.num_speakers == speaker_count
+            and cached.asr_chunk_duration == self._asr_chunk_duration
+            and cached.asr_chunk_overlap == self._asr_chunk_overlap
         )
-        if raw_valid:
+        if raw_valid and not (asr_recomputed or diarisation_recomputed):
             assert cached is not None
             return cached.model_copy(update={"timings": cache.load_timings(run_id)})
 
@@ -386,9 +404,13 @@ class LocalTranscriber:
                 SourceClip(
                     path=str(audio),
                     offset_seconds=0.0,
-                    duration_seconds=max(
-                        _duration(asr_checkpoint.segments),
-                        _duration(diarisation_checkpoint.turns),
+                    duration_seconds=(
+                        media_duration_seconds
+                        if media_duration_seconds is not None
+                        else max(
+                            _duration(asr_checkpoint.segments),
+                            _duration(diarisation_checkpoint.turns),
+                        )
                     ),
                 )
             ],
@@ -398,6 +420,8 @@ class LocalTranscriber:
             diarisation_model=self._diarisation_model,
             diarisation_device=device,
             num_speakers=speaker_count,
+            asr_chunk_duration=self._asr_chunk_duration,
+            asr_chunk_overlap=self._asr_chunk_overlap,
         )
         _record_timing(
             cache,
@@ -417,7 +441,13 @@ class LocalTranscriber:
         return raw
 
     def _run_cached_asr(
-        self, audio: Path, run_id: str, cache: RunCache, audio_sha256: str
+        self,
+        audio: Path,
+        run_id: str,
+        cache: RunCache,
+        audio_sha256: str,
+        *,
+        media_duration_seconds: float | None,
     ) -> AsrCheckpoint:
         started = time.monotonic()
         started_at = datetime.now(UTC)
@@ -445,7 +475,7 @@ class LocalTranscriber:
                         "chunk_duration": self._asr_chunk_duration,
                         "chunk_overlap": self._asr_chunk_overlap,
                     },
-                    media_duration=_duration(locals().get("segments", [])),
+                    media_duration=media_duration_seconds,
                 ),
             )
 
@@ -458,6 +488,7 @@ class LocalTranscriber:
         *,
         device: Literal["cpu", "mps"],
         num_speakers: int | None,
+        media_duration_seconds: float | None,
     ) -> DiarisationCheckpoint:
         started = time.monotonic()
         started_at = datetime.now(UTC)
@@ -485,7 +516,7 @@ class LocalTranscriber:
                     device=device,
                     model=self._diarisation_model,
                     config={"num_speakers": num_speakers},
-                    media_duration=_duration(locals().get("turns", [])),
+                    media_duration=media_duration_seconds,
                 ),
             )
 
@@ -555,7 +586,11 @@ class LocalTranscriber:
     ) -> list[DiarisedTurn]:
         # See DEFAULT_MPS_MEMORY_FRACTION: torch's MPS allocator's own
         # fail-fast cap, set immediately before the stage that uses it.
-        torch.mps.set_per_process_memory_fraction(DEFAULT_MPS_MEMORY_FRACTION)
+        if device == "mps":
+            try:
+                torch.mps.set_per_process_memory_fraction(DEFAULT_MPS_MEMORY_FRACTION)
+            except RuntimeError as exc:
+                raise AcceleratorOutOfMemoryError("diarisation", exc) from exc
 
         _log_stage("diarisation starting")
         started = time.monotonic()
@@ -568,15 +603,18 @@ class LocalTranscriber:
         # length — confirmed by reading that class, and empirically by
         # running this pipeline end-to-end against the same ~31-minute
         # meeting recording that broke parakeet (see task-004-report.md).
-        pipeline: Any = Pipeline.from_pretrained(
-            self._diarisation_model, token=self._hf_token
-        )
-        if pipeline is None:
-            raise TranscriberError(
-                f"could not load diarisation pipeline {self._diarisation_model!r} "
-                "(pyannote returned no pipeline for this checkpoint)"
+        try:
+            pipeline: Any = Pipeline.from_pretrained(
+                self._diarisation_model, token=self._hf_token
             )
-        pipeline.to(torch.device(device))
+            if pipeline is None:
+                raise TranscriberError(
+                    f"could not load diarisation pipeline {self._diarisation_model!r} "
+                    "(pyannote returned no pipeline for this checkpoint)"
+                )
+            pipeline.to(torch.device(device))
+        except RuntimeError as exc:
+            raise AcceleratorOutOfMemoryError("diarisation", exc) from exc
 
         # A plain ProgressHook-compatible callable is intentionally used here:
         # pyannote invokes it for segmentation, embeddings, and clustering.
@@ -883,6 +921,7 @@ def transcribe_merged_audio(
     transcriber: Transcriber,
     cache: RunCache,
     num_speakers: int | None = None,
+    media_duration_seconds: float | None = None,
 ) -> RawTranscript:
     """Run local stages from independent checkpoints, with safe legacy handling."""
     if isinstance(transcriber, LocalTranscriber):
@@ -891,10 +930,11 @@ def transcribe_merged_audio(
             run_id=run_id,
             cache=cache,
             num_speakers=num_speakers,
+            media_duration_seconds=media_duration_seconds,
         )
 
     audio_sha256 = sha256_of(audio)
-    cached = cache.load(run_id, _RAW_TRANSCRIPT_NAME, RawTranscript)
+    cached = cache.load_resumable(run_id, _RAW_TRANSCRIPT_NAME, RawTranscript)
     if cached is not None and (
         cached.audio_sha256 == audio_sha256
         and cached.asr_model is not None
