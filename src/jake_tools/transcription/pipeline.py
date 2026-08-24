@@ -138,7 +138,9 @@ class RunReport(BaseModel):
 
     run_id: str
     chapters: int
-    unknown_turn_ratio: float  # Unknown-speaker turns / total polished turns
+    unknown_turn_ratio: float  # Unknown-speaker turns / total resolved turns
+    resolved_unknown_turns: int = 0
+    resolved_unknown_words: int = 0
     fixer_issues: list[str]  # from polish_issues.json
     integration: IntegrationReport
     timings: list[StageTiming] = Field(default_factory=list)
@@ -187,12 +189,18 @@ def _transcript_embed_target(note: ParsedNote) -> str | None:
     return None
 
 
-def _unknown_turn_ratio(chapters: Sequence[PolishedChapter]) -> float:
+def _polished_unknown_ratio(chapters: Sequence[PolishedChapter]) -> float:
     turns = [turn for chapter in chapters for turn in chapter.turns]
     if not turns:
         return 0.0
-    unknown = sum(1 for turn in turns if turn.speaker == "Unknown")
-    return unknown / len(turns)
+    return sum(turn.speaker == "Unknown" for turn in turns) / len(turns)
+
+
+def _unknown_evidence(transcript: RawTranscript) -> tuple[float, int, int]:
+    unknown = [u for u in transcript.utterances if u.speaker == "Unknown"]
+    total = len(transcript.utterances)
+    words = sum(len(u.text.split()) for u in unknown)
+    return (len(unknown) / total if total else 0.0, len(unknown), words)
 
 
 async def _acquire_raw_transcript(
@@ -256,6 +264,7 @@ async def run_pipeline(
     spec: AgentSpec,
     *,
     assignments: Sequence[str] = (),
+    corrections: Sequence[str] = (),
     finalise: bool = False,
     max_concurrency: int = 4,
 ) -> PipelineOutcome:
@@ -296,6 +305,7 @@ async def run_pipeline(
         note_path,
         run_id,
         assign=assignments,
+        correct=corrections,
         finalise=finalise,
         agent=agent,
         audio_tool=audio_tool,
@@ -331,11 +341,25 @@ async def run_pipeline(
 
     products = load_products(note_path, run_id, cache)
     integration = run_integrate(note_path, products, cache=cache, run_id=run_id)
+    resolved = cache.load(run_id, "resolved_transcript", RawTranscript)
+    evidence_ratio, unknown_turns, unknown_words = _unknown_evidence(
+        resolved if resolved is not None else RawTranscript(clips=[], utterances=[])
+    )
 
     report = RunReport(
         run_id=run_id,
         chapters=len(products.chapters),
-        unknown_turn_ratio=_unknown_turn_ratio(products.chapters),
+        unknown_turn_ratio=(
+            evidence_ratio
+            if any(
+                turn.source_turn_indices
+                for chapter in products.chapters
+                for turn in chapter.turns
+            )
+            else _polished_unknown_ratio(products.chapters)
+        ),
+        resolved_unknown_turns=unknown_turns,
+        resolved_unknown_words=unknown_words,
         fixer_issues=polish_result.issues,
         integration=integration,
         timings=cache.load_timings(run_id),

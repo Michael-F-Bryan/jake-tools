@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from .models import StageTiming, StageTimingLog
+from .models import StageTiming, StageTimingLog, StaleState
 
 _DEFAULT_ROOT = Path.home() / "Library" / "Caches" / "jake-tools" / "transcription"
 _CHUNK_SIZE = 1024 * 1024
@@ -75,6 +75,34 @@ class RunCache:
     def load_timings(self, run_id: str) -> list[StageTiming]:
         log = self.load(run_id, "timings", StageTimingLog)
         return [] if log is None else log.stages
+
+    def invalidate_downstream(self, run_id: str, *, reason: str) -> StaleState:
+        """Remove products derived from speaker evidence, preserving human state."""
+        run_dir = self.run_dir(run_id)
+        names = {
+            "resolved_transcript",
+            "chapters",
+            "polished",
+            "polish_issues",
+            "minutes",
+            "review",
+            "candidate",
+            "decision",
+        }
+        removed: list[str] = []
+        for path in run_dir.glob("*.json"):
+            if path.stem in names or any(
+                token in path.stem for token in ("review", "candidate", "decision")
+            ):
+                path.unlink()
+                removed.append(path.name)
+        for path in run_dir.glob("*.txt"):
+            if any(token in path.stem for token in ("review", "candidate", "decision")):
+                path.unlink()
+                removed.append(path.name)
+        stale = StaleState(reason=reason, artefacts=sorted(removed))
+        self.store(run_id, "stale", stale)
+        return stale
 
     def _model_path(self, run_id: str, name: str) -> Path:
         return self.run_dir(run_id) / f"{name}.json"

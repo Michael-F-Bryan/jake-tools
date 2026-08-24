@@ -42,6 +42,7 @@ from __future__ import annotations
 import re
 import textwrap
 from collections.abc import Sequence
+from math import isfinite
 from pathlib import Path
 from typing import Literal
 
@@ -55,7 +56,9 @@ from .models import (
     RawTranscript,
     SnippetRequest,
     SpeakerAssignment,
+    SpeakerCorrection,
     StageTiming,
+    TimestampedSegment,
     Utterance,
 )
 from .note import MEETING_PREP_HEADING, ParsedNote, append_diarisation_hints, parse_note
@@ -65,6 +68,7 @@ from .note import MEETING_PREP_HEADING, ParsedNote, append_diarisation_hints, pa
 # than imported: `transcription/` must not depend on `cli/`.
 RAW_TRANSCRIPT_CACHE_NAME = "raw_transcript"
 ASSIGNMENTS_CACHE_NAME = "assignments"
+CORRECTIONS_CACHE_NAME = "corrections"
 RESOLVED_TRANSCRIPT_CACHE_NAME = "resolved_transcript"
 
 _UNKNOWN = "Unknown"
@@ -100,7 +104,20 @@ class InvalidAssignmentError(SpeakersError):
         self.raw = raw
 
 
-# --- LLM-backed cluster -> name proposal -------------------------------------
+class InvalidCorrectionError(SpeakersError):
+    """Raised when a range correction is malformed or unsafe."""
+
+
+class SpeakerCorrectionConflictError(SpeakersError):
+    """Raised when durable human corrections contradict one another."""
+
+
+class CorrectionSet(BaseModel):
+    """Typed durable range corrections plus their source identity."""
+
+    corrections: list[SpeakerCorrection] = Field(default_factory=list)
+    audio_sha256: str | None = None
+    recording_identity: str | None = None
 
 
 class ClusterProposal(BaseModel):
@@ -181,6 +198,7 @@ async def resolve(
     *,
     agent: ClaudeAgent,
     assignments: Sequence[SpeakerAssignment],
+    corrections: Sequence[SpeakerCorrection] = (),
     audio_tool: AudioTool,
     merged_audio: Path,
     snippet_dir: Path,
@@ -205,9 +223,15 @@ async def resolve(
     in Attendees but never a speaker) is never force-assigned to anything.
     """
     has_audio = _has_mergeable_audio(transcript, merged_audio)
+    _validate_corrections(transcript, note, corrections)
     assigned = {item.cluster: item.name for item in assignments}
     present_clusters = list(dict.fromkeys(u.speaker for u in transcript.utterances))
-    unassigned_clusters = [c for c in present_clusters if c not in assigned]
+    correction_clusters = {item.cluster for item in corrections}
+    unassigned_clusters = [
+        c
+        for c in present_clusters
+        if c not in assigned and c not in correction_clusters
+    ]
 
     accepted: dict[str, str] = {}
     if unassigned_clusters:
@@ -239,21 +263,40 @@ async def resolve(
             if accept:
                 accepted[cluster] = proposal.name
 
-    # Assignments always win, even over an accepted proposal - defence in
-    # depth for "never re-litigated" beyond simply not asking about them.
+    # Assignments always win over proposals. Range corrections are applied
+    # afterwards, so they can override a legacy whole-cluster default locally.
     resolution: dict[str, str] = {**accepted, **assigned}
-
+    resolved_utterances = _apply_corrections(transcript, assignments, corrections)
     resolved_utterances = [
         u.model_copy(update={"speaker": resolution[u.speaker]})
         if u.speaker in resolution
         else u
-        for u in transcript.utterances
+        for u in resolved_utterances
     ]
     resolved_transcript = transcript.model_copy(
         update={"utterances": resolved_utterances}
     )
 
-    unresolved_clusters = [c for c in unassigned_clusters if c not in accepted]
+    unresolved_clusters: list[str] = []
+    request_positions: dict[str, list[int]] = {}
+    for cluster in present_clusters:
+        uncovered = [
+            index
+            for index, utterance in enumerate(transcript.utterances)
+            if utterance.speaker == cluster
+            and not any(
+                utterance.start >= correction.start_seconds
+                and utterance.end <= correction.end_seconds
+                for correction in corrections
+                if correction.cluster == cluster
+            )
+        ]
+        if cluster in assigned or cluster in accepted:
+            continue
+        if uncovered:
+            unresolved_clusters.append(cluster)
+            request_positions[cluster] = uncovered
+
     requests = [
         _snippet_request(
             cluster,
@@ -263,6 +306,7 @@ async def resolve(
             merged_audio=merged_audio,
             snippet_dir=snippet_dir,
             has_audio=has_audio,
+            candidate_positions=request_positions[cluster],
         )
         for cluster in unresolved_clusters
     ]
@@ -377,9 +421,13 @@ def _snippet_request(
     merged_audio: Path,
     snippet_dir: Path,
     has_audio: bool,
+    candidate_positions: Sequence[int] | None = None,
 ) -> SnippetRequest:
     cluster_indices = [
-        i for i, u in enumerate(original_utterances) if u.speaker == cluster
+        i
+        for i, u in enumerate(original_utterances)
+        if u.speaker == cluster
+        and (candidate_positions is None or i in candidate_positions)
     ]
     cluster_utterances = [original_utterances[i] for i in cluster_indices]
     local_picks = _select_representative_indices(
@@ -408,8 +456,20 @@ def _snippet_request(
     context_lines = quote_lines + _context_lines(
         cluster, picked_positions, resolved_utterances
     )
+    segments = [
+        TimestampedSegment(
+            start_seconds=original_utterances[position].start,
+            end_seconds=original_utterances[position].end,
+            speaker=cluster,
+            text=original_utterances[position].text,
+        )
+        for position in picked_positions
+    ]
     return SnippetRequest(
-        cluster=cluster, clip_paths=clip_paths, context="\n".join(context_lines)
+        cluster=cluster,
+        clip_paths=clip_paths,
+        context="\n".join(context_lines),
+        segments=segments,
     )
 
 
@@ -460,6 +520,146 @@ def parse_assign(raw: str) -> SpeakerAssignment:
     if not separator or not cluster or not name:
         raise InvalidAssignmentError(raw)
     return SpeakerAssignment(cluster=cluster, name=name)
+
+
+def parse_correct(raw: str) -> SpeakerCorrection:
+    """Parse `CLUSTER=START-END=NAME` with finite, positive half-open bounds."""
+    cluster, first_separator, remainder = raw.partition("=")
+    range_text, second_separator, name = remainder.partition("=")
+    start_text, range_separator, end_text = range_text.partition("-")
+    try:
+        start = float(start_text)
+        end = float(end_text)
+    except ValueError as exc:
+        raise InvalidCorrectionError(
+            f"invalid --correct value {raw!r}; expected CLUSTER=START-END=NAME"
+        ) from exc
+    if (
+        not first_separator
+        or not second_separator
+        or not cluster.strip()
+        or not name.strip()
+        or not range_separator
+        or start < 0
+        or not isfinite(start)
+        or not isfinite(end)
+        or end <= start
+    ):
+        raise InvalidCorrectionError(
+            f"invalid --correct value {raw!r}; expected finite START >= 0 and END > START"
+        )
+    return SpeakerCorrection(
+        cluster=cluster.strip(),
+        start_seconds=start,
+        end_seconds=end,
+        name=name.strip(),
+    )
+
+
+parse_correction = parse_correct
+
+
+def _ranges_overlap(left: SpeakerCorrection, right: SpeakerCorrection) -> bool:
+    return (
+        left.cluster == right.cluster
+        and left.start_seconds < right.end_seconds
+        and right.start_seconds < left.end_seconds
+    )
+
+
+def _merge_corrections(
+    previous: Sequence[SpeakerCorrection], new: Sequence[SpeakerCorrection]
+) -> list[SpeakerCorrection]:
+    merged = list(previous)
+    for correction in new:
+        if correction in merged:
+            continue
+        for existing in merged:
+            if (
+                _ranges_overlap(existing, correction)
+                and existing.name != correction.name
+            ):
+                raise SpeakerCorrectionConflictError(
+                    "conflicting range corrections for "
+                    f"{correction.cluster!r}: "
+                    f"{existing.start_seconds}-{existing.end_seconds}={existing.name!r} "
+                    "overlaps "
+                    f"{correction.start_seconds}-{correction.end_seconds}={correction.name!r}"
+                )
+        merged.append(correction)
+    return sorted(
+        merged,
+        key=lambda item: (
+            item.cluster,
+            item.start_seconds,
+            item.end_seconds,
+            item.name,
+        ),
+    )
+
+
+def _validate_corrections(
+    transcript: RawTranscript,
+    note: ParsedNote,
+    corrections: Sequence[SpeakerCorrection],
+) -> None:
+    present = {utterance.speaker for utterance in transcript.utterances}
+    valid_names = set(note.attendees) | {_UNKNOWN}
+    _merge_corrections((), corrections)
+    for correction in corrections:
+        if correction.cluster not in present:
+            raise InvalidCorrectionError(
+                f"--correct targets absent cluster {correction.cluster!r}"
+            )
+        if correction.name not in valid_names:
+            raise InvalidCorrectionError(
+                f"--correct name {correction.name!r} is not an attendee or Unknown"
+            )
+        if (
+            correction.start_seconds < 0
+            or not isfinite(correction.start_seconds)
+            or not isfinite(correction.end_seconds)
+            or correction.end_seconds <= correction.start_seconds
+        ):
+            raise InvalidCorrectionError("--correct requires finite end > start")
+        for utterance in transcript.utterances:
+            if utterance.speaker != correction.cluster:
+                continue
+            overlaps = (
+                utterance.start < correction.end_seconds
+                and correction.start_seconds < utterance.end
+            )
+            contained = (
+                utterance.start >= correction.start_seconds
+                and utterance.end <= correction.end_seconds
+            )
+            if overlaps and not contained:
+                raise InvalidCorrectionError(
+                    f"--correct range {correction.start_seconds}-{correction.end_seconds} "
+                    f"has partial overlap with utterance {utterance.start}-{utterance.end}"
+                )
+
+
+def _apply_corrections(
+    transcript: RawTranscript,
+    assignments: Sequence[SpeakerAssignment],
+    corrections: Sequence[SpeakerCorrection],
+) -> list[Utterance]:
+    defaults = {assignment.cluster: assignment.name for assignment in assignments}
+    corrected: list[Utterance] = []
+    for utterance in transcript.utterances:
+        speaker = defaults.get(utterance.speaker, utterance.speaker)
+        matching = [
+            correction
+            for correction in corrections
+            if correction.cluster == utterance.speaker
+            and utterance.start >= correction.start_seconds
+            and utterance.end <= correction.end_seconds
+        ]
+        if matching:
+            speaker = matching[-1].name
+        corrected.append(utterance.model_copy(update={"speaker": speaker}))
+    return corrected
 
 
 def _merge_assignments(
@@ -551,11 +751,46 @@ def _hint_lines_for_assignments(
     return lines
 
 
+def _hint_lines_for_corrections(
+    corrections: Sequence[SpeakerCorrection],
+    utterances: Sequence[Utterance],
+    *,
+    audio_sha256: str | None,
+    recording_identity: str,
+) -> list[str]:
+    """Render exact range evidence without leaking run-local cluster ids."""
+    lines: list[str] = []
+    for correction in corrections:
+        if correction.name == _UNKNOWN:
+            continue
+        covered = [
+            utterance
+            for utterance in utterances
+            if utterance.speaker == correction.cluster
+            and utterance.start >= correction.start_seconds
+            and utterance.end <= correction.end_seconds
+        ]
+        quote = " ".join(utterance.text for utterance in covered)
+        if not quote:
+            continue
+        identity = (
+            f"{recording_identity} (audio {audio_sha256})"
+            if audio_sha256
+            else recording_identity
+        )
+        lines.append(
+            f'{correction.name} said "{quote}" from '
+            f"{correction.start_seconds}-{correction.end_seconds} seconds in {identity}"
+        )
+    return lines
+
+
 async def run_speaker_resolution(
     note_path: Path,
     run_id: str,
     *,
     assign: Sequence[str],
+    correct: Sequence[str] = (),
     finalise: bool,
     agent: ClaudeAgent,
     audio_tool: AudioTool,
@@ -587,9 +822,35 @@ async def run_speaker_resolution(
     merged_assignments = _merge_assignments(
         previous.assignments if previous is not None else [], new_assignments
     )
+    previous_assignments = previous.assignments if previous is not None else []
+    new_corrections = [parse_correct(raw) for raw in correct]
+    previous_correction_set = cache.load(run_id, "corrections", CorrectionSet)
+    previous_corrections = (
+        previous_correction_set.corrections
+        if previous_correction_set is not None
+        else []
+    )
+    merged_corrections = _merge_corrections(previous_corrections, new_corrections)
+    _validate_corrections(transcript, note, merged_corrections)
     cache.store(
         run_id, ASSIGNMENTS_CACHE_NAME, AssignmentSet(assignments=merged_assignments)
     )
+    cache.store(
+        run_id,
+        "corrections",
+        CorrectionSet(
+            corrections=merged_corrections,
+            audio_sha256=transcript.audio_sha256,
+            recording_identity=_recording_phrase(note),
+        ),
+    )
+    if (
+        merged_assignments != previous_assignments
+        or merged_corrections != previous_corrections
+    ):
+        cache.invalidate_downstream(
+            run_id, reason="speaker assignment or correction changed"
+        )
 
     run_dir = cache.run_dir(run_id)
     resolved, requests = await resolve(
@@ -597,6 +858,7 @@ async def run_speaker_resolution(
         transcript,
         agent=agent,
         assignments=merged_assignments,
+        corrections=merged_corrections,
         audio_tool=audio_tool,
         merged_audio=run_dir / "merged.m4a",
         snippet_dir=run_dir / "snippets",
@@ -617,6 +879,11 @@ async def run_speaker_resolution(
 
     hint_lines = _hint_lines_for_assignments(
         note, merged_assignments, transcript.utterances
+    ) + _hint_lines_for_corrections(
+        merged_corrections,
+        transcript.utterances,
+        audio_sha256=transcript.audio_sha256,
+        recording_identity=_recording_phrase(note),
     )
     if hint_lines:
         append_diarisation_hints(Path(note.path), hint_lines)

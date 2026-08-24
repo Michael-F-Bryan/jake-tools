@@ -97,6 +97,13 @@ _STAGE_ERRORS: tuple[type[Exception], ...] = (
     ),
 )
 @click.option(
+    "--correct",
+    "correct",
+    multiple=True,
+    metavar="CLUSTER=START-END=NAME",
+    help="Relabel utterances fully contained in a half-open range (repeatable).",
+)
+@click.option(
     "--finalise",
     "finalise",
     is_flag=True,
@@ -118,6 +125,7 @@ _STAGE_ERRORS: tuple[type[Exception], ...] = (
 async def transcribe(
     note_path: Path,
     assign: tuple[str, ...],
+    correct: tuple[str, ...],
     finalise: bool,
     max_concurrency: int,
     agent_options: AgentOptions,
@@ -176,14 +184,25 @@ async def transcribe(
     )
 
     try:
-        outcome = await run_pipeline(
-            note_path,
-            factories,
-            agent_options.spec(),
-            assignments=assign,
-            finalise=finalise,
-            max_concurrency=max_concurrency,
-        )
+        if correct:
+            outcome = await run_pipeline(
+                note_path,
+                factories,
+                agent_options.spec(),
+                assignments=assign,
+                corrections=correct,
+                finalise=finalise,
+                max_concurrency=max_concurrency,
+            )
+        else:
+            outcome = await run_pipeline(
+                note_path,
+                factories,
+                agent_options.spec(),
+                assignments=assign,
+                finalise=finalise,
+                max_concurrency=max_concurrency,
+            )
     except _STAGE_ERRORS as exc:
         raise click.ClickException(str(exc)) from exc
 

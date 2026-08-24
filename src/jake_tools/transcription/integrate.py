@@ -53,7 +53,7 @@ from pydantic import BaseModel, Field
 
 from .cache import RunCache
 from .minutes import MINUTES_CACHE_NAME, MinutesResult
-from .models import PolishedChapter, TranscriptProducts
+from .models import PolishedChapter, RawTranscript, TranscriptProducts
 from .note import (
     MEETING_PREP_HEADING,
     NoteSection,
@@ -61,7 +61,7 @@ from .note import (
     render_body,
     split_raw_frontmatter,
 )
-from .polish import POLISHED_CACHE_NAME, PolishedChapterList
+from .polish import POLISHED_CACHE_NAME, PolishedChapterList, validate_polished_chapter
 
 # Baseline names under `RunCache.store_text`/`load_text` - these land on
 # disk as `<name>.txt` (`RunCache.store_text` appends `.txt` itself), never
@@ -115,6 +115,10 @@ class MissingMinutesError(IntegrateError):
             f"`transcript minutes --run-id {run_id} ...` first."
         )
         self.run_id = run_id
+
+
+class UnverifiedPolishError(IntegrateError):
+    """Raised when legacy polish lacks source provenance."""
 
 
 class ReconstructionError(IntegrateError):
@@ -663,6 +667,19 @@ def load_products(note_path: Path, run_id: str, cache: RunCache) -> TranscriptPr
     minutes_result = cache.load(run_id, MINUTES_CACHE_NAME, MinutesResult)
     if minutes_result is None:
         raise MissingMinutesError(run_id)
+    raw = cache.load(run_id, "resolved_transcript", RawTranscript)
+    if raw is not None:
+        for chapter in polished.chapters:
+            indices = sorted(
+                {index for turn in chapter.turns for index in turn.source_turn_indices}
+                | {item.source_turn_index for item in chapter.dropped_source_turns}
+            )
+            if indices:
+                source = [raw.utterances[index] for index in indices]
+                try:
+                    validate_polished_chapter(chapter, source, source_indices=indices)
+                except ValueError as exc:
+                    raise UnverifiedPolishError(str(exc)) from exc
 
     note = parse_note(note_path)
     return TranscriptProducts(

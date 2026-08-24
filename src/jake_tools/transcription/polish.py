@@ -42,7 +42,14 @@ from ..claude import AgentSpec, ClaudeAgent, ClaudeAgentError
 from ..prompting import StructuredPrompt
 from .cache import RunCache
 from .chapters import CHAPTERS_CACHE_NAME, ChapterList
-from .models import ChapterSpan, PolishedChapter, PolishedTurn, RawTranscript, Utterance
+from .models import (
+    ChapterSpan,
+    DroppedSourceTurn,
+    PolishedChapter,
+    PolishedTurn,
+    RawTranscript,
+    Utterance,
+)
 from .note import ParsedNote, parse_note, render_body
 from .obsidian import VaultClient
 from .speakers import RESOLVED_TRANSCRIPT_CACHE_NAME
@@ -173,6 +180,7 @@ class PolishedChapterResponse(BaseModel):
 
     summary: str
     turns: list[PolishedTurn]
+    dropped_source_turns: list[DroppedSourceTurn] = Field(default_factory=list)
 
 
 class ChapterFixResponse(PolishedChapterResponse):
@@ -219,6 +227,13 @@ class PolishPrompt(StructuredPrompt[PolishedChapterResponse]):
           in the raw utterances below, or "Unknown" - never invent a
           speaker that isn't in that set.
         - Turns must stay in chronological order.
+        - Every raw utterance index must appear exactly once in
+          `source_turn_indices` or in `dropped_source_turns`. Drops are only
+          filler-only backchannels, immediate duplicate ASR fragments, or
+          unintelligible fragments with no recoverable substance.
+        - Preserve the raw speaker for every source index: Unknown must remain
+          Unknown and a named speaker must never become Unknown.
+        - A turn may merge only source indices belonging to the same speaker.
         - `summary` is 1-3 sentences describing what this chapter covered,
           written for a callout at the top of the chapter - not a
           transcript of who said what.
@@ -303,8 +318,50 @@ class ChapterFixPrompt(StructuredPrompt[ChapterFixResponse]):
     polished_lines: str
 
 
-def _render_utterances(utterances: Sequence[Utterance]) -> str:
-    return "\n".join(f"{u.speaker}: {u.text}" for u in utterances)
+def validate_polished_chapter(
+    chapter: PolishedChapter,
+    source_utterances: Sequence[Utterance],
+    *,
+    source_indices: Sequence[int] | None = None,
+) -> PolishedChapter:
+    """Validate exact source coverage and attribution before promotion."""
+    expected = list(source_indices or range(len(source_utterances)))
+    source_by_index = dict(zip(expected, source_utterances, strict=True))
+    covered: list[int] = []
+    for turn in chapter.turns:
+        if not turn.source_turn_indices:
+            raise ValueError("polish provenance is missing from an output turn")
+        if turn.source_turn_indices != list(
+            range(min(turn.source_turn_indices), max(turn.source_turn_indices) + 1)
+        ):
+            raise ValueError("a polished turn may merge only adjacent source turns")
+        for index in turn.source_turn_indices:
+            if index not in source_by_index:
+                raise ValueError(f"polish provenance index {index} is out of range")
+            if index in covered:
+                raise ValueError(f"polish provenance index {index} is duplicated")
+            if turn.speaker != source_by_index[index].speaker:
+                raise ValueError(
+                    f"polish output speaker {turn.speaker!r} does not match source speaker"
+                )
+            covered.append(index)
+    dropped = [item.source_turn_index for item in chapter.dropped_source_turns]
+    if len(dropped) != len(set(dropped)):
+        raise ValueError("polish dropped-source provenance is duplicated")
+    if any(index not in source_by_index for index in dropped):
+        raise ValueError("polish dropped-source provenance index is out of range")
+    if set(covered) & set(dropped) or set(covered) | set(dropped) != set(expected):
+        raise ValueError("polish provenance does not form an exact source partition")
+    if covered != sorted(covered):
+        raise ValueError("polish provenance is not chronological")
+    return chapter
+
+
+def _render_utterances(utterances: Sequence[Utterance], *, start_index: int = 0) -> str:
+    return "\n".join(
+        f"{start_index + index} | {u.speaker}: {u.text}"
+        for index, u in enumerate(utterances)
+    )
 
 
 def _render_turns(turns: Sequence[PolishedTurn]) -> str:
@@ -341,7 +398,7 @@ async def _polish_one_chapter(
     reflect a corrected turn.
     """
 
-    raw_lines = _render_utterances(utterances)
+    raw_lines = _render_utterances(utterances, start_index=span.start_utterance)
     lexicon_list = list(lexicon)
 
     polish_response, _reply = await agent.run_structured(
@@ -352,6 +409,21 @@ async def _polish_one_chapter(
         ),
         spec,
     )
+    polish_has_provenance = any(
+        turn.source_turn_indices for turn in polish_response.turns
+    ) or bool(polish_response.dropped_source_turns)
+    if polish_has_provenance:
+        validate_polished_chapter(
+            PolishedChapter(
+                title=span.title,
+                start_seconds=span.start_seconds,
+                summary=polish_response.summary,
+                turns=polish_response.turns,
+                dropped_source_turns=polish_response.dropped_source_turns,
+            ),
+            utterances,
+            source_indices=range(span.start_utterance, span.end_utterance + 1),
+        )
 
     fix_response, _reply = await agent.run_structured(
         ChapterFixPrompt(
@@ -363,6 +435,11 @@ async def _polish_one_chapter(
         ),
         spec,
     )
+    fix_has_provenance = any(
+        turn.source_turn_indices for turn in fix_response.turns
+    ) or bool(fix_response.dropped_source_turns)
+    if polish_has_provenance and not fix_has_provenance:
+        raise ValueError("fixer response omitted required source provenance")
 
     summary = fix_response.summary if fix_response.issues else polish_response.summary
     chapter = PolishedChapter(
@@ -370,7 +447,17 @@ async def _polish_one_chapter(
         start_seconds=span.start_seconds,
         summary=summary,
         turns=fix_response.turns,
+        dropped_source_turns=fix_response.dropped_source_turns,
     )
+    if (
+        any(turn.source_turn_indices for turn in fix_response.turns)
+        or fix_response.dropped_source_turns
+    ):
+        validate_polished_chapter(
+            chapter,
+            utterances,
+            source_indices=range(span.start_utterance, span.end_utterance + 1),
+        )
     issues = [f"{span.title}: {issue}" for issue in fix_response.issues]
     return chapter, issues
 

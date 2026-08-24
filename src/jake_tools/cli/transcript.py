@@ -230,6 +230,16 @@ async def adapt(
     ),
 )
 @click.option(
+    "--correct",
+    "correct",
+    multiple=True,
+    metavar="CLUSTER=START-END=NAME",
+    help=(
+        "Relabel only utterances fully contained in a half-open time range; "
+        "repeatable, e.g. --correct SPEAKER_00=12.0-18.5=Ada Lovelace."
+    ),
+)
+@click.option(
     "--finalise",
     "finalise",
     is_flag=True,
@@ -243,6 +253,7 @@ async def speakers(
     note_path: Path,
     run_id: str,
     assign: tuple[str, ...],
+    correct: tuple[str, ...],
     finalise: bool,
     agent_options: AgentOptions,
     audio_options: AudioOptions,
@@ -276,15 +287,27 @@ async def speakers(
     cache = cache_options.run_cache()
 
     try:
-        result = await run_speaker_resolution(
-            note_path,
-            run_id,
-            assign=assign,
-            finalise=finalise,
-            agent=agent,
-            audio_tool=audio_tool,
-            cache=cache,
-        )
+        if correct:
+            result = await run_speaker_resolution(
+                note_path,
+                run_id,
+                assign=assign,
+                correct=correct,
+                finalise=finalise,
+                agent=agent,
+                audio_tool=audio_tool,
+                cache=cache,
+            )
+        else:
+            result = await run_speaker_resolution(
+                note_path,
+                run_id,
+                assign=assign,
+                finalise=finalise,
+                agent=agent,
+                audio_tool=audio_tool,
+                cache=cache,
+            )
     except (SpeakersError, ClaudeAgentError, AudioToolError, NoteParseError) as exc:
         raise click.ClickException(str(exc)) from exc
 

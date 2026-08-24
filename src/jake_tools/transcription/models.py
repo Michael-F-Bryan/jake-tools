@@ -41,6 +41,13 @@ class StageTimingLog(BaseModel):
     stages: list[StageTiming] = Field(default_factory=list)
 
 
+class StaleState(BaseModel):
+    """Downstream artefacts invalidated by an upstream human correction."""
+
+    reason: str
+    artefacts: list[str] = Field(default_factory=list)
+
+
 NoteContext = Literal["meeting", "ops-log"]
 """Which kind of Obsidian note a run is producing. Detection lands in plan 002."""
 
@@ -92,12 +99,34 @@ class SpeakerAssignment(BaseModel):
     name: str  # "Nikki Staltari" or "Unknown"
 
 
+class SpeakerCorrection(BaseModel):
+    """A human attribution for one half-open time range of one cluster."""
+
+    cluster: str
+    start_seconds: float
+    end_seconds: float
+    name: str
+
+
+class TimestampedSegment(BaseModel):
+    """Verbatim, timestamped transcript evidence attached to a request."""
+
+    start_seconds: float
+    end_seconds: float
+    speaker: str
+    text: str
+
+
+SnippetSegment = TimestampedSegment
+
+
 class SnippetRequest(BaseModel):
     """One unresolved cluster and the evidence a human needs to identify it."""
 
     cluster: str
     clip_paths: list[str]  # ffmpeg-cut snippet files on disk
     context: str  # adjacent resolved dialogue, to jog memory
+    segments: list[TimestampedSegment] = Field(default_factory=list)
 
 
 class ChapterSpan(BaseModel):
@@ -109,11 +138,26 @@ class ChapterSpan(BaseModel):
     start_seconds: float
 
 
+DroppedSourceReason = Literal[
+    "filler-only backchannel",
+    "immediate duplicate ASR fragment",
+    "unintelligible fragment with no recoverable substance",
+]
+
+
+class DroppedSourceTurn(BaseModel):
+    """A source turn deliberately omitted by polish, with an allowed reason."""
+
+    source_turn_index: int
+    reason: DroppedSourceReason
+
+
 class PolishedTurn(BaseModel):
     """One cleaned-up turn of dialogue in a polished chapter."""
 
     speaker: str
     text: str
+    source_turn_indices: list[int] = Field(default_factory=list)
 
 
 class PolishedChapter(BaseModel):
@@ -123,6 +167,7 @@ class PolishedChapter(BaseModel):
     start_seconds: float
     summary: str  # per-chapter summary callout text
     turns: list[PolishedTurn]
+    dropped_source_turns: list[DroppedSourceTurn] = Field(default_factory=list)
 
 
 class TranscriptProducts(BaseModel):
