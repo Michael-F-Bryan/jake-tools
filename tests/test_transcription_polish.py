@@ -83,6 +83,7 @@ from jake_tools.transcription.polish import (
     build_lexicon,
     polish_chapters,
     run_polish,
+    validate_polished_chapter,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -342,6 +343,67 @@ async def test_polish_then_fix_are_two_separate_calls_and_fixer_sees_raw_and_pol
     ]
 
 
+async def test_fixer_receives_polisher_provenance_and_drop_ledger(
+    tmp_path: Path,
+) -> None:
+    transcript = _transcript(
+        [
+            _utterance(0, "Ada Lovelace", "The first point."),
+            _utterance(1, "Grace Hopper", "Mm-hm."),
+        ]
+    )
+    span = ChapterSpan(
+        title="Opening", start_utterance=0, end_utterance=1, start_seconds=0.0
+    )
+    dropped = {
+        "source_turn_index": 1,
+        "reason": "filler-only backchannel",
+    }
+    fake = ScriptedQuery(
+        {
+            "summary": "Draft summary",
+            "turns": [
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "The first point.",
+                    "source_turn_indices": [0],
+                }
+            ],
+            "dropped_source_turns": [dropped],
+        },
+        {
+            "summary": "Draft summary",
+            "turns": [
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "The first point.",
+                    "source_turn_indices": [0],
+                }
+            ],
+            "dropped_source_turns": [dropped],
+            "issues": [],
+        },
+    )
+
+    await polish_chapters(
+        transcript,
+        [span],
+        _note(attendees=["Ada Lovelace", "Grace Hopper"]),
+        _empty_vault(tmp_path),
+        ClaudeAgent(run_query=fake),
+    )
+
+    fix_prompt = fake.calls[1][0]
+    assert "Ada Lovelace [0]" in fix_prompt
+    assert "Grace Hopper" in fix_prompt
+    assert "source_turn_index=1" in fix_prompt
+    assert "filler-only backchannel" in fix_prompt
+    normalised = " ".join(fix_prompt.split()).casefold()
+    assert "every raw utterance index must appear exactly once" in normalised
+    assert "preserve the raw speaker for every source index" in normalised
+    assert "complete `dropped_source_turns` ledger" in normalised
+
+
 async def test_invalid_fixer_output_gets_one_validation_repair_call_with_telemetry(
     tmp_path: Path,
 ) -> None:
@@ -413,6 +475,233 @@ async def test_invalid_fixer_output_gets_one_validation_repair_call_with_telemet
     ]
 
 
+async def test_validation_repair_inherits_an_omitted_existing_drop_ledger(
+    tmp_path: Path,
+) -> None:
+    transcript = _transcript(
+        [
+            _utterance(0, "Ada Lovelace", "First point."),
+            _utterance(1, "Grace Hopper", "Mm-hm."),
+            _utterance(2, "Ada Lovelace", "Second point."),
+        ]
+    )
+    span = ChapterSpan(
+        title="Opening", start_utterance=0, end_utterance=2, start_seconds=0.0
+    )
+    dropped = {
+        "source_turn_index": 1,
+        "reason": "filler-only backchannel",
+    }
+    fake = ScriptedQuery(
+        {
+            "summary": "Draft",
+            "turns": [
+                {
+                    "speaker": "Grace Hopper",
+                    "text": "First point. Second point.",
+                    "source_turn_indices": [0, 2],
+                }
+            ],
+            "dropped_source_turns": [dropped],
+        },
+        {
+            "summary": "Repaired",
+            "turns": [
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "First point. Second point.",
+                    "source_turn_indices": [0, 2],
+                }
+            ],
+            "issues": ["restored the source speaker"],
+        },
+        {
+            "summary": "Repaired",
+            "turns": [
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "First point. Second point.",
+                    "source_turn_indices": [0, 2],
+                }
+            ],
+            "dropped_source_turns": [dropped],
+            "issues": [],
+        },
+    )
+
+    chapters, issues = await polish_chapters(
+        transcript,
+        [span],
+        _note(attendees=["Ada Lovelace", "Grace Hopper"]),
+        _empty_vault(tmp_path),
+        ClaudeAgent(run_query=fake),
+    )
+
+    assert [item.source_turn_index for item in chapters[0].dropped_source_turns] == [1]
+    assert issues == ["Opening: restored the source speaker"]
+
+
+async def test_validation_repair_excludes_restored_turns_from_an_inherited_ledger(
+    tmp_path: Path,
+) -> None:
+    transcript = _transcript(
+        [
+            _utterance(0, "Ada Lovelace", "First point."),
+            _utterance(1, "Grace Hopper", "And it."),
+            _utterance(2, "Ada Lovelace", "Second point."),
+            _utterance(3, "Grace Hopper", "Mm-hm."),
+            _utterance(4, "Ada Lovelace", "Third point."),
+        ]
+    )
+    span = ChapterSpan(
+        title="Opening", start_utterance=0, end_utterance=4, start_seconds=0.0
+    )
+    dropped_restored = {
+        "source_turn_index": 1,
+        "reason": "unintelligible fragment with no recoverable substance",
+    }
+    dropped_retained = {
+        "source_turn_index": 3,
+        "reason": "filler-only backchannel",
+    }
+    fake = ScriptedQuery(
+        {
+            "summary": "Draft",
+            "turns": [
+                {
+                    "speaker": "Grace Hopper",
+                    "text": "First point. Second point. Third point.",
+                    "source_turn_indices": [0, 2, 4],
+                }
+            ],
+            "dropped_source_turns": [dropped_restored, dropped_retained],
+        },
+        {
+            "summary": "Repaired",
+            "turns": [
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "First point.",
+                    "source_turn_indices": [0],
+                },
+                {
+                    "speaker": "Grace Hopper",
+                    "text": "And it.",
+                    "source_turn_indices": [1],
+                },
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "Second point. Third point.",
+                    "source_turn_indices": [2, 4],
+                },
+            ],
+            "issues": ["restored the dropped source turn"],
+        },
+        {
+            "summary": "Repaired",
+            "turns": [
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "First point.",
+                    "source_turn_indices": [0],
+                },
+                {
+                    "speaker": "Grace Hopper",
+                    "text": "And it.",
+                    "source_turn_indices": [1],
+                },
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "Second point. Third point.",
+                    "source_turn_indices": [2, 4],
+                },
+            ],
+            "dropped_source_turns": [dropped_retained],
+            "issues": [],
+        },
+    )
+
+    chapters, issues = await polish_chapters(
+        transcript,
+        [span],
+        _note(attendees=["Ada Lovelace", "Grace Hopper"]),
+        _empty_vault(tmp_path),
+        ClaudeAgent(run_query=fake),
+    )
+
+    assert [item.source_turn_index for item in chapters[0].dropped_source_turns] == [3]
+    assert issues == ["Opening: restored the dropped source turn"]
+
+
+async def test_polisher_and_fixer_each_get_one_independent_validation_repair(
+    tmp_path: Path,
+) -> None:
+    transcript = _transcript([_utterance(0, "Ada Lovelace", "Hello there.")])
+    span = ChapterSpan(
+        title="Opening", start_utterance=0, end_utterance=0, start_seconds=0.0
+    )
+    fake = ScriptedQuery(
+        {
+            "summary": "Invalid generation",
+            "turns": [
+                {
+                    "speaker": "Grace Hopper",
+                    "text": "Hello there.",
+                    "source_turn_indices": [0],
+                }
+            ],
+        },
+        {
+            "summary": "Repaired generation",
+            "turns": [
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "Hello there.",
+                    "source_turn_indices": [0],
+                }
+            ],
+            "issues": ["restored the generation speaker"],
+        },
+        {
+            "summary": "Invalid review",
+            "turns": [
+                {
+                    "speaker": "Grace Hopper",
+                    "text": "Hello there.",
+                    "source_turn_indices": [0],
+                }
+            ],
+            "issues": ["changed attribution during review"],
+        },
+        {
+            "summary": "Repaired review",
+            "turns": [
+                {
+                    "speaker": "Ada Lovelace",
+                    "text": "Hello there.",
+                    "source_turn_indices": [0],
+                }
+            ],
+            "issues": ["restored the review speaker"],
+        },
+    )
+
+    chapters, issues = await polish_chapters(
+        transcript,
+        [span],
+        _note(attendees=["Ada Lovelace"]),
+        _empty_vault(tmp_path),
+        ClaudeAgent(run_query=fake),
+    )
+
+    assert len(fake.calls) == 4
+    assert chapters[0].turns[0].speaker == "Ada Lovelace"
+    assert issues == [
+        "Opening: restored the generation speaker",
+        "Opening: restored the review speaker",
+    ]
+
+
 async def test_invalid_validation_repair_output_fails_closed_without_a_second_repair(
     tmp_path: Path,
 ) -> None:
@@ -475,9 +764,12 @@ def test_validation_repair_prompt_requires_full_indexed_timestamped_context() ->
         invalid_dropped="[]",
         validation_errors=["speaker mismatch"],
     ).render()
-    assert "raw indexed and timestamped turns" in " ".join(prompt.split()).lower()
+    normalised = " ".join(prompt.split())
+    assert "raw indexed and timestamped turns" in normalised.lower()
     assert "speaker mismatch" in prompt
-    assert "invalid proposed chapter" in " ".join(prompt.split()).lower()
+    assert "invalid proposed chapter" in normalised.lower()
+    assert "complete `dropped_source_turns` ledger" in normalised
+    assert "Do not merely describe ledger changes in `issues`" in normalised
 
 
 async def test_polish_library_rejects_non_positive_max_concurrency(
@@ -719,7 +1011,16 @@ def _chapter_text(chapter: PolishedChapter) -> str:
 async def test_live_polish_repairs_fragments_and_mishearings_and_preserves_meaning(
     tmp_path: Path,
 ) -> None:
-    transcript = _transcript(list(_MESSY_UTTERANCES))
+    source_utterances = [
+        *_MESSY_UTTERANCES,
+        _utterance(
+            len(_MESSY_UTTERANCES),
+            "Unknown",
+            "The fallback route stays manual until the certification review clears.",
+        ),
+    ]
+    transcript = _transcript(source_utterances)
+    span = _MESSY_SPAN.model_copy(update={"end_utterance": len(source_utterances) - 1})
     note = _note(
         attendees=["Jake"],
         body="Discussing the [[Autonomy Stack]] pilot.",
@@ -728,17 +1029,23 @@ async def test_live_polish_repairs_fragments_and_mishearings_and_preserves_meani
     agent = ClaudeAgent(defaults=AgentSpec(effort="low"))
 
     chapters, issues = await polish_chapters(
-        transcript, [_MESSY_SPAN], note, vault, agent, max_concurrency=1
+        transcript, [span], note, vault, agent, max_concurrency=1
     )
 
     assert len(chapters) == 1
     chapter = chapters[0]
+    validate_polished_chapter(chapter, source_utterances)
 
     assert chapter.summary.strip() != ""
     assert len(chapter.turns) > 0
     for turn in chapter.turns:
         assert turn.text.strip() != ""
         assert turn.speaker in {"SPEAKER_00", "SPEAKER_01", "Unknown"}
+    unknown_index = len(source_utterances) - 1
+    assert any(
+        turn.speaker == "Unknown" and unknown_index in turn.source_turn_indices
+        for turn in chapter.turns
+    )
 
     text = _chapter_text(chapter)
 
@@ -754,7 +1061,14 @@ async def test_live_polish_repairs_fragments_and_mishearings_and_preserves_meani
 
     # Meaning preservation: distinctive content words from the raw text
     # survive polish (not summarised away or dropped).
-    for content_word in ("jake", "vendor", "certification", "beachhead", "deployment"):
+    for content_word in (
+        "jake",
+        "vendor",
+        "certification",
+        "beachhead",
+        "deployment",
+        "manual",
+    ):
         assert content_word in text, (
             f"{content_word!r} missing from polished text: {text!r}"
         )

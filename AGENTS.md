@@ -62,6 +62,36 @@ downloads real ASR/diarisation models from Hugging Face Hub (HF-gated -
 requires an `HF_TOKEN` that has accepted the diarisation model's licence),
 which is exactly the "real external service" `live` exists for.
 
+### Testing judgement-bearing LLM behaviour
+
+A fake model response proves only deterministic mechanics around the LLM seam.
+It may test prompt rendering, schema injection and parsing, retry limits, cache
+behaviour, telemetry, validation, error mapping, or CLI delegation. It cannot
+prove that a prompt gives the model enough evidence, that the model follows the
+instructions, or that generated output meets a semantic quality bar.
+
+- If an acceptance criterion depends on language understanding, judgement,
+  interpretation, attribution, summarisation, or a prompt working as intended,
+  exercise the normal `ClaudeAgent` path through the real Claude Agent SDK in
+  an opt-in `@pytest.mark.slow` test.
+- Never author a compliant fake response and cite the passing test as evidence
+  that the model can produce that response. That proves only what the test
+  author supplied.
+- Default to executing the actual production code at the lowest practical
+  acceptance boundary. Do not monkeypatch the subject under test, replace its
+  orchestration, or pre-author the intelligent result merely to make a test
+  pass. A fake is acceptable only at a true external boundary, and the test
+  must still execute the production behaviour it claims to verify.
+- Keep deterministic validators and seam tests fast and hermetic, but pair them
+  with representative real-model tests for the judgement-bearing behaviour
+  they constrain.
+- Assert stable semantic invariants and observable outcomes in real-model tests,
+  not exact prose. Examples include preserved meaning, correct modality,
+  evidence-grounded attribution, source coverage, and refusal to invent.
+- If credentials, quota, or the provider are unavailable, report the real-model
+  test as blocked or unverified. Do not replace it with a fake, weaken the
+  assertion, or claim the prompt is covered.
+
 ### Code conventions
 
 - Keep CLI commands thin; put orchestration and domain logic in package modules.
@@ -71,23 +101,19 @@ which is exactly the "real external service" `live` exists for.
 - All LLM calls go through `ClaudeAgent` in `claude.py`. Nothing else imports
   `claude_agent_sdk` directly. `transcription/` (behind the `transcript`/
   `transcribe` commands) is the exemplar of every convention below: options
-  decorators, `@coro`, a `ClaudeAgent(run_query=fake)` test seam, and domain
-  errors + `ClaudeAgentError` mapped to a clean `ClickException`.
+  decorators, `@coro`, and domain errors + `ClaudeAgentError` mapped to a clean
+  `ClickException`.
 - Commands that call the LLM use the `agent_options` decorator in
   `cli/options.py` (adds `--model`/`--effort` and injects a typed
   `AgentOptions`) and `@coro`, applied closest to the callback, which runs the
   async callback with `asyncio.run`. The handler builds the agent itself —
   `agent_options.agent()` for a `ClaudeAgent`, or `.spec()` for just the
-  `AgentSpec` — there is no shared factory seam to route through, so a test
-  fakes the call by monkeypatching `AgentOptions.agent` (or the dependency it
-  returns), not by injecting a factory. `--effort`'s choices come from
-  `typing.get_args(EffortLevel)`, imported from `claude.py` (never
-  `claude_agent_sdk` directly).
+  `AgentSpec` — there is no shared factory seam to route through. `--effort`'s
+  choices come from `typing.get_args(EffortLevel)`, imported from `claude.py`
+  (never `claude_agent_sdk` directly).
 - `AgentSpec.tools` defaults to an empty tuple, which is genuinely tool-less.
   Never pass `tools=None` to `ClaudeAgentOptions`: the SDK then omits `--tools`
   and the agent inherits Claude Code's full default toolset.
-- Tests inject a fake at the `run_query` seam (see `tests/test_claude_agent.py`),
-  so prompt rendering, schema injection, and usage accounting stay real.
 - `ctx.obj` is never set or read anywhere in this codebase. Every CLI
   dependency is built by the command that needs it: a decorator (see
   `cli/transcript_options.py`, `cli/options.py`, `cli/clockify.py`) stacks the
@@ -100,11 +126,7 @@ which is exactly the "real external service" `live` exists for.
   `--api-base-url` are ordinary per-subcommand flags via a `clockify_options`
   decorator, the same shape as every other options decorator — there is no
   group-level state and no exception to this rule.
-- CLI tests stay thin: they monkeypatch the constructor method on an options
-  model (e.g. `ClockifyOptions.inventory_client`) or the client/orchestration
-  symbol in the CLI module, and assert flag parsing and delegation. Real
-  behaviour — reconciliation logic, HTTP clients, etc. — is tested at the
-  library seam with injected fakes, not through the CLI.
+
 
 ## External dependencies
 

@@ -10,6 +10,7 @@ integration write.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -22,7 +23,7 @@ from .cache import RunCache, StageManifest, atomic_write_text, sha256_of, stable
 from .chapters import ChapterList
 from .integrate import IntegrationPlan, IntegrationReport, load_products, plan_integrate
 from .minutes import MINUTES_CACHE_NAME, MinutesResult, MinutesReviewResult
-from .models import RawTranscript, TranscriptProducts
+from .models import ChapterSpan, RawTranscript, TranscriptProducts
 from .note import MEETING_PREP_HEADING, parse_note, split_raw_frontmatter
 from .polish import POLISHED_CACHE_NAME, PolishedChapterList, validate_polished_chapter
 
@@ -362,6 +363,41 @@ def _validate_manifests(cache: RunCache, run_id: str) -> bool:
     return resolved is not None and _validate_raw_stage(cache, run_id, resolved)
 
 
+def _temporal_geometry_is_valid(
+    raw: RawTranscript, spans: Sequence[ChapterSpan]
+) -> bool:
+    """Validate chapter timing without inventing precision for text sources.
+
+    Plain-text adapters may only know a turn's start (and represent its end
+    with the same value). The 60-second minimum is therefore meaningful for
+    audio timestamps but impossible to prove for text; chapter partition and
+    non-negative start geometry remain hard checks in both cases.
+    """
+    if any(
+        span.start_utterance < 0
+        or span.end_utterance < span.start_utterance
+        or span.end_utterance >= len(raw.utterances)
+        for span in spans
+    ):
+        return False
+    if (
+        raw.source_text_sha256 is None
+        and len(spans) >= 2
+        and not all(
+            raw.utterances[span.end_utterance].end
+            - raw.utterances[span.start_utterance].start
+            >= 60.0
+            for span in spans
+        )
+    ):
+        return False
+    return all(
+        span.start_seconds >= 0
+        and raw.utterances[span.start_utterance].start >= span.start_seconds
+        for span in spans
+    )
+
+
 def _check_products(
     note_path: Path,
     run_id: str,
@@ -435,23 +471,7 @@ def _check_products(
         chapter_ok = actual == expected and all(
             span.start_utterance <= span.end_utterance for span in spans
         )
-        duration_ok = len(spans) < 2 or all(
-            raw.utterances[span.end_utterance].end
-            - raw.utterances[span.start_utterance].start
-            >= 60.0
-            for span in spans
-            if 0 <= span.start_utterance <= span.end_utterance < len(raw.utterances)
-        )
-        geometry_ok = (
-            chapter_ok
-            and duration_ok
-            and all(
-                span.start_seconds >= 0
-                and (index := span.start_utterance) < len(raw.utterances)
-                and raw.utterances[index].start >= span.start_seconds
-                for span in spans
-            )
-        )
+        geometry_ok = chapter_ok and _temporal_geometry_is_valid(raw, spans)
         for previous, current in zip(raw.utterances, raw.utterances[1:], strict=False):
             if current.start < previous.end:
                 warnings.append(

@@ -44,7 +44,11 @@ from jake_tools.transcription.audio import (
     NoAudioEmbedsError,
 )
 from jake_tools.transcription.cache import RunCache, sha256_of
-from jake_tools.transcription.integrate import IntegrationReport
+from jake_tools.transcription.integrate import (
+    IntegrationReport,
+    load_products,
+    plan_integrate,
+)
 from jake_tools.transcription.models import (
     RawTranscript,
     SnippetRequest,
@@ -71,7 +75,11 @@ pipeline_module = importlib.import_module("jake_tools.transcription.pipeline")
 
 
 @pytest.fixture(autouse=True)
-def _stop_pipeline_before_canonical_apply(monkeypatch: pytest.MonkeyPatch) -> None:
+def _stop_pipeline_before_canonical_apply(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    if request.node.get_closest_marker("slow") is not None:
+        return
     monkeypatch.setattr(
         pipeline_module,
         "export_product_review",
@@ -1004,10 +1012,11 @@ def test_the_fixtures_own_raw_marker_check_is_honest() -> None:
 
 
 @pytest.mark.slow
-async def test_live_transcribe_produces_all_four_sections_with_attendee_only_speakers(
+async def test_live_transcribe_produces_review_candidate_with_attendee_only_speakers(
     tmp_path: Path,
 ) -> None:
     note_path = _live_transcript_note(tmp_path, filename="live-transcript.txt")
+    original_note = note_path.read_text()
     transcript_path = tmp_path / "live-transcript.txt"
     transcript_path.write_text(_TRANSCRIPT_LINES + "\n")
     vault_root = tmp_path / "vault"
@@ -1029,10 +1038,18 @@ async def test_live_transcribe_produces_all_four_sections_with_attendee_only_spe
     )
 
     assert outcome.status == "review_required", outcome.model_dump()
+    assert outcome.run_id is not None
     assert outcome.report is not None
+    assert outcome.candidate is not None
     print("run report:", outcome.report.model_dump_json(indent=2))
 
-    text = note_path.read_text()
+    assert note_path.read_text() == original_note
+    products = load_products(note_path, outcome.run_id, cache)
+    plan = plan_integrate(note_path, products, cache=cache, run_id=outcome.run_id)
+    candidate_path = Path(outcome.candidate)
+    assert candidate_path.exists()
+    text = candidate_path.read_text()
+    assert text == plan.candidate_text
     assert (
         text.index("[!summary]")
         < text.index("## Meeting Prep")
@@ -1080,4 +1097,4 @@ async def test_live_transcribe_produces_all_four_sections_with_attendee_only_spe
         f"found {found}: {transcript_body!r}"
     )
 
-    print("note text:\n", text)
+    print("review candidate:\n", text)

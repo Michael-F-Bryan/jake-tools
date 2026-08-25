@@ -297,6 +297,14 @@ class ChapterFixPrompt(StructuredPrompt[ChapterFixResponse]):
         will read (an empty list if the polish under review was already
         clean - do not invent issues to have something to report).
 
+        Provenance is also mandatory: Every raw utterance index must appear
+        exactly once in `source_turn_indices` or in the complete
+        `dropped_source_turns` ledger. Preserve the raw speaker for every
+        source index, keep `Unknown` as `Unknown`, and never merge turns
+        across speakers. A merged output turn may cite non-adjacent source
+        indices only when every intervening non-overlapping source index is
+        present in the dropped ledger; otherwise split the turn.
+
         `summary` must always read exactly like the polish's own summary
         field: 1-3 sentences describing what this chapter covered, for a
         reader's callout. Never write about this review itself - not the
@@ -315,6 +323,8 @@ class ChapterFixPrompt(StructuredPrompt[ChapterFixResponse]):
         Summary: {{ polished_summary }}
         Turns:
         {{ polished_lines }}
+        Dropped source-turn ledger:
+        {{ polished_dropped }}
         """)
     response_model = ChapterFixResponse
 
@@ -323,6 +333,7 @@ class ChapterFixPrompt(StructuredPrompt[ChapterFixResponse]):
     raw_lines: str
     polished_summary: str
     polished_lines: str
+    polished_dropped: str = "[]"
 
 
 class PolishValidationRepairPrompt(StructuredPrompt[PolishValidationRepairResponse]):
@@ -351,6 +362,13 @@ class PolishValidationRepairPrompt(StructuredPrompt[PolishValidationRepairRespon
 
         Exact deterministic validation errors:
         {{ validation_errors | json }}
+
+        Always return the complete `dropped_source_turns` ledger as a
+        structured field, even when it is unchanged or empty. Do not merely
+        describe ledger changes in `issues`. A merged output turn may cite
+        non-adjacent source indices only when every intervening non-overlapping
+        source index appears in `dropped_source_turns`; otherwise split the
+        output turn.
 
         Return the complete corrected chapter. `summary` must remain a
         reader-facing chapter summary, never commentary about this repair.
@@ -499,6 +517,21 @@ async def _validate_or_repair_response(
             stage="polish-validation-repair",
             scope=scope,
         )
+        if "dropped_source_turns" not in repair_response.model_fields_set:
+            repaired_indices = {
+                index
+                for turn in repair_response.turns
+                for index in turn.source_turn_indices
+            }
+            repair_response = repair_response.model_copy(
+                update={
+                    "dropped_source_turns": [
+                        item
+                        for item in response.dropped_source_turns
+                        if item.source_turn_index not in repaired_indices
+                    ]
+                }
+            )
         repaired_chapter = _chapter_from_response(span, repair_response)
         validate_polished_chapter(
             repaired_chapter,
@@ -558,7 +591,7 @@ async def _polish_one_chapter(
     (
         polish_response,
         polish_repair_issues,
-        repair_used,
+        _polish_repair_used,
     ) = await _validate_or_repair_response(
         polish_response,
         span,
@@ -580,7 +613,8 @@ async def _polish_one_chapter(
             lexicon=lexicon_list,
             raw_lines=raw_lines,
             polished_summary=polish_response.summary,
-            polished_lines=_render_turns(polish_response.turns),
+            polished_lines=_render_response_turns(polish_response),
+            polished_dropped=polish_response.dropped_source_turns.__repr__(),
         ),
         spec,
         stage="polish-review",
@@ -599,7 +633,7 @@ async def _polish_one_chapter(
         spec=spec,
         scope=scope,
         force_validation=polish_has_provenance,
-        repair_allowed=not repair_used,
+        repair_allowed=True,
     )
 
     fix_issues = getattr(fix_response, "issues", [])

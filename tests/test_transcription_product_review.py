@@ -33,6 +33,7 @@ from jake_tools.transcription.product_review import (
     ProductReviewExportError,
     ProductReviewRefusalError,
     ReviewBinding,
+    _temporal_geometry_is_valid,
     _validate_raw_stage,
     apply_accepted_product,
     decide_product_review,
@@ -105,6 +106,50 @@ def test_product_checks_separate_hard_failures_from_semantic_warnings() -> None:
     )
     assert checks.passed
     assert checks.semantic_warnings
+
+
+def test_text_source_temporal_geometry_does_not_claim_unknown_duration() -> None:
+    raw = RawTranscript(
+        clips=[],
+        utterances=[
+            Utterance(start=0.0, end=0.0, speaker="Ada", text="first"),
+            Utterance(start=0.0, end=0.0, speaker="Ada", text="second"),
+        ],
+        source_text_sha256="a" * 64,
+    )
+    spans = [
+        ChapterSpan(
+            title="Opening", start_utterance=0, end_utterance=0, start_seconds=0.0
+        ),
+        ChapterSpan(
+            title="Closing", start_utterance=1, end_utterance=1, start_seconds=0.0
+        ),
+    ]
+
+    assert _temporal_geometry_is_valid(raw, spans)
+
+
+def test_audio_source_temporal_geometry_still_requires_minimum_chapter_duration() -> (
+    None
+):
+    raw = RawTranscript(
+        clips=[],
+        utterances=[
+            Utterance(start=0.0, end=1.0, speaker="Ada", text="first"),
+            Utterance(start=2.0, end=3.0, speaker="Ada", text="second"),
+        ],
+        audio_sha256="a" * 64,
+    )
+    spans = [
+        ChapterSpan(
+            title="Opening", start_utterance=0, end_utterance=0, start_seconds=0.0
+        ),
+        ChapterSpan(
+            title="Closing", start_utterance=1, end_utterance=1, start_seconds=2.0
+        ),
+    ]
+
+    assert not _temporal_geometry_is_valid(raw, spans)
 
 
 def test_text_raw_review_rejects_manifest_with_wrong_stage_even_when_output_matches(
