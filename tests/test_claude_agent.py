@@ -79,6 +79,26 @@ class RecordingQuery:
         return self.calls[0][1]
 
 
+class FailingQuery(RecordingQuery):
+    """Replay messages, then reproduce the SDK's lossy stream exception."""
+
+    def __init__(self, *messages: Message, error: str) -> None:
+        super().__init__(*messages)
+        self.error = error
+
+    def __call__(
+        self, *, prompt: str, options: ClaudeAgentOptions
+    ) -> AsyncIterator[Message]:
+        stream = super().__call__(prompt=prompt, options=options)
+
+        async def failing_stream() -> AsyncIterator[Message]:
+            async for message in stream:
+                yield message
+            raise Exception(self.error)
+
+        return failing_stream()
+
+
 def _assistant(text: str) -> AssistantMessage:
     return AssistantMessage(content=[TextBlock(text=text)], model="claude-sonnet-5")
 
@@ -158,6 +178,26 @@ async def test_stream_without_a_result_message_raises() -> None:
 
     with pytest.raises(ClaudeAgentError, match="without a result"):
         await agent.run("say something")
+
+
+async def test_rate_limit_message_survives_the_sdk_stream_exception() -> None:
+    reset_message = "You've hit your session limit · resets 6:10pm (Australia/Perth)"
+    rate_limit = AssistantMessage(
+        content=[TextBlock(text=reset_message)],
+        model="<synthetic>",
+        error="rate_limit",
+    )
+    agent = ClaudeAgent(
+        run_query=FailingQuery(
+            rate_limit,
+            error="Claude Code returned an error result: success",
+        )
+    )
+
+    with pytest.raises(ClaudeAgentError) as excinfo:
+        await agent.run("say something")
+
+    assert str(excinfo.value) == f"Claude rate limit reached: {reset_message}"
 
 
 async def test_defaults_are_tool_less() -> None:

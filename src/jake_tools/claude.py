@@ -281,20 +281,36 @@ class ClaudeAgent:
     ) -> tuple[str | None, ResultMessage]:
         chunks: list[str] = []
         result: ResultMessage | None = None
-        async for message in self.run_query(prompt=prompt, options=options):
-            if isinstance(message, AssistantMessage):
-                chunks.extend(
-                    block.text
-                    for block in message.content
-                    if isinstance(block, TextBlock)
-                )
-            elif isinstance(message, ResultMessage):
-                result = message
+        rate_limit_detail: str | None = None
+        try:
+            async for message in self.run_query(prompt=prompt, options=options):
+                if isinstance(message, AssistantMessage):
+                    text_blocks = [
+                        block.text
+                        for block in message.content
+                        if isinstance(block, TextBlock)
+                    ]
+                    chunks.extend(text_blocks)
+                    if message.error == "rate_limit":
+                        rate_limit_detail = "\n".join(text_blocks).strip()
+                elif isinstance(message, ResultMessage):
+                    result = message
+        except Exception as exc:
+            if rate_limit_detail is not None:
+                raise _rate_limit_error(rate_limit_detail) from exc
+            raise
+        if rate_limit_detail is not None:
+            raise _rate_limit_error(rate_limit_detail)
         if result is None:
             raise ClaudeAgentError(
                 f"agent stream for model {options.model!r} ended without a result"
             )
         return ("\n".join(chunks) if chunks else None), result
+
+
+def _rate_limit_error(detail: str) -> ClaudeAgentError:
+    suffix = f": {detail}" if detail else ""
+    return ClaudeAgentError(f"Claude rate limit reached{suffix}")
 
 
 def _parse_structured[TModel: BaseModel](
