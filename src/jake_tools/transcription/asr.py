@@ -103,6 +103,30 @@ DEFAULT_ASR_CHUNK_OVERLAP = 15.0
 # runaway grows as ordinary swappable CPU memory these caps never see.
 DEFAULT_MPS_MEMORY_FRACTION = 0.6
 
+# `pyannote.audio.pipelines.SpeakerDiarization` defaults both
+# `segmentation_batch_size` and `embedding_batch_size` to 1 in its own
+# `__init__`, but the `speaker-diarization-community-1` checkpoint's
+# `config.yaml` overrides both to 32 — upstream pyannote issue #1963 traced
+# a comparable 4.x memory spike to the embedding batch size specifically,
+# and lowering it to 4 sharply reduced the reported peak. 4 is a
+# conservative operator default for both knobs, applied by
+# `_run_diarisation` as plain attribute assignment on the loaded pipeline
+# (`pipeline.segmentation_batch_size`/`.embedding_batch_size` — the former
+# is a property proxying `Inference.batch_size`, the latter a plain
+# attribute `get_embeddings()` reads directly; neither goes through
+# pyannote's separate tunable-`Parameter` `instantiate()` mechanism).
+DEFAULT_DIARISATION_SEGMENTATION_BATCH_SIZE = 4
+DEFAULT_DIARISATION_EMBEDDING_BATCH_SIZE = 4
+
+# Diarisation decodes straight to this target via `AudioDecoder`'s own
+# `sample_rate`/`num_channels` resample kwargs, instead of retaining the
+# merged recording's native rate (48kHz) for pyannote to resample
+# internally: pyannote's segmentation/embedding models are trained at
+# 16kHz mono anyway, so this loses nothing while roughly halving-to-
+# thirding the decoded waveform's memory footprint for a real meeting.
+DIARISATION_SAMPLE_RATE = 16_000
+DIARISATION_CHANNELS = 1
+
 UNKNOWN_SPEAKER = "SPEAKER_UNKNOWN"
 """Speaker id for an ASR segment with no overlapping diarised turn at all."""
 
@@ -172,12 +196,26 @@ class AsrCheckpoint(CacheEnvelope):
 
 
 class DiarisationCheckpoint(CacheEnvelope):
-    """Content/config-bound diarisation output that can be resumed independently."""
+    """Content/config-bound diarisation output that can be resumed independently.
+
+    `segmentation_batch_size`/`embedding_batch_size`/`sample_rate`/
+    `channels` are required (no default) specifically so a checkpoint
+    written before this schema existed fails Pydantic validation on load
+    rather than being silently trusted as still matching the current
+    configuration — `RunCache.load_resumable` already treats a validation
+    failure on one of these resumable checkpoints as a plain cache miss
+    (see its docstring), the same handling an already-corrupt checkpoint
+    gets.
+    """
 
     audio_sha256: str
     model: str
     device: Literal["cpu", "mps"]
     num_speakers: int | None
+    segmentation_batch_size: int
+    embedding_batch_size: int
+    sample_rate: int
+    channels: int
     turns: list[DiarisedTurn]
 
 
@@ -191,6 +229,10 @@ def build_audio_stage_manifest(raw: RawTranscript) -> StageManifest:
         "diarisation_model": raw.diarisation_model,
         "diarisation_device": raw.diarisation_device,
         "num_speakers": raw.num_speakers,
+        "diarisation_segmentation_batch_size": raw.diarisation_segmentation_batch_size,
+        "diarisation_embedding_batch_size": raw.diarisation_embedding_batch_size,
+        "diarisation_sample_rate": raw.diarisation_sample_rate,
+        "diarisation_channels": raw.diarisation_channels,
     }
     return StageManifest(
         stage="asr",
@@ -271,6 +313,8 @@ def audio_raw_matches_configuration(
     num_speakers: int | None,
     asr_chunk_duration: float,
     asr_chunk_overlap: float,
+    diarisation_segmentation_batch_size: int,
+    diarisation_embedding_batch_size: int,
 ) -> bool:
     """Check a raw cache's model/source binding before any local inference."""
     return raw is not None and (
@@ -281,6 +325,11 @@ def audio_raw_matches_configuration(
         and raw.num_speakers == num_speakers
         and raw.asr_chunk_duration == asr_chunk_duration
         and raw.asr_chunk_overlap == asr_chunk_overlap
+        and raw.diarisation_segmentation_batch_size
+        == diarisation_segmentation_batch_size
+        and raw.diarisation_embedding_batch_size == diarisation_embedding_batch_size
+        and raw.diarisation_sample_rate == DIARISATION_SAMPLE_RATE
+        and raw.diarisation_channels == DIARISATION_CHANNELS
     )
 
 
@@ -308,6 +357,10 @@ class LocalTranscriber:
         diarisation_device: DiarisationDevice = "auto",
         num_speakers: int | None = None,
         memory_budget_bytes: int | None = None,
+        diarisation_segmentation_batch_size: int = (
+            DEFAULT_DIARISATION_SEGMENTATION_BATCH_SIZE
+        ),
+        diarisation_embedding_batch_size: int = DEFAULT_DIARISATION_EMBEDDING_BATCH_SIZE,
     ) -> None:
         self._hf_token = hf_token
         self._asr_model = asr_model
@@ -316,6 +369,8 @@ class LocalTranscriber:
         self._asr_chunk_overlap = asr_chunk_overlap
         self._diarisation_device: DiarisationDevice = diarisation_device
         self._num_speakers = num_speakers
+        self._diarisation_segmentation_batch_size = diarisation_segmentation_batch_size
+        self._diarisation_embedding_batch_size = diarisation_embedding_batch_size
         # None means "use the shared ~60%-of-RAM default" — resolved lazily
         # via _resolve_memory_budget_bytes() rather than here, so the
         # default always reflects the machine actually running
@@ -400,6 +455,10 @@ class LocalTranscriber:
             num_speakers=speaker_count,
             asr_chunk_duration=self._asr_chunk_duration,
             asr_chunk_overlap=self._asr_chunk_overlap,
+            diarisation_segmentation_batch_size=self._diarisation_segmentation_batch_size,
+            diarisation_embedding_batch_size=self._diarisation_embedding_batch_size,
+            diarisation_sample_rate=DIARISATION_SAMPLE_RATE,
+            diarisation_channels=DIARISATION_CHANNELS,
         )
 
     def transcribe_cached(
@@ -426,6 +485,8 @@ class LocalTranscriber:
             num_speakers=speaker_count,
             asr_chunk_duration=self._asr_chunk_duration,
             asr_chunk_overlap=self._asr_chunk_overlap,
+            diarisation_segmentation_batch_size=self._diarisation_segmentation_batch_size,
+            diarisation_embedding_batch_size=self._diarisation_embedding_batch_size,
         )
         if raw_valid:
             assert cached is not None
@@ -444,6 +505,12 @@ class LocalTranscriber:
             and diarisation_checkpoint.model == self._diarisation_model
             and diarisation_checkpoint.device == device
             and diarisation_checkpoint.num_speakers == speaker_count
+            and diarisation_checkpoint.segmentation_batch_size
+            == self._diarisation_segmentation_batch_size
+            and diarisation_checkpoint.embedding_batch_size
+            == self._diarisation_embedding_batch_size
+            and diarisation_checkpoint.sample_rate == DIARISATION_SAMPLE_RATE
+            and diarisation_checkpoint.channels == DIARISATION_CHANNELS
         )
         diarisation_recomputed = not diarisation_valid
         if diarisation_recomputed and not self._hf_token:
@@ -536,6 +603,10 @@ class LocalTranscriber:
             num_speakers=speaker_count,
             asr_chunk_duration=self._asr_chunk_duration,
             asr_chunk_overlap=self._asr_chunk_overlap,
+            diarisation_segmentation_batch_size=self._diarisation_segmentation_batch_size,
+            diarisation_embedding_batch_size=self._diarisation_embedding_batch_size,
+            diarisation_sample_rate=DIARISATION_SAMPLE_RATE,
+            diarisation_channels=DIARISATION_CHANNELS,
         )
         _record_timing(
             cache,
@@ -616,6 +687,10 @@ class LocalTranscriber:
                 model=self._diarisation_model,
                 device=device,
                 num_speakers=num_speakers,
+                segmentation_batch_size=self._diarisation_segmentation_batch_size,
+                embedding_batch_size=self._diarisation_embedding_batch_size,
+                sample_rate=DIARISATION_SAMPLE_RATE,
+                channels=DIARISATION_CHANNELS,
                 turns=turns,
             )
             cache.store(run_id, "diarisation_checkpoint", checkpoint)
@@ -727,6 +802,12 @@ class LocalTranscriber:
                     f"could not load diarisation pipeline {self._diarisation_model!r} "
                     "(pyannote returned no pipeline for this checkpoint)"
                 )
+            # The checkpoint's own config.yaml overrides both to 32 (see
+            # DEFAULT_DIARISATION_SEGMENTATION_BATCH_SIZE) — must be
+            # applied to the loaded pipeline itself before it runs
+            # inference, not just accepted as configuration.
+            pipeline.segmentation_batch_size = self._diarisation_segmentation_batch_size
+            pipeline.embedding_batch_size = self._diarisation_embedding_batch_size
             pipeline.to(torch.device(device))
         except RuntimeError as exc:
             raise AcceleratorOutOfMemoryError("diarisation", exc) from exc
@@ -744,10 +825,18 @@ class LocalTranscriber:
         # resulted in 477184 samples instead of the expected 480000
         # samples`) — a real failure on real audio, not a synthetic one.
         # pyannote's waveform-dict input path pads instead of asserting, so
-        # decoding once upfront (linear in file length, ~350MB for 31
-        # minutes of mono float32 — nothing like parakeet's O(n^2) blowup)
-        # sidesteps the assertion entirely.
-        samples = AudioDecoder(audio).get_all_samples()
+        # decoding once upfront (linear in file length — nothing like
+        # parakeet's O(n^2) blowup) sidesteps the assertion entirely.
+        # `sample_rate`/`num_channels` decode straight to 16kHz mono (see
+        # DIARISATION_SAMPLE_RATE) instead of retaining the merged
+        # recording's native rate for pyannote to resample internally —
+        # ~120MB for 31 minutes of mono float32 at 16kHz, versus ~350MB at
+        # the merged recording's native 48kHz.
+        samples = AudioDecoder(
+            audio,
+            sample_rate=DIARISATION_SAMPLE_RATE,
+            num_channels=DIARISATION_CHANNELS,
+        ).get_all_samples()
         kwargs: dict[str, object] = {}
         if num_speakers is not None:
             kwargs["num_speakers"] = num_speakers

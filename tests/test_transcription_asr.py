@@ -29,6 +29,8 @@ from jake_tools.transcription import asr as asr_module
 from jake_tools.transcription.asr import (
     DEFAULT_ASR_CHUNK_DURATION,
     DEFAULT_ASR_CHUNK_OVERLAP,
+    DEFAULT_DIARISATION_EMBEDDING_BATCH_SIZE,
+    DEFAULT_DIARISATION_SEGMENTATION_BATCH_SIZE,
     UNKNOWN_SPEAKER,
     AcceleratorOutOfMemoryError,
     AsrSegment,
@@ -270,7 +272,11 @@ def _transcriber_probe(transcriber_options: TranscriberOptions) -> None:
         f"num_speakers={transcriber_options.num_speakers} "
         f"asr_chunk_duration={transcriber_options.asr_chunk_duration} "
         f"asr_chunk_overlap={transcriber_options.asr_chunk_overlap} "
-        f"memory_budget_bytes={transcriber_options.memory_budget_bytes}"
+        f"memory_budget_bytes={transcriber_options.memory_budget_bytes} "
+        "diarisation_segmentation_batch_size="
+        f"{transcriber_options.diarisation_segmentation_batch_size} "
+        "diarisation_embedding_batch_size="
+        f"{transcriber_options.diarisation_embedding_batch_size}"
     )
 
 
@@ -294,6 +300,10 @@ def test_transcriber_options_decorator_builds_options_from_flags() -> None:
             "5",
             "--memory-budget-bytes",
             "1000000000",
+            "--diarisation-segmentation-batch-size",
+            "8",
+            "--diarisation-embedding-batch-size",
+            "6",
         ],
     )
 
@@ -301,7 +311,8 @@ def test_transcriber_options_decorator_builds_options_from_flags() -> None:
     assert result.output == (
         "hf_token=hf_fake_token asr_model=custom/asr diarisation_model=custom/diarisation "
         "diarisation_device=cpu num_speakers=2 asr_chunk_duration=60.0 "
-        "asr_chunk_overlap=5.0 memory_budget_bytes=1000000000\n"
+        "asr_chunk_overlap=5.0 memory_budget_bytes=1000000000 "
+        "diarisation_segmentation_batch_size=8 diarisation_embedding_batch_size=6\n"
     )
 
 
@@ -321,6 +332,33 @@ def test_transcriber_options_decorator_defaults_chunking_and_memory_budget_flags
     assert f"asr_chunk_duration={DEFAULT_ASR_CHUNK_DURATION}" in result.output
     assert f"asr_chunk_overlap={DEFAULT_ASR_CHUNK_OVERLAP}" in result.output
     assert "memory_budget_bytes=None" in result.output
+    assert (
+        "diarisation_segmentation_batch_size="
+        f"{DEFAULT_DIARISATION_SEGMENTATION_BATCH_SIZE}" in result.output
+    )
+    assert (
+        "diarisation_embedding_batch_size="
+        f"{DEFAULT_DIARISATION_EMBEDDING_BATCH_SIZE}" in result.output
+    )
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--diarisation-segmentation-batch-size", "--diarisation-embedding-batch-size"],
+)
+def test_transcriber_options_decorator_rejects_non_positive_diarisation_batch_size(
+    flag: str,
+) -> None:
+    """Both diarisation batch-size flags must reject zero/negative values —
+    the same `click.IntRange(min=1)` contract `--num-speakers` already
+    enforces, not a silent clamp or a value pyannote would reject deep
+    inside inference instead."""
+    result = CliRunner().invoke(
+        _transcriber_probe, ["--hf-token", "hf_fake_token", flag, "0"]
+    )
+
+    assert result.exit_code != 0
+    assert "invalid" in result.output.lower() or "0 is not" in result.output.lower()
 
 
 def test_transcriber_options_decorator_defaults_hf_token_to_none(
@@ -533,6 +571,12 @@ class _FakePyannotePipeline:
     def __init__(self, turns: list[tuple[float, float, str]]) -> None:
         self._turns = turns
         self.call_args: list[object] = []
+        # Real pyannote's own class defaults (see
+        # DEFAULT_DIARISATION_SEGMENTATION_BATCH_SIZE) — declared here so
+        # `_run_diarisation`'s plain attribute assignment is a type-checked
+        # write to a known attribute, not a dynamically-created one.
+        self.segmentation_batch_size: int = 1
+        self.embedding_batch_size: int = 1
 
     def to(self, device: object) -> _FakePyannotePipeline:
         return self
@@ -553,9 +597,19 @@ class _FakeAudioSamples:
 class _FakeAudioDecoder:
     """Fake `torchcodec.decoders.AudioDecoder` (constructed fresh per call,
     same as the real one): always hands back the same canned samples
-    instead of running real audio decoding."""
+    instead of running real audio decoding. Accepts (and ignores) the
+    `sample_rate`/`num_channels` resample-target kwargs `_run_diarisation`
+    passes — tests that care about their exact values use a dedicated
+    recording fake instead (see
+    `test_local_transcriber_decodes_diarisation_audio_as_16khz_mono`)."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        sample_rate: int | None = None,
+        num_channels: int | None = None,
+    ) -> None:
         self._path = path
 
     def get_all_samples(self) -> _FakeAudioSamples:
@@ -628,6 +682,128 @@ def test_local_transcriber_enables_parakeets_own_chunking_for_long_audio(
     ]
     starts = [u.start for u in result.utterances]
     assert starts == sorted(starts)  # meeting-relative, monotonic
+
+
+# --- LocalTranscriber: diarisation batch sizes and 16kHz-mono decoding ------
+
+
+def test_local_transcriber_defaults_diarisation_batch_sizes_to_four(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`pyannote/speaker-diarization-community-1`'s own checkpoint config
+    overrides both the segmentation and embedding batch sizes to 32 —
+    upstream issue #1963 traced a comparable pyannote 4.x memory spike to
+    the embedding batch size in particular. `LocalTranscriber` must default
+    to a conservative 4 for both rather than inheriting the checkpoint's
+    unsafe-for-16GB default."""
+    fake_model = _FakeParakeetModel([_FakeAlignedSentence(0.0, 1.0, "hi")])
+    fake_pipeline = _FakePyannotePipeline([(0.0, 1.0, "SPEAKER_00")])
+    monkeypatch.setattr(
+        asr_module, "parakeet_from_pretrained", lambda model_id: fake_model
+    )
+    monkeypatch.setattr(
+        asr_module.Pipeline,
+        "from_pretrained",
+        lambda checkpoint, token=None: fake_pipeline,
+    )
+    monkeypatch.setattr(asr_module, "AudioDecoder", _FakeAudioDecoder)
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+
+    LocalTranscriber(hf_token="fake-token").transcribe(audio)
+
+    assert asr_module.DEFAULT_DIARISATION_SEGMENTATION_BATCH_SIZE == 4
+    assert asr_module.DEFAULT_DIARISATION_EMBEDDING_BATCH_SIZE == 4
+    assert fake_pipeline.segmentation_batch_size == 4
+    assert fake_pipeline.embedding_batch_size == 4
+
+
+def test_local_transcriber_sets_explicit_batch_sizes_on_the_loaded_pipeline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An operator-supplied batch size must actually reach the loaded
+    pyannote pipeline before inference runs — not just be accepted and
+    ignored."""
+    fake_model = _FakeParakeetModel([_FakeAlignedSentence(0.0, 1.0, "hi")])
+    fake_pipeline = _FakePyannotePipeline([(0.0, 1.0, "SPEAKER_00")])
+    monkeypatch.setattr(
+        asr_module, "parakeet_from_pretrained", lambda model_id: fake_model
+    )
+    monkeypatch.setattr(
+        asr_module.Pipeline,
+        "from_pretrained",
+        lambda checkpoint, token=None: fake_pipeline,
+    )
+    monkeypatch.setattr(asr_module, "AudioDecoder", _FakeAudioDecoder)
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+
+    LocalTranscriber(
+        hf_token="fake-token",
+        diarisation_segmentation_batch_size=8,
+        diarisation_embedding_batch_size=6,
+    ).transcribe(audio)
+
+    assert fake_pipeline.segmentation_batch_size == 8
+    assert fake_pipeline.embedding_batch_size == 6
+
+
+def test_local_transcriber_decodes_diarisation_audio_as_16khz_mono(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Diarisation must decode straight to 16kHz mono instead of retaining
+    the merged recording's native rate for pyannote to resample internally
+    — for a real ~2h37m/48kHz meeting this roughly halves-to-thirds the
+    decoded waveform's memory footprint (see DIARISATION_SAMPLE_RATE /
+    DIARISATION_CHANNELS). This must not change what `_run_asr` decodes —
+    only the diarisation boundary's own `AudioDecoder` call."""
+
+    class _RecordingAudioDecoder:
+        calls: list[dict[str, object]] = []
+
+        def __init__(
+            self,
+            path: Path,
+            *,
+            sample_rate: int | None = None,
+            num_channels: int | None = None,
+        ) -> None:
+            _RecordingAudioDecoder.calls.append(
+                {
+                    "path": path,
+                    "sample_rate": sample_rate,
+                    "num_channels": num_channels,
+                }
+            )
+
+        def get_all_samples(self) -> _FakeAudioSamples:
+            return _FakeAudioSamples(data="fake-waveform-tensor", sample_rate=16000)
+
+    fake_model = _FakeParakeetModel([_FakeAlignedSentence(0.0, 1.0, "hi")])
+    fake_pipeline = _FakePyannotePipeline([(0.0, 1.0, "SPEAKER_00")])
+    monkeypatch.setattr(
+        asr_module, "parakeet_from_pretrained", lambda model_id: fake_model
+    )
+    monkeypatch.setattr(
+        asr_module.Pipeline,
+        "from_pretrained",
+        lambda checkpoint, token=None: fake_pipeline,
+    )
+    monkeypatch.setattr(asr_module, "AudioDecoder", _RecordingAudioDecoder)
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+
+    LocalTranscriber(hf_token="fake-token").transcribe(audio)
+
+    assert _RecordingAudioDecoder.calls == [
+        {
+            "path": audio,
+            "sample_rate": asr_module.DIARISATION_SAMPLE_RATE,
+            "num_channels": asr_module.DIARISATION_CHANNELS,
+        }
+    ]
+    assert asr_module.DIARISATION_SAMPLE_RATE == 16000
+    assert asr_module.DIARISATION_CHANNELS == 1
 
 
 # --- LocalTranscriber: memory hardening (caps, cleanup, stage logging) ------
@@ -931,6 +1107,10 @@ def test_cached_transcriber_promoted_raw_manifest_hit_needs_no_checkpoints_or_to
         num_speakers=1,
         asr_chunk_duration=DEFAULT_ASR_CHUNK_DURATION,
         asr_chunk_overlap=DEFAULT_ASR_CHUNK_OVERLAP,
+        diarisation_segmentation_batch_size=DEFAULT_DIARISATION_SEGMENTATION_BATCH_SIZE,
+        diarisation_embedding_batch_size=DEFAULT_DIARISATION_EMBEDDING_BATCH_SIZE,
+        diarisation_sample_rate=asr_module.DIARISATION_SAMPLE_RATE,
+        diarisation_channels=asr_module.DIARISATION_CHANNELS,
     )
     cache.store("run-1", "raw_transcript", raw)
     cache.store_manifest("run-1", build_audio_stage_manifest(raw))

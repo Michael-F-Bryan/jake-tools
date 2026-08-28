@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,7 +22,7 @@ from jake_tools.transcription.asr import (
     select_diarisation_device,
     transcribe_merged_audio,
 )
-from jake_tools.transcription.cache import RunCache
+from jake_tools.transcription.cache import RunCache, sha256_of
 from jake_tools.transcription.models import RawTranscript
 
 
@@ -100,6 +101,8 @@ def test_transcriber_options_expose_device_and_num_speakers() -> None:
         asr_chunk_duration=120.0,
         asr_chunk_overlap=15.0,
         memory_budget_bytes=None,
+        diarisation_segmentation_batch_size=4,
+        diarisation_embedding_batch_size=4,
     )
 
     transcriber = options.transcriber()
@@ -137,7 +140,7 @@ def test_local_transcriber_moves_pipeline_and_passes_known_speaker_count(
     monkeypatch.setattr(
         asr_module,
         "AudioDecoder",
-        lambda _: SimpleNamespace(
+        lambda _, **kwargs: SimpleNamespace(
             get_all_samples=lambda: SimpleNamespace(data="waveform", sample_rate=16000)
         ),
     )
@@ -204,6 +207,117 @@ def test_local_transcriber_reuses_asr_checkpoint_but_recomputes_stale_diarisatio
     assert (
         cache.load("run", "diarisation_checkpoint", DiarisationCheckpoint) is not None
     )
+
+
+def test_local_transcriber_reuses_asr_checkpoint_but_recomputes_diarisation_for_changed_batch_size(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A changed diarisation batch size is an output-affecting diarisation
+    setting: it must invalidate the diarisation checkpoint (and the
+    promoted raw-transcript fast path built from it) while leaving a valid
+    ASR checkpoint untouched — the same contract already proven for
+    `num_speakers` above, extended to the new batch-size knobs."""
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"audio")
+    cache = RunCache(tmp_path / "cache")
+    transcriber = LocalTranscriber(
+        hf_token="token",
+        diarisation_device="cpu",
+        diarisation_segmentation_batch_size=4,
+        diarisation_embedding_batch_size=4,
+    )
+    asr_calls = 0
+    diarisation_calls = 0
+
+    def run_asr(_: Path) -> list[AsrSegment]:
+        nonlocal asr_calls
+        asr_calls += 1
+        return [AsrSegment(start=0.0, end=2.0, text="hello")]
+
+    def run_diarisation(_: Path, *, device: str, num_speakers: int | None):
+        nonlocal diarisation_calls
+        diarisation_calls += 1
+        return [DiarisedTurn(start=0.0, end=2.0, speaker="SPEAKER_00")]
+
+    monkeypatch.setattr(transcriber, "_run_asr", run_asr)
+    monkeypatch.setattr(transcriber, "_run_diarisation", run_diarisation)
+
+    first = transcribe_merged_audio(
+        audio, run_id="run", transcriber=transcriber, cache=cache
+    )
+    second = transcribe_merged_audio(
+        audio, run_id="run", transcriber=transcriber, cache=cache
+    )
+    transcriber._diarisation_embedding_batch_size = 8
+    third = transcribe_merged_audio(
+        audio, run_id="run", transcriber=transcriber, cache=cache
+    )
+
+    assert first.model_copy(update={"timings": []}) == second.model_copy(
+        update={"timings": []}
+    )
+    assert third.diarisation_embedding_batch_size == 8
+    assert asr_calls == 1
+    assert diarisation_calls == 2
+    stored_diarisation = cache.load(
+        "run", "diarisation_checkpoint", DiarisationCheckpoint
+    )
+    assert stored_diarisation is not None
+    assert stored_diarisation.embedding_batch_size == 8
+    assert stored_diarisation.segmentation_batch_size == 4
+    assert stored_diarisation.sample_rate == asr_module.DIARISATION_SAMPLE_RATE
+    assert stored_diarisation.channels == asr_module.DIARISATION_CHANNELS
+
+
+def test_local_transcriber_recomputes_diarisation_for_a_checkpoint_that_predates_batch_size_provenance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A diarisation checkpoint written before this change (no batch-size/
+    sample-rate/channel fields at all) must not be silently trusted as
+    still matching the current configuration — `DiarisationCheckpoint`'s
+    new fields are required, so `load_resumable`'s existing
+    malformed-cache handling (see the parametrized truncated-checkpoint
+    test below) treats the legacy shape as a cache miss rather than a
+    validated hit."""
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"audio")
+    cache = RunCache(tmp_path / "cache")
+    cache.run_dir("run").joinpath("diarisation_checkpoint.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "audio_sha256": sha256_of(audio),
+                "model": DEFAULT_DIARISATION_MODEL,
+                "device": "cpu",
+                "num_speakers": None,
+                "turns": [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_OLD"}],
+            }
+        )
+    )
+    transcriber = LocalTranscriber(hf_token="token", diarisation_device="cpu")
+    asr_calls = 0
+    diarisation_calls = 0
+
+    def run_asr(_: Path) -> list[AsrSegment]:
+        nonlocal asr_calls
+        asr_calls += 1
+        return [AsrSegment(start=0.0, end=2.0, text="hello")]
+
+    def run_diarisation(_: Path, *, device: str, num_speakers: int | None):
+        nonlocal diarisation_calls
+        diarisation_calls += 1
+        return [DiarisedTurn(start=0.0, end=2.0, speaker="SPEAKER_00")]
+
+    monkeypatch.setattr(transcriber, "_run_asr", run_asr)
+    monkeypatch.setattr(transcriber, "_run_diarisation", run_diarisation)
+
+    result = transcribe_merged_audio(
+        audio, run_id="run", transcriber=transcriber, cache=cache
+    )
+
+    assert result.utterances[0].speaker == "SPEAKER_00"
+    assert asr_calls == 1
+    assert diarisation_calls == 1
 
 
 @pytest.mark.parametrize(
@@ -302,7 +416,7 @@ def test_cpu_diarisation_does_not_touch_the_mps_allocator(
     monkeypatch.setattr(
         asr_module,
         "AudioDecoder",
-        lambda _: SimpleNamespace(
+        lambda _, **kwargs: SimpleNamespace(
             get_all_samples=lambda: SimpleNamespace(data="waveform", sample_rate=16000)
         ),
     )

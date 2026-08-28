@@ -412,6 +412,10 @@ def test_export_and_apply_use_the_same_exact_candidate_bytes(tmp_path: Path) -> 
         "diarisation_model": raw.diarisation_model,
         "diarisation_device": raw.diarisation_device,
         "num_speakers": raw.num_speakers,
+        "diarisation_segmentation_batch_size": raw.diarisation_segmentation_batch_size,
+        "diarisation_embedding_batch_size": raw.diarisation_embedding_batch_size,
+        "diarisation_sample_rate": raw.diarisation_sample_rate,
+        "diarisation_channels": raw.diarisation_channels,
     }
     cache.store_manifest(
         run_id,

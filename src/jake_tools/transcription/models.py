@@ -96,6 +96,10 @@ class RawTranscript(CacheEnvelope):
     num_speakers: int | None = None
     asr_chunk_duration: float | None = None
     asr_chunk_overlap: float | None = None
+    diarisation_segmentation_batch_size: int | None = None
+    diarisation_embedding_batch_size: int | None = None
+    diarisation_sample_rate: int | None = None
+    diarisation_channels: int | None = None
     timings: list[StageTiming] = Field(default_factory=list)
 
 

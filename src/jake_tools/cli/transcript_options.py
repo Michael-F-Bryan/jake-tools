@@ -32,7 +32,9 @@ from ..transcription.asr import (
     DEFAULT_ASR_CHUNK_DURATION,
     DEFAULT_ASR_CHUNK_OVERLAP,
     DEFAULT_ASR_MODEL,
+    DEFAULT_DIARISATION_EMBEDDING_BATCH_SIZE,
     DEFAULT_DIARISATION_MODEL,
+    DEFAULT_DIARISATION_SEGMENTATION_BATCH_SIZE,
     DiarisationDevice,
     LocalTranscriber,
     Transcriber,
@@ -97,6 +99,8 @@ class TranscriberOptions(BaseModel):
     asr_chunk_duration: float
     asr_chunk_overlap: float
     memory_budget_bytes: int | None
+    diarisation_segmentation_batch_size: int
+    diarisation_embedding_batch_size: int
 
     def transcriber(self, *, num_speakers: int | None = None) -> Transcriber:
         return LocalTranscriber(
@@ -108,6 +112,8 @@ class TranscriberOptions(BaseModel):
             asr_chunk_duration=self.asr_chunk_duration,
             asr_chunk_overlap=self.asr_chunk_overlap,
             memory_budget_bytes=self.memory_budget_bytes,
+            diarisation_segmentation_batch_size=self.diarisation_segmentation_batch_size,
+            diarisation_embedding_batch_size=self.diarisation_embedding_batch_size,
         )
 
 
@@ -256,6 +262,32 @@ def transcriber_options(func: F) -> F:
             "run time - see LocalTranscriber/memory_watchdog)."
         ),
     )
+    @click.option(
+        "--diarisation-segmentation-batch-size",
+        "diarisation_segmentation_batch_size",
+        type=click.IntRange(min=1),
+        default=DEFAULT_DIARISATION_SEGMENTATION_BATCH_SIZE,
+        show_default=True,
+        help=(
+            "Batch size for pyannote's segmentation model. The "
+            "speaker-diarization-community-1 checkpoint's own config "
+            "overrides this to 32, which can blow past a 16GB machine's "
+            "memory - lower is more conservative."
+        ),
+    )
+    @click.option(
+        "--diarisation-embedding-batch-size",
+        "diarisation_embedding_batch_size",
+        type=click.IntRange(min=1),
+        default=DEFAULT_DIARISATION_EMBEDDING_BATCH_SIZE,
+        show_default=True,
+        help=(
+            "Batch size for pyannote's embedding model. The "
+            "speaker-diarization-community-1 checkpoint's own config "
+            "overrides this to 32, which can blow past a 16GB machine's "
+            "memory - lower is more conservative."
+        ),
+    )
     @click.pass_context
     @functools.wraps(func)
     def wrapper(ctx: click.Context, *args: Any, **kwargs: Any) -> Any:
@@ -268,6 +300,12 @@ def transcriber_options(func: F) -> F:
             asr_chunk_duration=kwargs.pop("asr_chunk_duration"),
             asr_chunk_overlap=kwargs.pop("asr_chunk_overlap"),
             memory_budget_bytes=kwargs.pop("memory_budget_bytes"),
+            diarisation_segmentation_batch_size=kwargs.pop(
+                "diarisation_segmentation_batch_size"
+            ),
+            diarisation_embedding_batch_size=kwargs.pop(
+                "diarisation_embedding_batch_size"
+            ),
         )
         return ctx.invoke(func, *args, transcriber_options=options, **kwargs)
 
