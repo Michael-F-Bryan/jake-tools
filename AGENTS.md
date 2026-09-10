@@ -148,6 +148,16 @@ neither ffmpeg nor a token.
 
 ## Commands
 
+### `codex-usage-alert`
+
+```bash
+jake-tools codex-usage-alert
+```
+
+Reads Hermes' existing OpenAI Codex OAuth access token without refreshing or
+persisting credentials. Prints only on a new 20%, 10%, or 5% remaining
+threshold crossing; silence with exit status 0 means no alert is due.
+
 ### `clockify`
 
 ```bash

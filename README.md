@@ -61,6 +61,22 @@ For unattended runs, inject these values through the scheduler's secret
 environment or resolve `op://` references with `op run`. Do not persist the API
 tokens or depend on an interactive 1Password unlock in cron.
 
+## Codex usage alerts
+
+```bash
+jake-tools codex-usage-alert
+```
+
+The command reads the existing OpenAI Codex OAuth access token from Hermes'
+`auth.json`, fetches the five-hour and weekly usage windows, and prints only
+when a window first crosses 20%, 10%, or 5% remaining. It stores only the last
+observed threshold and reset time under `~/.hermes/cron/state/`; OAuth tokens
+remain owned and refreshed by Hermes.
+
+A silent successful run means no new threshold was crossed. Authentication or
+API failures are reported on stderr with a non-zero exit status so a script-only
+scheduler can deliver them as alerts.
+
 ## Transcription
 
 ```bash
