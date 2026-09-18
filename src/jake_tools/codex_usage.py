@@ -18,6 +18,7 @@ from .http import HttpSession
 
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 THRESHOLDS = (5, 10, 20)
+REARM_REMAINING = 30
 PERTH = ZoneInfo("Australia/Perth")
 
 
@@ -125,13 +126,26 @@ def run_codex_usage_alert(
         remaining = 100 - used
         bucket = _threshold_bucket(remaining)
         reset_at = window.reset_at.isoformat() if window.reset_at else None
-        previous = previous_state.get(window.label.lower())
-        if previous and previous.reset_at != reset_at:
-            previous = None
-        next_state[window.label.lower()] = WindowAlertState(reset_at, bucket)
+        state_key = window.label.lower()
+        previous = previous_state.get(state_key)
+        if previous is None and state_key == "weekly":
+            previous = previous_state.get("session")
+        previous_bucket = previous.bucket if previous else None
+        # Rolling windows can drift by seconds or briefly recover. Rearm only after
+        # enough quota returns to make a later low-water crossing meaningful.
+        if previous_bucket is not None and remaining <= REARM_REMAINING:
+            recorded_bucket = (
+                previous_bucket
+                if bucket is None or bucket > previous_bucket
+                else bucket
+            )
+        else:
+            previous_bucket = None
+            recorded_bucket = bucket
+        next_state[state_key] = WindowAlertState(reset_at, recorded_bucket)
 
         crossed = bucket is not None and (
-            previous is None or previous.bucket is None or bucket < previous.bucket
+            previous_bucket is None or bucket < previous_bucket
         )
         if not crossed:
             continue
@@ -198,7 +212,21 @@ def _parse_window(value: Any, label: str) -> CodexUsageWindow | None:
     used = value.get("used_percent")
     if isinstance(used, bool) or not isinstance(used, int | float):
         return None
-    return CodexUsageWindow(label, float(used), _parse_datetime(value.get("reset_at")))
+    return CodexUsageWindow(
+        _window_label(value.get("limit_window_seconds"), label),
+        float(used),
+        _parse_datetime(value.get("reset_at")),
+    )
+
+
+def _window_label(value: Any, fallback: str) -> str:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return fallback
+    if 4 * 60 * 60 <= value <= 6 * 60 * 60:
+        return "Session"
+    if 6 * 24 * 60 * 60 <= value <= 8 * 24 * 60 * 60:
+        return "Weekly"
+    return fallback
 
 
 def _parse_datetime(value: Any) -> datetime | None:
