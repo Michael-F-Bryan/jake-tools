@@ -51,11 +51,27 @@ class ClaudeAgentError(RuntimeError):
 
     ``usage`` carries whatever the run accrued before it failed, so a caller
     that accounts cost can still charge it even though the call raised.
+
+    ``result_subtype`` is the SDK result message's ``subtype`` when the
+    failure was reported *as a result* (``error_max_turns``,
+    ``error_max_budget_usd``, ``error_during_execution``, ...) and ``None``
+    when the stream failed before producing one; a caller that must tell a
+    turn limit from a crash reads it rather than parsing the message.
+    ``final_text`` is that result's own text, when it had one.
     """
 
-    def __init__(self, message: str, *, usage: Usage | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        usage: Usage | None = None,
+        result_subtype: str | None = None,
+        final_text: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.usage = usage if usage is not None else Usage()
+        self.result_subtype = result_subtype
+        self.final_text = final_text
 
 
 class Reply(BaseModel):
@@ -218,11 +234,8 @@ class ClaudeAgent:
             )
             raise
         if result.is_error:
-            error = ClaudeAgentError(
-                f"agent call to model {options.model!r} failed "
-                f"(subtype={result.subtype!r}, stop_reason={result.stop_reason!r}, "
-                f"errors={_error_of(result)!r})",
-                usage=_usage_of(result),
+            error = _result_error(
+                f"agent call to model {options.model!r} failed", result
             )
             self._record_result(
                 stage_name, options, result, status="error", scope=scope
@@ -258,11 +271,10 @@ class ClaudeAgent:
             )
             raise
         if result.is_error:
-            error = ClaudeAgentError(
+            error = _result_error(
                 f"expected {response_model.__name__} JSON from the agent but got an "
-                f"error result (subtype={result.subtype!r}, "
-                f"stop_reason={result.stop_reason!r}, errors={_error_of(result)!r})",
-                usage=_usage_of(result),
+                "error result",
+                result,
             )
             self._record_result(
                 stage_name, options, result, status="error", scope=scope
@@ -339,6 +351,13 @@ class ClaudeAgent:
         except Exception as exc:
             if rate_limit_detail is not None:
                 raise _rate_limit_error(rate_limit_detail) from exc
+            if result is not None and result.is_error:
+                # The CLI exits non-zero after an error result on purpose, and
+                # the SDK surfaces that exit as an exception *after* yielding
+                # the result. The result is the informative half: keep it.
+                raise _result_error(
+                    f"agent call to model {options.model!r} failed", result
+                ) from exc
             raise
         if rate_limit_detail is not None:
             raise _rate_limit_error(rate_limit_detail)
@@ -347,6 +366,17 @@ class ClaudeAgent:
                 f"agent stream for model {options.model!r} ended without a result"
             )
         return ("\n".join(chunks) if chunks else None), result
+
+
+def _result_error(prefix: str, result: ResultMessage) -> ClaudeAgentError:
+    """A :class:`ClaudeAgentError` for a result the SDK flagged ``is_error``."""
+    return ClaudeAgentError(
+        f"{prefix} (subtype={result.subtype!r}, stop_reason={result.stop_reason!r}, "
+        f"errors={_error_of(result)!r})",
+        usage=_usage_of(result),
+        result_subtype=result.subtype,
+        final_text=result.result,
+    )
 
 
 def message_to_json(message: Message) -> dict[str, Any]:
