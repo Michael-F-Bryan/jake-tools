@@ -124,6 +124,15 @@ class ClockifyClient:
     def get_user(self) -> ClockifyUser:
         return self._validate(ClockifyUser, self._request_json("GET", "/user"), "/user")
 
+    def get_workspace_ids(self) -> list[str]:
+        """Ids of every workspace the API key's user belongs to."""
+        data = self._request_json("GET", "/workspaces")
+        if not isinstance(data, list):
+            raise ClockifyError("Clockify returned invalid data for /workspaces")
+        return [
+            str(item["id"]) for item in data if isinstance(item, dict) and "id" in item
+        ]
+
     def get_clients(self, workspace_id: str) -> list[ClockifyClientRecord]:
         path = f"/workspaces/{workspace_id}/clients"
         return self._get_paginated_list(ClockifyClientRecord, path, params={})
