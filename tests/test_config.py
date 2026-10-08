@@ -235,6 +235,7 @@ def test_settings_listing_is_complete_and_stable(tmp_path: Path) -> None:
         "JIRA_API_TOKEN",
         "clockify.jira_project",
         "clockify.client",
+        "clockify.api_base_url",
         "clockify.workspaces",
         "session_store.path",
         "claude.runs_dir",
@@ -245,3 +246,14 @@ def test_settings_listing_is_complete_and_stable(tmp_path: Path) -> None:
         "claude.max_budget_usd",
     ]
     assert config.runs_dir.display_value().startswith(str(tmp_path))
+
+
+def test_clockify_api_base_url_defaults_to_the_public_api(tmp_path: Path) -> None:
+    config = load_config(_env(tmp_path))
+    assert config.clockify_api_base_url.value == "https://api.clockify.me/api/v1"
+
+    overridden = load_config(
+        _env(tmp_path, CLOCKIFY_API_BASE_URL="http://127.0.0.1:9/api/v1")
+    )
+    assert overridden.clockify_api_base_url.value == "http://127.0.0.1:9/api/v1"
+    assert overridden.clockify_api_base_url.source == "env"

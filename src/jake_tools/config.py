@@ -32,6 +32,7 @@ from typing import Any, Literal, get_args
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from .claude import DEFAULT_MODEL, EffortLevel
+from .clockify import CLOCKIFY_API_ROOT
 
 APP_DIRNAME = "jake-tools"
 CONFIG_FILENAME = "config.toml"
@@ -161,6 +162,7 @@ class Config(BaseModel):
 
     jira_project: Resolved[str]
     clockify_client: Resolved[str]
+    clockify_api_base_url: Resolved[str]
     clockify_workspaces: Resolved[tuple[str, ...]]
     session_store_path: Resolved[Path | None]
     runs_dir: Resolved[Path]
@@ -180,6 +182,7 @@ class Config(BaseModel):
             self.jira_api_token,
             self.jira_project,
             self.clockify_client,
+            self.clockify_api_base_url,
             self.clockify_workspaces,
             self.session_store_path,
             self.runs_dir,
@@ -294,6 +297,16 @@ def load_config(
                 _STR,
             ),
             DEFAULT_CLOCKIFY_CLIENT,
+        ),
+        clockify_api_base_url=resolve(
+            _Spec(
+                "clockify.api_base_url",
+                "CLOCKIFY_API_BASE_URL",
+                "clockify",
+                "api_base_url",
+                _STR,
+            ),
+            CLOCKIFY_API_ROOT,
         ),
         clockify_workspaces=resolve(
             _Spec(
