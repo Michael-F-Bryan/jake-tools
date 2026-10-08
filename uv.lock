@@ -807,7 +807,7 @@ requires-dist = [
     { name = "claude-agent-sdk", specifier = ">=0.2.128" },
     { name = "click", specifier = ">=8.4.1" },
     { name = "jinja2", specifier = ">=3.1.6" },
-    { name = "mcp", specifier = ">=1.29.0" },
+    { name = "mcp", specifier = ">=1.29.0,<2" },
     { name = "parakeet-mlx", specifier = ">=0.5.2" },
     { name = "pyannote-audio", specifier = ">=4.0.7" },
     { name = "pydantic", specifier = ">=2.13.4" },
