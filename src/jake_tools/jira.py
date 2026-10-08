@@ -133,6 +133,10 @@ class JiraClient:
             raise JiraError("Jira API token is required")
         self._session = session or requests.Session()
 
+    def check_authenticated(self) -> None:
+        """Cheap authenticated read (``/myself``); raises :class:`JiraError`."""
+        self._request_json("GET", "/rest/api/3/myself")
+
     def get_active_assigned_issues(self, project_key: str) -> list[JiraIssue]:
         project = self._normalise_project_key(project_key)
         statuses = ", ".join(f'"{status}"' for status in ACTIVE_ISSUE_STATUSES)
