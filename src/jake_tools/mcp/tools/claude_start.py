@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from typing import get_args
+
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
+from ...claude import EffortLevel
 from ...claude_runs import BUILTIN_TOOLS, ClaudeStartResult
 from ...claude_runs.control import (
     MAX_LIVE_TASKS,
@@ -33,7 +36,7 @@ def register(app: FastMCP, config: Config) -> None:
             "be an absolute path to an existing directory. `tools` is the "
             f"explicit built-in grant from {', '.join(BUILTIN_TOOLS)}; the "
             "default is none, and Bash is a broad capability, not a sandbox. "
-            "`model`, `effort` (low|medium|high|xhigh|max), `max_turns`, "
+            f"`model`, `effort` ({'|'.join(get_args(EffortLevel))}), `max_turns`, "
             "`timeout_seconds` and `max_budget_usd` default to the server's "
             "configuration and are hard limits. At most "
             f"{MAX_LIVE_TASKS} tasks run at once (capacity_exceeded otherwise). "

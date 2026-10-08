@@ -30,8 +30,14 @@ import pytest
 from mcp import ClientSession
 
 from jake_tools.claude_runs import RunState
-from jake_tools.claude_runs.rundir import STATUS_FILE, TRANSCRIPT_FILE, read_state
-from jake_tools.claude_runs.spawn import group_alive, group_members
+from jake_tools.claude_runs.procs import process_table
+from jake_tools.claude_runs.rundir import (
+    STATUS_FILE,
+    TRANSCRIPT_FILE,
+    read_groups,
+    read_state,
+)
+from jake_tools.claude_runs.spawn import group_alive, group_pids
 
 pytestmark = pytest.mark.slow
 
@@ -157,8 +163,24 @@ async def _assert_group_gone(pgid: int, *, timeout: float = 30) -> None:
     with pytest.raises(ProcessLookupError):
         os.killpg(pgid, 0)
     assert _pgrep_listing(pgid) == ""
-    assert group_members(pgid) == set()
+    assert group_pids(pgid) == set()
     assert _loop_shells() == ""
+
+
+async def _wait_for_recorded_group(state: RunState, *, timeout: float = 60) -> int:
+    """Block until the worker has recorded the tool shell's group; returns it."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        groups = read_groups(state.run_dir).groups
+        if groups:
+            return groups[-1].pgid
+        await anyio.sleep(0.25)
+    pytest.fail(f"task {state.task_id} recorded no descendant group")
+
+
+def _cli_pids(worker_pid: int) -> set[int]:
+    """The CLI processes: direct children of the worker."""
+    return {info.pid for info in process_table().values() if info.ppid == worker_pid}
 
 
 def _loop_shells() -> str:
@@ -476,7 +498,7 @@ async def test_live_worker_survives_server_sigkill_and_a_new_server_cancels_it(
     with pytest.raises(ProcessLookupError):
         os.kill(server_pid, 0)
     assert group_alive(pgid)
-    assert len(group_members(pgid)) >= 2, _pgrep_listing(pgid)  # worker + CLI
+    assert len(group_pids(pgid)) >= 2, _pgrep_listing(pgid)  # worker + CLI
     assert _loop_shells()  # and the tool's shell is still running somewhere
 
     async with mcp_server(live_env) as session:
@@ -490,3 +512,78 @@ async def test_live_worker_survives_server_sigkill_and_a_new_server_cancels_it(
     assert cancelled.status == "cancelled"
     assert cancelled.termination_reason == "cancelled"
     await _assert_group_gone(pgid)
+
+
+# 8. the CLI is SIGKILLed mid-tool; the worker still clears the tool shell ------
+
+
+async def test_live_sigkill_of_the_cli_still_ends_with_the_tool_shell_gone(
+    mcp_server: ServerFactory, live_env: dict[str, str], workdir: Path
+) -> None:
+    """The CLI runs tool shells in their own session (setsid). Killing the CLI
+    outright orphans the shell; the worker must reach it through groups.json."""
+    async with mcp_server(live_env) as session:
+        started = await _start(
+            session,
+            brief=WAIT_FOREVER_BRIEF,
+            working_directory=str(workdir),
+            tools=["Bash"],
+            max_turns=4,
+            timeout_seconds=POLL_WINDOW,
+        )
+        pgid = started.pgid or 0
+        await _wait_for_bash_tool(started)
+        shell_pgid = await _wait_for_recorded_group(started)
+        assert shell_pgid != pgid
+        assert _loop_shells()
+        cli = _cli_pids(started.pid or 0)
+        assert cli, "no CLI child under the worker"
+        for pid in cli:
+            os.kill(pid, signal.SIGKILL)
+        state = await _wait_terminal(session, started.task_id, timeout=60)
+
+    assert state.status == "failed"
+    assert state.termination_reason == "sdk_error", state
+    on_disk = RunState.model_validate_json((state.run_dir / STATUS_FILE).read_bytes())
+    assert on_disk == state
+    await _assert_group_gone(pgid)
+    assert not group_alive(shell_pgid)
+
+
+# 9. the worker group is SIGKILLed with no SIGTERM; cancel still clears the shell
+
+
+async def test_live_sigkill_of_the_worker_group_then_cancel_clears_the_tool_shell(
+    mcp_server: ServerFactory, live_env: dict[str, str], workdir: Path
+) -> None:
+    """What claude_cancel's SIGKILL backstop (or a server's group kill) leaves:
+    the shell in its own session survives the group kill, and the server must
+    settle the task and clear it from groups.json."""
+    async with mcp_server(live_env) as session:
+        started = await _start(
+            session,
+            brief=WAIT_FOREVER_BRIEF,
+            working_directory=str(workdir),
+            tools=["Bash"],
+            max_turns=4,
+            timeout_seconds=POLL_WINDOW,
+        )
+        pgid = started.pgid or 0
+        await _wait_for_bash_tool(started)
+        shell_pgid = await _wait_for_recorded_group(started)
+        os.killpg(pgid, signal.SIGKILL)
+        deadline = time.monotonic() + 10
+        while group_alive(pgid) and time.monotonic() < deadline:
+            await anyio.sleep(0.1)
+        assert not group_alive(pgid)
+        assert _loop_shells(), "the shell should have survived the group kill"
+        result = await session.call_tool("claude_cancel", {"task_id": started.task_id})
+        assert result.isError is False, result.structuredContent
+        state = RunState.model_validate(result.structuredContent)
+
+    assert state.status == "failed"
+    assert state.termination_reason == "worker_died", state
+    on_disk = RunState.model_validate_json((state.run_dir / STATUS_FILE).read_bytes())
+    assert on_disk == state
+    await _assert_group_gone(pgid)
+    assert not group_alive(shell_pgid)

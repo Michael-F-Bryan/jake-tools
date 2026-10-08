@@ -14,13 +14,21 @@ from __future__ import annotations
 import fcntl
 import os
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel
 
-from .models import TASK_ID_PATTERN, RunResult, RunSpec, RunState
+from .models import (
+    TASK_ID_PATTERN,
+    GroupRecords,
+    ProcessRecord,
+    RunResult,
+    RunSpec,
+    RunState,
+)
 
 BRIEF_FILE = "brief.md"
 SPEC_FILE = "spec.json"
@@ -30,7 +38,11 @@ TRANSCRIPT_FILE = "transcript.jsonl"
 TELEMETRY_FILE = "telemetry.json"
 STDOUT_FILE = "worker.stdout"
 STDERR_FILE = "worker.stderr"
+PROCESS_FILE = "process.json"
+GROUPS_FILE = "groups.json"
 LOCK_FILE = ".status.lock"
+WORKER_LOCK_FILE = ".worker.lock"
+RUNS_LOCK_FILE = ".runs.lock"
 
 DIR_MODE = 0o700
 FILE_MODE = 0o600
@@ -68,7 +80,7 @@ def task_dir(runs_dir: Path, task_id: str) -> Path:
     The ID is matched against :data:`TASK_ID_PATTERN` before it touches the
     filesystem, so a caller can never name a path outside ``runs_dir``.
     """
-    if not TASK_ID_PATTERN.match(task_id):
+    if not TASK_ID_PATTERN.fullmatch(task_id):
         raise UnknownTaskError(task_id)
     path = runs_dir / task_id
     if not path.is_dir():
@@ -83,7 +95,7 @@ def list_task_dirs(runs_dir: Path) -> list[Path]:
     return sorted(
         path
         for path in runs_dir.iterdir()
-        if path.is_dir() and TASK_ID_PATTERN.match(path.name)
+        if path.is_dir() and TASK_ID_PATTERN.fullmatch(path.name)
     )
 
 
@@ -165,6 +177,83 @@ def read_result(run_dir: Path) -> RunResult | None:
 def write_result(run_dir: Path, result: RunResult) -> RunResult:
     write_model(run_dir / RESULT_FILE, result)
     return result
+
+
+def read_process_record(run_dir: Path) -> ProcessRecord | None:
+    path = run_dir / PROCESS_FILE
+    if not path.exists():
+        return None
+    return ProcessRecord.model_validate_json(path.read_bytes())
+
+
+def write_process_record(run_dir: Path, record: ProcessRecord) -> None:
+    write_model(run_dir / PROCESS_FILE, record)
+
+
+def read_groups(run_dir: Path) -> GroupRecords:
+    path = run_dir / GROUPS_FILE
+    if not path.exists():
+        return GroupRecords()
+    return GroupRecords.model_validate_json(path.read_bytes())
+
+
+def write_groups(run_dir: Path, groups: GroupRecords) -> None:
+    write_model(run_dir / GROUPS_FILE, groups)
+
+
+@contextmanager
+def runs_lock(runs_dir: Path) -> Iterator[None]:
+    """Exclusive ``<runs_dir>/.runs.lock`` for the duration of the block.
+
+    Serialises capacity check, directory creation, spawn and PID recording
+    across every server sharing the directory, and keeps a status read from
+    overlapping a half-started task. Not re-entrant: a holder must call the
+    ``_locked`` variants, never take it again.
+    """
+    fd = os.open(runs_dir / RUNS_LOCK_FILE, os.O_RDWR | os.O_CREAT, FILE_MODE)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def acquire_worker_lock(run_dir: Path) -> int | None:
+    """Take ``.worker.lock`` exclusively for the life of this process.
+
+    Returns the fd (keep it; closing it releases the lock) or ``None`` when
+    another process already holds it, which means another worker is running
+    this task and this one must not touch it.
+    """
+    fd = os.open(run_dir / WORKER_LOCK_FILE, os.O_RDWR | os.O_CREAT, FILE_MODE)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def worker_lock_held(run_dir: Path) -> bool:
+    """Whether some process currently holds ``.worker.lock``.
+
+    The kernel releases a ``flock`` when its holder exits, zombie or not, so
+    this is a liveness test that cannot be fooled by an unreaped worker.
+    """
+    path = run_dir / WORKER_LOCK_FILE
+    if not path.exists():
+        return False
+    fd = os.open(path, os.O_RDWR)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def write_model(path: Path, model: BaseModel) -> None:

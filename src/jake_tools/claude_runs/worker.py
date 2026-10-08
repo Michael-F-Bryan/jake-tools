@@ -18,11 +18,20 @@ Termination: the timeout is an anyio ``move_on_after`` around the call, and
 SIGTERM cancels the same scope. Both are anyio cancellations, which is what
 the SDK's transport needs to run its stdin-EOF / SIGTERM / SIGKILL
 escalation on the CLI child; a raw asyncio cancellation would orphan it
-(see the SDK's ``subprocess_cli.py`` ``close()`` docstring). Before
-recording a terminal state the worker kills anything else left in its
-process group (a tool's shell the CLI had to be SIGKILLed out of), so "the
-task ended" also means "its processes are gone". The server's group SIGKILL
-is the backstop if this process never gets that far.
+(see the SDK's ``subprocess_cli.py`` ``close()`` docstring).
+
+Processes: the CLI runs each tool shell in its own session, outside the
+worker's process group, so the worker tracks every group in its descendant
+tree into ``groups.json`` while it runs (and, on Linux, is a child subreaper
+so orphans of a killed CLI stay in that tree). Before recording a terminal
+state it kills its live descendants and every recorded group, so "the task
+ended" also means "its processes are gone". If the worker itself is killed
+first, the server does the same from ``groups.json`` when it settles the
+task (see :mod:`.spawn`).
+
+Liveness: the worker holds ``.worker.lock`` for its whole life; the server
+reads "alive" as "that lock is held", which an exited-but-unreaped worker
+cannot fake.
 """
 
 from __future__ import annotations
@@ -50,15 +59,22 @@ from .models import (
 from .rundir import (
     TELEMETRY_FILE,
     TRANSCRIPT_FILE,
+    acquire_worker_lock,
     open_private,
     read_brief,
+    read_process_record,
     read_spec,
     update_state,
     utc_now,
     write_model,
     write_result,
 )
-from .spawn import sweep_own_group
+from .spawn import (
+    become_subreaper,
+    record_process,
+    sweep_own_group,
+    track_descendant_groups,
+)
 
 log = logging.getLogger(__name__)
 
@@ -81,12 +97,22 @@ class Outcome:
 
 
 def main(run_dir: Path) -> int:
-    """Run the task in ``run_dir``; the process exit status (0 = completed)."""
+    """Run the task in ``run_dir``; the process exit status (0 = completed).
+
+    The worker lock is taken first and held (the fd is deliberately never
+    closed) until this process exits; a task whose lock is already held has
+    a worker, and this process leaves without touching anything.
+    """
     logging.basicConfig(
         stream=sys.stderr,
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if acquire_worker_lock(run_dir) is None:
+        log.error("another worker already holds %s; exiting", run_dir)
+        return 1
+    if become_subreaper():
+        log.info("child subreaper enabled")
     outcome = anyio.run(run_worker, run_dir)
     return 0 if outcome.status == "completed" else 1
 
@@ -101,6 +127,8 @@ async def run_worker(run_dir: Path) -> Outcome:
             update={"started_at": utc_now(), "pid": pid, "pgid": pgid}
         ),
     )
+    if read_process_record(run_dir) is None:
+        record_process(run_dir, pid)  # the server died before it could
     log.info("task %s started (pid %d, pgid %d)", spec.task_id, pid, pgid)
 
     transcript = TranscriptWriter(run_dir / TRANSCRIPT_FILE)
@@ -117,6 +145,7 @@ async def run_worker(run_dir: Path) -> Outcome:
         with anyio.CancelScope() as run_scope:
             async with anyio.create_task_group() as tg:
                 tg.start_soon(_cancel_on_signal, run_scope)
+                tg.start_soon(track_descendant_groups, run_dir)
                 outcome = await _run_agent(agent, brief, spec.timeout_seconds)
                 tg.cancel_scope.cancel()
         if run_scope.cancel_called:
@@ -138,13 +167,13 @@ async def run_worker(run_dir: Path) -> Outcome:
 def _finish(
     run_dir: Path, spec: RunSpec, outcome: Outcome, transcript: TranscriptWriter
 ) -> None:
-    """Leave nothing behind: sweep the group, then record the outcome.
+    """Leave nothing behind: sweep the task's processes, then record the outcome.
 
     The sweep comes first so that a terminal ``status.json`` also means the
     task's processes are gone (bar this one, which exits next).
     """
     transcript.close()
-    swept = sweep_own_group()
+    swept = sweep_own_group(run_dir)
     if swept:
         log.warning("task %s: killed %d leftover process(es)", spec.task_id, swept)
     _record(run_dir, spec, outcome)

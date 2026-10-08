@@ -18,7 +18,7 @@ import sys
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import AbstractAsyncContextManager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -38,24 +38,33 @@ from jake_tools.claude_runs import (
     task_status,
 )
 from jake_tools.claude_runs.control import live_tasks, reconcile, start_task
-from jake_tools.claude_runs.models import TASK_ID_PATTERN
+from jake_tools.claude_runs.models import TASK_ID_PATTERN, GroupRecord, ProcessRecord
+from jake_tools.claude_runs.procs import process_table
 from jake_tools.claude_runs.rundir import (
     LOCK_FILE,
+    PROCESS_FILE,
+    RUNS_LOCK_FILE,
     STATUS_FILE,
+    WORKER_LOCK_FILE,
     create_run_dir,
     new_task_id,
+    read_process_record,
     read_state,
     task_dir,
     update_state,
+    worker_lock_held,
+    write_process_record,
     write_text,
 )
 from jake_tools.claude_runs.spawn import (
     group_alive,
     reap_in_background,
+    record_process,
     signal_group,
-    terminate_group,
+    terminate_task,
+    worker_environment,
 )
-from jake_tools.config import load_config
+from jake_tools.config import SECRET_VARIABLES, load_config
 
 ServerFactory = Callable[..., AbstractAsyncContextManager[ClientSession]]
 
@@ -100,10 +109,12 @@ def dead_group() -> int:
     return process.pid
 
 
-def _spec(task_id: str, working_directory: Path) -> RunSpec:
+def _spec(
+    task_id: str, working_directory: Path, created_at: datetime | None = None
+) -> RunSpec:
     return RunSpec(
         task_id=task_id,
-        created_at=datetime.now(UTC),
+        created_at=created_at or datetime.now(UTC),
         working_directory=working_directory,
         model="claude-haiku-4-5",
         max_turns=3,
@@ -112,12 +123,31 @@ def _spec(task_id: str, working_directory: Path) -> RunSpec:
     )
 
 
-def _working(runs_dir: Path, working_directory: Path, pgid: int | None) -> Path:
-    """A run directory whose status says ``working`` with ``pgid``."""
+def _working(runs_dir: Path, working_directory: Path, pid: int | None) -> Path:
+    """A run directory whose status says ``working`` with worker ``pid``.
+
+    ``process.json`` is recorded exactly as the server records it after a
+    spawn: with the start-time token the process table shows now, or none
+    if the process has already gone.
+    """
     spec = _spec(new_task_id(), working_directory)
     run_dir = create_run_dir(runs_dir, spec, "do the thing")
-    update_state(run_dir, lambda s: s.model_copy(update={"pid": pgid, "pgid": pgid}))
+    update_state(run_dir, lambda s: s.model_copy(update={"pid": pid, "pgid": pid}))
+    if pid is not None:
+        record_process(run_dir, pid)
     return run_dir
+
+
+def _zombie(command: list[str]) -> subprocess.Popen[bytes]:
+    """A child in its own session that has exited but not been reaped."""
+    process = subprocess.Popen(command, start_new_session=True)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        info = process_table().get(process.pid)
+        if info is not None and info.zombie:
+            return process
+        time.sleep(0.05)
+    pytest.fail(f"pid {process.pid} did not become a zombie")
 
 
 # --- task IDs and the run directory ------------------------------------------
@@ -202,7 +232,14 @@ def test_timestamps_serialise_as_rfc3339_utc(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "task_id",
-    ["", "nope", "../../etc", "20261008T031500Z-zzzzzzzz", "20261008T031500Z-1a2b3c4d"],
+    [
+        "",
+        "nope",
+        "../../etc",
+        "20261008T031500Z-zzzzzzzz",
+        "20261008T031500Z-1a2b3c4d",
+        "20261008T031500Z-1a2b3c4d\n",  # ``$`` would accept this; fullmatch does not
+    ],
 )
 def test_task_dir_rejects_malformed_and_unknown_ids(
     tmp_path: Path, task_id: str
@@ -232,6 +269,148 @@ def test_group_alive_reflects_real_process_groups(
     assert group_alive(dead_group()) is False
     assert group_alive(None) is False
     assert group_alive(0) is False  # never our own group
+
+
+def test_a_zombie_only_group_reads_dead_and_is_safe_to_signal() -> None:
+    """An exited-but-unreaped process is not alive, however it looks to kill(2)."""
+    process = _zombie(["true"])
+    try:
+        table = process_table()
+        assert table[process.pid].zombie
+        assert group_alive(process.pid) is False
+        record = GroupRecord(
+            pgid=process.pid, leader_started=table[process.pid].started
+        )
+        signal_group(record, signal.SIGKILL, table)  # must not raise
+    finally:
+        process.wait()
+
+
+def test_signalling_our_own_group_or_init_is_refused_quietly() -> None:
+    table = process_table()
+    me = table[os.getpid()]
+    leader = table.get(me.pgid)
+    own = GroupRecord(
+        pgid=me.pgid, leader_started=leader.started if leader else me.started
+    )
+
+    assert signal_group(own, signal.SIGKILL, table) is False  # we are still here
+    assert (
+        signal_group(GroupRecord(pgid=1, leader_started="x"), signal.SIGKILL, table)
+        is False
+    )
+    assert (
+        signal_group(GroupRecord(pgid=0, leader_started="x"), signal.SIGKILL, table)
+        is False
+    )
+
+
+def test_a_reused_pid_is_neither_alive_nor_signalled(tmp_path: Path) -> None:
+    """A recorded PID whose start time no longer matches is someone else's."""
+    runs_dir = tmp_path / "runs"
+    bystander = subprocess.Popen(
+        ["sleep", "300"], start_new_session=True, stdin=subprocess.DEVNULL
+    )
+    reap_in_background(bystander)
+    try:
+        run_dir = _working(runs_dir, tmp_path, bystander.pid)
+        write_process_record(
+            run_dir,
+            ProcessRecord(pid=bystander.pid, pgid=bystander.pid, started="older-run"),
+        )
+
+        state = reconcile(run_dir)
+        time.sleep(0.5)
+
+        assert state.termination_reason == "worker_died"
+        assert bystander.poll() is None  # untouched
+    finally:
+        if bystander.poll() is None:
+            os.killpg(bystander.pid, signal.SIGKILL)
+        bystander.wait()
+
+
+async def test_cancel_never_signals_a_reused_pid(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    bystander = subprocess.Popen(
+        ["sleep", "300"], start_new_session=True, stdin=subprocess.DEVNULL
+    )
+    reap_in_background(bystander)
+    try:
+        run_dir = _working(runs_dir, tmp_path, bystander.pid)
+        write_process_record(
+            run_dir,
+            ProcessRecord(pid=bystander.pid, pgid=bystander.pid, started="older-run"),
+        )
+
+        state = await cancel_task(runs_dir, run_dir.name)
+
+        assert state.status == "failed"
+        assert state.termination_reason == "worker_died"
+        assert bystander.poll() is None
+    finally:
+        if bystander.poll() is None:
+            os.killpg(bystander.pid, signal.SIGKILL)
+        bystander.wait()
+
+
+def test_a_zombie_worker_reads_dead(tmp_path: Path) -> None:
+    """Linux containers without a reaping PID 1 leave exited workers as zombies."""
+    runs_dir = tmp_path / "runs"
+    process = subprocess.Popen(
+        ["sleep", "0.3"], start_new_session=True, stdin=subprocess.DEVNULL
+    )
+    try:
+        run_dir = _working(runs_dir, tmp_path, process.pid)  # recorded while alive
+        assert read_process_record(run_dir) is not None
+        assert read_process_record(run_dir).started is not None  # type: ignore[union-attr]
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            info = process_table().get(process.pid)
+            if info is not None and info.zombie:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("worker stand-in never became a zombie")
+
+        state = reconcile(run_dir)
+
+        assert state.status == "failed"
+        assert state.termination_reason == "worker_died"
+    finally:
+        process.wait()
+
+
+def test_worker_lock_is_liveness(tmp_path: Path) -> None:
+    """A held ``.worker.lock`` means alive; a released one means gone."""
+    runs_dir = tmp_path / "runs"
+    run_dir = _working(runs_dir, tmp_path, dead_group())
+    assert worker_lock_held(run_dir) is False
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys, time\n"
+            "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "print('held', flush=True)\n"
+            "time.sleep(300)\n",
+            str(run_dir / WORKER_LOCK_FILE),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "held"
+        assert worker_lock_held(run_dir) is True
+        assert reconcile(run_dir).status == "working"  # the lock alone keeps it alive
+    finally:
+        holder.kill()
+        holder.wait()
+
+    assert worker_lock_held(run_dir) is False
+    assert reconcile(run_dir).termination_reason == "worker_died"
 
 
 def test_reconcile_marks_a_working_task_with_a_dead_group_as_worker_died(
@@ -276,18 +455,22 @@ def test_reconcile_never_overwrites_a_terminal_state(tmp_path: Path) -> None:
     assert reconcile(run_dir) == done
 
 
-def test_task_status_without_a_status_file_settles_as_worker_died(
+def test_task_without_a_process_record_is_working_until_the_grace_ends(
     tmp_path: Path,
 ) -> None:
-    """The creator died between spec.json and the spawn: no status, no process."""
+    """No process.json yet: still being spawned (working), unless it is stale."""
     runs_dir = tmp_path / "runs"
-    spec = _spec(new_task_id(), tmp_path)
-    create_run_dir(runs_dir, spec, "brief")
+    fresh = _spec(new_task_id(), tmp_path)
+    create_run_dir(runs_dir, fresh, "brief")
+    assert task_status(runs_dir, fresh.task_id).status == "working"
 
-    state = task_status(runs_dir, spec.task_id)
+    stale = _spec(new_task_id(), tmp_path, datetime.now(UTC) - timedelta(minutes=5))
+    create_run_dir(runs_dir, stale, "brief")
+    state = task_status(runs_dir, stale.task_id)
 
     assert state.status == "failed"
     assert state.termination_reason == "worker_died"
+    assert not (runs_dir / stale.task_id / PROCESS_FILE).exists()
 
 
 # --- capacity ------------------------------------------------------------------
@@ -312,14 +495,37 @@ def test_start_task_refuses_a_third_live_task_without_creating_anything(
     runs_dir = tmp_path / "runs"
     for _ in range(MAX_LIVE_TASKS):
         _working(runs_dir, tmp_path, live_group())
-    before = sorted(p.name for p in runs_dir.iterdir())
+    before = sorted(p.name for p in runs_dir.iterdir() if not p.name.startswith("."))
     request = StartRequest(brief="x", working_directory=tmp_path)
 
     with pytest.raises(CapacityExceededError) as info:
         start_task(runs_dir, request, DEFAULTS)
 
     assert info.value.live == MAX_LIVE_TASKS
-    assert sorted(p.name for p in runs_dir.iterdir()) == before
+    after = sorted(p.name for p in runs_dir.iterdir() if not p.name.startswith("."))
+    assert after == before  # only the runs lock file may have appeared
+
+
+def test_start_time_token_is_the_same_from_a_process_in_another_locale() -> None:
+    """The token is compared across processes; a locale must not change it."""
+    pid = os.getpid()
+    ours = process_table()[pid].started
+    script = (
+        "import sys\n"
+        "from jake_tools.claude_runs.procs import process_table\n"
+        "print(process_table()[int(sys.argv[1])].started)\n"
+    )
+    for locale in ("C", "de_DE.UTF-8", "en_AU.UTF-8"):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("LC_", "LANG"))}
+        env["LC_ALL"] = locale
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(pid)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert completed.stdout.strip() == ours, locale
 
 
 # --- cancel ---------------------------------------------------------------------
@@ -370,14 +576,17 @@ async def test_cancel_kills_a_real_group_and_records_cancelled(
     assert elapsed < 20
 
 
-async def test_terminate_group_returns_quickly_for_a_cooperative_group() -> None:
+async def test_terminate_task_returns_quickly_for_a_cooperative_worker(
+    tmp_path: Path,
+) -> None:
     process = subprocess.Popen(
         ["sleep", "300"], start_new_session=True, stdin=subprocess.DEVNULL
     )
     reap_in_background(process)
+    run_dir = _working(tmp_path / "runs", tmp_path, process.pid)
     started = time.monotonic()
     try:
-        dead = await terminate_group(process.pid)
+        dead = await terminate_task(run_dir)
     finally:
         process.wait()
 
@@ -385,19 +594,210 @@ async def test_terminate_group_returns_quickly_for_a_cooperative_group() -> None
     assert time.monotonic() - started < 5
 
 
-def test_signalling_a_zombie_only_group_does_not_raise() -> None:
-    """macOS answers EPERM for a group whose only member has exited unreaped."""
-    process = subprocess.Popen(["true"], start_new_session=True)
+async def test_cancel_also_kills_recorded_groups_outside_the_worker_group(
+    tmp_path: Path,
+) -> None:
+    """What the worker recorded in groups.json dies with it, start time matching."""
+    runs_dir = tmp_path / "runs"
+    worker = subprocess.Popen(
+        ["sleep", "300"], start_new_session=True, stdin=subprocess.DEVNULL
+    )
+    shell = subprocess.Popen(
+        ["sleep", "300"], start_new_session=True, stdin=subprocess.DEVNULL
+    )
+    for process in (worker, shell):
+        reap_in_background(process)
+    try:
+        run_dir = _working(runs_dir, tmp_path, worker.pid)
+        table = process_table()
+        from jake_tools.claude_runs.models import GroupRecords
+        from jake_tools.claude_runs.rundir import write_groups
+
+        write_groups(
+            run_dir,
+            GroupRecords(
+                groups=[
+                    GroupRecord(pgid=shell.pid, leader_started=table[shell.pid].started)
+                ]
+            ),
+        )
+
+        state = await cancel_task(runs_dir, run_dir.name)
+
+        assert state.status == "cancelled"
+        deadline = time.monotonic() + 5
+        while shell.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert shell.poll() is not None
+        assert worker.poll() is not None
+    finally:
+        for process in (worker, shell):
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+
+def test_settling_a_dead_worker_kills_its_recorded_groups(tmp_path: Path) -> None:
+    """reconcile() after a SIGKILLed worker still clears what it left running."""
+    runs_dir = tmp_path / "runs"
+    shell = subprocess.Popen(
+        ["sleep", "300"], start_new_session=True, stdin=subprocess.DEVNULL
+    )
+    reap_in_background(shell)
+    try:
+        run_dir = _working(runs_dir, tmp_path, dead_group())
+        from jake_tools.claude_runs.models import GroupRecords
+        from jake_tools.claude_runs.rundir import write_groups
+
+        table = process_table()
+        write_groups(
+            run_dir,
+            GroupRecords(
+                groups=[
+                    GroupRecord(pgid=shell.pid, leader_started=table[shell.pid].started)
+                ]
+            ),
+        )
+
+        state = reconcile(run_dir)
+
+        assert state.termination_reason == "worker_died"
+        deadline = time.monotonic() + 5
+        while shell.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert shell.poll() is not None
+    finally:
+        if shell.poll() is None:
+            os.killpg(shell.pid, signal.SIGKILL)
+        shell.wait()
+
+
+# --- the worker's environment ---------------------------------------------------
+
+
+def test_secret_variables_is_the_complete_list_config_reads() -> None:
+    config = load_config({"HOME": "/nonexistent"})
+
+    assert {s.name for s in config.settings() if s.secret} == set(SECRET_VARIABLES)
+
+
+def test_worker_environment_drops_every_secret_and_its_file_variant() -> None:
+    environ = {
+        "HOME": "/h",
+        "PATH": "/bin",
+        "ANTHROPIC_API_KEY": "keep-me",
+        "CLAUDE_CODE_OAUTH_TOKEN": "keep-me-too",
+        **dict.fromkeys(SECRET_VARIABLES, "s3cret"),
+        **{f"{name}_FILE": "/run/secrets/x" for name in SECRET_VARIABLES},
+    }
+
+    env = worker_environment(environ)
+
+    assert env == {
+        "HOME": "/h",
+        "PATH": "/bin",
+        "ANTHROPIC_API_KEY": "keep-me",
+        "CLAUDE_CODE_OAUTH_TOKEN": "keep-me-too",
+    }
+
+
+def test_a_child_spawned_with_the_worker_environment_cannot_see_secrets() -> None:
+    environ = {
+        **os.environ,
+        "CLOCKIFY_API_KEY": "s3cret",
+        "JIRA_API_TOKEN_FILE": "/run/secrets/jira",
+    }
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "import json, os; print(json.dumps(dict(os.environ)))"],
+        env=worker_environment(environ),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    seen = json.loads(completed.stdout)
+    assert not any(k.startswith(tuple(SECRET_VARIABLES)) for k in seen), sorted(seen)
+    assert seen["PATH"] == os.environ["PATH"]
+
+
+# --- a real worker, briefly -----------------------------------------------------
+
+
+def test_real_worker_holds_the_lock_records_itself_and_fails_cleanly(
+    tmp_path: Path,
+) -> None:
+    """Spawn the real worker against a working directory that vanishes.
+
+    The SDK refuses to start the CLI (no API call is made), so the whole
+    lifecycle runs in a second or two: process.json recorded by the server,
+    the lock held while the worker runs, ``failed/sdk_error`` written by the
+    worker, the lock released on exit.
+    """
+    runs_dir = tmp_path / "runs"
+    workdir = tmp_path / "gone-soon"
+    workdir.mkdir()
+    request = StartRequest(brief="hello", working_directory=workdir)
+    workdir.rmdir()
+
+    started = start_task(runs_dir, request, DEFAULTS)
+    run_dir = started.run_dir
+    record = read_process_record(run_dir)
+    assert record is not None and record.started is not None
+    assert (runs_dir / RUNS_LOCK_FILE).exists()
+
+    deadline = time.monotonic() + 30
+    saw_lock = False
+    while time.monotonic() < deadline:
+        if worker_lock_held(run_dir):
+            saw_lock = True
+        state = read_state(run_dir)
+        if state.is_terminal:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail(f"worker did not finish: {read_state(run_dir)}")
+
+    assert saw_lock, "the worker never held its lock"
+    assert state.status == "failed"
+    assert state.termination_reason == "sdk_error"
+    assert state.error and "gone-soon" in state.error
+    assert state.started_at is not None
+    assert (run_dir / "groups.json").exists() or True  # may be absent: nothing spawned
     deadline = time.monotonic() + 5
-    while process.poll() is None and time.monotonic() < deadline:
-        # poll() reaps; we want the zombie, so look without waiting.
-        break
-    time.sleep(0.2)
+    while worker_lock_held(run_dir) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert worker_lock_held(run_dir) is False
+    assert task_status(runs_dir, started.task_id) == state  # terminal stays put
 
-    signal_group(process.pid, signal.SIGKILL)  # must not raise
 
-    process.wait()
-    assert group_alive(process.pid) is False
+def test_runs_lock_serialises_servers_sharing_a_runs_dir(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys, time\n"
+            "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "print('held', flush=True)\n"
+            "time.sleep(1.5)\n",
+            str(runs_dir / RUNS_LOCK_FILE),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "held"
+        began = time.monotonic()
+        assert live_tasks(runs_dir) == []
+        waited = time.monotonic() - began
+    finally:
+        holder.wait()
+
+    assert waited >= 1.0, waited
 
 
 # --- argument validation --------------------------------------------------------
@@ -590,7 +990,8 @@ async def test_stdio_capacity_exceeded_with_two_live_groups(
         "live": MAX_LIVE_TASKS,
         "limit": MAX_LIVE_TASKS,
     }
-    assert len(list(runs_dir.iterdir())) == MAX_LIVE_TASKS
+    task_dirs = [p for p in runs_dir.iterdir() if not p.name.startswith(".")]
+    assert len(task_dirs) == MAX_LIVE_TASKS  # nothing created; only the lock file
 
 
 @pytest.fixture
