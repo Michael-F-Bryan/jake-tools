@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from jake_tools.clockify import (
     ClockifyClientRecord,
+    ClockifyError,
     ClockifyProject,
     ClockifyTask,
     ClockifyUser,
@@ -24,8 +25,10 @@ from jake_tools.clockify_jira_sync import (
     RenameTaskAction,
     SyncActionKind,
     SyncApplyError,
+    SyncConflictError,
     SyncFailure,
     SyncPlan,
+    SyncPlanStaleError,
     SyncPreparationError,
     SyncReport,
     SyncReportInventory,
@@ -36,6 +39,7 @@ from jake_tools.clockify_jira_sync import (
     plan_digest,
     plan_jira_sync,
     prepare_jira_sync,
+    run_jira_sync,
 )
 from jake_tools.jira import JiraIssue, JiraStatusCategory
 
@@ -824,7 +828,8 @@ def test_prepare_jira_sync_requires_exact_active_clockify_client() -> None:
 # --- SyncReport and plan_digest -------------------------------------------------
 
 
-def _snapshot_with_drift() -> SyncSnapshot:
+def _drift_clients() -> tuple[FakeClockifyInventoryClient, FakeJiraInventoryClient]:
+    """Inventory where SF-427 needs reactivating and SF-304 marking done."""
     project = clockify_project("SF-131", "Production Vehicle")
     active_task = clockify_task("SF-304", "Bench test PX4")
     done_task = clockify_task("SF-427", "Evaluate PX4", status="DONE")
@@ -845,7 +850,16 @@ def _snapshot_with_drift() -> SyncSnapshot:
         active_tasks=[active_task],
         done_tasks=[done_task],
     )
+    # The sync fake's get_task reads what it holds; seed it with the
+    # inventory so update_task's read-back sees the existing tasks.
+    for task in (active_task, done_task):
+        clockify._tasks_by_id[task.id] = task
     jira = FakeJiraInventoryClient(active_issues=[active_issue], issues=issues)
+    return clockify, jira
+
+
+def _snapshot_with_drift() -> SyncSnapshot:
+    clockify, jira = _drift_clients()
     return prepare_jira_sync(
         clockify=clockify,
         jira=jira,
@@ -950,3 +964,171 @@ def test_with_apply_outcome_flags_written_actions_and_records_failure() -> None:
     ]
     assert outcome.failure is not None and outcome.failure.jira_key == "SF-304"
     assert outcome.plan_digest == report.plan_digest
+
+
+# --- SyncApplyError carries the partial outcome; run_jira_sync ------------------
+
+
+class FailingSecondWriteClient(FakeClockifyInventoryClient):
+    """Fails the second task update, as an HTTP 500 from Clockify would."""
+
+    def update_task(
+        self,
+        workspace_id: str,
+        task: ClockifyTask,
+        *,
+        name: str | None = None,
+        status: TaskStatus | None = None,
+    ) -> ClockifyTask:
+        if any(op.startswith("update_task") for op in self.operations):
+            raise ClockifyError("Clockify request failed for PUT /x: 500 Boom")
+        return super().update_task(workspace_id, task, name=name, status=status)
+
+
+def _failing_second_write_clients() -> tuple[
+    FailingSecondWriteClient, FakeJiraInventoryClient
+]:
+    good, jira = _drift_clients()
+    failing = FailingSecondWriteClient(
+        clients=good.clients,
+        projects=good.projects,
+        active_tasks=good.active_tasks,
+        done_tasks=good.done_tasks,
+    )
+    failing._tasks_by_id.update(good._tasks_by_id)
+    return failing, jira
+
+
+def _run(
+    clockify: FakeClockifyInventoryClient,
+    jira: FakeJiraInventoryClient,
+    *,
+    apply: bool = False,
+    expected_digest: str | None = None,
+) -> SyncReport:
+    return run_jira_sync(
+        clockify=clockify,
+        jira=jira,
+        jira_project="SF",
+        clockify_client="Sunfish Robotics",
+        apply=apply,
+        expected_digest=expected_digest,
+    )
+
+
+def test_apply_sync_plan_error_carries_applied_actions_and_failing_action() -> None:
+    clockify, jira = _failing_second_write_clients()
+    snapshot = prepare_jira_sync(
+        clockify=clockify,
+        jira=jira,
+        jira_project="SF",
+        clockify_client="Sunfish Robotics",
+    )
+
+    with pytest.raises(SyncApplyError, match="500 Boom") as raised:
+        apply_sync_plan(
+            snapshot.plan,
+            clockify=clockify,
+            workspace_id=snapshot.workspace_id,
+            client_id=snapshot.client_id,
+            index=snapshot.index,
+        )
+
+    assert [item.action.jira_key for item in raised.value.applied] == ["SF-427"]
+    assert raised.value.action is not None
+    assert raised.value.action.jira_key == "SF-304"
+    # The message is the underlying error's, unchanged, for the CLI's text mode.
+    assert str(raised.value) == "Clockify request failed for PUT /x: 500 Boom"
+
+
+def test_apply_sync_plan_conflict_refusal_has_no_failing_action() -> None:
+    plan = SyncPlan(actions=(ConflictAction(jira_key="SF-1", message="dup"),))
+
+    with pytest.raises(SyncApplyError) as raised:
+        apply_sync_plan(
+            plan,
+            clockify=FakeClockifySyncClient(),
+            workspace_id="workspace-1",
+            client_id="client-1",
+            index=build_index([], []),
+        )
+
+    assert raised.value.applied == ()
+    assert raised.value.action is None
+
+
+def test_run_jira_sync_preview_is_the_snapshot_report_and_writes_nothing() -> None:
+    clockify, jira = _drift_clients()
+
+    report = _run(clockify, jira)
+
+    assert report == SyncReport.from_snapshot(
+        _snapshot_with_drift(), jira_project="SF", clockify_client="Sunfish Robotics"
+    )
+    assert clockify.operations == []
+
+
+def test_run_jira_sync_apply_with_matching_digest_applies_and_verifies() -> None:
+    clockify, jira = _drift_clients()
+    digest = _run(clockify, jira).plan_digest
+
+    report = _run(clockify, jira, apply=True, expected_digest=digest)
+
+    assert report.mode == "apply"
+    assert report.failure is None
+    assert [(a.jira_key, a.applied, a.verified) for a in report.actions] == [
+        ("SF-427", True, True),
+        ("SF-304", True, True),
+    ]
+    assert len(clockify.operations) == 2
+
+
+def test_run_jira_sync_stale_digest_applies_nothing() -> None:
+    clockify, jira = _drift_clients()
+
+    with pytest.raises(SyncPlanStaleError) as raised:
+        _run(clockify, jira, apply=True, expected_digest="0" * 64)
+
+    assert raised.value.expected == "0" * 64
+    assert raised.value.actual == plan_digest(_snapshot_with_drift())
+    assert clockify.operations == []
+
+
+def test_run_jira_sync_refuses_conflicts_before_writing() -> None:
+    project = clockify_project("SF-131", "Production Vehicle")
+    task = clockify_task("SF-304", "Bench test PX4")
+    duplicate = task.model_copy(update={"id": "task-dup"})
+    clockify = FakeClockifyInventoryClient(
+        clients=[ClockifyClientRecord(id="client-1", name="Sunfish Robotics")],
+        projects=[project],
+        active_tasks=[task, duplicate],
+        done_tasks=[],
+    )
+    issues = [
+        jira_issue("SF-131", "Production Vehicle", issue_type="Project / Phase"),
+        jira_issue("SF-304", "Bench test PX4", status="Done", status_category="Done"),
+    ]
+    jira = FakeJiraInventoryClient(active_issues=[], issues=issues)
+
+    with pytest.raises(SyncConflictError, match="SF-304") as raised:
+        _run(clockify, jira, apply=True)
+
+    assert [c.jira_key for c in raised.value.report.conflicts] == ["SF-304"]
+    assert clockify.operations == []
+
+
+def test_run_jira_sync_partial_failure_returns_report_with_failure() -> None:
+    clockify, jira = _failing_second_write_clients()
+
+    report = _run(clockify, jira, apply=True)
+
+    assert report.mode == "apply"
+    assert report.failure == SyncFailure(
+        jira_key="SF-304",
+        kind=SyncActionKind.MARK_TASK_DONE,
+        message="Clockify request failed for PUT /x: 500 Boom",
+    )
+    assert [(a.jira_key, a.applied) for a in report.actions] == [
+        ("SF-427", True),
+        ("SF-304", False),
+    ]

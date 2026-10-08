@@ -17,13 +17,12 @@ from ..clockify import (
 from ..clockify_jira_sync import (
     ClockifyInventoryClient,
     JiraInventoryClient,
-    SyncAction,
     SyncActionKind,
-    SyncApplyError,
+    SyncConflictError,
     SyncPreparationError,
-    SyncSnapshot,
-    apply_sync_plan,
-    prepare_jira_sync,
+    SyncReport,
+    SyncReportAction,
+    run_jira_sync,
 )
 from ..jira import JiraClient, JiraError
 
@@ -224,48 +223,29 @@ def jira_sync(
     regardless of assignee. The command never deletes records.
     """
     try:
-        clockify_api = clockify_options.inventory_client()
-        jira_api = jira_options.inventory_client()
-        snapshot = prepare_jira_sync(
-            clockify=clockify_api,
-            jira=jira_api,
+        report = run_jira_sync(
+            clockify=clockify_options.inventory_client(),
+            jira=jira_options.inventory_client(),
             jira_project=jira_project,
             clockify_client=clockify_client,
             issue_keys=issue_keys,
+            apply=apply_changes,
         )
-        result = None
-        if apply_changes:
-            result = apply_sync_plan(
-                snapshot.plan,
-                clockify=clockify_api,
-                workspace_id=snapshot.workspace_id,
-                client_id=snapshot.client_id,
-                index=snapshot.index,
-            )
-    except (ClockifyError, JiraError, SyncPreparationError, SyncApplyError) as exc:
+    except SyncConflictError as exc:
+        if not as_json:
+            raise click.ClickException(str(exc)) from exc
+        report = exc.report
+    except (ClockifyError, JiraError, SyncPreparationError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     if as_json:
-        payload = {
-            "mode": "apply" if apply_changes else "dry-run",
-            "workspaceId": snapshot.workspace_id,
-            "jiraProject": jira_project,
-            "clockifyClient": clockify_client,
-            "scope": _scope_payload(snapshot, jira_project=jira_project),
-            "inventory": _inventory_payload(snapshot),
-            "actions": [_action_payload(action) for action in snapshot.plan.actions],
-        }
-        if result is not None:
-            payload["applied"] = len(result.applied)
-            # Every applied action re-fetches and verifies the Clockify record;
-            # apply_sync_plan raises before returning if verification fails, so
-            # reaching this point means everything applied was verified.
-            payload["verified"] = True
-        click.echo(json.dumps(payload, indent=2))
+        click.echo(json.dumps(report.model_dump(mode="json"), indent=2))
+    elif report.failure is not None:
+        raise click.ClickException(report.failure.message)
     else:
-        _emit_sync_plan(snapshot, applied=apply_changes)
+        _emit_sync_report(report)
 
-    if snapshot.plan.has_conflicts:
+    if report.has_conflicts or report.failure is not None:
         ctx.exit(1)
 
 
@@ -283,57 +263,34 @@ def whoami(clockify_options: ClockifyOptions, as_json: bool) -> None:
     _emit_user(user, as_json=as_json)
 
 
-def _action_payload(action: SyncAction) -> dict[str, object]:
-    return {
-        "kind": action.kind.value,
-        "jiraKey": action.jira_key,
-        "currentName": action.current_name,
-        "desiredName": action.desired_name,
-        "projectKey": action.project_key,
-        "projectId": action.project_id,
-        "taskId": action.task_id,
-        "jiraStatus": action.jira_status,
-        "message": action.message,
-    }
-
-
-def _scope_payload(snapshot: SyncSnapshot, *, jira_project: str) -> dict[str, object]:
-    return {
-        "kind": snapshot.scope.value,
-        "jiraProject": jira_project,
-        "issueKeys": list(snapshot.requested_issue_keys),
-    }
-
-
-def _inventory_payload(snapshot: SyncSnapshot) -> dict[str, int]:
-    return {
-        "activeIssues": len(snapshot.active_issues),
-        "jiraIssues": len(snapshot.jira_issues),
-        "projects": len(snapshot.projects),
-        "tasks": len(snapshot.tasks),
-    }
-
-
-def _emit_sync_plan(snapshot: SyncSnapshot, *, applied: bool) -> None:
-    actions = snapshot.plan.actions
-    if not actions:
-        click.echo(f"No Clockify changes required for {_scope_description(snapshot)}.")
+def _emit_sync_report(report: SyncReport) -> None:
+    # Conflicts sort first in the plan, so listing them before the other
+    # actions keeps the plan's order.
+    lines = [
+        *(
+            f"{SyncActionKind.CONFLICT.value} {c.jira_key} — {c.message}"
+            for c in report.conflicts
+        ),
+        *(_describe_action(action) for action in report.actions),
+    ]
+    if not lines:
+        click.echo(f"No Clockify changes required for {_scope_description(report)}.")
         return
 
-    label = "Applied" if applied else "Dry run"
-    suffix = "change" if len(actions) == 1 else "changes"
-    click.echo(f"{label}: {len(actions)} {suffix}")
-    for action in actions:
-        click.echo(_describe_action(action))
+    label = "Applied" if report.applied else "Dry run"
+    suffix = "change" if len(lines) == 1 else "changes"
+    click.echo(f"{label}: {len(lines)} {suffix}")
+    for line in lines:
+        click.echo(line)
 
 
-def _scope_description(snapshot: SyncSnapshot) -> str:
-    if snapshot.requested_issue_keys:
-        return ", ".join(snapshot.requested_issue_keys)
+def _scope_description(report: SyncReport) -> str:
+    if report.scope.issue_keys:
+        return ", ".join(report.scope.issue_keys)
     return "active Jira issues assigned to currentUser()"
 
 
-def _describe_action(action: SyncAction) -> str:
+def _describe_action(action: SyncReportAction) -> str:
     prefix = f"{action.kind.value} {action.jira_key}"
     if action.kind in {SyncActionKind.RENAME_PROJECT, SyncActionKind.RENAME_TASK}:
         return f"{prefix} — {action.current_name!r} → {action.desired_name!r}"
@@ -345,8 +302,6 @@ def _describe_action(action: SyncAction) -> str:
         return f"{prefix} — create under {action.project_key}: {action.desired_name}"
     if action.kind == SyncActionKind.CREATE_PROJECT:
         return f"{prefix} — create project {action.desired_name!r}"
-    if action.kind == SyncActionKind.CONFLICT:
-        return f"{prefix} — {action.message}"
     return prefix
 
 
