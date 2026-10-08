@@ -372,6 +372,98 @@ def test_jira_partially_configured_names_missing_variables(
     assert "JIRA_EMAIL" not in line.split("unset:")[1]
 
 
+def test_jira_unresolvable_host_leaks_neither_host_nor_path_nor_token(
+    run_doctor: RunDoctor, home: Path, claude_bin: Path
+) -> None:
+    result = run_doctor(
+        home,
+        claude_bin,
+        JIRA_BASE_URL="https://secret-tenant-xyz.invalid/secretpath",
+        JIRA_EMAIL="me@example.com",
+        JIRA_API_TOKEN="tok-DISTINCT-9876",
+    )
+
+    assert result.returncode == 1
+    line = check_line(result.stdout, "jira")
+    assert line.startswith("FAIL")
+    assert "connection failed" in line
+    for leaked in ("secret-tenant", "secretpath", "tok-DISTINCT", "xyz.invalid"):
+        assert leaked not in result.stdout
+        assert leaked not in result.stderr
+
+
+def test_clockify_response_body_is_never_printed(
+    run_doctor: RunDoctor,
+    home: Path,
+    claude_bin: Path,
+    fake_api: tuple[str, dict[str, tuple[int, object]]],
+) -> None:
+    url, routes = fake_api
+    routes["/user"] = (200, {"id": "u1"})
+    routes["/workspaces"] = (200, {"body": "BODY-TEXT-MARKER"})
+
+    result = run_doctor(
+        home,
+        claude_bin,
+        CLOCKIFY_API_KEY="key-DISTINCT-5555",
+        CLOCKIFY_API_BASE_URL=url,
+    )
+
+    assert result.returncode == 1
+    assert "BODY-TEXT-MARKER" not in result.stdout
+    assert "key-DISTINCT" not in result.stdout
+
+
+def test_jira_error_body_is_never_printed(
+    run_doctor: RunDoctor,
+    home: Path,
+    claude_bin: Path,
+    fake_api: tuple[str, dict[str, tuple[int, object]]],
+) -> None:
+    url, routes = fake_api
+    routes["/rest/api/3/myself"] = (500, {"message": "BODY-TEXT-MARKER"})
+
+    result = run_doctor(
+        home,
+        claude_bin,
+        JIRA_BASE_URL=url,
+        JIRA_EMAIL="me@example.com",
+        JIRA_API_TOKEN="tok-DISTINCT-9876",
+    )
+
+    line = check_line(result.stdout, "jira")
+    assert "HTTP 500" in line
+    assert "BODY-TEXT-MARKER" not in result.stdout
+
+
+def test_runs_dir_with_loose_mode_warns(
+    run_doctor: RunDoctor, home: Path, claude_bin: Path, tmp_path: Path
+) -> None:
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    runs.chmod(0o755)
+
+    result = run_doctor(home, claude_bin, "--runs-dir", str(runs))
+
+    assert result.returncode == 0
+    assert check_line(result.stdout, "runs_dir").startswith("WARN")
+
+
+def test_environment_block_reports_home_hermes_and_xdg(
+    run_doctor: RunDoctor, home: Path, claude_bin: Path, tmp_path: Path
+) -> None:
+    result = run_doctor(home, claude_bin, HERMES_HOME=str(tmp_path / "hermes"))
+
+    assert f"HOME = {home}" in result.stdout
+    assert f"HERMES_HOME = {tmp_path / 'hermes'}" in result.stdout
+    assert f"XDG config home = {home / '.config'}" in result.stdout
+    assert f"XDG state home = {home / '.local' / 'state'}" in result.stdout
+    assert f"XDG cache home = {home / '.cache'}" in result.stdout
+
+    unset = run_doctor(home, claude_bin)
+    assert "HERMES_HOME = unset" in unset.stdout
+
+
 @pytest.mark.slow
 def test_live_real_claude_cli_under_isolated_home_is_not_authenticated(
     run_doctor: RunDoctor,

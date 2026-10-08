@@ -13,7 +13,7 @@ from pathlib import Path
 
 import click
 
-from ..config import ConfigError, load_config
+from ..config import ConfigError, XdgPaths, load_config
 from .checks import Check, inspect_config_files, run_checks
 
 
@@ -38,6 +38,13 @@ def doctor(runs_dir: Path | None) -> None:
     else:
         checks = run_checks(config, files, environ)
 
+    click.echo("Environment")
+    click.echo(f"  HOME = {environ.get('HOME', 'unset')}")
+    click.echo(f"  HERMES_HOME = {environ.get('HERMES_HOME') or 'unset'}")
+    xdg = XdgPaths.from_environ(environ)
+    click.echo(f"  XDG config home = {xdg.config_home}")
+    click.echo(f"  XDG state home = {xdg.state_home}")
+    click.echo(f"  XDG cache home = {xdg.cache_home}")
     click.echo("Settings")
     if config is not None:
         for setting in config.settings():

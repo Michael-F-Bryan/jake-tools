@@ -8,14 +8,18 @@ secret value before they leave this module.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
 import tomllib
 from collections.abc import Mapping
+from http import HTTPStatus
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
+import requests
 from pydantic import BaseModel, ConfigDict
 
 from ..clockify import ClockifyClient, ClockifyError
@@ -103,6 +107,14 @@ def check_runs_dir(config: Config) -> Check:
             detail=f"{path} is not writable: {exc.strerror or exc}",
             required=True,
         )
+    mode = path.stat().st_mode & 0o777
+    if mode != 0o700:
+        return Check(
+            name="runs_dir",
+            status="warn",
+            detail=f"{path} writable but mode is {mode:04o}, expected 0700",
+            required=True,
+        )
     return Check(name="runs_dir", status="ok", detail=f"{path} writable", required=True)
 
 
@@ -155,28 +167,58 @@ def check_claude_cli(environ: Mapping[str, str]) -> Check:
     )
 
 
-def _secret_values(config: Config) -> list[str]:
-    return [s.value for s in config.settings() if s.secret and isinstance(s.value, str)]
+_STATUS_PATTERN = re.compile(r"failed for [A-Z]+ \S+: (\d{3})\b")
+_MIN_REDACT_LENGTH = 4
+
+
+def _sensitive_values(config: Config) -> list[str]:
+    """Secrets plus the pieces of the Jira base URL that identify a tenant."""
+    values: list[str] = [
+        s.value for s in config.settings() if s.secret and isinstance(s.value, str)
+    ]
+    base = config.jira_base_url.value
+    if base:
+        text = base.strip().rstrip("/")
+        parsed = urlsplit(text if "://" in text else f"https://{text}")
+        values += [text, parsed.netloc, parsed.hostname or "", parsed.path.strip("/")]
+    return values
 
 
 def scrub(text: str, secrets: list[str]) -> str:
-    for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+    """Defence in depth: redact sensitive values of meaningful length."""
+    candidates = {s for s in secrets if len(s) >= _MIN_REDACT_LENGTH}
+    for secret in sorted(candidates, key=len, reverse=True):
         text = text.replace(secret, REDACTED)
     return text
 
 
-def _first_line(exc: Exception, secrets: list[str]) -> str:
-    # The client error's first line is "<service> request failed for GET /x:
-    # <status> <reason>"; later lines are the response body, which is dropped.
-    message = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
-    return scrub(message, secrets)
+def describe_failure(exc: Exception) -> str:
+    """A fixed-vocabulary category for a client error; never any exception text."""
+    cause = exc.__cause__
+    if isinstance(cause, requests.Timeout):
+        return "request timed out"
+    if isinstance(cause, requests.ConnectionError):
+        return "connection failed"
+    if isinstance(cause, requests.RequestException):
+        return "request failed"
+    match = _STATUS_PATTERN.search(str(exc))
+    if match:
+        code = int(match.group(1))
+        try:
+            reason = HTTPStatus(code).phrase
+        except ValueError:
+            reason = "unexpected status"
+        return f"HTTP {code} {reason}"
+    if isinstance(exc, ValueError):
+        return "invalid configuration value"
+    return "invalid or unexpected response"
 
 
 def check_clockify(config: Config) -> Check:
     key = config.clockify_api_key.value
     if key is None:
         return Check(name="clockify", status="skip", detail="CLOCKIFY_API_KEY is unset")
-    secrets = _secret_values(config)
+    secrets = _sensitive_values(config)
     try:
         client = ClockifyClient(
             api_key=key, base_url=config.clockify_api_base_url.value
@@ -188,7 +230,7 @@ def check_clockify(config: Config) -> Check:
             name="clockify",
             status="fail",
             detail="CLOCKIFY_API_KEY rejected or API unreachable: "
-            f"{_first_line(exc, secrets)}",
+            f"{scrub(describe_failure(exc), secrets)}",
             required=True,
         )
     allowlist = config.clockify_workspaces.value
@@ -234,7 +276,7 @@ def check_jira(config: Config) -> Check:
             detail="partially configured; unset: " + ", ".join(missing),
             required=True,
         )
-    secrets = _secret_values(config)
+    secrets = _sensitive_values(config)
     try:
         JiraClient(
             base_url=config.jira_base_url.value or "",
@@ -246,7 +288,7 @@ def check_jira(config: Config) -> Check:
             name="jira",
             status="fail",
             detail="JIRA_* credentials rejected or API unreachable: "
-            f"{_first_line(exc, secrets)}",
+            f"{scrub(describe_failure(exc), secrets)}",
             required=True,
         )
     return Check(name="jira", status="ok", detail="authenticated", required=True)

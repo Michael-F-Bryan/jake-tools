@@ -49,6 +49,12 @@ class ClockifyUser(BaseModel):
     default_workspace: str = Field(default="", alias="defaultWorkspace")
 
 
+class ClockifyWorkspaceRef(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+
+
 class ClockifyClientRecord(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -126,12 +132,11 @@ class ClockifyClient:
 
     def get_workspace_ids(self) -> list[str]:
         """Ids of every workspace the API key's user belongs to."""
-        data = self._request_json("GET", "/workspaces")
-        if not isinstance(data, list):
-            raise ClockifyError("Clockify returned invalid data for /workspaces")
-        return [
-            str(item["id"]) for item in data if isinstance(item, dict) and "id" in item
-        ]
+        path = "/workspaces"
+        records = self._validate_list(
+            ClockifyWorkspaceRef, self._request_json("GET", path), path
+        )
+        return [record.id for record in records]
 
     def get_clients(self, workspace_id: str) -> list[ClockifyClientRecord]:
         path = f"/workspaces/{workspace_id}/clients"
