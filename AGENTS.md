@@ -128,6 +128,55 @@ instructions, or that generated output meets a semantic quality bar.
   group-level state and no exception to this rule.
 
 
+## MCP server (`jake_tools.mcp`)
+
+`python -m jake_tools.mcp` (also the `jake-tools-mcp` console script) is the
+stdio MCP server Hermes runs; design in `_working/mcp-server/README.md`.
+Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
+`worker RUN_DIR`. It is a separate entrypoint from `jake-tools` on purpose:
+
+- Nothing on this path imports `jake_tools.__main__`, `dotenv`, or
+  `jake_tools.transcription`, and nothing calls `load_dotenv()`. The process
+  environment Hermes passes is the only environment. A test pins this.
+- Stdout is the transport. Log to stderr only, never print.
+- Configuration comes from `config.load_config()`: XDG paths, then flag >
+  env > `$XDG_CONFIG_HOME/jake-tools/config.toml` > `$XDG_CONFIG_DIRS` >
+  default. Secrets are environment-only (`NAME` or `NAME_FILE`) and are never
+  read from `config.toml`. Every value is a `Resolved` that remembers its
+  source; `doctor` prints `display_value()`, which redacts secrets. Each
+  sub-command loads its own `Config`; there is still no `ctx.obj`.
+- Missing credentials never stop startup. Clients are built per call inside
+  the tool that needs them and raise `ToolError("missing_credentials", ...)`
+  naming the variable, never the value.
+- `mcp/server.py` registers; `mcp/tools/<tool>.py` holds one thin handler
+  each, registered through `structured_tool`, which sends the handler's
+  Pydantic result as structured content and turns a raised
+  `mcp.errors.ToolError` into an `isError` result with the stable
+  `{code, message, detail?}` payload. Codes are the `ToolErrorCode` literal;
+  do not invent new ones without adding them there. No `outputSchema` is
+  advertised, by design, so error payloads never fail schema validation.
+- Handlers are `async`. Blocking `requests` clients run under
+  `anyio.to_thread.run_sync`. Timeouts and cancellation use anyio cancel
+  scopes (`anyio.fail_after`, `move_on_after`), never `asyncio.timeout` or
+  `wait_for`: the Claude SDK's child-process cleanup only runs under anyio
+  cancellation.
+- The server holds no state that matters. Delegated tasks live in run
+  directories (`claude_runs/models.py` documents the files); the worker is
+  its own process group and outlives the server. No queue, no database.
+- Contract models the tools return live with their domain, not in `mcp/`:
+  `clockify_jira_sync.SyncReport` (also what `clockify jira-sync --json`
+  prints), `claude_runs.RunState`/`ClaudeStartResult`,
+  `session_store.models` (phase 3).
+- Tests: `tests/conftest.py` provides `mcp_server`/`mcp_env` fixtures that
+  spawn the real server over stdio under an isolated `HOME` with no
+  secrets. Protocol and result-shape tests go through them. Process
+  lifecycle tests (worker, cancel, timeout, server death) use real processes
+  and check the process table afterwards; a lifecycle test that stubs the
+  process is not a lifecycle test.
+- Packaged skills live in `src/jake_tools/skills/<name>/SKILL.md`, are served
+  as `skill://<name>` resources, and are installed by `install-skills`. They
+  describe what the tools actually return.
+
 ## External dependencies
 
 | Tool               | Used by                                               |

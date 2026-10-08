@@ -1,4 +1,6 @@
+import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 from claude_agent_sdk import (
@@ -14,6 +16,7 @@ from jake_tools.claude import (
     AgentSpec,
     ClaudeAgent,
     ClaudeAgentError,
+    message_to_json,
 )
 from jake_tools.prompting import StructuredPrompt
 
@@ -325,3 +328,88 @@ class TestAgentSpecMerge:
         merged = base.merge(AgentSpec(tools=()))
 
         assert merged.tools == ()
+
+
+# --- AgentSpec isolation fields and the message observer ---------------------
+
+
+def test_to_options_always_isolates_mcp_config_and_passes_through_defaults() -> None:
+    options = AgentSpec().to_options()
+
+    assert options.strict_mcp_config is True
+    assert options.cwd is None
+    assert options.env == {}
+    assert options.setting_sources is None
+    assert options.permission_mode is None
+
+
+def test_to_options_forwards_cwd_env_setting_sources_and_permission_mode(
+    tmp_path: Path,
+) -> None:
+    spec = AgentSpec(
+        cwd=tmp_path,
+        env={"EXAMPLE": "1"},
+        setting_sources=(),
+        permission_mode="dontAsk",
+    )
+
+    options = spec.to_options()
+
+    assert options.cwd == tmp_path
+    assert options.env == {"EXAMPLE": "1"}
+    assert options.setting_sources == []
+    assert options.permission_mode == "dontAsk"
+
+
+def test_merge_only_overrides_fields_the_override_set() -> None:
+    base = AgentSpec(tools=("Read",), setting_sources=(), cwd=Path("/base"))
+
+    merged = base.merge(AgentSpec(model="other"))
+
+    assert merged.model == "other"
+    assert merged.tools == ("Read",)
+    assert merged.setting_sources == ()
+    assert merged.cwd == Path("/base")
+
+
+async def test_reply_carries_the_result_messages_final_text() -> None:
+    result = _result()
+    result.result = "the final answer"
+    fake = RecordingQuery(_assistant("thinking aloud"), result)
+    agent = ClaudeAgent(run_query=fake)
+
+    reply = await agent.run("go")
+
+    assert reply.text == "thinking aloud"
+    assert reply.final_text == "the final answer"
+
+
+async def test_message_observer_sees_every_message_in_order() -> None:
+    seen: list[Message] = []
+    observer = seen.append
+    fake = RecordingQuery(_assistant("one"), _assistant("two"), _result())
+    agent = ClaudeAgent(run_query=fake).with_message_observer(observer)
+
+    await agent.run("go")
+
+    assert [type(message).__name__ for message in seen] == [
+        "AssistantMessage",
+        "AssistantMessage",
+        "ResultMessage",
+    ]
+    # The observer survives the other builders.
+    assert agent.for_stage("x").on_message is observer
+    assert agent.with_defaults(AgentSpec()).on_message is observer
+
+
+def test_message_to_json_tags_the_type_and_is_json_serialisable() -> None:
+    payload = message_to_json(_assistant("hello"))
+
+    assert payload["type"] == "AssistantMessage"
+    assert payload["content"] == [{"text": "hello"}]
+    assert payload["model"] == "claude-sonnet-5"
+    assert json.loads(json.dumps(payload)) == payload
+
+    result_payload = message_to_json(_result(total_cost_usd=0.5))
+    assert result_payload["type"] == "ResultMessage"
+    assert result_payload["total_cost_usd"] == 0.5

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
@@ -824,3 +826,213 @@ def _tasks_by_jira_key(
         if match:
             grouped[match.group(1)].append(task)
     return dict(grouped)
+
+
+# --- The typed report shared by the MCP tool and the CLI's --json -------------
+
+
+class SyncReportScope(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: SyncScope
+    jira_project: str
+    issue_keys: tuple[str, ...] = ()
+
+
+class SyncReportInventory(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    active_issues: int
+    jira_issues: int
+    projects: int
+    tasks: int
+
+
+class SyncReportAction(BaseModel):
+    """One planned (non-conflict) action, flattened to a single shape.
+
+    ``applied`` and ``verified`` are both false in a preview. After an apply
+    they record whether the action was written and whether the re-read of
+    the Clockify record matched the plan.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: SyncActionKind
+    jira_key: str
+    current_name: str = ""
+    desired_name: str = ""
+    project_key: str | None = None
+    project_id: str | None = None
+    task_id: str | None = None
+    jira_status: str = ""
+    message: str = ""
+    applied: bool = False
+    verified: bool = False
+
+    @classmethod
+    def from_action(cls, action: SyncAction) -> SyncReportAction:
+        return cls(
+            kind=action.kind,
+            jira_key=action.jira_key,
+            current_name=action.current_name,
+            desired_name=action.desired_name,
+            project_key=action.project_key,
+            project_id=action.project_id,
+            task_id=action.task_id,
+            jira_status=action.jira_status,
+            message=action.message,
+        )
+
+
+class SyncConflict(BaseModel):
+    """Something the plan refuses to touch; any conflict blocks apply."""
+
+    model_config = ConfigDict(frozen=True)
+
+    jira_key: str
+    message: str
+    project_key: str | None = None
+    project_id: str | None = None
+    task_id: str | None = None
+
+    @classmethod
+    def from_action(cls, action: ConflictAction) -> SyncConflict:
+        return cls(
+            jira_key=action.jira_key,
+            message=action.message,
+            project_key=action.project_key,
+            project_id=action.project_id,
+            task_id=action.task_id,
+        )
+
+
+class SyncFailure(BaseModel):
+    """Where an apply stopped. Every action before it was applied and verified."""
+
+    model_config = ConfigDict(frozen=True)
+
+    jira_key: str | None = None
+    kind: SyncActionKind | None = None
+    message: str
+
+
+class SyncReport(BaseModel):
+    """What a preview or apply found and did.
+
+    The MCP tool returns this model and ``jake-tools clockify jira-sync
+    --json`` prints it, so "preview agrees with the CLI" holds by
+    construction. ``plan_digest`` is :func:`plan_digest` over the snapshot the
+    report was built from; an apply must present the digest of the plan it
+    was shown, and a mismatch is ``plan_stale``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    mode: Literal["preview", "apply"]
+    workspace_id: str
+    client_id: str
+    jira_project: str
+    clockify_client: str
+    scope: SyncReportScope
+    inventory: SyncReportInventory
+    actions: tuple[SyncReportAction, ...]
+    conflicts: tuple[SyncConflict, ...]
+    plan_digest: str
+    applied: bool = False
+    failure: SyncFailure | None = None
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        snapshot: SyncSnapshot,
+        *,
+        jira_project: str,
+        clockify_client: str,
+        mode: Literal["preview", "apply"] = "preview",
+    ) -> SyncReport:
+        return cls(
+            mode=mode,
+            workspace_id=snapshot.workspace_id,
+            client_id=snapshot.client_id,
+            jira_project=jira_project,
+            clockify_client=clockify_client,
+            scope=SyncReportScope(
+                kind=snapshot.scope,
+                jira_project=jira_project,
+                issue_keys=snapshot.requested_issue_keys,
+            ),
+            inventory=SyncReportInventory(
+                active_issues=len(snapshot.active_issues),
+                jira_issues=len(snapshot.jira_issues),
+                projects=len(snapshot.projects),
+                tasks=len(snapshot.tasks),
+            ),
+            actions=tuple(
+                SyncReportAction.from_action(action)
+                for action in snapshot.plan.actions
+                if not isinstance(action, ConflictAction)
+            ),
+            conflicts=tuple(
+                SyncConflict.from_action(action)
+                for action in snapshot.plan.actions
+                if isinstance(action, ConflictAction)
+            ),
+            plan_digest=plan_digest(snapshot),
+        )
+
+    @property
+    def has_conflicts(self) -> bool:
+        return bool(self.conflicts)
+
+    def with_apply_outcome(
+        self,
+        applied: Sequence[AppliedSyncAction],
+        *,
+        failure: SyncFailure | None = None,
+    ) -> SyncReport:
+        """The apply-mode report: flag each written action, record a failure.
+
+        Every action ``apply_sync_plan`` returns (or had completed before it
+        raised) was re-read and verified, so ``applied`` implies ``verified``.
+        """
+        written = {(item.action.kind, item.action.jira_key) for item in applied}
+        return self.model_copy(
+            update={
+                "mode": "apply",
+                "applied": True,
+                "failure": failure,
+                "actions": tuple(
+                    action.model_copy(update={"applied": True, "verified": True})
+                    if (action.kind, action.jira_key) in written
+                    else action
+                    for action in self.actions
+                ),
+            }
+        )
+
+
+def plan_digest(snapshot: SyncSnapshot) -> str:
+    """SHA-256 over the canonical JSON of the plan and the IDs it depends on.
+
+    The input is the workspace and client the plan targets plus every action
+    (conflicts included), dumped in JSON mode with sorted keys. Actions carry
+    the record IDs and current names they were planned against, so a changed
+    snapshot that changes the plan changes the digest; an identical plan over
+    a changed snapshot is still safe to apply.
+    """
+    canonical = json.dumps(
+        {
+            "workspace_id": snapshot.workspace_id,
+            "client_id": snapshot.client_id,
+            "actions": [_dump_action(action) for action in snapshot.plan.actions],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _dump_action(action: SyncAction) -> dict[str, object]:
+    return action.model_dump(mode="json")

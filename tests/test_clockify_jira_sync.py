@@ -13,6 +13,7 @@ from jake_tools.clockify import (
     TaskStatus,
 )
 from jake_tools.clockify_jira_sync import (
+    AppliedSyncAction,
     ClockifyIndex,
     CompleteTaskAction,
     ConflictAction,
@@ -23,9 +24,16 @@ from jake_tools.clockify_jira_sync import (
     RenameTaskAction,
     SyncActionKind,
     SyncApplyError,
+    SyncFailure,
     SyncPlan,
     SyncPreparationError,
+    SyncReport,
+    SyncReportInventory,
+    SyncReportScope,
+    SyncScope,
+    SyncSnapshot,
     apply_sync_plan,
+    plan_digest,
     plan_jira_sync,
     prepare_jira_sync,
 )
@@ -811,3 +819,134 @@ def test_prepare_jira_sync_requires_exact_active_clockify_client() -> None:
             jira_project="SF",
             clockify_client="Sunfish Robotics",
         )
+
+
+# --- SyncReport and plan_digest -------------------------------------------------
+
+
+def _snapshot_with_drift() -> SyncSnapshot:
+    project = clockify_project("SF-131", "Production Vehicle")
+    active_task = clockify_task("SF-304", "Bench test PX4")
+    done_task = clockify_task("SF-427", "Evaluate PX4", status="DONE")
+    active_issue = jira_issue(
+        "SF-427",
+        "Evaluate PX4 external control methods",
+        status="In Progress",
+        status_category="In Progress",
+    )
+    issues = [
+        jira_issue("SF-131", "Production Vehicle", issue_type="Project / Phase"),
+        jira_issue("SF-304", "Bench test PX4", status="Done", status_category="Done"),
+        active_issue,
+    ]
+    clockify = FakeClockifyInventoryClient(
+        clients=[ClockifyClientRecord(id="client-1", name="Sunfish Robotics")],
+        projects=[project],
+        active_tasks=[active_task],
+        done_tasks=[done_task],
+    )
+    jira = FakeJiraInventoryClient(active_issues=[active_issue], issues=issues)
+    return prepare_jira_sync(
+        clockify=clockify,
+        jira=jira,
+        jira_project="SF",
+        clockify_client="Sunfish Robotics",
+    )
+
+
+def test_sync_report_separates_actions_from_conflicts_and_carries_digest() -> None:
+    snapshot = _snapshot_with_drift()
+
+    report = SyncReport.from_snapshot(
+        snapshot, jira_project="SF", clockify_client="Sunfish Robotics"
+    )
+
+    assert report.mode == "preview"
+    assert report.applied is False
+    assert report.failure is None
+    assert report.scope == SyncReportScope(
+        kind=SyncScope.ASSIGNED_ACTIVE, jira_project="SF"
+    )
+    assert report.inventory == SyncReportInventory(
+        active_issues=1, jira_issues=3, projects=1, tasks=2
+    )
+    assert [(action.kind, action.jira_key) for action in report.actions] == [
+        (SyncActionKind.REACTIVATE_TASK, "SF-427"),
+        (SyncActionKind.MARK_TASK_DONE, "SF-304"),
+    ]
+    assert report.conflicts == ()
+    assert not report.has_conflicts
+    assert report.plan_digest == plan_digest(snapshot)
+    assert len(report.plan_digest) == 64
+    # The report round-trips through JSON unchanged: the CLI prints exactly this.
+    assert SyncReport.model_validate_json(report.model_dump_json()) == report
+
+
+def test_sync_report_lists_conflicts_separately() -> None:
+    orphan = jira_issue("SF-900", "No parent", parent_key=None, parent_summary=None)
+    plan = plan_jira_sync(
+        active_issues=[orphan], jira_issues=[orphan], index=build_index([], [])
+    )
+    snapshot = SyncSnapshot(
+        workspace_id="workspace-1",
+        client_id="client-1",
+        scope=SyncScope.ISSUES,
+        requested_issue_keys=("SF-900",),
+        active_issues=(orphan,),
+        jira_issues=(orphan,),
+        projects=(),
+        tasks=(),
+        index=build_index([], []),
+        plan=plan,
+    )
+
+    report = SyncReport.from_snapshot(
+        snapshot, jira_project="SF", clockify_client="Sunfish Robotics"
+    )
+
+    assert report.actions == ()
+    assert [conflict.jira_key for conflict in report.conflicts] == ["SF-900"]
+    assert report.has_conflicts
+    assert report.scope.issue_keys == ("SF-900",)
+
+
+def test_plan_digest_is_stable_and_changes_with_the_plan() -> None:
+    first = plan_digest(_snapshot_with_drift())
+    second = plan_digest(_snapshot_with_drift())
+    assert first == second
+
+    snapshot = _snapshot_with_drift()
+    changed_plan = SyncPlan(actions=snapshot.plan.actions[:1])
+    assert plan_digest(snapshot.model_copy(update={"plan": changed_plan})) != first
+    assert plan_digest(snapshot.model_copy(update={"workspace_id": "other"})) != first
+
+
+def test_with_apply_outcome_flags_written_actions_and_records_failure() -> None:
+    snapshot = _snapshot_with_drift()
+    report = SyncReport.from_snapshot(
+        snapshot, jira_project="SF", clockify_client="Sunfish Robotics"
+    )
+    first_action = snapshot.plan.actions[0]
+    assert isinstance(first_action, ReactivateTaskAction)
+    applied = [
+        AppliedSyncAction(
+            action=first_action,
+            task=clockify_task("SF-427", "Evaluate PX4 external control methods"),
+        )
+    ]
+
+    outcome = report.with_apply_outcome(
+        applied,
+        failure=SyncFailure(
+            jira_key="SF-304", kind=SyncActionKind.MARK_TASK_DONE, message="boom"
+        ),
+    )
+
+    assert outcome.mode == "apply"
+    assert outcome.applied is True
+    assert [(a.applied, a.verified) for a in outcome.actions] == [
+        (True, True),
+        (False, False),
+    ]
+    assert outcome.failure is not None and outcome.failure.jira_key == "SF-304"
+    assert outcome.plan_digest == report.plan_digest

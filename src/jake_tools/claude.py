@@ -7,8 +7,10 @@ prompts in and typed replies out.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import dataclasses
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
 from claude_agent_sdk import (
@@ -17,7 +19,9 @@ from claude_agent_sdk import (
     EffortLevel,
     McpServerConfig,
     Message,
+    PermissionMode,
     ResultMessage,
+    SettingSource,
     TextBlock,
     query,
 )
@@ -25,6 +29,19 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .ai_usage import AICallTelemetry, TelemetrySink, Usage
 from .prompting import Prompt, StructuredPrompt
+
+__all__ = [
+    "DEFAULT_MODEL",
+    "AgentSpec",
+    "ClaudeAgent",
+    "ClaudeAgentError",
+    "EffortLevel",
+    "Message",
+    "PermissionMode",
+    "Reply",
+    "SettingSource",
+    "message_to_json",
+]
 
 DEFAULT_MODEL = "claude-sonnet-5"
 
@@ -42,14 +59,21 @@ class ClaudeAgentError(RuntimeError):
 
 
 class Reply(BaseModel):
-    """What one agent call returned, and what it cost."""
+    """What one agent call returned, and what it cost.
+
+    ``text`` is every assistant text block concatenated: the per-turn
+    narration. ``final_text`` is the SDK result message's own ``result``
+    field, the agent's final answer; a consumer reporting an outcome wants
+    that, not the narration.
+    """
 
     text: str | None = None
+    final_text: str | None = None
     usage: Usage = Field(default_factory=Usage)
 
     @classmethod
     def from_result(cls, result: ResultMessage, text: str | None) -> Reply:
-        return cls(text=text, usage=_usage_of(result))
+        return cls(text=text, final_text=result.result, usage=_usage_of(result))
 
 
 class AgentSpec(BaseModel):
@@ -59,6 +83,14 @@ class AgentSpec(BaseModel):
     nothing. That default is load-bearing: the SDK omits ``--tools`` when the
     option is ``None``, which hands the agent Claude Code's *full* default
     toolset, so :meth:`to_options` always passes an explicit list.
+
+    :meth:`to_options` always sets ``strict_mcp_config``: the only MCP servers
+    an agent sees are the ones in ``mcp_servers``, never user- or
+    project-level ones the CLI would otherwise pick up.
+
+    ``setting_sources`` is ``None`` for the CLI's defaults (all filesystem
+    settings); ``()`` isolates the run from every settings file. ``cwd`` and
+    ``env`` are the subprocess's working directory and extra environment.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -71,6 +103,10 @@ class AgentSpec(BaseModel):
     max_turns: int | None = None
     effort: EffortLevel | None = None
     max_budget_usd: float | None = None
+    cwd: Path | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+    setting_sources: tuple[SettingSource, ...] | None = None
+    permission_mode: PermissionMode | None = None
 
     def merge(self, override: AgentSpec | None) -> AgentSpec:
         """Layer the fields ``override`` actually set on top of this spec.
@@ -104,6 +140,13 @@ class AgentSpec(BaseModel):
             effort=self.effort,
             max_budget_usd=self.max_budget_usd,
             output_format=output_format,
+            strict_mcp_config=True,
+            cwd=self.cwd,
+            env=dict(self.env),
+            setting_sources=(
+                None if self.setting_sources is None else list(self.setting_sources)
+            ),
+            permission_mode=self.permission_mode,
         )
 
 
@@ -121,38 +164,34 @@ class ClaudeAgent:
 
     ``run_query`` is the injection seam: production passes the SDK's
     :func:`~claude_agent_sdk.query`, tests pass a fake that replays messages.
+
+    ``on_message`` sees every message the stream yields, in order, before it
+    is interpreted; a caller that wants a durable transcript writes each one
+    out (see :func:`message_to_json`). It must not raise.
     """
 
     defaults: AgentSpec = field(default_factory=AgentSpec)
     run_query: QueryFn = field(default=cast(QueryFn, query))
     telemetry_sink: TelemetrySink | None = None
     stage: str | None = None
+    on_message: Callable[[Message], None] | None = None
 
     def with_telemetry(self, sink: TelemetrySink) -> ClaudeAgent:
         """Bind a durable sink without changing the query seam."""
-        return ClaudeAgent(
-            defaults=self.defaults,
-            run_query=self.run_query,
-            telemetry_sink=sink,
-            stage=self.stage,
-        )
+        return dataclasses.replace(self, telemetry_sink=sink)
 
     def for_stage(self, stage: str) -> ClaudeAgent:
         """Carry explicit stage identity through a composed stage."""
-        return ClaudeAgent(
-            defaults=self.defaults,
-            run_query=self.run_query,
-            telemetry_sink=self.telemetry_sink,
-            stage=stage,
-        )
+        return dataclasses.replace(self, stage=stage)
 
     def with_defaults(self, defaults: AgentSpec) -> ClaudeAgent:
-        return ClaudeAgent(
-            defaults=defaults,
-            run_query=self.run_query,
-            telemetry_sink=self.telemetry_sink,
-            stage=self.stage,
-        )
+        return dataclasses.replace(self, defaults=defaults)
+
+    def with_message_observer(
+        self, on_message: Callable[[Message], None]
+    ) -> ClaudeAgent:
+        """Observe the raw message stream without changing the query seam."""
+        return dataclasses.replace(self, on_message=on_message)
 
     async def run(
         self,
@@ -284,6 +323,8 @@ class ClaudeAgent:
         rate_limit_detail: str | None = None
         try:
             async for message in self.run_query(prompt=prompt, options=options):
+                if self.on_message is not None:
+                    self.on_message(message)
                 if isinstance(message, AssistantMessage):
                     text_blocks = [
                         block.text
@@ -306,6 +347,21 @@ class ClaudeAgent:
                 f"agent stream for model {options.model!r} ended without a result"
             )
         return ("\n".join(chunks) if chunks else None), result
+
+
+def message_to_json(message: Message) -> dict[str, Any]:
+    """A JSON-ready view of one SDK message, tagged with its type name.
+
+    SDK messages are plain dataclasses, so this is a recursive ``asdict`` plus
+    a ``type`` discriminator; anything the SDK leaves untyped (raw usage
+    dicts, tool inputs) passes through as-is.
+    """
+    payload: dict[str, Any] = {"type": type(message).__name__}
+    if dataclasses.is_dataclass(message):
+        payload.update(dataclasses.asdict(message))
+    else:  # pragma: no cover - every SDK message type is a dataclass today
+        payload["repr"] = repr(message)
+    return payload
 
 
 def _rate_limit_error(detail: str) -> ClaudeAgentError:
