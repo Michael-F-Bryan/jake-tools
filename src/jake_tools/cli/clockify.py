@@ -241,6 +241,7 @@ def jira_sync(
     if as_json:
         click.echo(json.dumps(report.model_dump(mode="json"), indent=2))
     elif report.failure is not None:
+        _emit_applied_before_failure(report)
         raise click.ClickException(report.failure.message)
     else:
         _emit_sync_report(report)
@@ -282,6 +283,16 @@ def _emit_sync_report(report: SyncReport) -> None:
     click.echo(f"{label}: {len(lines)} {suffix}")
     for line in lines:
         click.echo(line)
+
+
+def _emit_applied_before_failure(report: SyncReport) -> None:
+    applied = [action for action in report.actions if action.applied]
+    if not applied:
+        return
+    suffix = "change" if len(applied) == 1 else "changes"
+    click.echo(f"Applied before failure: {len(applied)} {suffix}")
+    for action in applied:
+        click.echo(_describe_action(action))
 
 
 def _scope_description(report: SyncReport) -> str:

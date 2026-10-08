@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from enum import StrEnum
 from typing import Annotated, Literal, Protocol
 
@@ -931,7 +931,13 @@ class SyncConflict(BaseModel):
 
 
 class SyncFailure(BaseModel):
-    """Where an apply stopped. Every action before it was applied and verified."""
+    """Where an apply stopped.
+
+    Every action before the one named here was applied and verified. The
+    named action itself may have been partly written: the write can have
+    landed in Clockify and the read-back verification failed afterwards, so
+    inspect that record before retrying.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -948,6 +954,10 @@ class SyncReport(BaseModel):
     construction. ``plan_digest`` is :func:`plan_digest` over the snapshot the
     report was built from; an apply must present the digest of the plan it
     was shown, and a mismatch is ``plan_stale``.
+
+    ``applied`` means an apply was attempted, not that it succeeded: check
+    ``failure`` and each action's ``applied``/``verified`` flags for what
+    was actually written.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -1100,6 +1110,7 @@ def run_jira_sync(
     issue_keys: Sequence[str] = (),
     apply: bool = False,
     expected_digest: str | None = None,
+    describe_failure: Callable[[SyncApplyError], str] = str,
 ) -> SyncReport:
     """Prepare the plan and either report it (preview) or apply it.
 
@@ -1108,7 +1119,9 @@ def run_jira_sync(
     before writing anything; a plan with conflicts raises
     :class:`SyncConflictError`, also before writing. A failure part-way
     through an apply is not raised: the returned report carries the actions
-    written and verified before it plus a :class:`SyncFailure`.
+    written and verified before it plus a :class:`SyncFailure` whose
+    message is ``describe_failure(error)``. The default is the full message;
+    a caller reporting to someone else passes a sanitiser.
 
     Errors reading Clockify or Jira (:class:`ClockifyError`,
     :class:`~jake_tools.jira.JiraError`, :class:`SyncPreparationError`)
@@ -1145,7 +1158,7 @@ def run_jira_sync(
             failure=SyncFailure(
                 jira_key=exc.action.jira_key if exc.action else None,
                 kind=exc.action.kind if exc.action else None,
-                message=str(exc),
+                message=describe_failure(exc),
             ),
         )
     return report.with_apply_outcome(result.applied)

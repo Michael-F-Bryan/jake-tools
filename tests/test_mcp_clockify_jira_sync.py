@@ -367,12 +367,63 @@ async def test_upstream_failure_is_upstream_error_without_secrets(
     result = await _call(mcp_server, env)
 
     error = _err(result, "upstream_error")
-    assert error["message"].startswith("Jira error:")
-    assert "401" in error["message"]
+    # Operation and status only: no host, no response body.
+    assert error["message"] == (
+        "Jira error: POST /rest/api/3/search/jql returned HTTP 401"
+    )
     assert error["detail"] == {"integration": "jira"}
     wire = json.dumps(result.model_dump(mode="json"))
-    for secret in (CLOCKIFY_KEY, JIRA_EMAIL, "dummy-wrong-token-77"):
+    jira_host = urlsplit(upstream.jira_url).netloc
+    for secret in (
+        CLOCKIFY_KEY,
+        JIRA_EMAIL,
+        "dummy-wrong-token-77",
+        upstream.jira_url,
+        jira_host,
+        "bad auth",
+    ):
         assert secret not in wire
+
+
+async def test_unreachable_jira_host_is_named_by_error_class_only(
+    mcp_server: ServerFactory,
+    mcp_env_factory: EnvFactory,
+    mcp_home: Path,
+    upstream: FakeUpstream,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    # .invalid never resolves (RFC 2606), so requests raises ConnectionError
+    # whose text names the host.
+    env = mcp_env_factory(
+        mcp_home,
+        **{**upstream.env(), "JIRA_BASE_URL": "secret-tenant.invalid/"},
+    )
+
+    result = await _call(mcp_server, env)
+
+    error = _err(result, "upstream_error")
+    assert error["message"] == (
+        "Jira error: POST /rest/api/3/search/jql failed: ConnectionError"
+    )
+    wire = json.dumps(result.model_dump(mode="json"))
+    assert "secret-tenant" not in wire
+    # The server's stderr log carries the same sanitised message.
+    stderr = capfd.readouterr().err
+    assert "Jira error: POST /rest/api/3/search/jql failed" in stderr
+    assert "secret-tenant" not in stderr
+
+
+async def test_short_secret_values_are_not_redacted_into_the_message(
+    mcp_server: ServerFactory,
+    mcp_env_factory: EnvFactory,
+    mcp_home: Path,
+    upstream: FakeUpstream,
+) -> None:
+    env = mcp_env_factory(mcp_home, **{**upstream.env(), "CLOCKIFY_API_KEY": "k"})
+
+    error = _err(await _call(mcp_server, env), "upstream_error")
+
+    assert error["message"] == "Clockify error: GET /user returned HTTP 401"
 
 
 # --- Preview ------------------------------------------------------------------
@@ -495,7 +546,11 @@ async def test_partial_failure_returns_a_report_with_the_failure(
     failure = report["failure"]
     assert failure["jira_key"] == "SF-304"
     assert failure["kind"] == "MARK_TASK_DONE"
-    assert "500" in failure["message"]
+    assert failure["message"] == (
+        "Clockify error: PUT /workspaces/ws-1/projects/p-131/tasks/t-304 "
+        "returned HTTP 500"
+    )
+    assert "simulated Clockify outage" not in json.dumps(report)
     assert upstream.writes == ["PUT task t-427", "PUT task t-304"]
     assert upstream.tasks["t-427"]["status"] == "ACTIVE"
     assert upstream.tasks["t-304"]["status"] == "ACTIVE"
@@ -538,6 +593,26 @@ async def test_cli_dry_run_json_equals_the_tool_preview(
     assert isinstance(text, TextContent)
     assert cli.output == f"{text.text}\n"
     assert upstream.writes == []
+
+
+def test_cli_text_partial_failure_lists_applied_actions_before_the_error(
+    upstream: FakeUpstream,
+) -> None:
+    upstream.fail_write_number = 2
+
+    cli = CliRunner().invoke(clockify_cli, ["jira-sync", "--apply"], env=upstream.env())
+
+    assert cli.exit_code == 1
+    lines = cli.output.splitlines()
+    assert lines[:2] == [
+        "Applied before failure: 1 change",
+        "REACTIVATE_TASK SF-427 \u2014 reactivate as "
+        "'SF-427 Evaluate PX4 external control methods'",
+    ]
+    assert lines[2].startswith(
+        "Error: Clockify request failed for PUT "
+        "/workspaces/ws-1/projects/p-131/tasks/t-304: 500"
+    )
 
 
 # --- Live: the real account ---------------------------------------------------

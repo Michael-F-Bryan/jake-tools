@@ -5,7 +5,7 @@ from typing import Any, Literal, TypeVar
 import requests
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from .http import HttpSession
+from .http import HttpSession, UpstreamError
 from .jira import normalise_jira_key
 
 CLOCKIFY_API_ROOT = "https://api.clockify.me/api/v1"
@@ -16,7 +16,7 @@ TaskStatus = Literal["ACTIVE", "DONE"]
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
-class ClockifyError(RuntimeError):
+class ClockifyError(UpstreamError):
     pass
 
 
@@ -320,14 +320,16 @@ class ClockifyClient:
             )
         except requests.RequestException as exc:
             raise ClockifyError(
-                f"Clockify request failed for {method} {path}: {exc}"
+                f"Clockify request failed for {method} {path}: {exc}",
+                safe_summary=f"{method} {path} failed: {type(exc).__name__}",
             ) from exc
 
         if response.status_code >= 400:
             body = str(response.text)[:500]
             raise ClockifyError(
                 f"Clockify request failed for {method} {path}: "
-                f"{response.status_code} {response.reason}\n{body}"
+                f"{response.status_code} {response.reason}\n{body}",
+                safe_summary=f"{method} {path} returned HTTP {response.status_code}",
             )
 
         if not response.content:
@@ -339,7 +341,8 @@ class ClockifyClient:
             body = str(response.text)[:500]
             raise ClockifyError(
                 f"Clockify returned invalid JSON for {method} {path}: {exc}; "
-                f"body={body!r}"
+                f"body={body!r}",
+                safe_summary=f"{method} {path} returned invalid JSON",
             ) from exc
 
     @staticmethod
@@ -352,7 +355,8 @@ class ClockifyClient:
             return model.model_validate(data)
         except ValidationError as exc:
             raise ClockifyError(
-                f"Clockify returned invalid data for {path}: {exc}"
+                f"Clockify returned invalid data for {path}: {exc}",
+                safe_summary=f"{path} returned invalid data",
             ) from exc
 
     @staticmethod
@@ -365,5 +369,6 @@ class ClockifyClient:
             return TypeAdapter(list[model]).validate_python(data)
         except ValidationError as exc:
             raise ClockifyError(
-                f"Clockify returned invalid data for {path}: {exc}"
+                f"Clockify returned invalid data for {path}: {exc}",
+                safe_summary=f"{path} returned invalid data",
             ) from exc
