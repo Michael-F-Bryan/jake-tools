@@ -16,9 +16,11 @@ renamed):
 ``transcript.jsonl``
     One :func:`jake_tools.claude.message_to_json` object per SDK message.
 ``telemetry.json``
-    The ``ClaudeAgent`` telemetry sink's output.
+    :class:`RunTelemetry`: the ``ClaudeAgent`` telemetry sink's output.
 ``worker.stdout`` / ``worker.stderr``
     The worker process's own streams.
+``.status.lock``
+    The lock every ``status.json`` read-modify-write takes.
 
 Timestamps are RFC 3339 in UTC. Task IDs are ``<UTC basic timestamp>-<8 hex>``
 (``20261008T031500Z-1a2b3c4d``) so directory listings sort by creation.
@@ -33,7 +35,7 @@ from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..ai_usage import Usage
+from ..ai_usage import AICallTelemetry, Usage
 from ..claude import EffortLevel
 
 RunStatus = Literal["working", "completed", "failed", "cancelled"]
@@ -124,3 +126,16 @@ class ClaudeStartResult(BaseModel):
     task_id: str
     status: Literal["working"] = "working"
     run_dir: Path
+
+
+class RunTelemetry(BaseModel):
+    """``telemetry.json``: every call the worker's agent recorded, plus totals."""
+
+    calls: list[AICallTelemetry] = Field(default_factory=list)
+
+    @property
+    def totals(self) -> Usage:
+        usage = Usage()
+        for call in self.calls:
+            usage = usage + call.as_usage()
+        return usage
