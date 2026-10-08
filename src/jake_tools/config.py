@@ -44,6 +44,19 @@ Source = Literal["flag", "env", "config", "default"]
 :attr:`Resolved.origin` names the actual file.
 """
 
+SECRET_VARIABLES: tuple[str, ...] = (
+    "CLOCKIFY_API_KEY",
+    "JIRA_BASE_URL",
+    "JIRA_EMAIL",
+    "JIRA_API_TOKEN",
+)
+"""Every environment-only secret, by variable name.
+
+The single list: :func:`load_config` reads each (and its ``_FILE`` variant),
+and the delegated-task worker is spawned with all of them removed from its
+environment so a Bash-granted task can never ``env`` them into a transcript.
+"""
+
 DEFAULT_JIRA_PROJECT = "SF"
 DEFAULT_CLOCKIFY_CLIENT = "Sunfish Robotics"
 DEFAULT_CLAUDE_MAX_TURNS = 20
@@ -270,14 +283,15 @@ def load_config(
         None if hermes_home is None else "HERMES_HOME",
     )
 
+    secrets = {name: _secret(name, env) for name in SECRET_VARIABLES}
     return Config(
         xdg=xdg,
         config_files=files,
         hermes_home=hermes_home,
-        clockify_api_key=_secret("CLOCKIFY_API_KEY", env),
-        jira_base_url=_secret("JIRA_BASE_URL", env),
-        jira_email=_secret("JIRA_EMAIL", env),
-        jira_api_token=_secret("JIRA_API_TOKEN", env),
+        clockify_api_key=secrets["CLOCKIFY_API_KEY"],
+        jira_base_url=secrets["JIRA_BASE_URL"],
+        jira_email=secrets["JIRA_EMAIL"],
+        jira_api_token=secrets["JIRA_API_TOKEN"],
         jira_project=resolve(
             _Spec(
                 "clockify.jira_project",

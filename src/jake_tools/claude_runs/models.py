@@ -16,9 +16,28 @@ renamed):
 ``transcript.jsonl``
     One :func:`jake_tools.claude.message_to_json` object per SDK message.
 ``telemetry.json``
-    The ``ClaudeAgent`` telemetry sink's output.
+    :class:`RunTelemetry`: the ``ClaudeAgent`` telemetry sink's output.
 ``worker.stdout`` / ``worker.stderr``
     The worker process's own streams.
+``process.json``
+    :class:`ProcessRecord`: the worker's PID, process group and start-time
+    token, written by the server right after the spawn (and by the worker
+    if it finds the file missing). Nothing signals that group unless its
+    leader's start time still matches, so a reused PID is never hit.
+``groups.json``
+    :class:`GroupRecords`: every other process group the worker has seen in
+    its descendant tree, with the group leader's start-time token. The CLI
+    starts each tool shell in its own session, so these are what a cancel
+    or a sweep has to reach beyond the worker's own group.
+``.status.lock``
+    The lock every ``status.json`` read-modify-write takes.
+``.worker.lock``
+    Held exclusively by the worker for its whole life; "is the worker
+    alive" is "is this lock held", which is true for a running worker and
+    false for an exited one even when it lingers as a zombie.
+
+``<runs_dir>/.runs.lock`` serialises capacity check, creation and spawn
+across every server sharing the directory.
 
 Timestamps are RFC 3339 in UTC. Task IDs are ``<UTC basic timestamp>-<8 hex>``
 (``20261008T031500Z-1a2b3c4d``) so directory listings sort by creation.
@@ -33,7 +52,7 @@ from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..ai_usage import Usage
+from ..ai_usage import AICallTelemetry, Usage
 from ..claude import EffortLevel
 
 RunStatus = Literal["working", "completed", "failed", "cancelled"]
@@ -124,3 +143,46 @@ class ClaudeStartResult(BaseModel):
     task_id: str
     status: Literal["working"] = "working"
     run_dir: Path
+
+
+class ProcessRecord(BaseModel):
+    """``process.json``: which process is the worker, pinned by start time.
+
+    ``started`` is an opaque token from the process table (``/proc`` start
+    ticks on Linux, ``ps lstart`` elsewhere); ``None`` means the process had
+    already gone when it was looked up, which reads as dead.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    pid: int
+    pgid: int
+    started: str | None
+
+
+class GroupRecord(BaseModel):
+    """One process group a task's tree has used, pinned by its leader's start."""
+
+    model_config = ConfigDict(frozen=True)
+
+    pgid: int
+    leader_started: str | None
+
+
+class GroupRecords(BaseModel):
+    """``groups.json``: append-only set of :class:`GroupRecord`."""
+
+    groups: list[GroupRecord] = Field(default_factory=list)
+
+
+class RunTelemetry(BaseModel):
+    """``telemetry.json``: every call the worker's agent recorded, plus totals."""
+
+    calls: list[AICallTelemetry] = Field(default_factory=list)
+
+    @property
+    def totals(self) -> Usage:
+        usage = Usage()
+        for call in self.calls:
+            usage = usage + call.as_usage()
+        return usage

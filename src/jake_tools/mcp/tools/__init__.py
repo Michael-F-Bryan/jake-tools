@@ -11,9 +11,12 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 from ...config import Config
-from . import clockify_jira_sync, ping
+from . import claude_cancel, claude_start, claude_status, clockify_jira_sync, ping
 
 
 def register_all(app: FastMCP, config: Config) -> None:
     ping.register(app, config)
     clockify_jira_sync.register(app, config)
+    claude_start.register(app, config)
+    claude_status.register(app, config)
+    claude_cancel.register(app, config)

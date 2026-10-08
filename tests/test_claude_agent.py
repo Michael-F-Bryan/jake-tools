@@ -42,6 +42,7 @@ def _result(
     num_turns: int = 1,
     usage: dict[str, object] | None = None,
     total_cost_usd: float | None = None,
+    result: str | None = None,
 ) -> ResultMessage:
     return ResultMessage(
         subtype=subtype,
@@ -52,7 +53,7 @@ def _result(
         session_id="session-1",
         total_cost_usd=total_cost_usd,
         usage=usage,
-        result=None,
+        result=result,
         structured_output=structured_output,
         errors=errors,
     )
@@ -273,6 +274,44 @@ async def test_run_raise_reports_the_subtype_when_no_errors_listed() -> None:
 
     with pytest.raises(ClaudeAgentError, match="error_max_turns"):
         await ClaudeAgent(run_query=fake).run("go")
+
+
+async def test_error_result_subtype_and_text_ride_on_the_exception() -> None:
+    """A caller telling a turn limit from a crash reads the field, not the prose."""
+    fake = RecordingQuery(
+        _result(is_error=True, subtype="error_max_budget_usd", result="partial")
+    )
+
+    with pytest.raises(ClaudeAgentError) as excinfo:
+        await ClaudeAgent(run_query=fake).run("go")
+
+    assert excinfo.value.result_subtype == "error_max_budget_usd"
+    assert excinfo.value.final_text == "partial"
+
+
+async def test_stream_failure_after_an_error_result_keeps_the_result() -> None:
+    """The CLI exits non-zero after an error result; the SDK raises after
+    yielding it. The result, not the exit, is what the caller needs."""
+    fake = FailingQuery(
+        _result(is_error=True, subtype="error_max_turns", num_turns=4),
+        error="Claude Code returned an error result: error_max_turns",
+    )
+
+    with pytest.raises(ClaudeAgentError) as excinfo:
+        await ClaudeAgent(run_query=fake).run("go")
+
+    assert excinfo.value.result_subtype == "error_max_turns"
+    assert excinfo.value.usage.api_calls == 4
+    assert isinstance(excinfo.value.__cause__, Exception)
+
+
+async def test_stream_failure_without_a_result_is_not_rewrapped() -> None:
+    fake = FailingQuery(_assistant("partial"), error="connection lost")
+
+    with pytest.raises(Exception, match="connection lost") as excinfo:
+        await ClaudeAgent(run_query=fake).run("go")
+
+    assert not isinstance(excinfo.value, ClaudeAgentError)
 
 
 async def test_usage_is_taken_from_the_result_message() -> None:
