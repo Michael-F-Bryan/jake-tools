@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 import requests
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .http import HttpSession
+from .http import HttpSession, UpstreamError
 
 JIRA_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 JIRA_PROJECT_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+$")
@@ -29,7 +29,7 @@ JiraStatusCategory = Literal["To Do", "In Progress", "Done"]
 ACTIVE_ISSUE_STATUSES: tuple[str, ...] = ("In Progress", "Blocked", "In Review")
 
 
-class JiraError(RuntimeError):
+class JiraError(UpstreamError):
     pass
 
 
@@ -158,7 +158,8 @@ class JiraClient:
             return _RestIssue.model_validate(payload).to_domain()
         except ValidationError as exc:
             raise JiraError(
-                f"Jira returned invalid issue data for {normalised}: {exc}"
+                f"Jira returned invalid issue data for {normalised}: {exc}",
+                safe_summary=f"GET {path} returned invalid data",
             ) from exc
 
     def get_issues(self, keys: Iterable[str]) -> list[JiraIssue]:
@@ -183,7 +184,10 @@ class JiraClient:
             try:
                 page = _RestSearchPage.model_validate(data)
             except ValidationError as exc:
-                raise JiraError(f"Jira returned invalid search data: {exc}") from exc
+                raise JiraError(
+                    f"Jira returned invalid search data: {exc}",
+                    safe_summary=f"POST {self._SEARCH_PATH} returned invalid data",
+                ) from exc
 
             issues.extend(issue.to_domain() for issue in page.issues)
             if page.next_page_token is None:
@@ -218,13 +222,17 @@ class JiraClient:
                 **request_kwargs,
             )
         except requests.RequestException as exc:
-            raise JiraError(f"Jira request failed for {method} {path}: {exc}") from exc
+            raise JiraError(
+                f"Jira request failed for {method} {path}: {exc}",
+                safe_summary=f"{method} {path} failed: {type(exc).__name__}",
+            ) from exc
 
         if response.status_code >= 400:
             body = str(response.text)[:500]
             raise JiraError(
                 f"Jira request failed for {method} {path}: "
-                f"{response.status_code} {response.reason}\n{body}"
+                f"{response.status_code} {response.reason}\n{body}",
+                safe_summary=f"{method} {path} returned HTTP {response.status_code}",
             )
 
         try:
@@ -233,7 +241,8 @@ class JiraClient:
             body = str(response.text)[:500]
             raise JiraError(
                 f"Jira returned invalid JSON for {method} {path}: {exc}; "
-                f"response={body!r}"
+                f"response={body!r}",
+                safe_summary=f"{method} {path} returned invalid JSON",
             ) from exc
 
     @staticmethod

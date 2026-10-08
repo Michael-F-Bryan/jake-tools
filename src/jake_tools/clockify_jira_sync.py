@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from enum import StrEnum
 from typing import Annotated, Literal, Protocol
 
@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .clockify import (
     ClockifyClientRecord,
+    ClockifyError,
     ClockifyProject,
     ClockifyTask,
     ClockifyUser,
@@ -162,20 +163,36 @@ class SyncPlan(BaseModel):
         return any(isinstance(action, ConflictAction) for action in self.actions)
 
 
-class SyncApplyError(RuntimeError):
-    pass
-
-
-class SyncPreparationError(RuntimeError):
-    pass
-
-
 class AppliedSyncAction(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     action: SyncAction
     project: ClockifyProject | None = None
     task: ClockifyTask | None = None
+
+
+class SyncApplyError(RuntimeError):
+    """An apply stopped before finishing the plan.
+
+    ``applied`` is every action written and verified before the failure;
+    ``action`` is the one that failed, or ``None`` when apply refused to
+    start (a plan with conflicts).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        applied: Sequence[AppliedSyncAction] = (),
+        action: SyncAction | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.applied: tuple[AppliedSyncAction, ...] = tuple(applied)
+        self.action: SyncAction | None = action
+
+
+class SyncPreparationError(RuntimeError):
+    pass
 
 
 class SyncApplyResult(BaseModel):
@@ -624,7 +641,7 @@ def apply_sync_plan(
     tasks_by_id = dict(index.tasks_by_id)
     applied: list[AppliedSyncAction] = []
 
-    for action in plan.actions:
+    def apply_one(action: SyncAction) -> AppliedSyncAction:
         if isinstance(action, CreateProjectAction):
             note = project_note_for(action.jira_key)
             written_project = clockify.create_project(
@@ -642,8 +659,7 @@ def apply_sync_plan(
             )
             projects_by_id[project.id] = project
             projects_by_key[action.jira_key] = project
-            applied.append(AppliedSyncAction(action=action, project=project))
-            continue
+            return AppliedSyncAction(action=action, project=project)
 
         if isinstance(action, RenameProjectAction):
             current_project = projects_by_id.get(action.project_id)
@@ -663,8 +679,7 @@ def apply_sync_plan(
             )
             projects_by_id[updated_project.id] = updated_project
             projects_by_key[action.jira_key] = updated_project
-            applied.append(AppliedSyncAction(action=action, project=updated_project))
-            continue
+            return AppliedSyncAction(action=action, project=updated_project)
 
         if isinstance(action, CreateTaskAction):
             parent_project = projects_by_key.get(action.project_key)
@@ -683,8 +698,7 @@ def apply_sync_plan(
                 expected_status="ACTIVE",
             )
             tasks_by_id[created_task.id] = created_task
-            applied.append(AppliedSyncAction(action=action, task=created_task))
-            continue
+            return AppliedSyncAction(action=action, task=created_task)
 
         # The remaining kinds (RenameTaskAction, ReactivateTaskAction,
         # CompleteTaskAction) all mutate an existing task in place. Conflicts
@@ -713,7 +727,16 @@ def apply_sync_plan(
             expected_status=expected_status,
         )
         tasks_by_id[updated_task.id] = updated_task
-        applied.append(AppliedSyncAction(action=action, task=updated_task))
+        return AppliedSyncAction(action=action, task=updated_task)
+
+    for action in plan.actions:
+        try:
+            applied.append(apply_one(action))
+        except (SyncApplyError, ClockifyError) as exc:
+            # Same message as the underlying error, plus what had already
+            # been written and verified, so a caller can report a partial
+            # apply instead of losing it.
+            raise SyncApplyError(str(exc), applied=applied, action=action) from exc
 
     return SyncApplyResult(applied=tuple(applied))
 
@@ -908,7 +931,13 @@ class SyncConflict(BaseModel):
 
 
 class SyncFailure(BaseModel):
-    """Where an apply stopped. Every action before it was applied and verified."""
+    """Where an apply stopped.
+
+    Every action before the one named here was applied and verified. The
+    named action itself may have been partly written: the write can have
+    landed in Clockify and the read-back verification failed afterwards, so
+    inspect that record before retrying.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -925,6 +954,10 @@ class SyncReport(BaseModel):
     construction. ``plan_digest`` is :func:`plan_digest` over the snapshot the
     report was built from; an apply must present the digest of the plan it
     was shown, and a mismatch is ``plan_stale``.
+
+    ``applied`` means an apply was attempted, not that it succeeded: check
+    ``failure`` and each action's ``applied``/``verified`` flags for what
+    was actually written.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -1036,3 +1069,96 @@ def plan_digest(snapshot: SyncSnapshot) -> str:
 
 def _dump_action(action: SyncAction) -> dict[str, object]:
     return action.model_dump(mode="json")
+
+
+# --- Preview / apply, shared by the MCP tool and the CLI -----------------------
+
+
+class SyncPlanStaleError(RuntimeError):
+    """The plan recomputed for an apply is not the plan the caller previewed."""
+
+    def __init__(self, *, expected: str, actual: str) -> None:
+        super().__init__(
+            "The Jira/Clockify sync plan changed since it was previewed "
+            f"(expected digest {expected}, found {actual}); nothing was applied. "
+            "Preview again and review the new plan."
+        )
+        self.expected = expected
+        self.actual = actual
+
+
+class SyncConflictError(RuntimeError):
+    """Apply refused because the plan has conflicts; nothing was written.
+
+    ``report`` is the preview report that blocked the apply.
+    """
+
+    def __init__(self, report: SyncReport) -> None:
+        details = "; ".join(
+            f"{conflict.jira_key}: {conflict.message}" for conflict in report.conflicts
+        )
+        super().__init__(f"Refusing to apply a plan with conflicts: {details}")
+        self.report = report
+
+
+def run_jira_sync(
+    *,
+    clockify: ClockifyInventoryClient,
+    jira: JiraInventoryClient,
+    jira_project: str,
+    clockify_client: str,
+    issue_keys: Sequence[str] = (),
+    apply: bool = False,
+    expected_digest: str | None = None,
+    describe_failure: Callable[[SyncApplyError], str] = str,
+) -> SyncReport:
+    """Prepare the plan and either report it (preview) or apply it.
+
+    Apply recomputes the plan. When ``expected_digest`` is given and differs
+    from the recomputed plan's digest, raise :class:`SyncPlanStaleError`
+    before writing anything; a plan with conflicts raises
+    :class:`SyncConflictError`, also before writing. A failure part-way
+    through an apply is not raised: the returned report carries the actions
+    written and verified before it plus a :class:`SyncFailure` whose
+    message is ``describe_failure(error)``. The default is the full message;
+    a caller reporting to someone else passes a sanitiser.
+
+    Errors reading Clockify or Jira (:class:`ClockifyError`,
+    :class:`~jake_tools.jira.JiraError`, :class:`SyncPreparationError`)
+    propagate unchanged.
+    """
+    snapshot = prepare_jira_sync(
+        clockify=clockify,
+        jira=jira,
+        jira_project=jira_project,
+        clockify_client=clockify_client,
+        issue_keys=issue_keys,
+    )
+    report = SyncReport.from_snapshot(
+        snapshot, jira_project=jira_project, clockify_client=clockify_client
+    )
+    if not apply:
+        return report
+    if expected_digest is not None and expected_digest != report.plan_digest:
+        raise SyncPlanStaleError(expected=expected_digest, actual=report.plan_digest)
+    if report.has_conflicts:
+        raise SyncConflictError(report)
+
+    try:
+        result = apply_sync_plan(
+            snapshot.plan,
+            clockify=clockify,
+            workspace_id=snapshot.workspace_id,
+            client_id=snapshot.client_id,
+            index=snapshot.index,
+        )
+    except SyncApplyError as exc:
+        return report.with_apply_outcome(
+            exc.applied,
+            failure=SyncFailure(
+                jira_key=exc.action.jira_key if exc.action else None,
+                kind=exc.action.kind if exc.action else None,
+                message=describe_failure(exc),
+            ),
+        )
+    return report.with_apply_outcome(result.applied)

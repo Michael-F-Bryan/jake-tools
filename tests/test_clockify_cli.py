@@ -8,11 +8,13 @@ from jake_tools.cli.clockify import ClockifyOptions, JiraOptions, clockify
 from jake_tools.clockify import (
     CLOCKIFY_API_ROOT,
     ClockifyClientRecord,
+    ClockifyError,
     ClockifyProject,
     ClockifyTask,
     ClockifyUser,
     TaskStatus,
 )
+from jake_tools.clockify_jira_sync import SyncReport
 from jake_tools.jira import JiraError, JiraIssue
 
 
@@ -379,32 +381,44 @@ def test_jira_sync_defaults_to_json_dry_run(monkeypatch) -> None:
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["mode"] == "dry-run"
-    assert payload["workspaceId"] == "workspace-1"
+    # The CLI prints exactly the SyncReport the MCP tool returns.
+    report = SyncReport.model_validate(payload)
+    assert payload == report.model_dump(mode="json")
+    assert payload["mode"] == "preview"
+    assert payload["applied"] is False
+    assert payload["failure"] is None
+    assert payload["workspace_id"] == "workspace-1"
+    assert payload["client_id"] == "client-1"
+    assert payload["jira_project"] == "SF"
+    assert payload["clockify_client"] == "Sunfish Robotics"
     assert payload["scope"] == {
         "kind": "assigned-active",
-        "jiraProject": "SF",
-        "issueKeys": [],
+        "jira_project": "SF",
+        "issue_keys": [],
     }
     assert payload["inventory"] == {
-        "activeIssues": 0,
-        "jiraIssues": 2,
+        "active_issues": 0,
+        "jira_issues": 2,
         "projects": 1,
         "tasks": 1,
     }
     assert payload["actions"] == [
         {
             "kind": "MARK_TASK_DONE",
-            "jiraKey": "SF-304",
-            "currentName": "SF-304 Bench test PX4",
-            "desiredName": "SF-304 Bench test PX4",
-            "projectKey": None,
-            "projectId": "project-1",
-            "taskId": "task-1",
-            "jiraStatus": "Done",
+            "jira_key": "SF-304",
+            "current_name": "SF-304 Bench test PX4",
+            "desired_name": "SF-304 Bench test PX4",
+            "project_key": None,
+            "project_id": "project-1",
+            "task_id": "task-1",
+            "jira_status": "Done",
             "message": "",
+            "applied": False,
+            "verified": False,
         }
     ]
+    assert payload["conflicts"] == []
+    assert len(payload["plan_digest"]) == 64
     assert client.operations == []
 
 
@@ -466,8 +480,12 @@ def test_jira_sync_apply_executes_and_reports_changes(monkeypatch) -> None:
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["mode"] == "apply"
-    assert payload["applied"] == 1
-    assert payload["verified"] is True
+    assert payload["applied"] is True
+    assert payload["failure"] is None
+    assert [
+        (action["kind"], action["applied"], action["verified"])
+        for action in payload["actions"]
+    ] == [("MARK_TASK_DONE", True, True)]
     assert client.operations == ["task-1:DONE"]
 
 
@@ -492,10 +510,10 @@ def test_jira_sync_can_target_issue_assigned_to_someone_else(monkeypatch) -> Non
     payload = json.loads(result.output)
     assert payload["scope"] == {
         "kind": "issues",
-        "jiraProject": "SF",
-        "issueKeys": ["SF-304"],
+        "jira_project": "SF",
+        "issue_keys": ["SF-304"],
     }
-    assert [(action["kind"], action["jiraKey"]) for action in payload["actions"]] == [
+    assert [(action["kind"], action["jira_key"]) for action in payload["actions"]] == [
         ("REACTIVATE_TASK", "SF-304")
     ]
     assert client.operations == []
@@ -572,10 +590,103 @@ def test_jira_sync_reports_conflicts_as_json_and_exits_nonzero(monkeypatch) -> N
 
     assert result.exit_code == 1
     payload = json.loads(result.output)
-    assert [(action["kind"], action["jiraKey"]) for action in payload["actions"]] == [
-        ("CONFLICT", "SF-304")
-    ]
+    assert payload["actions"] == []
+    assert [conflict["jira_key"] for conflict in payload["conflicts"]] == ["SF-304"]
     assert client.operations == []
+
+
+def install_conflict_fakes(monkeypatch) -> DuplicateTaskClockifyClient:
+    client = DuplicateTaskClockifyClient(
+        api_key="test-key",
+        base_url="https://clockify.example.test/api/v1",
+    )
+    monkeypatch.setattr(ClockifyOptions, "inventory_client", lambda self: client)
+    monkeypatch.setattr(JiraOptions, "inventory_client", lambda self: FakeJiraClient())
+    return client
+
+
+def test_jira_sync_apply_with_conflicts_prints_report_and_writes_nothing(
+    monkeypatch,
+) -> None:
+    client = install_conflict_fakes(monkeypatch)
+
+    result = CliRunner().invoke(
+        clockify, ["jira-sync", "--api-key", "test-key", "--apply", "--json"]
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["applied"] is False
+    assert [conflict["jira_key"] for conflict in payload["conflicts"]] == ["SF-304"]
+    assert client.operations == []
+
+
+def test_jira_sync_apply_with_conflicts_in_text_mode_is_an_error(monkeypatch) -> None:
+    client = install_conflict_fakes(monkeypatch)
+
+    result = CliRunner().invoke(
+        clockify, ["jira-sync", "--api-key", "test-key", "--apply"]
+    )
+
+    assert result.exit_code == 1
+    assert result.output.startswith(
+        "Error: Refusing to apply a plan with conflicts: SF-304: "
+    )
+    assert client.operations == []
+
+
+class FailingWriteClockifyClient(FakeJiraSyncClockifyClient):
+    def update_task(
+        self,
+        workspace_id: str,
+        task: ClockifyTask,
+        *,
+        name: str | None = None,
+        status: TaskStatus | None = None,
+    ) -> ClockifyTask:
+        raise ClockifyError("Clockify request failed for PUT /tasks: 500 Boom")
+
+
+def install_failing_write_fakes(monkeypatch) -> None:
+    client = FailingWriteClockifyClient(
+        api_key="test-key",
+        base_url="https://clockify.example.test/api/v1",
+    )
+    monkeypatch.setattr(ClockifyOptions, "inventory_client", lambda self: client)
+    monkeypatch.setattr(JiraOptions, "inventory_client", lambda self: FakeJiraClient())
+
+
+def test_jira_sync_apply_failure_prints_report_with_failure_and_exits_nonzero(
+    monkeypatch,
+) -> None:
+    install_failing_write_fakes(monkeypatch)
+
+    result = CliRunner().invoke(
+        clockify, ["jira-sync", "--api-key", "test-key", "--apply", "--json"]
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["mode"] == "apply"
+    assert payload["failure"] == {
+        "jira_key": "SF-304",
+        "kind": "MARK_TASK_DONE",
+        "message": "Clockify request failed for PUT /tasks: 500 Boom",
+    }
+    assert [action["applied"] for action in payload["actions"]] == [False]
+
+
+def test_jira_sync_apply_failure_in_text_mode_prints_only_the_error(
+    monkeypatch,
+) -> None:
+    install_failing_write_fakes(monkeypatch)
+
+    result = CliRunner().invoke(
+        clockify, ["jira-sync", "--api-key", "test-key", "--apply"]
+    )
+
+    assert result.exit_code == 1
+    assert result.output == "Error: Clockify request failed for PUT /tasks: 500 Boom\n"
 
 
 def test_jira_sync_reports_backend_errors_without_polluting_json(monkeypatch) -> None:
