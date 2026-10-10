@@ -14,7 +14,6 @@ src/jake_tools/
   claude.py       # Claude Agent SDK wrapper — the only LLM seam
   prompting.py    # typed Jinja prompts bound to a response model
   newsletters.py  # SharePoint Graph client
-  transcription/  # meeting-transcription pipeline stages + pipeline.py composition
 tests/            # mirrors packages above
 ```
 
@@ -51,16 +50,6 @@ default, via two independent markers:
   target one with `uv run pytest --slow -k <selector>`.
 - `@pytest.mark.live` — anything that hits a real external service; excluded
   via `addopts = -m "not live"` in `pyproject.toml`, independent of `--slow`.
-
-A test can (and often does) carry only `slow` — see most of `transcription/`'s
-own real-model tests (`tests/test_transcription_*.py`, `tests/test_transcribe_cli.py`),
-named `test_live_...` for a convenient `-k live` selector even though `live`
-itself isn't the marker gating them. One test in that family is a genuine
-exception, actually gated by `live` rather than just named for it:
-`tests/test_transcription_asr.py::test_local_transcriber_produces_nonempty_monotonic_utterances`
-downloads real ASR/diarisation models from Hugging Face Hub (HF-gated -
-requires an `HF_TOKEN` that has accepted the diarisation model's licence),
-which is exactly the "real external service" `live` exists for.
 
 ### Testing judgement-bearing LLM behaviour
 
@@ -99,28 +88,16 @@ instructions, or that generated output meets a semantic quality bar.
 - Ruff rules: `E`, `F`, `I`, `UP`, `B`, `SIM`, `C4` (see `pyproject.toml`).
 - Pyright must pass (`pyrightconfig.json`).
 - All LLM calls go through `ClaudeAgent` in `claude.py`. Nothing else imports
-  `claude_agent_sdk` directly. `transcription/` (behind the `transcript`/
-  `transcribe` commands) is the exemplar of every convention below: options
-  decorators, `@coro`, and domain errors + `ClaudeAgentError` mapped to a clean
-  `ClickException`.
-- Commands that call the LLM use the `agent_options` decorator in
-  `cli/options.py` (adds `--model`/`--effort` and injects a typed
-  `AgentOptions`) and `@coro`, applied closest to the callback, which runs the
-  async callback with `asyncio.run`. The handler builds the agent itself —
-  `agent_options.agent()` for a `ClaudeAgent`, or `.spec()` for just the
-  `AgentSpec` — there is no shared factory seam to route through. `--effort`'s
-  choices come from `typing.get_args(EffortLevel)`, imported from `claude.py`
-  (never `claude_agent_sdk` directly).
+  `claude_agent_sdk` directly.
 - `AgentSpec.tools` defaults to an empty tuple, which is genuinely tool-less.
   Never pass `tools=None` to `ClaudeAgentOptions`: the SDK then omits `--tools`
   and the agent inherits Claude Code's full default toolset.
 - `ctx.obj` is never set or read anywhere in this codebase. Every CLI
   dependency is built by the command that needs it: a decorator (see
-  `cli/transcript_options.py`, `cli/options.py`, `cli/clockify.py`) stacks the
+  `cli/clockify.py`) stacks the
   relevant `click.option`s, pops their parsed values, and injects a typed
   Pydantic options model with dependency-constructor methods — e.g.
-  `ObsidianOptions.vault_client()`, `ClockifyOptions.inventory_client()`,
-  `AgentOptions.agent()` — via `ctx.invoke`. When a dependency takes no CLI
+  `ClockifyOptions.inventory_client()` — via `ctx.invoke`. When a dependency takes no CLI
   flags at all (e.g. `NewsletterClient`), the handler just constructs it
   directly at the top of the function. `clockify`'s `--api-key`/
   `--api-base-url` are ordinary per-subcommand flags via a `clockify_options`
@@ -135,8 +112,7 @@ stdio MCP server Hermes runs; design in `_working/mcp-server/README.md`.
 Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
 `worker RUN_DIR`. It is a separate entrypoint from `jake-tools` on purpose:
 
-- Nothing on this path imports `jake_tools.__main__`, `dotenv`, or
-  `jake_tools.transcription`, and nothing calls `load_dotenv()`. The process
+- Nothing on this path imports `jake_tools.__main__`, or `dotenv`, and nothing calls `load_dotenv()`. The process
   environment Hermes passes is the only environment. A test pins this.
 - Stdout is the transport. Log to stderr only, never print.
 - Configuration comes from `config.load_config()`: XDG paths, then flag >
@@ -184,16 +160,8 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
 | `uv`                | dependency management and script runner                |
 | `claude-agent-sdk`  | LLM calls; drives the local `claude` CLI               |
 | `az` (Azure CLI)    | `newsletter` commands (Microsoft Graph token)          |
-| `ffmpeg`/`ffprobe`  | `transcript`/`transcribe`: merge and cut audio          |
-| `obsidian` (CLI)    | `transcript`/`transcribe`: resolve vault embeds         |
-
 If a required external tool is missing, report the blocker. Do not mock
 preflight checks or skip them silently.
-
-`transcribe`/`transcript asr` additionally need `HF_TOKEN` (see `.env`) for
-pyannote's gated diarisation model — only for a fresh ASR run over new
-audio; a cached run, or a run over a pre-diarised transcript source, needs
-neither ffmpeg nor a token.
 
 ## Commands
 
@@ -235,41 +203,6 @@ SharePoint list via Microsoft Graph. Body text is read from stdin for `add`
 (required) and `edit` (optional). `--attach` can be supplied multiple times.
 
 Requires `az login` to the CSU tenant for a Graph access token.
-
-### `transcribe` / `transcript`
-
-```bash
-jake-tools transcribe "2 Areas/Sunfish/2026-08-11 Team Sync.md"
-jake-tools transcribe "...md" --assign "SPEAKER_03=Nikki Staltari"
-jake-tools transcribe "...md" --assign "SPEAKER_04=Unknown" --finalise
-```
-
-`transcribe` is the porcelain: the full meeting-transcription pipeline
-(merge/ASR or adapt, resolve speakers, chapterise, polish, minutes,
-integrate) over one Obsidian prep note, one call. If speaker resolution
-can't confidently name every voice it prints `{"status": "needs_input",
-"requests": [...]}` and exits 3 instead of guessing; re-run with more
-`--assign "SPEAKER_NN=Name"` flags, or `--assign "...=Unknown" --finalise`
-to give up on the rest. ASR/diarisation (and the text-transcript adapter)
-check the run cache first, so that resume loop never redoes finished
-ASR/diarisation work; chapterise/polish/minutes currently re-run their LLM
-calls on a repeat invocation of an already-complete run (a known
-follow-up — see `transcription/pipeline.py`'s module docstring). See
-README.md's Transcription section for the full behaviour and the
-requirements list.
-
-`transcript` exposes the same eight stages individually (`merge-audio`,
-`asr`, `adapt`, `speakers`, `chapterise`, `polish`, `minutes`, `integrate`)
-as plumbing sub-commands sharing one run cache — useful for debugging a
-single stage. Both command groups follow the options-decorator DI
-convention above; `transcription/pipeline.py` is pure composition over the
-stage modules in `transcription/` and contains no stage logic of its own.
-
-A coordinating agent without direct access to Michael's judgement can ask
-Jake (his Hermes agent) for supporting context via
-`hermes chat --quiet --query '...'` (`--resume <session_id>` to continue a
-session) — e.g. which prep note to run, or how to answer a `needs_input`
-request.
 
 ## Boundaries
 
