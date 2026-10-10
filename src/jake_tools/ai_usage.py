@@ -2,27 +2,19 @@
 
 This module deliberately knows nothing about the Claude Agent SDK or the run
 cache. The SDK seam translates its ``ResultMessage`` into these domain types;
-the cache persists them. ``estimated_cost_usd`` is the SDK's list-price/API-
+the delegated worker persists them. ``estimated_cost_usd`` is the SDK's list-price/API-
 equivalent estimate, never an invoice or subscription marginal cost.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import (
     BaseModel,
     Field,
-    SerializerFunctionWrapHandler,
     computed_field,
-    model_serializer,
 )
-
-from .cache_models import CacheEnvelope
-
-if TYPE_CHECKING:
-    from .claude import Reply
-
 
 COST_BASIS = (
     "list-price/API-equivalent estimate; not invoice or subscription marginal cost"
@@ -120,49 +112,11 @@ class Usage(BaseModel):
         )
 
 
-def _flatten_usage(
-    dumped: dict[str, Any], *, exclude: frozenset[str] = frozenset()
-) -> dict[str, Any]:
-    """Duplicate ``usage``'s scalar fields at the top level alongside it."""
-    extra = {key: value for key, value in dumped["usage"].items() if key not in exclude}
-    return {**dumped, **extra}
-
-
-class AIStageStats(BaseModel):
-    """Aggregated usage for one model-backed stage."""
-
-    stage: str
-    usage: Usage = Field(default_factory=Usage)
-
-    @model_serializer(mode="wrap")
-    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        return _flatten_usage(handler(self))
-
-
-class AITotals(BaseModel):
-    """Aggregated usage across model-backed stages."""
-
-    stage_count: int = 0
-    usage: Usage = Field(default_factory=Usage)
-
-    @property
-    def estimated_cost_usd(self) -> float | None:
-        return self.usage.estimated_cost_usd
-
-    @property
-    def api_rate_equivalent_usd(self) -> float | None:
-        return self.estimated_cost_usd
-
-    @model_serializer(mode="wrap")
-    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        return _flatten_usage(handler(self), exclude=frozenset({"model"}))
-
-
 class AICallTelemetry(BaseModel):
     """One durable attempt at the ClaudeAgent seam.
 
     ``attempt`` is assigned by the durable sink, rather than by a caller, so
-    concurrent chapter calls and retries receive a deterministic per-stage
+    concurrent calls and retries receive a deterministic per-stage
     sequence. ``cache_hit`` is an explicit zero-cost event, not a model call.
     """
 
@@ -231,45 +185,9 @@ class AICallTelemetry(BaseModel):
         )
 
 
-class AITelemetry(CacheEnvelope):
-    """The incrementally persisted AI telemetry document for one run."""
-
-    cost_basis: str = COST_BASIS
-    calls: list[AICallTelemetry]
-    stages: list[AIStageStats]
-    totals: AITotals
-
-    def append(self, record: AICallTelemetry) -> AITelemetry:
-        self.calls.append(record)
-        by_stage: dict[str, Usage] = {}
-        for call in self.calls:
-            by_stage[call.stage] = by_stage.get(call.stage, Usage()) + call.as_usage()
-        self.stages = [
-            AIStageStats(stage=stage, usage=usage) for stage, usage in by_stage.items()
-        ]
-        self.totals = AITotals(
-            stage_count=len(self.stages),
-            usage=build_ai_totals(self.stages).usage,
-        )
-        return self
-
-
 class TelemetrySink(Protocol):
     """Concrete boundary used by ``ClaudeAgent`` without importing RunCache."""
 
     def record_call(self, record: AICallTelemetry) -> None: ...
 
     def record_cache_hit(self, *, stage: str, model: str | None = None) -> None: ...
-
-
-def build_ai_stage_stats(stage: str, reply: Reply | None) -> AIStageStats | None:
-    if reply is None:
-        return None
-    return AIStageStats(stage=stage, usage=reply.usage)
-
-
-def build_ai_totals(stage_stats: list[AIStageStats]) -> AITotals:
-    usage = Usage()
-    for stage in stage_stats:
-        usage = usage + stage.usage
-    return AITotals(stage_count=len(stage_stats), usage=usage)

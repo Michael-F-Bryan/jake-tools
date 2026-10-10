@@ -7,7 +7,7 @@ import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import cast
 
 import requests
 from pydantic import BaseModel, ConfigDict, Field
@@ -137,33 +137,6 @@ class AzureCliTokenProvider:
             raise NewsletterError(
                 f"unable to get Microsoft Graph token via Azure CLI. Run: {login}\n{exc.stderr}"
             ) from exc
-
-
-class NewsletterOperations(Protocol):
-    """The subset of :class:`NewsletterClient` the CLI depends on.
-
-    Lets the CLI's typed context inject a fake without subclassing the real
-    Graph-backed client.
-    """
-
-    def list_items(self, *, limit: int) -> list[NewsletterItem]: ...
-
-    def create_item(
-        self,
-        *,
-        title: str,
-        body: str,
-        attachments: Sequence[NewsletterAttachment],
-    ) -> NewsletterItem: ...
-
-    def update_item(
-        self,
-        item_id: str,
-        *,
-        title: str | None,
-        body: str | None,
-        attachments: Sequence[NewsletterAttachment],
-    ) -> NewsletterItem: ...
 
 
 class NewsletterClient:

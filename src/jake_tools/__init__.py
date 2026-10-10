@@ -1,2 +1,1 @@
-def hello() -> str:
-    return "Hello from jake-tools!"
+"""Internal automation tools for Jake."""
