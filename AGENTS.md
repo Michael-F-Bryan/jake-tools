@@ -141,8 +141,7 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   its own process group and outlives the server. No queue, no database.
 - Contract models the tools return live with their domain, not in `mcp/`:
   `clockify_jira_sync.SyncReport` (also what `clockify jira-sync --json`
-  prints), `claude_runs.RunState`/`ClaudeStartResult`,
-  `session_store.models` (phase 3).
+  prints) and `claude_runs.RunState`/`ClaudeStartResult`.
 - Tests: `tests/conftest.py` provides `mcp_server`/`mcp_env` fixtures that
   spawn the real server over stdio under an isolated `HOME` with no
   secrets. Protocol and result-shape tests go through them. Process
