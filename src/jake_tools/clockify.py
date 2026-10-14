@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from typing import Any, Literal, TypeVar
 
 import requests
@@ -18,6 +20,47 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 
 class ClockifyError(UpstreamError):
     pass
+
+
+def validate_clockify_id(value: str) -> str:
+    """Accept opaque IDs, never URL path/query syntax (including escapes)."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
+        raise ValueError("Clockify IDs must contain only letters, digits, _ or -")
+    return value
+
+
+class ClockifyInterval(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    start: str
+    end: str | None = None
+
+    def instants(self) -> tuple[datetime, datetime | None]:
+        try:
+            start = datetime.fromisoformat(self.start)
+            end = datetime.fromisoformat(self.end) if self.end is not None else None
+            if start.utcoffset() is None or (
+                end is not None and end.utcoffset() is None
+            ):
+                raise ValueError("missing timezone")
+        except ValueError as exc:
+            raise ClockifyError(
+                "Clockify returned an invalid or timezone-naive timestamp"
+            ) from exc
+        if end is not None and end < start:
+            raise ClockifyError("Clockify returned an invalid time interval")
+        return start, end
+
+
+class ClockifyTimeEntry(BaseModel):
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+    id: str
+    user_id: str = Field(alias="userId")
+    workspace_id: str = Field(alias="workspaceId")
+    description: str = ""
+    project_id: str | None = Field(default=None, alias="projectId")
+    task_id: str | None = Field(default=None, alias="taskId")
+    billable: bool
+    time_interval: ClockifyInterval = Field(alias="timeInterval")
 
 
 def clockify_project_name_for_jira(summary: str) -> str:
@@ -110,6 +153,7 @@ class ClockifyClient:
     # bare literal at each call site) so tests can shrink it to exercise the
     # continuation logic without building a 5000-record fixture.
     _PAGE_SIZE: int = 5000
+    _MAX_PAGES: int = 1000
 
     def __init__(
         self,
@@ -126,6 +170,28 @@ class ClockifyClient:
         self._api_key = api_key
         self._base_url = normalised_base_url
         self._session = session or requests.Session()
+        self.pagination_reads: list[dict[str, object]] = []
+
+    def get_time_entries(
+        self, workspace_id: str, user_id: str
+    ) -> list[ClockifyTimeEntry]:
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/user/{validate_clockify_id(user_id)}/time-entries"
+        # Deliberately no date filter: entries starting arbitrarily far back
+        # can still overlap the requested interval.
+        return self._get_paginated_list(ClockifyTimeEntry, path, params={})
+
+    def create_time_entry(self, workspace_id: str, payload: JsonObject) -> str:
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/time-entries"
+        data = self._request_json("POST", path, payload=payload, follow_redirects=False)
+        if not isinstance(data, dict) or not isinstance(data.get("id"), str):
+            raise ClockifyError("Create response did not contain an entry ID")
+        # Preserve the known ID even if it cannot safely be interpolated into
+        # a GET path. The domain reports it as an unverified created entry.
+        return str(data["id"])
+
+    def get_time_entry(self, workspace_id: str, entry_id: str) -> ClockifyTimeEntry:
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/time-entries/{validate_clockify_id(entry_id)}"
+        return self._validate(ClockifyTimeEntry, self._request_json("GET", path), path)
 
     def get_user(self) -> ClockifyUser:
         return self._validate(ClockifyUser, self._request_json("GET", "/user"), "/user")
@@ -138,9 +204,14 @@ class ClockifyClient:
         )
         return [record.id for record in records]
 
-    def get_clients(self, workspace_id: str) -> list[ClockifyClientRecord]:
-        path = f"/workspaces/{workspace_id}/clients"
-        return self._get_paginated_list(ClockifyClientRecord, path, params={})
+    def get_clients(
+        self, workspace_id: str, *, archived: bool | None = None
+    ) -> list[ClockifyClientRecord]:
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/clients"
+        params: dict[str, object] = (
+            {} if archived is None else {"archived": str(archived).lower()}
+        )
+        return self._get_paginated_list(ClockifyClientRecord, path, params=params)
 
     def get_projects(
         self,
@@ -148,7 +219,7 @@ class ClockifyClient:
         *,
         archived: bool,
     ) -> list[ClockifyProject]:
-        path = f"/workspaces/{workspace_id}/projects"
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/projects"
         projects = self._get_paginated_list(
             ClockifyProject,
             path,
@@ -160,7 +231,7 @@ class ClockifyClient:
         return [project for project in projects if project.archived is archived]
 
     def get_project(self, workspace_id: str, project_id: str) -> ClockifyProject:
-        path = f"/workspaces/{workspace_id}/projects/{project_id}"
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/projects/{validate_clockify_id(project_id)}"
         return self._validate(
             ClockifyProject,
             self._request_json("GET", path),
@@ -174,7 +245,7 @@ class ClockifyClient:
         *,
         active: bool,
     ) -> list[ClockifyTask]:
-        path = f"/workspaces/{workspace_id}/projects/{project_id}/tasks"
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/projects/{validate_clockify_id(project_id)}/tasks"
         return self._get_paginated_list(
             ClockifyTask,
             path,
@@ -187,7 +258,7 @@ class ClockifyClient:
         project_id: str,
         task_id: str,
     ) -> ClockifyTask:
-        path = f"/workspaces/{workspace_id}/projects/{project_id}/tasks/{task_id}"
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/projects/{validate_clockify_id(project_id)}/tasks/{validate_clockify_id(task_id)}"
         return self._validate(
             ClockifyTask,
             self._request_json("GET", path),
@@ -202,7 +273,7 @@ class ClockifyClient:
         note: str,
         client_id: str,
     ) -> ClockifyProject:
-        path = f"/workspaces/{workspace_id}/projects"
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/projects"
         payload: JsonObject = {
             "billable": False,
             "clientId": client_id,
@@ -222,7 +293,7 @@ class ClockifyClient:
         project: ClockifyProject,
         name: str,
     ) -> ClockifyProject:
-        path = f"/workspaces/{workspace_id}/projects/{project.id}"
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/projects/{validate_clockify_id(project.id)}"
         payload: JsonObject = {
             "archived": project.archived,
             "billable": project.billable,
@@ -245,7 +316,7 @@ class ClockifyClient:
         *,
         name: str,
     ) -> ClockifyTask:
-        path = f"/workspaces/{workspace_id}/projects/{project_id}/tasks"
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/projects/{validate_clockify_id(project_id)}/tasks"
         return self._validate(
             ClockifyTask,
             self._request_json("POST", path, payload={"name": name}),
@@ -278,7 +349,7 @@ class ClockifyClient:
                 f"found name={current.name!r} status={current.status!r}"
             )
 
-        path = f"/workspaces/{workspace_id}/projects/{task.project_id}/tasks/{task.id}"
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/projects/{validate_clockify_id(task.project_id)}/tasks/{validate_clockify_id(task.id)}"
         payload: JsonObject = {
             "name": name if name is not None else task.name,
             "status": status if status is not None else task.status,
@@ -298,14 +369,37 @@ class ClockifyClient:
     ) -> list[ModelT]:
         results: list[ModelT] = []
         page = 1
-        while True:
+        seen: set[str] = set()
+        while page <= self._MAX_PAGES:
             page_params = {**params, "page-size": self._PAGE_SIZE, "page": page}
             data = self._request_json("GET", path, params=page_params)
             items = self._validate_list(model, data, path)
+            if len(items) > self._PAGE_SIZE:
+                raise ClockifyError(
+                    "Clockify returned an oversized page; coverage is incomplete"
+                )
+            ids = [str(item.model_dump()["id"]) for item in items]
+            if len(ids) != len(set(ids)) or seen.intersection(ids):
+                raise ClockifyError(
+                    "Clockify pagination repeated record IDs; coverage is incomplete"
+                )
+            seen.update(ids)
             results.extend(items)
             if len(items) < self._PAGE_SIZE:
+                self.pagination_reads.append(
+                    {
+                        "path": path,
+                        "filters": params,
+                        "pages": page,
+                        "records": len(results),
+                        "page_size": self._PAGE_SIZE,
+                    }
+                )
                 return results
             page += 1
+        raise ClockifyError(
+            "Clockify pagination exceeded the page bound; coverage is incomplete"
+        )
 
     def _request_json(
         self,
@@ -314,7 +408,10 @@ class ClockifyClient:
         *,
         payload: JsonObject | None = None,
         params: dict[str, object] | None = None,
+        follow_redirects: bool = True,
     ) -> JsonValue:
+        for segment in path.strip("/").split("/"):
+            validate_clockify_id(segment)
         request_kwargs: dict[str, Any] = {
             "headers": {
                 "Accept": "application/json",
@@ -323,6 +420,8 @@ class ClockifyClient:
             "json": payload,
             "timeout": 30,
         }
+        if not follow_redirects:
+            request_kwargs["allow_redirects"] = False
         if params is not None:
             request_kwargs["params"] = params
 
@@ -338,7 +437,9 @@ class ClockifyClient:
                 safe_summary=f"{method} {path} failed: {type(exc).__name__}",
             ) from exc
 
-        if response.status_code >= 400:
+        if response.status_code >= 400 or (
+            not follow_redirects and response.status_code >= 300
+        ):
             body = str(response.text)[:500]
             raise ClockifyError(
                 f"Clockify request failed for {method} {path}: "

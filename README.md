@@ -61,6 +61,52 @@ For unattended runs, inject these values through the scheduler's secret
 environment or resolve `op://` references with `op run`. Do not persist the API
 tokens or depend on an interactive 1Password unlock in cron.
 
+## Clockify MCP tools
+
+The stdio server (`jake-tools-mcp`) also provides:
+
+- `clockify_time_entries(start, end, workspace_id?, timezone="UTC", limit=100,
+  cursor?)`: authenticated-user entries overlapping timezone-aware `[start,end)`.
+  Original timestamps and null ends/running status are preserved, with project/task
+  IDs and resolved names. Results sort by start then ID; cursors are query-bound
+  and reject changed selected history. Running entries use a fixed `observed_at`
+  across continuation pages.
+- `clockify_workspace_catalogue(workspace_id?)`: all active/archived clients and
+  projects, and ACTIVE/DONE tasks with an explicit `completed` flag. IDs remain
+  available for creating entries.
+- `clockify_create_time_entry(start, end, description, billable, workspace_id?,
+  project_id?, task_id?)`: creates a completed entry, requires aware timestamps
+  and `end > start`, and validates task/project ownership. Makes one POST, then
+  GET-verifies the ID, user/workspace, interval, description, associations and
+  billable flag. It never starts a timer or retries a write.
+
+These tools require only `CLOCKIFY_API_KEY` (not Jira credentials), plus a mandatory
+workspace allowlist in MCP configuration:
+
+```toml
+[clockify]
+workspaces = ["your-workspace-id"]
+```
+
+Alternatively set `JAKE_TOOLS_CLOCKIFY_WORKSPACES` to comma-separated IDs. Omitted
+workspace defaults to the first allowlisted ID; an empty allowlist or an outside
+workspace is `access_denied`. IDs accept only letters, digits, `_` and `-`.
+
+History scans **all** the authenticated user's entries without date filters on
+**every** call, then filters overlaps locally. This includes arbitrarily old
+straddling/running entries, but costs requests/memory proportional to all history.
+Coverage reports upstream paths, filters, page counts and record counts. Missing
+names fail the request rather than returning an apparently complete result.
+Each upstream list is bounded at 1,000 pages of 5,000 records; repeated IDs,
+oversized pages or reaching the bound are errors, never successful truncation.
+Upstream pagination is not an atomic snapshot: concurrent changes can still affect
+coverage. No live-account overlap or API compatibility validation has been done.
+
+Create errors report `post_uncertain`, `verification_unavailable`, or
+`verification_failed`, with `created_entry_id` when known and `retry_safe=false`.
+A failed POST (even HTTP 500) may have committed. Inspect history/the known ID
+before deciding whether to try again; **never automatically retry**.
+
 ## Codex usage alerts
 
 ```bash
