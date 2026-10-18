@@ -471,3 +471,252 @@ def test_message_to_json_tags_the_type_and_is_json_serialisable() -> None:
     result_payload = message_to_json(_result(total_cost_usd=0.5))
     assert result_payload["type"] == "ResultMessage"
     assert result_payload["total_cost_usd"] == 0.5
+
+
+# --- the streaming conversation seam -------------------------------------------
+
+
+class FakeStreamingClient:
+    """A fake ``ClaudeSDKClient``: records what is sent, replays fixed messages.
+
+    It stands at the SDK boundary only; ``ClaudeAgent.converse`` and
+    ``Conversation`` run for real on top of it.
+    """
+
+    instances: list[FakeStreamingClient] = []
+
+    def __init__(self, options: ClaudeAgentOptions, *messages: Message) -> None:
+        self.options = options
+        self.messages = messages
+        self.sent: list[dict[str, object]] = []
+        self.connected = False
+        self.disconnected = False
+
+    async def connect(self, prompt: object = None) -> None:
+        self.connected = True
+
+    async def query(self, prompt: object, session_id: str = "default") -> None:
+        assert not isinstance(prompt, str)
+        async for message in prompt:  # type: ignore[union-attr]
+            self.sent.append(message)
+
+    async def receive_messages(self) -> AsyncIterator[Message]:
+        for message in self.messages:
+            yield message
+
+    async def disconnect(self) -> None:
+        self.disconnected = True
+
+
+def _connect_with(*messages: Message):
+    made: list[FakeStreamingClient] = []
+
+    def connect(options: ClaudeAgentOptions) -> FakeStreamingClient:
+        client = FakeStreamingClient(options, *messages)
+        made.append(client)
+        return client
+
+    return connect, made
+
+
+async def test_converse_sends_tagged_user_messages_and_replays_them() -> None:
+    from claude_agent_sdk import UserMessage
+
+    connect, made = _connect_with(
+        UserMessage(content="hello", uuid="u-1"), _result(result="hi")
+    )
+    agent = ClaudeAgent(connect=connect)
+
+    async with agent.converse() as conversation:
+        await conversation.send("hello", uuid="u-1")
+        seen = [message async for message in conversation.messages()]
+
+    client = made[0]
+    assert client.connected and client.disconnected
+    assert client.sent == [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "hello"},
+            "parent_tool_use_id": None,
+            "uuid": "u-1",
+        }
+    ]
+    # The CLI must echo user messages so a caller can see them land.
+    assert client.options.extra_args == {"replay-user-messages": None}
+    assert client.options.tools == []  # still genuinely tool-less by default
+    assert len(seen) == 2
+
+
+async def test_converse_disconnects_when_the_block_is_cancelled() -> None:
+    import anyio
+
+    connect, made = _connect_with()
+    agent = ClaudeAgent(connect=connect)
+
+    with anyio.move_on_after(0.05):
+        async with agent.converse():
+            await anyio.sleep(10)
+
+    assert made[0].disconnected
+
+
+async def test_converse_records_telemetry_per_result_and_observes_messages() -> None:
+    from jake_tools.ai_usage import AICallTelemetry
+
+    class Sink:
+        def __init__(self) -> None:
+            self.calls: list[AICallTelemetry] = []
+
+        def record_call(self, record: AICallTelemetry) -> None:
+            self.calls.append(record)
+
+        def record_cache_hit(self, *, stage: str, model: str | None = None) -> None:
+            raise AssertionError("unused")
+
+    observed: list[Message] = []
+    sink = Sink()
+    connect, _ = _connect_with(
+        _result(result="one", total_cost_usd=0.01),
+        _result(is_error=True, subtype="error_max_turns"),
+    )
+    agent = (
+        ClaudeAgent(connect=connect)
+        .with_telemetry(sink)
+        .with_message_observer(observed.append)
+        .for_stage("delegated")
+    )
+
+    async with agent.converse() as conversation:
+        _ = [message async for message in conversation.messages()]
+
+    assert [call.status for call in sink.calls] == ["success", "error"]
+    assert {call.stage for call in sink.calls} == {"delegated"}
+    assert len(observed) == 2
+
+
+def test_local_tools_are_served_in_process_and_auto_approved() -> None:
+    from jake_tools.claude import LocalTool, LocalToolResult, local_tool_name
+
+    async def handler(arguments: dict[str, object]) -> LocalToolResult:
+        return LocalToolResult(text="ok")
+
+    ask = LocalTool(
+        name="ask_parent",
+        description="Ask the parent.",
+        input_schema={"type": "object", "properties": {"question": {"type": "string"}}},
+        handler=handler,
+    )
+
+    options = AgentSpec(tools=("Read",), local_tools=(ask,)).to_options()
+
+    assert options.tools == ["Read"]  # built-ins unchanged
+    assert options.allowed_tools == ["Read", local_tool_name("ask_parent")]
+    assert local_tool_name("ask_parent") == "mcp__jake__ask_parent"
+    assert isinstance(options.mcp_servers, dict)
+    assert set(options.mcp_servers) == {"jake"}
+    assert options.mcp_servers["jake"].get("type") == "sdk"  # in-process, not external
+    assert options.strict_mcp_config is True
+
+
+async def test_local_tool_handler_result_reaches_the_sdk_server() -> None:
+    from mcp.types import CallToolRequest, CallToolRequestParams
+
+    from jake_tools.claude import LocalTool, LocalToolResult
+
+    received: list[dict[str, object]] = []
+
+    async def handler(arguments: dict[str, object]) -> LocalToolResult:
+        received.append(arguments)
+        return LocalToolResult(text="no such choice", is_error=True)
+
+    ask = LocalTool(
+        name="ask_parent",
+        description="Ask.",
+        input_schema={"type": "object", "properties": {"question": {"type": "string"}}},
+        handler=handler,
+    )
+    options = AgentSpec(local_tools=(ask,)).to_options()
+    assert isinstance(options.mcp_servers, dict)
+    server = options.mcp_servers["jake"]["instance"]  # type: ignore[typeddict-item]
+    call = server.request_handlers[CallToolRequest]
+
+    result = await call(
+        CallToolRequest(
+            method="tools/call",
+            params=CallToolRequestParams(
+                name="ask_parent", arguments={"question": "?"}
+            ),
+        )
+    )
+
+    assert received == [{"question": "?"}]
+    payload = result.root.model_dump()
+    assert payload["isError"] is True
+    assert payload["content"][0]["text"] == "no such choice"
+
+
+def test_session_options_pass_through() -> None:
+    fresh = AgentSpec(session_id="11111111-1111-4111-8111-111111111111").to_options()
+    resumed = AgentSpec(resume="22222222-2222-4222-8222-222222222222").to_options()
+
+    assert fresh.session_id == "11111111-1111-4111-8111-111111111111"
+    assert fresh.resume is None
+    assert resumed.resume == "22222222-2222-4222-8222-222222222222"
+
+
+def test_describe_drops_thinking_and_flattens_tool_activity() -> None:
+    from claude_agent_sdk import (
+        SystemMessage,
+        ThinkingBlock,
+        ToolResultBlock,
+        ToolUseBlock,
+        UserMessage,
+    )
+
+    from jake_tools.claude import describe
+
+    assistant = describe(
+        AssistantMessage(
+            content=[
+                ThinkingBlock(thinking="PRIVATE-THOUGHT", signature="sig"),
+                TextBlock(text="Reading the file."),
+                ToolUseBlock(id="t1", name="Read", input={"file_path": "a.txt"}),
+            ],
+            model="m",
+            session_id="s",
+        )
+    )
+    results = describe(
+        UserMessage(
+            content=[
+                ToolResultBlock(
+                    tool_use_id="t1",
+                    content=[{"type": "text", "text": "line"}],
+                    is_error=False,
+                )
+            ]
+        )
+    )
+    echoed = describe(UserMessage(content="Correction: use B", uuid="m-1"))
+    init = describe(SystemMessage(subtype="init", data={"session_id": "s-1"}))
+    retry = describe(
+        SystemMessage(subtype="api_retry", data={"attempt": 2, "error": "overloaded"})
+    )
+    result = describe(_result(result="done", total_cost_usd=0.02))
+
+    assert assistant.kind == "assistant"
+    assert assistant.texts == ["Reading the file."]
+    assert "PRIVATE-THOUGHT" not in assistant.model_dump_json()
+    assert assistant.tool_uses[0].name == "Read"
+    assert results.kind == "tool_results"
+    assert results.tool_results[0].text == "line"
+    assert (echoed.kind, echoed.uuid, echoed.user_text) == (
+        "user_input",
+        "m-1",
+        "Correction: use B",
+    )
+    assert (init.kind, init.session_id) == ("init", "s-1")
+    assert retry.kind == "notice" and retry.notice and "overloaded" in retry.notice
+    assert result.result is not None
+    assert result.result.text == "done"
+    assert result.result.usage.estimated_cost_usd == 0.02

@@ -3,13 +3,29 @@
 Every model call in this package goes through :class:`ClaudeAgent`. It owns the
 Claude Agent SDK's async surface so the rest of the codebase deals in typed
 prompts in and typed replies out.
+
+Two shapes of call share one configuration (:class:`AgentSpec`):
+
+- :meth:`ClaudeAgent.run` / :meth:`ClaudeAgent.run_structured`: one prompt in,
+  one reply out, through the SDK's one-shot ``query``.
+- :meth:`ClaudeAgent.converse`: a live :class:`Conversation` over the SDK's
+  streaming client. The caller sends user messages whenever it likes (the CLI
+  queues one sent mid-turn and adds it to the conversation after the running
+  tool finishes) and reads the message stream. :func:`describe` turns each
+  message into an SDK-free :class:`MessageView` that never carries thinking.
+
+:class:`LocalTool` is an in-process tool the agent can call, served by an SDK
+MCP server inside this process; it is how a caller gives the agent a narrow
+capability (such as asking its parent a question) without granting any
+external MCP server.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import shutil
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -17,13 +33,20 @@ from typing import Any, Literal, Protocol, cast
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    ClaudeSDKClient,
     EffortLevel,
     McpServerConfig,
     Message,
     PermissionMode,
     ResultMessage,
+    SdkMcpTool,
     SettingSource,
+    SystemMessage,
     TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+    create_sdk_mcp_server,
     query,
 )
 from pydantic import BaseModel, ConfigDict, Field
@@ -33,18 +56,31 @@ from .prompting import Prompt, StructuredPrompt
 
 __all__ = [
     "DEFAULT_MODEL",
+    "LOCAL_MCP_SERVER",
     "AgentSpec",
     "ClaudeAgent",
     "ClaudeAgentError",
+    "Conversation",
     "EffortLevel",
+    "LocalTool",
+    "LocalToolResult",
     "Message",
+    "MessageView",
     "PermissionMode",
     "Reply",
+    "ResultView",
     "SettingSource",
+    "ToolResultView",
+    "ToolUseView",
+    "describe",
+    "local_tool_name",
     "message_to_json",
 ]
 
 DEFAULT_MODEL = "claude-sonnet-5"
+
+LOCAL_MCP_SERVER = "jake"
+"""The name of the in-process MCP server that serves :class:`LocalTool` s."""
 
 
 class ClaudeAgentError(RuntimeError):
@@ -93,6 +129,36 @@ class Reply(BaseModel):
         return cls(text=text, final_text=result.result, usage=_usage_of(result))
 
 
+class LocalToolResult(BaseModel):
+    """What a :class:`LocalTool` handler returns to the agent."""
+
+    text: str
+    is_error: bool = False
+
+
+@dataclass(frozen=True)
+class LocalTool:
+    """An in-process tool the agent may call, and nothing else may.
+
+    ``input_schema`` is a JSON Schema object; the handler gets the agent's
+    arguments as a dict and must validate them itself (the schema guides the
+    model, it is not enforced). The agent sees the tool as
+    :func:`local_tool_name` ``(name)``; granting it never grants any other
+    MCP server, because :meth:`AgentSpec.to_options` keeps
+    ``strict_mcp_config``.
+    """
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    handler: Callable[[dict[str, Any]], Awaitable[LocalToolResult]]
+
+
+def local_tool_name(name: str) -> str:
+    """The name the agent uses for the :class:`LocalTool` called ``name``."""
+    return f"mcp__{LOCAL_MCP_SERVER}__{name}"
+
+
 class AgentSpec(BaseModel):
     """How one agent call is configured.
 
@@ -108,6 +174,11 @@ class AgentSpec(BaseModel):
     ``setting_sources`` is ``None`` for the CLI's defaults (all filesystem
     settings); ``()`` isolates the run from every settings file. ``cwd`` and
     ``env`` are the subprocess's working directory and extra environment.
+
+    ``local_tools`` are served in-process and auto-approved like ``tools``.
+    ``session_id`` names the Claude session a fresh conversation creates;
+    ``resume`` continues an existing one instead (the CLI keeps its ID and
+    fails, rather than starting afresh, when it cannot find it).
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -124,6 +195,9 @@ class AgentSpec(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     setting_sources: tuple[SettingSource, ...] | None = None
     permission_mode: PermissionMode | None = None
+    local_tools: tuple[LocalTool, ...] = ()
+    session_id: str | None = None
+    resume: str | None = None
 
     def merge(self, override: AgentSpec | None) -> AgentSpec:
         """Layer the fields ``override`` actually set on top of this spec.
@@ -138,13 +212,23 @@ class AgentSpec(BaseModel):
         return self.model_copy(update=updates)
 
     def to_options(
-        self, *, output_schema: dict[str, Any] | None = None
+        self,
+        *,
+        output_schema: dict[str, Any] | None = None,
+        extra_args: dict[str, str | None] | None = None,
     ) -> ClaudeAgentOptions:
         output_format = (
             None
             if output_schema is None
             else {"type": "json_schema", "schema": output_schema}
         )
+        mcp_servers: dict[str, McpServerConfig] = dict(self.mcp_servers)
+        local_names: list[str] = []
+        if self.local_tools:
+            mcp_servers[LOCAL_MCP_SERVER] = create_sdk_mcp_server(
+                LOCAL_MCP_SERVER, tools=[_sdk_tool(t) for t in self.local_tools]
+            )
+            local_names = [local_tool_name(t.name) for t in self.local_tools]
         return ClaudeAgentOptions(
             # The SDK's bundled ELF may require a loader absent on Nix.
             # Prefer the installed CLI; retain SDK discovery if none exists.
@@ -153,8 +237,8 @@ class AgentSpec(BaseModel):
             tools=list(self.tools),
             # Everything granted is also auto-approved: these runs are
             # non-interactive, so an unapproved call would block on a prompt.
-            allowed_tools=[*self.tools, *self.mcp_tools],
-            mcp_servers=dict(self.mcp_servers),
+            allowed_tools=[*self.tools, *self.mcp_tools, *local_names],
+            mcp_servers=mcp_servers,
             system_prompt=self.system_prompt,
             max_turns=self.max_turns,
             effort=self.effort,
@@ -167,7 +251,26 @@ class AgentSpec(BaseModel):
                 None if self.setting_sources is None else list(self.setting_sources)
             ),
             permission_mode=self.permission_mode,
+            session_id=self.session_id,
+            resume=self.resume,
+            extra_args=dict(extra_args or {}),
         )
+
+
+def _sdk_tool(local: LocalTool) -> SdkMcpTool[Any]:
+    async def handler(arguments: dict[str, Any]) -> dict[str, Any]:
+        result = await local.handler(arguments)
+        payload: dict[str, Any] = {"content": [{"type": "text", "text": result.text}]}
+        if result.is_error:
+            payload["is_error"] = True
+        return payload
+
+    return SdkMcpTool(
+        name=local.name,
+        description=local.description,
+        input_schema=local.input_schema,
+        handler=handler,
+    )
 
 
 class QueryFn(Protocol):
@@ -178,12 +281,33 @@ class QueryFn(Protocol):
     ) -> AsyncIterator[Message]: ...
 
 
+class StreamingClient(Protocol):
+    """The part of :class:`claude_agent_sdk.ClaudeSDKClient` a conversation uses."""
+
+    async def connect(
+        self, prompt: str | AsyncIterable[dict[str, Any]] | None = None
+    ) -> None: ...
+
+    async def query(
+        self, prompt: str | AsyncIterable[dict[str, Any]], session_id: str = "default"
+    ) -> None: ...
+
+    def receive_messages(self) -> AsyncIterator[Message]: ...
+
+    async def disconnect(self) -> None: ...
+
+
+ConnectFn = Callable[[ClaudeAgentOptions], StreamingClient]
+"""Builds the streaming client for a conversation; production uses the SDK's."""
+
+
 @dataclass(frozen=True)
 class ClaudeAgent:
     """A high-level wrapper around the Claude Agent SDK.
 
-    ``run_query`` is the injection seam: production passes the SDK's
-    :func:`~claude_agent_sdk.query`, tests pass a fake that replays messages.
+    ``run_query`` is the injection seam for one-shot calls: production passes
+    the SDK's :func:`~claude_agent_sdk.query`, tests pass a fake that replays
+    messages. ``connect`` is the same seam for :meth:`converse`.
 
     ``on_message`` sees every message the stream yields, in order, before it
     is interpreted; a caller that wants a durable transcript writes each one
@@ -192,6 +316,7 @@ class ClaudeAgent:
 
     defaults: AgentSpec = field(default_factory=AgentSpec)
     run_query: QueryFn = field(default=cast(QueryFn, query))
+    connect: ConnectFn = field(default=cast(ConnectFn, ClaudeSDKClient))
     telemetry_sink: TelemetrySink | None = None
     stage: str | None = None
     on_message: Callable[[Message], None] | None = None
@@ -294,6 +419,42 @@ class ClaudeAgent:
         self._record_result(stage_name, options, result, status="success", scope=scope)
         return parsed, Reply.from_result(result, text)
 
+    @asynccontextmanager
+    async def converse(
+        self,
+        spec: AgentSpec | None = None,
+        *,
+        stage: str | None = None,
+        scope: str | None = None,
+    ) -> AsyncIterator[Conversation]:
+        """Open a streaming conversation; it is closed when the block exits.
+
+        The CLI is started with ``--replay-user-messages``, so every user
+        message comes back on the stream, with the ``uuid`` it was sent with,
+        at the point the CLI adds it to the conversation. That echo is the
+        evidence a message reached the conversation; writing it to the CLI's
+        stdin is not. Telemetry is recorded once per result message (one per
+        completed turn). Closing goes through the SDK's shielded disconnect,
+        so the CLI is terminated even when the block is cancelled.
+        """
+
+        options = self.defaults.merge(spec).to_options(
+            extra_args={"replay-user-messages": None}
+        )
+        client = self.connect(options)
+        conversation = Conversation(
+            _client=client,
+            _agent=self,
+            _options=options,
+            _stage=stage or self.stage or "unspecified",
+            _scope=scope,
+        )
+        try:
+            await client.connect()
+            yield conversation
+        finally:
+            await client.disconnect()
+
     def record_cache_hit(self, *, stage: str | None = None) -> None:
         if self.telemetry_sink is not None:
             self.telemetry_sink.record_cache_hit(
@@ -370,6 +531,203 @@ class ClaudeAgent:
                 f"agent stream for model {options.model!r} ended without a result"
             )
         return ("\n".join(chunks) if chunks else None), result
+
+
+@dataclass
+class Conversation:
+    """A live streaming conversation; obtain one from :meth:`ClaudeAgent.converse`."""
+
+    _client: StreamingClient
+    _agent: ClaudeAgent
+    _options: ClaudeAgentOptions
+    _stage: str
+    _scope: str | None
+
+    @property
+    def model(self) -> str | None:
+        return self._options.model
+
+    async def send(self, text: str, *, uuid: str) -> None:
+        """Write one user message to the CLI, tagged with ``uuid``.
+
+        Returning means the CLI's stdin accepted the bytes, nothing more; the
+        message is in the conversation once :func:`describe` reports a
+        ``user_input`` view carrying the same ``uuid``.
+        """
+
+        async def one() -> AsyncIterator[dict[str, Any]]:
+            yield {
+                "type": "user",
+                "message": {"role": "user", "content": text},
+                "parent_tool_use_id": None,
+                "uuid": uuid,
+            }
+
+        await self._client.query(one())
+
+    async def messages(self) -> AsyncIterator[Message]:
+        """Every message the CLI sends, in order, until the stream ends.
+
+        The agent's ``on_message`` observer sees each one first. A result
+        message is recorded to the telemetry sink as it arrives.
+        """
+
+        async for message in self._client.receive_messages():
+            if self._agent.on_message is not None:
+                self._agent.on_message(message)
+            if isinstance(message, ResultMessage):
+                self._agent._record_result(
+                    self._stage,
+                    self._options,
+                    message,
+                    status="error" if message.is_error else "success",
+                    scope=self._scope,
+                )
+            yield message
+
+
+class ToolUseView(BaseModel):
+    """A tool call the agent made: which tool, with what input."""
+
+    id: str
+    name: str
+    input: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolResultView(BaseModel):
+    """A tool's result as the agent saw it, flattened to text."""
+
+    tool_use_id: str
+    text: str
+    is_error: bool = False
+
+
+class ResultView(BaseModel):
+    """One turn's result message: how it ended, its final text and usage."""
+
+    subtype: str
+    is_error: bool
+    text: str | None = None
+    stop_reason: str | None = None
+    errors: list[str] = Field(default_factory=list)
+    num_turns: int = 0
+    usage: Usage = Field(default_factory=Usage)
+
+
+class MessageView(BaseModel):
+    """An SDK message reduced to what a supervisor may show or act on.
+
+    ``kind`` says which fields are meaningful. ``texts`` holds only public
+    text blocks: thinking blocks are dropped here and never reach a caller.
+    ``user_text``/``uuid`` on a ``user_input`` view is a user message the CLI
+    replayed into the conversation.
+    """
+
+    kind: Literal[
+        "init", "assistant", "user_input", "tool_results", "result", "notice", "other"
+    ]
+    session_id: str | None = None
+    uuid: str | None = None
+    texts: list[str] = Field(default_factory=list)
+    tool_uses: list[ToolUseView] = Field(default_factory=list)
+    tool_results: list[ToolResultView] = Field(default_factory=list)
+    user_text: str | None = None
+    result: ResultView | None = None
+    notice: str | None = None
+
+
+def describe(message: Message) -> MessageView:
+    """The :class:`MessageView` of one SDK message."""
+    if isinstance(message, AssistantMessage):
+        if message.error == "rate_limit":
+            detail = " ".join(
+                b.text for b in message.content if isinstance(b, TextBlock)
+            )
+            return MessageView(
+                kind="notice",
+                session_id=message.session_id,
+                notice=f"rate limit: {detail}".strip(),
+            )
+        return MessageView(
+            kind="assistant",
+            session_id=message.session_id,
+            uuid=message.uuid,
+            texts=[b.text for b in message.content if isinstance(b, TextBlock)],
+            tool_uses=[
+                ToolUseView(id=b.id, name=b.name, input=dict(b.input or {}))
+                for b in message.content
+                if isinstance(b, ToolUseBlock)
+            ],
+        )
+    if isinstance(message, UserMessage):
+        if isinstance(message.content, str):
+            return MessageView(
+                kind="user_input", uuid=message.uuid, user_text=message.content
+            )
+        results = [
+            ToolResultView(
+                tool_use_id=b.tool_use_id,
+                text=_flatten_tool_content(b.content),
+                is_error=bool(b.is_error),
+            )
+            for b in message.content
+            if isinstance(b, ToolResultBlock)
+        ]
+        if results:
+            return MessageView(
+                kind="tool_results", uuid=message.uuid, tool_results=results
+            )
+        texts = [b.text for b in message.content if isinstance(b, TextBlock)]
+        return MessageView(
+            kind="user_input", uuid=message.uuid, user_text="\n".join(texts)
+        )
+    if isinstance(message, ResultMessage):
+        return MessageView(
+            kind="result",
+            session_id=message.session_id,
+            uuid=message.uuid,
+            result=ResultView(
+                subtype=message.subtype,
+                is_error=message.is_error,
+                text=message.result,
+                stop_reason=message.stop_reason,
+                errors=list(message.errors or []),
+                num_turns=message.num_turns,
+                usage=_usage_of(message),
+            ),
+        )
+    if isinstance(message, SystemMessage):
+        data = message.data or {}
+        session_id = data.get("session_id")
+        session = session_id if isinstance(session_id, str) else None
+        if message.subtype == "init":
+            return MessageView(kind="init", session_id=session)
+        if message.subtype == "api_retry":
+            attempt = data.get("attempt")
+            error = data.get("error") or data.get("error_status")
+            return MessageView(
+                kind="notice",
+                session_id=session,
+                notice=f"API retry (attempt {attempt}): {error}"
+                if attempt is not None
+                else f"API retry: {error}",
+            )
+        return MessageView(kind="other", session_id=session)
+    return MessageView(kind="other")
+
+
+def _flatten_tool_content(content: str | list[dict[str, Any]] | None) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for item in content:
+        if item.get("type") == "text" and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+        else:
+            parts.append(f"[{item.get('type', 'content')}]")
+    return "\n".join(parts)
 
 
 def _result_error(prefix: str, result: ResultMessage) -> ClaudeAgentError:
