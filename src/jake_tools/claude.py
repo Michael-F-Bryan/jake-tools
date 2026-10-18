@@ -8,6 +8,7 @@ prompts in and typed replies out.
 from __future__ import annotations
 
 import dataclasses
+import shutil
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -145,6 +146,9 @@ class AgentSpec(BaseModel):
             else {"type": "json_schema", "schema": output_schema}
         )
         return ClaudeAgentOptions(
+            # The SDK's bundled ELF may require a loader absent on Nix.
+            # Prefer the installed CLI; retain SDK discovery if none exists.
+            cli_path=shutil.which("claude"),
             model=self.model,
             tools=list(self.tools),
             # Everything granted is also auto-approved: these runs are

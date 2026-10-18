@@ -204,6 +204,25 @@ async def test_rate_limit_message_survives_the_sdk_stream_exception() -> None:
     assert str(excinfo.value) == f"Claude rate limit reached: {reset_message}"
 
 
+def test_options_prefer_installed_claude(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli = tmp_path / "claude"
+    cli.write_text("#!/bin/sh\nexit 0\n")
+    cli.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    assert AgentSpec().to_options().cli_path == str(cli)
+
+
+def test_options_keep_sdk_discovery_without_installed_claude(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    assert AgentSpec().to_options().cli_path is None
+
+
 async def test_defaults_are_tool_less() -> None:
     fake = RecordingQuery(_result())
 
