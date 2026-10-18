@@ -78,3 +78,39 @@ def mcp_env_factory() -> Callable[..., dict[str, str]]:
 def mcp_server() -> Callable[..., AbstractAsyncContextManager[ClientSession]]:
     """``async with mcp_server(env) as session:`` against the real server."""
     return start_mcp_server
+
+
+# --- a fake ``claude`` CLI on PATH ---------------------------------------------
+#
+# ``tests/fake_claude.py`` speaks the CLI's stream-json protocol. Putting it
+# first on PATH as ``claude`` lets the real server spawn the real worker,
+# which drives the real SDK, which runs this instead of the real CLI (the
+# SDK prefers ``shutil.which("claude")``). Deterministic mechanics only.
+
+FAKE_CLAUDE = Path(__file__).resolve().parent / "fake_claude.py"
+
+
+def install_fake_claude(root: Path) -> tuple[Path, Path]:
+    """Write ``root/bin/claude``; returns ``(bin_dir, state_dir)``."""
+    bin_dir = root / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    state = root / "fake-claude-state"
+    state.mkdir(parents=True, exist_ok=True)
+    script = bin_dir / "claude"
+    script.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_CLAUDE}" "$@"\n')
+    script.chmod(0o755)
+    return bin_dir, state
+
+
+@pytest.fixture
+def fake_claude_state(tmp_path: Path) -> Path:
+    return tmp_path / "fake" / "fake-claude-state"
+
+
+@pytest.fixture
+def fake_env(mcp_home: Path, tmp_path: Path) -> dict[str, str]:
+    """The hermetic server environment with the fake CLI first on PATH."""
+    bin_dir, state = install_fake_claude(tmp_path / "fake")
+    env = isolated_mcp_env(mcp_home, FAKE_CLAUDE_STATE=str(state))
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    return env

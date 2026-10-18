@@ -34,7 +34,15 @@ BRIEF_FILE = "brief.md"
 SPEC_FILE = "spec.json"
 STATUS_FILE = "status.json"
 RESULT_FILE = "result.json"
+FINAL_FILE = "final.md"
 TRANSCRIPT_FILE = "transcript.jsonl"
+EVENTS_FILE = "events.jsonl"
+EVENTS_LOCK_FILE = ".events.lock"
+MESSAGES_DIR = "messages"
+INPUTS_DIR = "inputs"
+INBOX_LOCK_FILE = ".inbox.lock"
+INBOX_CLOSED_FILE = "inbox.closed"
+REQUESTS_DIR = ".requests"
 TELEMETRY_FILE = "telemetry.json"
 STDOUT_FILE = "worker.stdout"
 STDERR_FILE = "worker.stderr"
@@ -61,9 +69,9 @@ def utc_now() -> datetime:
 
 
 def new_task_id(now: datetime | None = None) -> str:
-    """``<UTC basic timestamp>-<8 hex>``, so directory listings sort by creation."""
+    """``<UTC basic timestamp>-<32 hex>``: sorts by creation, 128 random bits."""
     stamp = (now or utc_now()).astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-    return f"{stamp}-{secrets.token_hex(4)}"
+    return f"{stamp}-{secrets.token_hex(16)}"
 
 
 def ensure_runs_dir(runs_dir: Path) -> Path:
@@ -199,6 +207,25 @@ def read_groups(run_dir: Path) -> GroupRecords:
 
 def write_groups(run_dir: Path, groups: GroupRecords) -> None:
     write_model(run_dir / GROUPS_FILE, groups)
+
+
+@contextmanager
+def file_lock(path: Path) -> Iterator[None]:
+    """Exclusive ``flock`` on ``path`` (created ``0600``) for the block."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, FILE_MODE)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def write_final_text(run_dir: Path, text: str) -> Path:
+    """``final.md``: the final answer in full; returns its path."""
+    path = run_dir / FINAL_FILE
+    write_text(path, text)
+    return path
 
 
 @contextmanager

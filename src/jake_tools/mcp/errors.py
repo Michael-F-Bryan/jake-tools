@@ -24,6 +24,10 @@ ToolErrorCode = Literal[
     "unknown_task",
     "capacity_exceeded",
     "worker_failed",
+    "request_conflict",
+    "session_busy",
+    "resume_unavailable",
+    "task_not_running",
     "unsupported_store_schema",
     "acquisition_failed",
     "upstream_error",
@@ -35,6 +39,12 @@ The first nine come from the design. ``upstream_error`` is for a remote API
 (Clockify, Jira) failing after credentials were present, and
 ``internal_error`` is the wrapper's catch-all for an exception a handler did
 not translate; both are additions the design's list left implicit.
+
+The delegated-task tools add four: ``request_conflict`` (a caller key such
+as ``request_id`` or ``message_id`` reused with a different payload),
+``session_busy`` (the Claude session to resume is still being written),
+``resume_unavailable`` (the task cannot be resumed at all) and
+``task_not_running`` (the task can no longer take a message).
 """
 
 

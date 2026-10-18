@@ -153,13 +153,15 @@ def _zombie(command: list[str]) -> subprocess.Popen[bytes]:
 # --- task IDs and the run directory ------------------------------------------
 
 
-def test_task_ids_are_utc_basic_timestamp_plus_eight_hex() -> None:
+def test_task_ids_are_utc_basic_timestamp_plus_128_random_bits() -> None:
     now = datetime(2026, 10, 8, 3, 15, 0, tzinfo=UTC)
 
     task_id = new_task_id(now)
 
     assert task_id.startswith("20261008T031500Z-")
-    assert TASK_ID_PATTERN.match(task_id)
+    assert len(task_id.split("-")[1]) == 32  # unguessable: usable as a handle
+    assert TASK_ID_PATTERN.fullmatch(task_id)
+    assert TASK_ID_PATTERN.fullmatch("20261008T031500Z-1a2b3c4d")  # older runs
     assert new_task_id(now) != task_id
 
 
@@ -838,7 +840,12 @@ def test_start_request_fills_defaults_and_keeps_explicit_values(tmp_path: Path) 
         max_turns=7,
     )
 
-    spec = request.to_spec("20261008T031500Z-1a2b3c4d", DEFAULTS)
+    spec = request.to_spec(
+        "20261008T031500Z-1a2b3c4d",
+        DEFAULTS,
+        working_directory=tmp_path,
+        session_id="11111111-1111-4111-8111-111111111111",
+    )
 
     assert spec.tools == ("Bash", "Read")
     assert spec.max_turns == 7
@@ -869,7 +876,7 @@ def test_run_defaults_come_from_config(tmp_path: Path) -> None:
 # --- the tools over stdio ------------------------------------------------------
 
 
-async def test_stdio_lists_the_three_claude_tools(
+async def test_stdio_lists_the_claude_tools(
     mcp_server: ServerFactory, mcp_env: dict[str, str]
 ) -> None:
     async with mcp_server(mcp_env) as session:
@@ -877,7 +884,9 @@ async def test_stdio_lists_the_three_claude_tools(
 
     assert {"claude_start", "claude_status", "claude_cancel"} <= set(tools)
     start = tools["claude_start"].inputSchema
-    assert start["required"] == ["brief", "working_directory"]
+    # working_directory is required unless resume_task_id is given; the
+    # handler enforces that (invalid_argument), the schema cannot.
+    assert start["required"] == ["brief"]
     assert set(start["properties"]) == {
         "brief",
         "working_directory",
@@ -887,6 +896,8 @@ async def test_stdio_lists_the_three_claude_tools(
         "max_turns",
         "timeout_seconds",
         "max_budget_usd",
+        "resume_task_id",
+        "request_id",
     }
     assert tools["claude_status"].inputSchema["required"] == ["task_id"]
     assert tools["claude_cancel"].inputSchema["required"] == ["task_id"]

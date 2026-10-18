@@ -110,6 +110,7 @@ _INSTRUCTIONS = (
     "Every tool returns JSON as structured content. Failures are results with "
     "isError=true and a stable `code` field (missing_credentials, "
     "invalid_argument, access_denied, plan_stale, unknown_task, "
-    "capacity_exceeded, worker_failed, upstream_error, internal_error). "
+    "capacity_exceeded, worker_failed, request_conflict, session_busy, "
+    "resume_unavailable, task_not_running, upstream_error, internal_error). "
     "The packaged skills are served as skill://<name> resources."
 )

@@ -13,8 +13,12 @@ from mcp.server.fastmcp import FastMCP
 from ...config import Config
 from . import (
     claude_cancel,
+    claude_poll,
     claude_start,
     claude_status,
+    claude_steer,
+    claude_transcript,
+    claude_update,
     clockify_create_time_entry,
     clockify_jira_sync,
     clockify_time_entries,
@@ -31,4 +35,8 @@ def register_all(app: FastMCP, config: Config) -> None:
     clockify_create_time_entry.register(app, config)
     claude_start.register(app, config)
     claude_status.register(app, config)
+    claude_poll.register(app, config)
+    claude_transcript.register(app, config)
+    claude_steer.register(app, config)
+    claude_update.register(app, config)
     claude_cancel.register(app, config)
