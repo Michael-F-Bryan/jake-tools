@@ -426,6 +426,7 @@ class ClaudeAgent:
         *,
         stage: str | None = None,
         scope: str | None = None,
+        cost_baseline_usd: float | None = None,
     ) -> AsyncIterator[Conversation]:
         """Open a streaming conversation; it is closed when the block exits.
 
@@ -433,9 +434,19 @@ class ClaudeAgent:
         message comes back on the stream, with the ``uuid`` it was sent with,
         at the point the CLI adds it to the conversation. That echo is the
         evidence a message reached the conversation; writing it to the CLI's
-        stdin is not. Telemetry is recorded once per result message (one per
-        completed turn). Closing goes through the SDK's shielded disconnect,
-        so the CLI is terminated even when the block is cancelled.
+        stdin is not.
+
+        Usage: the CLI reports token usage per prompt but ``total_cost_usd``
+        as the session's running total, carried across a resume (observed
+        with CLI 2.1.293). Each result is therefore recorded to telemetry
+        with its own tokens and only the cost it added since the previous
+        result, starting from ``cost_baseline_usd`` (the session's total
+        when this conversation began). :attr:`Conversation.usage` is the
+        sum of those per-turn records: this invocation's usage and cost, and
+        what the telemetry totals add up to.
+
+        Closing goes through the SDK's shielded disconnect, so the CLI is
+        terminated even when the block is cancelled.
         """
 
         options = self.defaults.merge(spec).to_options(
@@ -448,6 +459,7 @@ class ClaudeAgent:
             _options=options,
             _stage=stage or self.stage or "unspecified",
             _scope=scope,
+            _session_cost_usd=cost_baseline_usd,
         )
         try:
             await client.connect()
@@ -483,14 +495,22 @@ class ClaudeAgent:
         *,
         status: Literal["success", "error"],
         scope: str | None,
+        cost_usd: float | None = None,
     ) -> None:
         if self.telemetry_sink is None:
             return
-        self.telemetry_sink.record_call(
-            _telemetry_of(
-                result, stage=stage, status=status, model=options.model, scope=scope
-            )
+        record = _telemetry_of(
+            result, stage=stage, status=status, model=options.model, scope=scope
         )
+        if cost_usd is not None:
+            record = record.model_copy(
+                update={
+                    "usage": record.usage.model_copy(
+                        update={"estimated_cost_usd": cost_usd}
+                    )
+                }
+            )
+        self.telemetry_sink.record_call(record)
 
     async def _collect(
         self, prompt: str, options: ClaudeAgentOptions
@@ -542,10 +562,28 @@ class Conversation:
     _options: ClaudeAgentOptions
     _stage: str
     _scope: str | None
+    _session_cost_usd: float | None = None
+    usage: Usage = field(default_factory=Usage)
+    """This conversation's usage so far: every result's tokens, and the cost
+    added since the conversation began."""
 
     @property
     def model(self) -> str | None:
         return self._options.model
+
+    @property
+    def session_cost_usd(self) -> float | None:
+        """The session's running cost as the CLI last reported it."""
+        return self._session_cost_usd
+
+    def _turn_usage(self, result: ResultMessage) -> Usage:
+        usage = _usage_of(result)
+        total = result.total_cost_usd
+        if total is None:
+            return usage
+        added = max(0.0, total - (self._session_cost_usd or 0.0))
+        self._session_cost_usd = total
+        return usage.model_copy(update={"estimated_cost_usd": added})
 
     async def send(self, text: str, *, uuid: str) -> None:
         """Write one user message to the CLI, tagged with ``uuid``.
@@ -576,12 +614,19 @@ class Conversation:
             if self._agent.on_message is not None:
                 self._agent.on_message(message)
             if isinstance(message, ResultMessage):
+                turn = self._turn_usage(message)
+                # ``model_usage`` is the CLI's own per-model breakdown; keep the
+                # latest rather than summing what may be running totals.
+                self.usage = (self.usage + turn).model_copy(
+                    update={"model_usage": turn.model_usage}
+                )
                 self._agent._record_result(
                     self._stage,
                     self._options,
                     message,
                     status="error" if message.is_error else "success",
                     scope=self._scope,
+                    cost_usd=turn.estimated_cost_usd,
                 )
             yield message
 
@@ -628,6 +673,7 @@ class MessageView(BaseModel):
     ]
     session_id: str | None = None
     uuid: str | None = None
+    message_id: str | None = None
     texts: list[str] = Field(default_factory=list)
     tool_uses: list[ToolUseView] = Field(default_factory=list)
     tool_results: list[ToolResultView] = Field(default_factory=list)
@@ -652,6 +698,7 @@ def describe(message: Message) -> MessageView:
             kind="assistant",
             session_id=message.session_id,
             uuid=message.uuid,
+            message_id=message.message_id,
             texts=[b.text for b in message.content if isinstance(b, TextBlock)],
             tool_uses=[
                 ToolUseView(id=b.id, name=b.name, input=dict(b.input or {}))

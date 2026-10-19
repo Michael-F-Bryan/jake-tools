@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from anyio import to_thread
 from mcp.server.fastmcp import FastMCP
 
 from ...claude_runs.inbox import MAX_MESSAGE_CHARS, SteerSubmission
@@ -39,4 +40,4 @@ def register(app: FastMCP, config: Config) -> None:
             submission = SteerSubmission.model_validate(
                 {"message": message, "message_id": message_id}
             )
-            return service.steer(task_id, submission)
+            return await to_thread.run_sync(service.steer, task_id, submission)

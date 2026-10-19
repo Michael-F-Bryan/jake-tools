@@ -147,7 +147,7 @@ async def test_stdio_lists_the_delegation_tools_with_their_arguments(
     for name, required in expected.items():
         assert set(tools[name].inputSchema.get("required", [])) == required, name
         assert tools[name].outputSchema is None
-    assert {"resume_task_id", "request_id"} <= set(
+    assert {"resume_task_id", "request_id", "allow_questions"} <= set(
         tools["claude_start"].inputSchema["properties"]
     )
     assert {"cursor", "wait_seconds", "limit"} <= set(
@@ -200,9 +200,9 @@ async def test_poll_returns_new_events_once_and_a_complete_result(
     assert "--strict-mcp-config" in argv
     assert flag(argv, "--permission-mode") == "dontAsk"
     assert flag(argv, "--tools") == ""  # no built-ins without a grant
-    assert flag(argv, "--allowedTools") == "mcp__jake__ask_parent"
-    mcp_config = json.loads(flag(argv, "--mcp-config") or "{}")
-    assert mcp_config == {"mcpServers": {"jake": {"type": "sdk", "name": "jake"}}}
+    assert flag(argv, "--allowedTools") is None  # and no ask_parent by default
+    assert flag(argv, "--mcp-config") is None
+    assert final["limits"]["allow_questions"] is False
 
 
 async def test_poll_waits_for_change_and_stops_at_its_own_deadline(
@@ -267,7 +267,9 @@ async def test_cursor_pages_are_bounded_and_resume_exactly(
 ) -> None:
     fake_env = {**fake_env, "FAKE_CLAUDE_BIG_EVENTS": "7"}
     async with mcp_server(fake_env) as session:
-        started = await start(session, workdir, "[[scenario:big:3000]] go")
+        started = await start(
+            session, workdir, "[[scenario:big:3000]] go", max_turns=20
+        )
         task_id = started["task_id"]
         await poll_until(session, task_id, terminal)
         seen: list[int] = []
@@ -435,6 +437,14 @@ async def test_a_message_that_arrives_as_a_turn_ends_gets_its_own_turn(
     assert final["messages"][0]["state"] == "in_conversation"
     assert final["result"]["final_text"] == "ECHO: second"
     assert len([e for e in events if e["kind"] == "turn_result"]) == 2
+    # Two turns: tokens add up, cost is the session total's growth, and the
+    # telemetry file agrees with the status (the CLI reports cost cumulatively).
+    assert final["usage"]["input_tokens"] == 20
+    assert final["invocation_cost_usd"] == pytest.approx(0.02)
+    assert final["session_cost_usd"] == pytest.approx(0.02)
+    telemetry = json.loads((Path(final["run_dir"]) / "telemetry.json").read_text())
+    costs = [call["usage"]["estimated_cost_usd"] for call in telemetry["calls"]]
+    assert costs == [pytest.approx(0.01), pytest.approx(0.01)]
 
 
 async def test_steer_rejects_bad_arguments(
@@ -472,7 +482,9 @@ async def test_clarification_round_trip_resumes_the_same_task(
     mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
 ) -> None:
     async with mcp_server(fake_env) as session:
-        started = await start(session, workdir, "[[scenario:ask:Which colour?]] go")
+        started = await start(
+            session, workdir, "[[scenario:ask:Which colour?]] go", allow_questions=True
+        )
         task_id = started["task_id"]
         waiting, events, cursor = await poll_until(
             session, task_id, lambda r, _: r["status"] == "input_required"
@@ -516,20 +528,38 @@ async def test_clarification_round_trip_resumes_the_same_task(
         {"request_id": "q9-nope", "outcome": "unknown", "state": None, "reason": None}
     ]
     assert answered["results"][0]["outcome"] == "accepted"
+    # The snapshot is coherent at once: nothing pending, no longer waiting.
+    assert answered["pending_inputs"] == []
+    assert answered["task_status"] in ("working", "completed")
     assert duplicate["results"][0]["outcome"] == "duplicate"
     assert conflict["results"][0]["outcome"] == "conflict"
     assert final["status"] == "completed"
     assert final["result"]["final_text"] == "Answer was: Your parent answered: green"
     assert final["pending_inputs"] == []
     assert "input_answered" in kinds(more)
+    assert "Waiting for an answer" not in (final["status_message"] or "")
     assert started["task_id"] == final["task_id"]  # same task, same conversation
+
+
+async def test_without_allow_questions_the_worker_has_no_way_to_ask(
+    mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
+) -> None:
+    async with mcp_server(fake_env) as session:
+        started = await start(session, workdir, "[[scenario:ask]] go")
+        final, events, _ = await poll_until(session, started["task_id"], terminal)
+
+    assert "input_requested" not in kinds(events)
+    assert final["status"] == "completed"
+    assert "Server 'jake' not found" in final["result"]["final_text"]
 
 
 async def test_two_pending_questions_need_both_answers(
     mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
 ) -> None:
     async with mcp_server(fake_env) as session:
-        started = await start(session, workdir, "[[scenario:ask_twice]] go")
+        started = await start(
+            session, workdir, "[[scenario:ask_twice]] go", allow_questions=True
+        )
         task_id = started["task_id"]
         waiting, _, _ = await poll_until(
             session, task_id, lambda r, _: len(r["pending_inputs"]) == 2
@@ -562,11 +592,45 @@ async def test_two_pending_questions_need_both_answers(
     )
 
 
+async def test_an_abandoned_question_is_withdrawn_and_the_other_stays_pending(
+    mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
+) -> None:
+    async with mcp_server(fake_env) as session:
+        started = await start(
+            session, workdir, "[[scenario:ask_one_abandoned]] go", allow_questions=True
+        )
+        task_id = started["task_id"]
+        waiting, events, cursor = await poll_until(
+            session, task_id, lambda _, evs: "input_expired" in kinds(evs)
+        )
+        expired = next(e for e in events if e["kind"] == "input_expired")
+        status = await call(session, "claude_status", task_id=task_id)
+        kept = waiting["pending_inputs"]
+        await call(
+            session,
+            "claude_update",
+            task_id=task_id,
+            responses={kept[0]["request_id"]: {"answer": "yes"}},
+        )
+        final, _, _ = await poll_until(session, task_id, terminal, cursor=cursor)
+
+    assert "withdrawn" in expired["detail"]["reason"]
+    assert [r["question"] for r in kept] == ["kept?"]
+    assert waiting["status"] == "input_required"  # the other question is open
+    assert status["status"] == "input_required"
+    assert final["status"] == "completed"
+    assert final["result"]["final_text"] == (
+        "abandoned=ERROR: the tool call was cancelled kept=Your parent answered: yes"
+    )
+
+
 async def test_a_malformed_question_is_a_tool_error_not_a_pending_request(
     mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
 ) -> None:
     async with mcp_server(fake_env) as session:
-        started = await start(session, workdir, "[[scenario:bad_ask]] go")
+        started = await start(
+            session, workdir, "[[scenario:bad_ask]] go", allow_questions=True
+        )
         final, events, _ = await poll_until(session, started["task_id"], terminal)
 
     assert "input_requested" not in kinds(events)
@@ -605,7 +669,11 @@ async def test_timeout_while_waiting_for_an_answer_expires_the_request(
 ) -> None:
     async with mcp_server(fake_env) as session:
         started = await start(
-            session, workdir, "[[scenario:ask:Proceed?]] go", timeout_seconds=4
+            session,
+            workdir,
+            "[[scenario:ask:Proceed?]] go",
+            timeout_seconds=4,
+            allow_questions=True,
         )
         task_id = started["task_id"]
         waiting, _, _ = await poll_until(
@@ -626,6 +694,29 @@ async def test_timeout_while_waiting_for_an_answer_expires_the_request(
     assert "input_expired" in kinds(events)
     assert stale["results"][0]["outcome"] == "not_pending"
     assert stale["results"][0]["state"] == "expired"
+
+
+async def test_max_turns_bounds_the_whole_task_across_steered_prompts(
+    mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
+) -> None:
+    """The CLI's own turn count restarts with every prompt, so a message that
+    starts a new turn must not buy a fresh max_turns."""
+    async with mcp_server(fake_env) as session:
+        started = await start(
+            session, workdir, "[[scenario:slow_echo:2]] first", max_turns=3
+        )
+        task_id = started["task_id"]
+        await poll_until(session, task_id, lambda _, evs: "tool_use" in kinds(evs))
+        await call(
+            session, "claude_steer", task_id=task_id, message="more", message_id="m"
+        )
+        final, events, _ = await poll_until(session, task_id, terminal)
+
+    assert final["status"] == "failed"
+    assert final["termination_reason"] == "max_turns"
+    assert "max_turns=3" in final["result"]["error"]
+    assert final["result"]["final_text"] == "ECHO: [[scenario:slow_echo:2]] first"
+    assert final["messages"][0]["state"] == "in_conversation"
 
 
 # --- idempotent start --------------------------------------------------------------
@@ -728,15 +819,17 @@ async def test_resume_continues_the_conversation_as_a_new_task_with_its_own_gran
     assert child["resumed_from"] == parent["task_id"]
     assert final["resumed_from"] == parent["task_id"]
     assert final["result"]["final_text"] == "REMEMBERED: [[scenario:echo]] remember me"
-    assert final["invocation_cost_usd"] == pytest.approx(0.01)  # 0.02 cumulative - 0.01
-    assert final["usage"]["estimated_cost_usd"] == pytest.approx(0.02)
+    assert final["invocation_cost_usd"] == pytest.approx(0.01)  # 0.02 total - 0.01
+    assert final["usage"]["estimated_cost_usd"] == pytest.approx(0.01)
+    assert final["session_cost_usd"] == pytest.approx(0.02)
+    assert final["invocation_cost_exact"] is True
     assert parent_after["status"] == "completed"  # untouched
     first_argv, resume_argv = argv_files(fake_claude_state)
     assert flag(first_argv, "--tools") == "Bash,Edit"
     assert flag(resume_argv, "--resume") == parent["session_id"]
     assert flag(resume_argv, "--session-id") is None
     assert flag(resume_argv, "--tools") == "Read"  # nothing inherited
-    assert flag(resume_argv, "--allowedTools") == "Read,mcp__jake__ask_parent"
+    assert flag(resume_argv, "--allowedTools") == "Read"
 
 
 async def test_resume_refuses_busy_sessions_and_mismatched_directories(
@@ -800,6 +893,34 @@ async def test_resume_refuses_busy_sessions_and_mismatched_directories(
     assert unknown["code"] == "unknown_task"
     assert no_dir["code"] == "invalid_argument"
     assert no_dir["detail"] == {"argument": "working_directory"}
+
+
+async def test_only_the_latest_task_in_a_session_can_be_resumed(
+    mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
+) -> None:
+    async with mcp_server(fake_env) as session:
+        first = await start(session, workdir, "[[scenario:echo]] a")
+        await poll_until(session, first["task_id"], terminal)
+        second = await call(
+            session, "claude_start", brief="b", resume_task_id=first["task_id"], **FAST
+        )
+        await poll_until(session, second["task_id"], terminal)
+        stale = await call_error(
+            session, "claude_start", brief="c", resume_task_id=first["task_id"], **FAST
+        )
+        third = await call(
+            session, "claude_start", brief="c", resume_task_id=second["task_id"], **FAST
+        )
+        final, _, _ = await poll_until(session, third["task_id"], terminal)
+
+    assert stale["code"] == "resume_unavailable"
+    assert stale["detail"] == {
+        "task_id": first["task_id"],
+        "latest_task_id": second["task_id"],
+    }
+    # The baseline is the head's session total, so B's spend is not C's.
+    assert final["session_cost_usd"] == pytest.approx(0.03)
+    assert final["invocation_cost_usd"] == pytest.approx(0.01)
 
 
 async def test_a_resume_of_a_vanished_session_fails_instead_of_starting_afresh(
@@ -980,6 +1101,7 @@ async def test_a_message_queued_to_a_wedged_task_is_reported_not_delivered(
 
     message = final["messages"][0]
     assert message["state"] == "delivered"  # honest: written, never confirmed
+    assert "never confirmed adding it to the conversation" in message["reason"]
     assert sleepers("31005") == []
 
 

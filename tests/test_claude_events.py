@@ -139,3 +139,37 @@ def test_input_requests_are_unique_and_settle_once(run_dir: Path) -> None:
     late = inbox.respond({second.request_id: InputResponse(action="decline")})
     assert (late[0].outcome, late[0].state) == ("not_pending", "expired")
     assert inbox.respond({"../x": InputResponse(answer="x")})[0].outcome == "unknown"
+
+
+def test_the_session_head_is_the_latest_by_creation_not_by_id(tmp_path: Path) -> None:
+    """Two tasks created in the same second can sort either way by ID."""
+    from datetime import timedelta
+
+    from jake_tools.claude_runs.control import _session_head_locked
+    from jake_tools.claude_runs.rundir import read_state
+
+    runs = tmp_path / "runs"
+    now = datetime.now(UTC)
+    stamp = now.strftime("%Y%m%dT%H%M%SZ")
+
+    def make(task_id: str, created: datetime) -> Path:
+        spec = RunSpec(
+            task_id=task_id,
+            created_at=created,
+            working_directory=tmp_path,
+            model="m",
+            max_turns=1,
+            timeout_seconds=1,
+            max_budget_usd=1,
+            schema_version=2,
+            session_id="s-1",
+        )
+        return create_run_dir(runs, spec, "b")
+
+    parent = make(f"{stamp}-{'f' * 32}", now)
+    later = make(f"{stamp}-{'0' * 32}", now + timedelta(milliseconds=300))
+
+    head = _session_head_locked(runs, "s-1", read_state(parent))
+
+    assert later.name < parent.name  # sorts first by ID...
+    assert head == later.name  # ...but was created after

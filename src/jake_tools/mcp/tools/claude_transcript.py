@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import functools
+
+from anyio import to_thread
 from mcp.server.fastmcp import FastMCP
 
 from ...claude_runs.service import (
@@ -43,6 +46,12 @@ def register(app: FastMCP, config: Config) -> None:
         max_text_chars: int = TRANSCRIPT_DEFAULT_TEXT_CHARS,
     ) -> TranscriptPage:
         with task_errors():
-            return service.transcript(
-                task_id, cursor=cursor, limit=limit, max_text_chars=max_text_chars
+            return await to_thread.run_sync(
+                functools.partial(
+                    service.transcript,
+                    task_id,
+                    cursor=cursor,
+                    limit=limit,
+                    max_text_chars=max_text_chars,
+                )
             )

@@ -196,7 +196,8 @@ class Session:
                 "num_turns": self.turns,
                 "session_id": self.reported_id,
                 "total_cost_usd": self.data["cost"],
-                "usage": {"input_tokens": 10 * self.turns, "output_tokens": 5},
+                # Like the real CLI: tokens per prompt, cost as a session total.
+                "usage": {"input_tokens": 10, "output_tokens": 5},
                 "result": text,
                 "stop_reason": "end_turn",
                 "errors": [] if subtype == "success" else [f"fake {subtype}"],
@@ -219,7 +220,9 @@ class Session:
                 return seen
             seen.append(self.echo(message))
 
-    def ask(self, arguments: dict[str, Any]) -> str:
+    def ask(
+        self, arguments: dict[str, Any], *, abandon_after: float | None = None
+    ) -> str:
         request_id = f"cli_{uuid.uuid4().hex[:8]}"
         waiter: queue.Queue[dict[str, Any]] = queue.Queue()
         with _responses_lock:
@@ -240,9 +243,15 @@ class Session:
                 },
             }
         )
+        if abandon_after is not None:
+            time.sleep(abandon_after)
+            emit({"type": "control_cancel_request", "request_id": request_id})
+            return "ERROR: the tool call was cancelled"
         response = waiter.get()
-        result = response["response"]["mcp_response"]["result"]
-        return "\n".join(item.get("text", "") for item in result["content"])
+        reply = response["response"]["mcp_response"]
+        if "error" in reply:  # e.g. no in-process server: the tool was not granted
+            return f"ERROR: {reply['error']['message']}"
+        return "\n".join(item.get("text", "") for item in reply["result"]["content"])
 
     # --- the conversation --------------------------------------------------------
 
@@ -326,6 +335,34 @@ class Session:
         final = f"first={answers['first?']} second={answers['second?']}"
         self.say({"type": "text", "text": final})
         self.result(final)
+
+    def turn_ask_one_abandoned(self, text: str) -> None:
+        """Two questions at once; the CLI abandons the first after a second."""
+        answers: dict[str, str] = {}
+
+        def one(question: str, abandon: float | None) -> None:
+            answers[question] = self.ask({"question": question}, abandon_after=abandon)
+
+        threads = [
+            threading.Thread(target=one, args=("abandoned?", 1.0)),
+            threading.Thread(target=one, args=("kept?", None)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        final = f"abandoned={answers['abandoned?']} kept={answers['kept?']}"
+        self.say({"type": "text", "text": final})
+        self.result(final)
+
+    def turn_slow_echo(self, text: str) -> None:
+        """Each prompt its own turn: a slow 'tool', then an echo. Messages that
+        arrive meanwhile wait for their own turn (two model turns each)."""
+        tool_id = self.tool("Bash", {"command": f"sleep {self.arg or 2}"})
+        time.sleep(float(self.arg or 2))
+        self.tool_result(tool_id, "slept")
+        self.say({"type": "text", "text": f"ECHO: {text}"})
+        self.result(f"ECHO: {text}")
 
     def turn_bad_ask(self, text: str) -> None:
         answer = self.ask({"question": ""})

@@ -132,10 +132,14 @@ class RunSpec(BaseModel):
     request_id: str | None = None
     request_fingerprint: str | None = None
     cost_baseline_usd: float | None = None
+    cost_baseline_exact: bool = True
+    allow_questions: bool = False
     """``session_id`` is the Claude session this invocation writes: a fresh
     UUID for a new conversation, the parent's for a resume (the CLI keeps it).
     ``cost_baseline_usd`` is the session's cumulative cost when this
-    invocation began, because the CLI carries it across a resume."""
+    invocation began, because the CLI carries it across a resume.
+    ``allow_questions`` gives the agent the ``ask_parent`` tool; off, the
+    task can never block waiting for an answer."""
 
 
 class RunState(BaseModel):
@@ -151,9 +155,12 @@ class RunState(BaseModel):
     ``last_activity_at`` when the agent last did something observable (a
     message, a tool call or result); neither is a heartbeat.
     ``cancel_requested_at`` is set when a cancel began, before anything was
-    signalled; ``status`` says whether it finished. ``usage`` is known after
-    each completed turn; ``invocation_cost_usd`` is this invocation's share
-    of a resumed session's cumulative cost.
+    signalled; ``status`` says whether it finished. ``usage`` is this
+    invocation's usage, summed over its completed turns (tokens per turn as
+    the CLI reports them; cost as the session total's growth since the
+    invocation began), and ``invocation_cost_usd`` is its cost.
+    ``session_cost_usd`` is the Claude session's running total, which the
+    CLI carries across resumes.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -177,6 +184,7 @@ class RunState(BaseModel):
     cancel_requested_at: datetime | None = None
     final_text_path: Path | None = None
     invocation_cost_usd: float | None = None
+    session_cost_usd: float | None = None
 
     @property
     def is_terminal(self) -> bool:

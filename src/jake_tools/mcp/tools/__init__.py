@@ -3,7 +3,9 @@
 Keep handlers thin: validate arguments, raise :class:`~..errors.ToolError`,
 and delegate to a package module (``clockify_jira_sync``, ``claude_runs``).
 Blocking HTTP clients run under ``anyio.to_thread.run_sync`` so a slow apply
-cannot stall ``claude_status``.
+cannot stall ``claude_status``; so do the delegated-task operations, which
+take file locks and read the process table. A thread call is not abandoned
+on cancellation: a start or steer that began is finished and recorded.
 """
 
 from __future__ import annotations

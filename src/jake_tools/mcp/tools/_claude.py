@@ -66,9 +66,10 @@ def task_errors() -> Iterator[None]:
             detail={"session_id": exc.session_id, "task_id": exc.task_id},
         ) from exc
     except ResumeUnavailableError as exc:
-        raise ToolError(
-            "resume_unavailable", str(exc), detail={"task_id": exc.task_id}
-        ) from exc
+        detail = {"task_id": exc.task_id}
+        if exc.latest_task_id is not None:
+            detail["latest_task_id"] = exc.latest_task_id
+        raise ToolError("resume_unavailable", str(exc), detail=detail) from exc
     except TaskNotRunningError as exc:
         raise ToolError(
             "task_not_running",

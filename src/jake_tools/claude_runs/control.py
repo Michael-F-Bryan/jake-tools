@@ -140,10 +140,13 @@ class SessionBusyError(RuntimeError):
 class ResumeUnavailableError(RuntimeError):
     """The task to resume cannot be resumed (no session, or a mismatch)."""
 
-    def __init__(self, task_id: str, reason: str) -> None:
+    def __init__(
+        self, task_id: str, reason: str, *, latest_task_id: str | None = None
+    ) -> None:
         super().__init__(f"task {task_id} cannot be resumed: {reason}")
         self.task_id = task_id
         self.reason = reason
+        self.latest_task_id = latest_task_id
 
 
 class RunDefaults(BaseModel):
@@ -183,6 +186,10 @@ class StartRequest(BaseModel):
 
     ``request_id`` makes the start idempotent: the same ID with the same
     request returns the task it started; with a different one, it fails.
+
+    ``allow_questions`` lets the agent ask its parent (``ask_parent``); a
+    caller that will not watch for ``input_required`` leaves it off, so an
+    unattended task can never stall on a question nobody answers.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -197,6 +204,7 @@ class StartRequest(BaseModel):
     max_budget_usd: float | None = Field(default=None, gt=0)
     resume_task_id: str | None = None
     request_id: str | None = None
+    allow_questions: bool = False
 
     @field_validator("brief")
     @classmethod
@@ -253,6 +261,7 @@ class StartRequest(BaseModel):
         working_directory: Path,
         session_id: str,
         cost_baseline_usd: float | None = None,
+        cost_baseline_exact: bool = True,
     ) -> RunSpec:
         return RunSpec(
             task_id=task_id,
@@ -270,6 +279,8 @@ class StartRequest(BaseModel):
             request_id=self.request_id,
             request_fingerprint=self.fingerprint() if self.request_id else None,
             cost_baseline_usd=cost_baseline_usd,
+            cost_baseline_exact=cost_baseline_exact,
+            allow_questions=self.allow_questions,
         )
 
 
@@ -297,7 +308,7 @@ def start_task(
             if replay is not None:
                 return replay
         live = _live_tasks_locked(runs_dir)
-        working_directory, session_id, baseline = _session_for_locked(
+        working_directory, session_id, baseline, exact = _session_for_locked(
             runs_dir, request, live
         )
         if len(live) >= MAX_LIVE_TASKS:
@@ -309,6 +320,7 @@ def start_task(
             working_directory=working_directory,
             session_id=session_id,
             cost_baseline_usd=baseline,
+            cost_baseline_exact=exact,
         )
         run_dir = create_run_dir(runs_dir, spec, request.brief)
         update_state(
@@ -397,12 +409,14 @@ def _record_request_locked(runs_dir: Path, request: StartRequest, task_id: str) 
 
 def _session_for_locked(
     runs_dir: Path, request: StartRequest, live: list[RunState]
-) -> tuple[Path, str, float | None]:
+) -> tuple[Path, str, float | None, bool]:
     """The working directory, Claude session and cost baseline for a start.
 
     A fresh task gets a new session ID. A resume takes its parent's, after
     checking the parent ended, the session is not being written by another
-    live task, and the working directory matches (Claude keys its sessions
+    live task, the parent is the session's latest writer (resuming an older
+    task would silently continue from a later task's state), and the
+    working directory matches (Claude keys its sessions
     by directory, and a resume elsewhere would not see the same files).
     """
     if request.resume_task_id is None:
@@ -410,7 +424,7 @@ def _session_for_locked(
             raise ArgumentError(
                 "working_directory", "required unless resume_task_id is given"
             )
-        return request.working_directory, str(uuid.uuid4()), None
+        return request.working_directory, str(uuid.uuid4()), None, True
     parent_dir = task_dir(runs_dir, request.resume_task_id)
     parent = _reconcile_locked(parent_dir)
     if not parent.is_terminal:
@@ -436,12 +450,55 @@ def _session_for_locked(
     for other in live:
         if other.session_id == session_id:
             raise SessionBusyError(session_id, other.task_id)
-    baseline = None
-    result = read_result(parent_dir)
-    usage = result.usage if result is not None else parent.usage
-    if usage is not None:
-        baseline = usage.estimated_cost_usd
-    return working_directory, session_id, baseline
+    head = _session_head_locked(runs_dir, session_id, parent)
+    if head != parent.task_id:
+        raise ResumeUnavailableError(
+            parent.task_id,
+            f"task {head} has continued this Claude session since; resume that "
+            "task (the latest) instead",
+            latest_task_id=head,
+        )
+    return working_directory, session_id, *_cost_baseline(parent_dir, parent)
+
+
+def _session_head_locked(runs_dir: Path, session_id: str, parent: RunState) -> str:
+    """The latest task that wrote ``session_id``: the only valid resume handle.
+
+    "Latest" is by recorded ``created_at``: task IDs sort by creation only
+    to the second, and two tasks in one second order by their random part.
+    A failed resume never reached the session, so it does not count.
+    """
+    head, head_created = parent.task_id, parent.created_at
+    for run_dir in list_task_dirs(runs_dir):
+        if run_dir.name == parent.task_id:
+            continue
+        try:
+            spec = read_spec(run_dir)
+        except OSError, ValueError:
+            continue
+        if spec.session_id != session_id or spec.created_at <= head_created:
+            continue
+        if read_state(run_dir).termination_reason == "resume_failed":
+            continue
+        head, head_created = run_dir.name, spec.created_at
+    return head
+
+
+def _cost_baseline(parent_dir: Path, parent: RunState) -> tuple[float | None, bool]:
+    """The session's running cost where the parent left it, and whether exact.
+
+    A parent recorded by this version carries ``session_cost_usd``; an older
+    one recorded the last result's own cost, which was the session total
+    then. Only a parent that ended at a result (``completed``) is exact: a
+    limit, error or cancel mid-turn may have spent more than any result
+    reported, so the resumed invocation's cost is then an overestimate.
+    """
+    total = parent.session_cost_usd
+    if total is None:
+        result = read_result(parent_dir)
+        usage = result.usage if result is not None else parent.usage
+        total = usage.estimated_cost_usd if usage is not None else None
+    return total, total is not None and parent.status == "completed"
 
 
 def _legacy_session(run_dir: Path, *, max_lines: int = 200) -> str | None:
@@ -556,7 +613,8 @@ async def cancel_task(runs_dir: Path, task_id: str) -> RunState:
             else current.model_copy(update={"cancel_requested_at": utc_now()})
         ),
     )
-    EventLog(run_dir).append("cancel_requested")
+    if read_spec(run_dir).schema_version >= SCHEMA_VERSION:
+        EventLog(run_dir).append("cancel_requested")
     dead = await terminate_task(run_dir)
     Inbox(run_dir).close("the task was cancelled")
     if dead:

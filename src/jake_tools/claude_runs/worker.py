@@ -17,8 +17,9 @@ through :meth:`ClaudeAgent.converse`:
 - The conversation ends at a result message once nothing is queued or
   still on its way (:meth:`~.inbox.Inbox.close_if_idle`); an error result
   (turn or budget limit) ends it at once.
-- Clarification: the agent has exactly one extra tool, ``ask_parent``, an
-  in-process :class:`~jake_tools.claude.LocalTool`. Calling it records a
+- Clarification (only when ``spec.allow_questions``): the agent gets one
+  extra tool, ``ask_parent``, an in-process
+  :class:`~jake_tools.claude.LocalTool`. Calling it records a
   pending request in ``inputs/``, sets ``input_required``, and blocks until
   ``claude_update`` answers or declines it, then returns the answer as the
   tool result, so the same turn carries on. It is not a permission
@@ -130,9 +131,11 @@ ASK_DESCRIPTION = (
     "Ask the person who delegated this task a question, and wait for the "
     "answer. Use it only when you cannot continue correctly without a "
     "decision or fact that only they have; otherwise proceed and state your "
-    "assumptions in your final message. It does not grant permissions or "
-    "tools. Optional `choices` lists suggested answers. Blocks until "
-    "answered; the answer comes back as this tool's result."
+    "assumptions in your final message. It cannot grant tools, permissions "
+    "or access, so never use it to ask for them: work with the tools you "
+    "have, or say in your final message what you could not do. Optional "
+    "`choices` lists suggested answers. Blocks until answered; the answer "
+    "comes back as this tool's result."
 )
 ASK_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -214,7 +217,11 @@ async def run_worker(run_dir: Path) -> Outcome:
     progress = Progress(run_dir)
     ask = AskParent(run_dir, inbox, progress)
     agent = (
-        ClaudeAgent(defaults=agent_spec(spec, local_tools=(ask.tool(),)))
+        ClaudeAgent(
+            defaults=agent_spec(
+                spec, local_tools=(ask.tool(),) if spec.allow_questions else ()
+            )
+        )
         .with_telemetry(telemetry)
         .with_message_observer(transcript.write)
         .for_stage(STAGE)
@@ -229,14 +236,21 @@ async def run_worker(run_dir: Path) -> Outcome:
                 tg.start_soon(track_descendant_groups, run_dir)
                 outcome = await driver.run()
                 tg.cancel_scope.cancel()
-        if run_scope.cancel_called:
+        # An outcome the conversation already reached stands even if a
+        # SIGTERM or the deadline lands during the CLI's shutdown: the work
+        # was done; ``_finish`` still sweeps every process before recording.
+        if driver.resolved is not None:
+            outcome = driver.resolved
+        elif run_scope.cancel_called:
             outcome = driver.partial("cancelled", "cancelled")
         if outcome is None:  # pragma: no cover - defensive; the scope says why
             outcome = driver.partial(
                 "failed", "sdk_error", error="worker ended without an outcome"
             )
     except BaseException as exc:
-        outcome = driver.partial("failed", "sdk_error", error=_describe(exc))
+        outcome = driver.resolved or driver.partial(
+            "failed", "sdk_error", error=_describe(exc)
+        )
         _finish(run_dir, spec, outcome, transcript, inbox, events)
         raise
     _finish(run_dir, spec, outcome, transcript, inbox, events)
@@ -282,6 +296,13 @@ class Driver:
         self.events = events
         self.progress = progress
         self.last_result: ResultView | None = None
+        self.usage: Usage | None = None
+        self.resolved: Outcome | None = None
+        self.model_turns: set[str] = set()
+        """Distinct assistant message IDs: model turns across every prompt.
+        The CLI's own ``--max-turns`` and ``num_turns`` restart with each
+        user message (observed, CLI 2.1.293), so a steered task enforces
+        ``max_turns`` for the whole invocation here."""
         self.saw_init = False
         self._send_lock = anyio.Lock()
 
@@ -289,10 +310,15 @@ class Driver:
         timeout = self.spec.timeout_seconds
         with anyio.move_on_after(timeout):
             try:
-                async with self.agent.converse() as conversation:
-                    return await self._drive(conversation)
+                async with self.agent.converse(
+                    cost_baseline_usd=self.spec.cost_baseline_usd
+                ) as conversation:
+                    self.resolved = await self._drive(conversation)
             except Exception as exc:
-                return self._failure(exc)
+                if self.resolved is None:
+                    self.resolved = self._failure(exc)
+        if self.resolved is not None:
+            return self.resolved
         return self.partial(
             "failed", "timeout", error=f"the task exceeded its {timeout:g}s timeout"
         )
@@ -306,7 +332,7 @@ class Driver:
             status=status,
             reason=reason,
             final_text=last.text if last is not None else None,
-            usage=last.usage if last is not None else None,
+            usage=self.usage,
             error=error,
         )
 
@@ -371,18 +397,30 @@ class Driver:
                 continue
             for kind, fields in events_from_view(view):
                 self.progress.note(self.events.append(kind, **fields))
+            if view.kind == "assistant" and view.message_id:
+                self.model_turns.add(view.message_id)
+                if len(self.model_turns) > self.spec.max_turns:
+                    return self.partial(
+                        "failed",
+                        "max_turns",
+                        error=(
+                            f"the task used more than its max_turns="
+                            f"{self.spec.max_turns} model turns across all prompts"
+                        ),
+                    )
             if view.result is None:
                 continue
             result = view.result
             self.last_result = result
-            self.progress.record_usage(result.usage, self.spec.cost_baseline_usd)
+            self.usage = conversation.usage
+            self.progress.record_usage(self.usage, conversation.session_cost_usd)
             if result.is_error:
                 reason = _SUBTYPE_REASONS.get(result.subtype, "sdk_error")
                 return Outcome(
                     status="failed",
                     reason=reason,
                     final_text=result.text,
-                    usage=result.usage,
+                    usage=self.usage,
                     error=_result_error(result),
                 )
             async with self._send_lock:
@@ -391,7 +429,7 @@ class Driver:
                         status="completed",
                         reason="finished",
                         final_text=result.text,
-                        usage=result.usage,
+                        usage=self.usage,
                     )
         return self.partial(
             "failed",
@@ -443,42 +481,27 @@ class AskParent:
                 ),
                 is_error=True,
             )
-        request = self.inbox.ask(question, list(raw_choices))
         self.progress.flush()
-        self._sync_status()
+        request = self.inbox.ask(question, list(raw_choices))  # -> input_required
         log.info("asked parent %s", request.request_id)
-        while True:
-            current = self.inbox.read_input(request.request_id)
-            if current is not None and current.state != "pending":
-                break
-            await anyio.sleep(ANSWER_POLL_SECONDS)
-        self._sync_status()
+        try:
+            while True:
+                current = self.inbox.read_input(request.request_id)
+                if current is not None and current.state != "pending":
+                    break
+                await anyio.sleep(ANSWER_POLL_SECONDS)
+        except anyio.get_cancelled_exc_class():
+            # The CLI abandoned this tool call, or the task is ending. Either
+            # way no answer will be used: withdraw it so it does not sit
+            # pending (another open question keeps input_required).
+            with anyio.CancelScope(shield=True):
+                self.inbox.withdraw(
+                    request.request_id,
+                    "the question was withdrawn: its tool call ended",
+                )
+            raise
+        self.inbox.sync_status()
         return _answer_text(current)
-
-    def _sync_status(self) -> None:
-        """``input_required`` while any request is pending, else ``working``.
-
-        Decided under the inbox lock, so a request asked concurrently can
-        never be left pending under a ``working`` status.
-        """
-        with self.inbox.locked():
-            pending = self.inbox.pending_inputs()
-            message = (
-                f"Waiting for an answer: {pending[0].question.strip().splitlines()[0]}"
-                if pending
-                else None
-            )
-
-            def transition(state: RunState) -> RunState:
-                if state.is_terminal:
-                    return state
-                if pending:
-                    return state.model_copy(
-                        update={"status": "input_required", "status_message": message}
-                    )
-                return state.model_copy(update={"status": "working"})
-
-            update_state(self.run_dir, transition)
 
 
 def _answer_text(request: InputRequest) -> LocalToolResult:
@@ -510,6 +533,7 @@ class Progress:
         self.last_activity_at: datetime | None = None
         self.usage: Usage | None = None
         self.invocation_cost_usd: float | None = None
+        self.session_cost_usd: float | None = None
         self._last_flush = 0.0
         self._dirty = False
 
@@ -535,9 +559,10 @@ class Progress:
         ):
             self.flush()
 
-    def record_usage(self, usage: Usage, baseline: float | None) -> None:
+    def record_usage(self, usage: Usage | None, session_cost_usd: float | None) -> None:
         self.usage = usage
-        self.invocation_cost_usd = invocation_cost(usage, baseline)
+        self.invocation_cost_usd = usage.estimated_cost_usd if usage else None
+        self.session_cost_usd = session_cost_usd
         self.flush()
 
     def flush(self) -> None:
@@ -548,6 +573,7 @@ class Progress:
                 "last_activity_at": self.last_activity_at or state.last_activity_at,
                 "usage": self.usage or state.usage,
                 "invocation_cost_usd": self.invocation_cost_usd,
+                "session_cost_usd": self.session_cost_usd,
             }
             if state.status != "input_required" and self.status_message is not None:
                 update["status_message"] = self.status_message
@@ -556,13 +582,6 @@ class Progress:
         update_state(self.run_dir, transition)
         self._last_flush = time.monotonic()
         self._dirty = False
-
-
-def invocation_cost(usage: Usage | None, baseline: float | None) -> float | None:
-    """This invocation's cost: the session's cumulative cost minus where it began."""
-    if usage is None or usage.estimated_cost_usd is None:
-        return None
-    return max(0.0, usage.estimated_cost_usd - (baseline or 0.0))
 
 
 def _finish(
@@ -600,7 +619,7 @@ def _record(run_dir: Path, spec: RunSpec, outcome: Outcome, events: EventLog) ->
     final_path = (
         write_final_text(run_dir, outcome.final_text) if outcome.final_text else None
     )
-    cost = invocation_cost(outcome.usage, spec.cost_baseline_usd)
+    cost = outcome.usage.estimated_cost_usd if outcome.usage is not None else None
     write_result(
         run_dir,
         RunResult(

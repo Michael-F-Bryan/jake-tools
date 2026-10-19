@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from anyio import to_thread
 from mcp.server.fastmcp import FastMCP
 from pydantic import TypeAdapter
 
@@ -47,4 +48,4 @@ def register(app: FastMCP, config: Config) -> None:
             )
         with task_errors():
             parsed = _RESPONSES.validate_python(responses)
-            return service.respond(task_id, parsed)
+            return await to_thread.run_sync(service.respond, task_id, parsed)

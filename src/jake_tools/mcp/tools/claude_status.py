@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from anyio import to_thread
 from mcp.server.fastmcp import FastMCP
 
 from ...claude_runs import RunState
@@ -32,4 +33,4 @@ def register(app: FastMCP, config: Config) -> None:
     )
     async def claude_status(task_id: str) -> RunState:
         with task_errors():
-            return service.status(task_id)
+            return await to_thread.run_sync(service.status, task_id)

@@ -10,6 +10,11 @@ its parent, is a small file in the run directory, changed only under
 - ``inputs/<request_id>.json`` (:class:`~.models.InputRequest`): written
   ``pending`` by the worker's ``ask_parent`` tool, answered or declined by
   the server, ``expired`` when the task ends first.
+- ``status.json``'s ``input_required``/``working`` is derived from the
+  pending requests inside the same lock that changes them
+  (:meth:`Inbox._sync_status_locked`), so a status snapshot never shows
+  ``input_required`` with nothing pending, or ``working`` with a question
+  open. (Lock order: inbox, then status, then events.)
 - ``inbox.closed``: once present, no message is accepted. The worker
   creates it only when its conversation is idle with nothing queued, and
   every way a task ends creates it while sweeping what is left; both happen
@@ -33,7 +38,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .events import EventLog
-from .models import CALLER_ID_PATTERN, InputRequest, SteerMessage
+from .models import CALLER_ID_PATTERN, InputRequest, RunState, SteerMessage
 from .rundir import (
     DIR_MODE,
     INBOX_CLOSED_FILE,
@@ -41,6 +46,7 @@ from .rundir import (
     INPUTS_DIR,
     MESSAGES_DIR,
     file_lock,
+    update_state,
     utc_now,
     write_model,
     write_text,
@@ -289,7 +295,55 @@ class Inbox:
                 text_chars=len(question),
                 choices=choices or None,
             )
+            self._sync_status_locked()
         return request
+
+    def withdraw(self, request_id: str, reason: str) -> None:
+        """Expire a still-pending request whose tool call was abandoned."""
+        with self.locked():
+            current = self.read_input(request_id)
+            if current is not None and current.state == "pending":
+                self._save_input(
+                    current.model_copy(update={"state": "expired", "reason": reason})
+                )
+                self.events.append(
+                    "input_expired", request_id=request_id, detail={"reason": reason}
+                )
+            self._sync_status_locked()
+
+    def sync_status(self) -> None:
+        with self.locked():
+            self._sync_status_locked()
+
+    def _sync_status_locked(self) -> None:
+        """``input_required`` while any request is pending, else ``working``.
+
+        Never touches a terminal state, and only leaves ``input_required``
+        (not some other non-terminal state) when nothing is pending.
+        """
+        pending = self.pending_inputs()
+
+        def transition(state: RunState) -> RunState:
+            if state.is_terminal:
+                return state
+            if pending:
+                first = pending[0].question.strip().splitlines()[0]
+                return state.model_copy(
+                    update={
+                        "status": "input_required",
+                        "status_message": f"Waiting for an answer: {first}",
+                    }
+                )
+            if state.status != "input_required":
+                return state
+            return state.model_copy(
+                update={
+                    "status": "working",
+                    "status_message": "Answer received; continuing",
+                }
+            )
+
+        update_state(self.run_dir, transition)
 
     # --- clarification (server side) -----------------------------------------
 
@@ -305,6 +359,7 @@ class Inbox:
         with self.locked():
             for request_id, response in responses.items():
                 results.append(self._respond_locked(request_id, response))
+            self._sync_status_locked()
         return results
 
     def _respond_locked(self, request_id: str, response: InputResponse) -> AnswerResult:
@@ -356,11 +411,26 @@ class Inbox:
 
         Queued messages become ``not_delivered`` (or, if a write had begun,
         ``not_delivered`` saying delivery is unknown) and pending requests
-        ``expired``, each with ``reason``. Idempotent.
+        ``expired``, each with ``reason``. A ``delivered`` message the CLI
+        never echoed keeps its state (it was written) and gains a reason
+        saying it was never confirmed in the conversation. Idempotent.
         """
         with self.locked():
             write_text(self.run_dir / INBOX_CLOSED_FILE, "")
             for message in self.messages():
+                if message.state == "delivered" and message.reason is None:
+                    self._save(
+                        message.model_copy(
+                            update={
+                                "reason": (
+                                    f"{reason}; it was written to Claude's input, but "
+                                    "Claude Code never confirmed adding it to the "
+                                    "conversation"
+                                )
+                            }
+                        )
+                    )
+                    continue
                 if message.state != "queued":
                     continue
                 why = reason

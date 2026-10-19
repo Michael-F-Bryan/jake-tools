@@ -104,6 +104,7 @@ class Limits(BaseModel):
     max_turns: int
     timeout_seconds: float
     max_budget_usd: float
+    allow_questions: bool
     deadline_at: datetime | None
     """``started_at + timeout_seconds``: the wall clock keeps running while
     the task waits for an answer."""
@@ -140,7 +141,9 @@ class TaskResult(BaseModel):
     the last completed turn's answer, if any, and ``last_narration`` is the
     agent's latest public message, as recovery context. ``resumable`` means
     a Claude session is on record for ``claude_start(resume_task_id=...)``;
-    Claude Code may still have deleted it (its own retention applies).
+    only the session's latest task is accepted there (an older one gets
+    ``resume_unavailable`` naming the latest), and Claude Code may still
+    have deleted the session (its own retention applies).
     """
 
     outcome: RunStatus
@@ -183,6 +186,11 @@ class TaskView(BaseModel):
     resumed_from: str | None = None
     usage: Usage | None = None
     invocation_cost_usd: float | None = None
+    invocation_cost_exact: bool = True
+    """False for a resume whose parent ended mid-turn: the session may have
+    spent more than its last result reported, so this invocation's cost
+    (measured from that report) may be overstated."""
+    session_cost_usd: float | None = None
     limits: Limits
     pending_inputs: list[InputRequest] = Field(default_factory=list)
     messages: list[SteerStatus] = Field(default_factory=list)
@@ -325,7 +333,7 @@ class TaskService:
             elif now >= deadline:
                 reason = "deadline"
             if reason is not None:
-                view = build_view(run_dir, state)
+                view = await to_thread.run_sync(build_view, run_dir, state)
                 return PollResult(
                     **view.model_dump(),
                     events=page.events,
@@ -451,6 +459,8 @@ def build_view(run_dir: Path, state: RunState) -> TaskView:
         resumed_from=state.resumed_from or spec.resume_task_id,
         usage=state.usage,
         invocation_cost_usd=state.invocation_cost_usd,
+        invocation_cost_exact=spec.cost_baseline_exact,
+        session_cost_usd=state.session_cost_usd,
         limits=Limits(
             model=spec.model,
             effort=spec.effort,
@@ -458,6 +468,7 @@ def build_view(run_dir: Path, state: RunState) -> TaskView:
             max_turns=spec.max_turns,
             timeout_seconds=spec.timeout_seconds,
             max_budget_usd=spec.max_budget_usd,
+            allow_questions=spec.allow_questions,
             deadline_at=deadline,
         ),
         pending_inputs=[r for r in inbox.inputs() if r.state == "pending"],

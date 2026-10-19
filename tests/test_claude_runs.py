@@ -898,6 +898,7 @@ async def test_stdio_lists_the_claude_tools(
         "max_budget_usd",
         "resume_task_id",
         "request_id",
+        "allow_questions",
     }
     assert tools["claude_status"].inputSchema["required"] == ["task_id"]
     assert tools["claude_cancel"].inputSchema["required"] == ["task_id"]

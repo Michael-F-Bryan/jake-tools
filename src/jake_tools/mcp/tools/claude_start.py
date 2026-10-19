@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import get_args
 
+from anyio import to_thread
 from mcp.server.fastmcp import FastMCP
 
 from ...claude import EffortLevel
@@ -27,14 +28,18 @@ def register(app: FastMCP, config: Config) -> None:
             "nothing else). `working_directory` must be an absolute path to an "
             "existing directory. `tools` is the explicit built-in grant from "
             f"{', '.join(BUILTIN_TOOLS)}; the default is none, and Bash is a "
-            "broad capability, not a sandbox. The worker can always ask you a "
-            "question (status input_required; answer with claude_update). "
+            "broad capability, not a sandbox. `allow_questions=true` lets the "
+            "worker ask you questions (status input_required; answer with "
+            "claude_update); leave it off unless you will watch with "
+            "claude_poll, or an unanswered question stalls the task until its "
+            "timeout. "
             f"`model`, `effort` ({'|'.join(get_args(EffortLevel))}), `max_turns`, "
             "`timeout_seconds` (wall clock, including time waiting for your "
             "answers) and `max_budget_usd` default to the server's "
             "configuration and are hard limits. `resume_task_id` continues a "
             "finished task's Claude conversation as a NEW task: tools and "
-            "limits are this call's own (nothing is inherited), and "
+            "limits (and allow_questions) are this call's own (nothing is "
+            "inherited), and "
             "working_directory must be the parent's (omit it to use it). "
             "`request_id` (1-128 of [A-Za-z0-9._:-]) makes the call safe to "
             "retry: the same id and request return the original task "
@@ -56,6 +61,7 @@ def register(app: FastMCP, config: Config) -> None:
         max_budget_usd: float | None = None,
         resume_task_id: str | None = None,
         request_id: str | None = None,
+        allow_questions: bool = False,
     ) -> ClaudeStartResult:
         with task_errors():
             request = StartRequest.model_validate(
@@ -70,6 +76,7 @@ def register(app: FastMCP, config: Config) -> None:
                     "max_budget_usd": max_budget_usd,
                     "resume_task_id": resume_task_id,
                     "request_id": request_id,
+                    "allow_questions": allow_questions,
                 }
             )
-            return service.start(request)
+            return await to_thread.run_sync(service.start, request)
