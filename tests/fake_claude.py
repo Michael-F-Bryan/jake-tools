@@ -14,7 +14,11 @@ echoes each user message (with its ``uuid``) when it enters the
 conversation, and ends each turn with a ``result``. A user message that
 arrives while a "tool" runs is echoed after the tool result, inside the
 same turn, as the real CLI does. ``ask`` calls the worker's in-process
-``ask_parent`` tool with a ``control_request`` ``mcp_message``.
+``ask_parent`` tool with a ``control_request`` ``mcp_message``. As the real
+CLI does (observed on 2.1.293), it first performs the MCP handshake
+(``initialize``, ``notifications/initialized``, ``tools/list``), gives each
+request a fresh JSON-RPC id, and abandons a running call with
+``notifications/cancelled`` for that id.
 
 The scenario comes from a marker in the first user message:
 ``[[scenario:NAME]]`` or ``[[scenario:NAME:ARG]]``. Sessions persist as
@@ -25,6 +29,7 @@ invocation's argv is saved to ``$FAKE_CLAUDE_STATE/argv-<n>.json``.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import queue
@@ -45,6 +50,9 @@ _out_lock = threading.Lock()
 _inbox: queue.Queue[dict[str, Any] | None] = queue.Queue()
 _responses: dict[str, queue.Queue[dict[str, Any]]] = {}
 _responses_lock = threading.Lock()
+_rpc_ids = itertools.count(1)
+_handshake_lock = threading.Lock()
+_handshake_done = False
 
 
 def emit(message: dict[str, Any]) -> None:
@@ -82,6 +90,62 @@ def reader() -> None:
         elif kind == "user":
             _inbox.put(message)
     _inbox.put(None)
+
+
+def send_mcp(message: dict[str, Any]) -> tuple[str, queue.Queue[dict[str, Any]]]:
+    """Send one JSON-RPC message to the ``jake`` SDK server; its reply queue."""
+    request_id = f"cli_{uuid.uuid4().hex[:8]}"
+    waiter: queue.Queue[dict[str, Any]] = queue.Queue()
+    with _responses_lock:
+        _responses[request_id] = waiter
+    emit(
+        {
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {
+                "subtype": "mcp_message",
+                "server_name": "jake",
+                "message": message,
+            },
+        }
+    )
+    return request_id, waiter
+
+
+def mcp_reply(response: dict[str, Any]) -> dict[str, Any]:
+    if response.get("subtype") == "error":  # the SDK has no such server
+        return {"error": {"message": str(response.get("error"))}}
+    return response["response"]["mcp_response"]
+
+
+def handshake() -> None:
+    """``initialize``, ``notifications/initialized``, ``tools/list``; once."""
+    global _handshake_done
+    with _handshake_lock:
+        if _handshake_done:
+            return
+        _, waiter = send_mcp(
+            {
+                "jsonrpc": "2.0",
+                "id": next(_rpc_ids),
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "claude-code", "version": VERSION},
+                },
+            }
+        )
+        if "error" not in mcp_reply(waiter.get()):
+            _, waiter = send_mcp(
+                {"jsonrpc": "2.0", "method": "notifications/initialized"}
+            )
+            waiter.get()
+            _, waiter = send_mcp(
+                {"jsonrpc": "2.0", "id": next(_rpc_ids), "method": "tools/list"}
+            )
+            waiter.get()
+        _handshake_done = True
 
 
 class Session:
@@ -223,32 +287,27 @@ class Session:
     def ask(
         self, arguments: dict[str, Any], *, abandon_after: float | None = None
     ) -> str:
-        request_id = f"cli_{uuid.uuid4().hex[:8]}"
-        waiter: queue.Queue[dict[str, Any]] = queue.Queue()
-        with _responses_lock:
-            _responses[request_id] = waiter
-        emit(
+        handshake()
+        rpc_id = next(_rpc_ids)
+        _, waiter = send_mcp(
             {
-                "type": "control_request",
-                "request_id": request_id,
-                "request": {
-                    "subtype": "mcp_message",
-                    "server_name": "jake",
-                    "message": {
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "tools/call",
-                        "params": {"name": "ask_parent", "arguments": arguments},
-                    },
-                },
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "method": "tools/call",
+                "params": {"name": "ask_parent", "arguments": arguments},
             }
         )
         if abandon_after is not None:
             time.sleep(abandon_after)
-            emit({"type": "control_cancel_request", "request_id": request_id})
+            send_mcp(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/cancelled",
+                    "params": {"requestId": rpc_id, "reason": "AbortError"},
+                }
+            )
             return "ERROR: the tool call was cancelled"
-        response = waiter.get()
-        reply = response["response"]["mcp_response"]
+        reply = mcp_reply(waiter.get())
         if "error" in reply:  # e.g. no in-process server: the tool was not granted
             return f"ERROR: {reply['error']['message']}"
         return "\n".join(item.get("text", "") for item in reply["result"]["content"])

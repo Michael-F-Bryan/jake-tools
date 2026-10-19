@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from anyio import to_thread
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from ...claude_runs.inbox import MAX_MESSAGE_CHARS, SteerSubmission
 from ...claude_runs.service import SteerResult
@@ -12,7 +12,7 @@ from ..server import structured_tool
 from ._claude import task_errors, task_service
 
 
-def register(app: FastMCP, config: Config) -> None:
+def register(app: MCPServer, config: Config) -> None:
     service = task_service(config)
 
     @structured_tool(

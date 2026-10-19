@@ -12,7 +12,7 @@ import functools
 from urllib.parse import urlsplit
 
 import anyio.to_thread
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from ...clockify import ClockifyClient, ClockifyError
 from ...clockify_jira_sync import (
@@ -56,7 +56,7 @@ Never deletes anything in Clockify or Jira, and never writes to Jira.
 """
 
 
-def register(app: FastMCP, config: Config) -> None:
+def register(app: MCPServer, config: Config) -> None:
     @structured_tool(app, name="clockify_jira_sync", description=DESCRIPTION)
     async def clockify_jira_sync(
         issues: list[str] | None = None,

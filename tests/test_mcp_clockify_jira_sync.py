@@ -290,16 +290,16 @@ async def _call(
 
 
 def _ok(result: CallToolResult) -> dict[str, Any]:
-    assert result.isError is False, result.structuredContent
-    assert result.structuredContent is not None
-    return result.structuredContent
+    assert result.is_error is False, result.structured_content
+    assert result.structured_content is not None
+    return result.structured_content
 
 
 def _err(result: CallToolResult, code: str) -> dict[str, Any]:
-    assert result.isError is True
-    assert result.structuredContent is not None
-    assert result.structuredContent["code"] == code, result.structuredContent
-    return result.structuredContent
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == code, result.structured_content
+    return result.structured_content
 
 
 # --- Discovery and arguments ----------------------------------------------------
@@ -312,11 +312,11 @@ async def test_tool_is_listed_with_its_input_schema(
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
 
     tool = tools["clockify_jira_sync"]
-    properties = tool.inputSchema["properties"]
+    properties = tool.input_schema["properties"]
     assert set(properties) == {"issues", "apply", "plan_digest"}
     assert properties["apply"]["default"] is False
-    assert tool.inputSchema.get("required", []) == []
-    assert tool.outputSchema is None
+    assert tool.input_schema.get("required", []) == []
+    assert tool.output_schema is None
     assert tool.description is not None
     assert "planned or underway" in tool.description
     assert "plan_digest" in tool.description
@@ -723,7 +723,7 @@ async def test_live_preview_matches_cli_dry_run_json_byte_for_byte(
         check=False,
     )
 
-    assert result.isError is False, result.structuredContent
+    assert result.is_error is False, result.structured_content
     text = result.content[0]
     assert isinstance(text, TextContent)
     assert completed.stdout == f"{text.text}\n"

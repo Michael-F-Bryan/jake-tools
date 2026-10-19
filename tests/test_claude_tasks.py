@@ -44,18 +44,18 @@ def runs_dir(mcp_home: Path) -> Path:
 
 async def call(session: ClientSession, tool: str, **arguments: Any) -> dict[str, Any]:
     result = await session.call_tool(tool, arguments)
-    assert result.isError is False, result.structuredContent
-    assert result.structuredContent is not None
-    return result.structuredContent
+    assert result.is_error is False, result.structured_content
+    assert result.structured_content is not None
+    return result.structured_content
 
 
 async def call_error(
     session: ClientSession, tool: str, **arguments: Any
 ) -> dict[str, Any]:
     result = await session.call_tool(tool, arguments)
-    assert result.isError is True, result.structuredContent
-    assert result.structuredContent is not None
-    return result.structuredContent
+    assert result.is_error is True, result.structured_content
+    assert result.structured_content is not None
+    return result.structured_content
 
 
 async def start(
@@ -145,13 +145,13 @@ async def test_stdio_lists_the_delegation_tools_with_their_arguments(
         "claude_cancel": {"task_id"},
     }
     for name, required in expected.items():
-        assert set(tools[name].inputSchema.get("required", [])) == required, name
-        assert tools[name].outputSchema is None
+        assert set(tools[name].input_schema.get("required", [])) == required, name
+        assert tools[name].output_schema is None
     assert {"resume_task_id", "request_id", "allow_questions"} <= set(
-        tools["claude_start"].inputSchema["properties"]
+        tools["claude_start"].input_schema["properties"]
     )
     assert {"cursor", "wait_seconds", "limit"} <= set(
-        tools["claude_poll"].inputSchema["properties"]
+        tools["claude_poll"].input_schema["properties"]
     )
 
 

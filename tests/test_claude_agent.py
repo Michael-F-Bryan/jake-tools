@@ -619,7 +619,8 @@ def test_local_tools_are_served_in_process_and_auto_approved() -> None:
 
 
 async def test_local_tool_handler_result_reaches_the_sdk_server() -> None:
-    from mcp.types import CallToolRequest, CallToolRequestParams
+    from mcp.client import Client
+    from mcp.types import TextContent
 
     from jake_tools.claude import LocalTool, LocalToolResult
 
@@ -638,21 +639,16 @@ async def test_local_tool_handler_result_reaches_the_sdk_server() -> None:
     options = AgentSpec(local_tools=(ask,)).to_options()
     assert isinstance(options.mcp_servers, dict)
     server = options.mcp_servers["jake"]["instance"]  # type: ignore[typeddict-item]
-    call = server.request_handlers[CallToolRequest]
 
-    result = await call(
-        CallToolRequest(
-            method="tools/call",
-            params=CallToolRequestParams(
-                name="ask_parent", arguments={"question": "?"}
-            ),
-        )
-    )
+    # The SDK's own in-process server, driven through mcp's public client.
+    async with Client(server) as client:
+        result = await client.call_tool("ask_parent", {"question": "?"})
 
     assert received == [{"question": "?"}]
-    payload = result.root.model_dump()
-    assert payload["isError"] is True
-    assert payload["content"][0]["text"] == "no such choice"
+    assert result.is_error is True
+    text = result.content[0]
+    assert isinstance(text, TextContent)
+    assert text.text == "no such choice"
 
 
 def test_session_options_pass_through() -> None:

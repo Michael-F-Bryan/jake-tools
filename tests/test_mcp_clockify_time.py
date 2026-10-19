@@ -14,7 +14,6 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from mcp import ClientSession
-from pydantic import AnyUrl
 from test_clockify_time import END, START, entry
 
 ServerFactory = Callable[..., AbstractAsyncContextManager[ClientSession]]
@@ -167,17 +166,17 @@ async def test_discovery_history_catalogue_and_verified_create(
     async with mcp_server(clockify_env) as session:
         tools = {t.name: t for t in (await session.list_tools()).tools}
         assert {"start", "end", "description", "billable"} == set(
-            tools["clockify_create_time_entry"].inputSchema["required"]
+            tools["clockify_create_time_entry"].input_schema["required"]
         )
-        assert tools["clockify_time_entries"].outputSchema is None
-        skill = await session.read_resource(AnyUrl("skill://clockify-time"))
+        assert tools["clockify_time_entries"].output_schema is None
+        skill = await session.read_resource("skill://clockify-time")
         assert "post_uncertain" in str(skill)
         assert "clockify_create_time_entry" in str(skill)
         history = await session.call_tool(
             "clockify_time_entries", {"start": START, "end": END, "limit": 1}
         )
-        assert not history.isError, history.structuredContent
-        report = history.structuredContent
+        assert not history.is_error, history.structured_content
+        report = history.structured_content
         assert report is not None
         assert report["entries"][0]["entry"]["id"] == "old"
         assert report["entries"][0]["running"]
@@ -185,16 +184,16 @@ async def test_discovery_history_catalogue_and_verified_create(
             "clockify_time_entries",
             {"start": START, "end": END, "limit": 1, "cursor": report["next_cursor"]},
         )
-        assert second.structuredContent is not None
-        assert second.structuredContent["entries"][0]["entry"]["id"] == "completed"
+        assert second.structured_content is not None
+        assert second.structured_content["entries"][0]["entry"]["id"] == "completed"
         catalogue = await session.call_tool("clockify_workspace_catalogue", {})
-        assert not catalogue.isError, catalogue.structuredContent
-        assert catalogue.structuredContent is not None
-        assert [p["archived"] for p in catalogue.structuredContent["projects"]] == [
+        assert not catalogue.is_error, catalogue.structured_content
+        assert catalogue.structured_content is not None
+        assert [p["archived"] for p in catalogue.structured_content["projects"]] == [
             False,
             True,
         ]
-        assert {t["status"] for t in catalogue.structuredContent["tasks"]} == {
+        assert {t["status"] for t in catalogue.structured_content["tasks"]} == {
             "ACTIVE",
             "DONE",
         }
@@ -209,18 +208,18 @@ async def test_discovery_history_catalogue_and_verified_create(
                 "task_id": "t-1",
             },
         )
-        assert not result.isError, result.structuredContent
+        assert not result.is_error, result.structured_content
         assert (
-            result.structuredContent is not None
-            and result.structuredContent["verified"]
+            result.structured_content is not None
+            and result.structured_content["verified"]
         )
         history = await session.call_tool(
             "clockify_time_entries", {"start": START, "end": END}
         )
-        assert history.structuredContent is not None
+        assert history.structured_content is not None
         created = next(
             r
-            for r in history.structuredContent["entries"]
+            for r in history.structured_content["entries"]
             if r["entry"]["id"] == "created"
         )
         assert (created["project_name"], created["task_name"]) == ("Project", "Task")
@@ -239,10 +238,10 @@ async def test_real_upstream_pagination_is_unfiltered(
         result = await session.call_tool(
             "clockify_time_entries", {"start": START, "end": END}
         )
-    assert not result.isError, result.structuredContent
-    assert result.structuredContent is not None
-    assert result.structuredContent["total"] == 1
-    assert result.structuredContent["coverage"]["reads"][0]["pages"] == 2
+    assert not result.is_error, result.structured_content
+    assert result.structured_content is not None
+    assert result.structured_content["total"] == 1
+    assert result.structured_content["coverage"]["reads"][0]["pages"] == 2
     assert [
         q["page"]
         for _, path, q in upstream.requests
@@ -272,15 +271,15 @@ async def test_create_errors_include_known_id_never_retry(
             "clockify_create_time_entry",
             {"start": START, "end": END, "description": "work", "billable": False},
         )
-    assert result.isError and result.structuredContent is not None
-    assert result.structuredContent["code"] == "upstream_error"
-    assert result.structuredContent["detail"] == {
+    assert result.is_error and result.structured_content is not None
+    assert result.structured_content["code"] == "upstream_error"
+    assert result.structured_content["detail"] == {
         "integration": "clockify",
         "outcome": expected,
         "created_entry_id": known_id,
         "retry_safe": False,
     }
-    assert "secret response" not in json.dumps(result.structuredContent)
+    assert "secret response" not in json.dumps(result.structured_content)
     assert len(upstream.posts) == 1
 
 
@@ -325,8 +324,8 @@ async def test_validation_and_allowlist(
 ) -> None:
     async with mcp_server(clockify_env) as session:
         result = await session.call_tool(tool, args)
-    assert result.isError and result.structuredContent is not None
-    assert result.structuredContent["code"] == code
+    assert result.is_error and result.structured_content is not None
+    assert result.structured_content["code"] == code
     assert upstream.posts == []
 
 
@@ -336,16 +335,16 @@ async def test_missing_allowlist_and_clockify_credentials(
     async with mcp_server(mcp_env) as session:
         result = await session.call_tool("clockify_workspace_catalogue", {})
         assert (
-            result.structuredContent is not None
-            and result.structuredContent["code"] == "access_denied"
+            result.structured_content is not None
+            and result.structured_content["code"] == "access_denied"
         )
     async with mcp_server(
         {**mcp_env, "JAKE_TOOLS_CLOCKIFY_WORKSPACES": "ws-1"}
     ) as session:
         result = await session.call_tool("clockify_workspace_catalogue", {})
         assert (
-            result.structuredContent is not None
-            and result.structuredContent["code"] == "missing_credentials"
+            result.structured_content is not None
+            and result.structured_content["code"] == "missing_credentials"
         )
 
 
@@ -354,13 +353,13 @@ async def test_upstream_error_is_sanitised(
 ) -> None:
     async with mcp_server({**clockify_env, "CLOCKIFY_API_KEY": "wrong-key"}) as session:
         result = await session.call_tool("clockify_workspace_catalogue", {})
-    assert result.isError and result.structuredContent is not None
-    assert result.structuredContent["code"] == "upstream_error"
+    assert result.is_error and result.structured_content is not None
+    assert result.structured_content["code"] == "upstream_error"
     assert (
-        result.structuredContent["message"]
+        result.structured_content["message"]
         == "Clockify error: GET /workspaces/ws-1/clients returned HTTP 401"
     )
-    wire = json.dumps(result.structuredContent)
+    wire = json.dumps(result.structured_content)
     assert "wrong-key" not in wire and "never expose upstream body" not in wire
 
 
@@ -381,7 +380,7 @@ async def test_task_mismatch_no_mutation(
             },
         )
     assert (
-        result.structuredContent is not None
-        and result.structuredContent["code"] == "invalid_argument"
+        result.structured_content is not None
+        and result.structured_content["code"] == "invalid_argument"
     )
     assert upstream.posts == []

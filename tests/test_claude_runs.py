@@ -883,7 +883,7 @@ async def test_stdio_lists_the_claude_tools(
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
 
     assert {"claude_start", "claude_status", "claude_cancel"} <= set(tools)
-    start = tools["claude_start"].inputSchema
+    start = tools["claude_start"].input_schema
     # working_directory is required unless resume_task_id is given; the
     # handler enforces that (invalid_argument), the schema cannot.
     assert start["required"] == ["brief"]
@@ -900,10 +900,10 @@ async def test_stdio_lists_the_claude_tools(
         "request_id",
         "allow_questions",
     }
-    assert tools["claude_status"].inputSchema["required"] == ["task_id"]
-    assert tools["claude_cancel"].inputSchema["required"] == ["task_id"]
+    assert tools["claude_status"].input_schema["required"] == ["task_id"]
+    assert tools["claude_cancel"].input_schema["required"] == ["task_id"]
     for name in ("claude_start", "claude_status", "claude_cancel"):
-        assert tools[name].outputSchema is None
+        assert tools[name].output_schema is None
 
 
 @pytest.mark.parametrize(
@@ -938,10 +938,10 @@ async def test_stdio_claude_start_rejects_bad_arguments_without_creating_a_run(
     async with mcp_server(mcp_env) as session:
         result = await session.call_tool("claude_start", arguments)
 
-    assert result.isError is True
-    assert result.structuredContent is not None
-    assert result.structuredContent["code"] == "invalid_argument"
-    assert result.structuredContent["detail"] == {"argument": argument}
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "invalid_argument"
+    assert result.structured_content["detail"] == {"argument": argument}
     runs_dir = mcp_home / ".local" / "state" / "jake-tools" / "runs"
     assert not runs_dir.exists() or not any(runs_dir.iterdir())
 
@@ -954,13 +954,13 @@ async def test_stdio_status_and_cancel_report_unknown_task(
     async with mcp_server(mcp_env) as session:
         result = await session.call_tool(tool, {"task_id": task_id})
 
-    assert result.isError is True
-    assert result.structuredContent is not None
-    assert result.structuredContent["code"] == "unknown_task"
-    assert result.structuredContent["detail"] == {"task_id": task_id}
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "unknown_task"
+    assert result.structured_content["detail"] == {"task_id": task_id}
     text = result.content[0]
     assert isinstance(text, TextContent)
-    assert json.loads(text.text) == result.structuredContent
+    assert json.loads(text.text) == result.structured_content
 
 
 async def test_stdio_status_reconciles_a_dead_group_from_a_fresh_server(
@@ -973,8 +973,8 @@ async def test_stdio_status_reconciles_a_dead_group_from_a_fresh_server(
     async with mcp_server(mcp_env) as session:
         result = await session.call_tool("claude_status", {"task_id": run_dir.name})
 
-    assert result.isError is False
-    state = RunState.model_validate(result.structuredContent)
+    assert result.is_error is False
+    state = RunState.model_validate(result.structured_content)
     assert state.status == "failed"
     assert state.termination_reason == "worker_died"
     assert state.run_dir == run_dir
@@ -995,10 +995,10 @@ async def test_stdio_capacity_exceeded_with_two_live_groups(
             "claude_start", {"brief": "x", "working_directory": str(mcp_home)}
         )
 
-    assert result.isError is True
-    assert result.structuredContent is not None
-    assert result.structuredContent["code"] == "capacity_exceeded"
-    assert result.structuredContent["detail"] == {
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "capacity_exceeded"
+    assert result.structured_content["detail"] == {
         "live": MAX_LIVE_TASKS,
         "limit": MAX_LIVE_TASKS,
     }

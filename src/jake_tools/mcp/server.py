@@ -1,4 +1,4 @@
-"""The FastMCP app: tool and resource registration only.
+"""The MCPServer app: tool and resource registration only.
 
 Tool logic lives in :mod:`jake_tools.mcp.tools`; each module there exposes a
 ``register(app, config)`` that calls :func:`structured_tool`. Packaged skills
@@ -12,13 +12,14 @@ import functools
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.resources import FileResource
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.resources import FileResource
 from mcp.types import CallToolResult
-from pydantic import AnyUrl, BaseModel
+from pydantic import BaseModel
 
 from ..config import Config
 from .errors import ToolError, error_result, success_result
@@ -29,16 +30,16 @@ SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 log = logging.getLogger(__name__)
 
 
-def build_server(config: Config) -> FastMCP:
+def build_server(config: Config) -> MCPServer:
     """Assemble the server for one process. Tools read ``config`` by closure."""
     from .tools import register_all
 
-    app = FastMCP(SERVER_NAME, instructions=_INSTRUCTIONS)
+    app = MCPServer(SERVER_NAME, instructions=_INSTRUCTIONS, version=package_version())
     register_all(app, config)
     for skill_dir in packaged_skills():
         app.add_resource(
             FileResource(
-                uri=AnyUrl(f"skill://{skill_dir.name}"),
+                uri=f"skill://{skill_dir.name}",
                 name=skill_dir.name,
                 description=f"The packaged {skill_dir.name} skill, as installed by install-skills.",
                 mime_type="text/markdown",
@@ -46,6 +47,13 @@ def build_server(config: Config) -> FastMCP:
             )
         )
     return app
+
+
+def package_version() -> str:
+    try:
+        return version("jake-tools")
+    except PackageNotFoundError:  # pragma: no cover - only outside an install
+        return "unknown"
 
 
 def packaged_skills() -> tuple[Path, ...]:
@@ -58,7 +66,7 @@ def packaged_skills() -> tuple[Path, ...]:
 
 
 def structured_tool(
-    app: FastMCP, *, name: str, description: str
+    app: MCPServer, *, name: str, description: str
 ) -> Callable[
     [Callable[..., Awaitable[BaseModel]]], Callable[..., Awaitable[BaseModel]]
 ]:

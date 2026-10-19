@@ -85,8 +85,8 @@ def error_result(error: ToolError) -> CallToolResult:
     payload = error.payload.model_dump(mode="json", exclude_none=True)
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps(payload, indent=2))],
-        structuredContent=payload,
-        isError=True,
+        structured_content=payload,
+        is_error=True,
     )
 
 
@@ -95,6 +95,6 @@ def success_result(model: BaseModel) -> CallToolResult:
     payload = model.model_dump(mode="json")
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps(payload, indent=2))],
-        structuredContent=payload,
-        isError=False,
+        structured_content=payload,
+        is_error=False,
     )

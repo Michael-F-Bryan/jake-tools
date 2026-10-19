@@ -4,10 +4,8 @@ Spec: ``io.modelcontextprotocol/tasks``, version ``2026-07-28``, fetched
 from ``modelcontextprotocol/ext-tasks`` at revision :data:`SPEC_REVISION`
 (``specification/2026-07-28/tasks.md``).
 
-**Not wired to the transport.** The server registers ordinary tools only;
-``mcp`` 1.29's FastMCP cannot return a ``CreateTaskResult`` from
-``tools/call`` or route ``tasks/*`` methods, and Hermes does not declare the
-extension. A request without the extension in its per-request capabilities
+**Not wired to the transport.** The server registers ordinary tools only,
+and Hermes does not declare the extension. A request without the extension in its per-request capabilities
 must never get a native task response (:func:`start_response` enforces
 that), so nothing here is reachable in production today. These functions
 are the projection a thin adapter would call, written against the same

@@ -3,7 +3,7 @@
 The stdio tests spawn the real ``python -m jake_tools.mcp`` under a hermetic
 environment (see ``conftest.py``) and talk to it through the ``mcp`` client
 library. The in-process tests exercise the registration wrapper directly
-through FastMCP's own ``call_tool`` so the error contract is pinned without
+through MCPServer's own ``call_tool`` so the error contract is pinned without
 needing a tool that fails on purpose in the shipped server.
 """
 
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from mcp import ClientSession
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel
 
@@ -38,9 +38,9 @@ async def test_stdio_server_lists_ping_with_input_schema_and_no_output_schema(
     by_name = {tool.name: tool for tool in tools}
     assert "ping" in by_name
     ping = by_name["ping"]
-    assert ping.inputSchema["type"] == "object"
-    assert ping.inputSchema.get("properties", {}) == {}
-    assert ping.outputSchema is None
+    assert ping.input_schema["type"] == "object"
+    assert ping.input_schema.get("properties", {}) == {}
+    assert ping.output_schema is None
     assert ping.description and "jake-tools" in ping.description
 
 
@@ -50,16 +50,16 @@ async def test_stdio_ping_returns_structured_content_and_matching_text(
     async with mcp_server(mcp_env) as session:
         result = await session.call_tool("ping", {})
 
-    assert result.isError is False
-    assert result.structuredContent is not None
-    assert result.structuredContent["ok"] is True
-    assert result.structuredContent["pid"] > 0
-    assert result.structuredContent["version"]
-    assert result.structuredContent["server_time"].endswith("Z")
+    assert result.is_error is False
+    assert result.structured_content is not None
+    assert result.structured_content["ok"] is True
+    assert result.structured_content["pid"] > 0
+    assert result.structured_content["version"]
+    assert result.structured_content["server_time"].endswith("Z")
     assert len(result.content) == 1
     text = result.content[0]
     assert isinstance(text, TextContent)
-    assert json.loads(text.text) == result.structuredContent
+    assert json.loads(text.text) == result.structured_content
 
 
 async def test_stdio_default_subcommand_is_serve(
@@ -68,7 +68,7 @@ async def test_stdio_default_subcommand_is_serve(
     async with mcp_server(mcp_env, args=("-m", "jake_tools.mcp")) as session:
         result = await session.call_tool("ping", {})
 
-    assert result.isError is False
+    assert result.is_error is False
 
 
 async def test_stdio_starts_without_any_credentials_and_lists_skill_resources(
@@ -102,7 +102,7 @@ async def test_stdio_server_resolves_config_from_the_isolated_home(
     assert config.jira_project.origin == str(config_dir / "config.toml")
 
     async with mcp_server(env) as session:
-        assert (await session.call_tool("ping", {})).isError is False
+        assert (await session.call_tool("ping", {})).is_error is False
 
 
 def test_entrypoint_never_loads_dotenv_or_the_cli_entrypoint(tmp_path: Path) -> None:
@@ -153,8 +153,8 @@ class Echo(BaseModel):
     count: int
 
 
-def _app_with_tools() -> FastMCP:
-    app = FastMCP("test")
+def _app_with_tools() -> MCPServer:
+    app = MCPServer("test")
 
     @structured_tool(app, name="echo", description="echo")
     async def echo(value: str, count: int = 1) -> Echo:
@@ -179,8 +179,8 @@ async def test_wrapper_sends_model_as_structured_content() -> None:
     result = await app.call_tool("echo", {"value": "hi", "count": 2})
 
     assert isinstance(result, CallToolResult)
-    assert result.isError is False
-    assert result.structuredContent == {"value": "hi", "count": 2}
+    assert result.is_error is False
+    assert result.structured_content == {"value": "hi", "count": 2}
 
 
 async def test_wrapper_keeps_handler_parameters_as_input_schema() -> None:
@@ -188,9 +188,9 @@ async def test_wrapper_keeps_handler_parameters_as_input_schema() -> None:
 
     tools = {tool.name: tool for tool in await app.list_tools()}
 
-    assert set(tools["echo"].inputSchema["properties"]) == {"value", "count"}
-    assert tools["echo"].inputSchema["required"] == ["value"]
-    assert tools["echo"].outputSchema is None
+    assert set(tools["echo"].input_schema["properties"]) == {"value", "count"}
+    assert tools["echo"].input_schema["required"] == ["value"]
+    assert tools["echo"].output_schema is None
 
 
 async def test_wrapper_turns_tool_error_into_structured_error_result() -> None:
@@ -199,13 +199,13 @@ async def test_wrapper_turns_tool_error_into_structured_error_result() -> None:
     result = await app.call_tool("echo", {"value": "hi", "count": -1})
 
     assert isinstance(result, CallToolResult)
-    assert result.isError is True
-    payload = ToolErrorPayload.model_validate(result.structuredContent)
+    assert result.is_error is True
+    payload = ToolErrorPayload.model_validate(result.structured_content)
     assert payload.code == "invalid_argument"
     assert payload.detail == {"argument": "count"}
     text = result.content[0]
     assert isinstance(text, TextContent)
-    assert json.loads(text.text) == result.structuredContent
+    assert json.loads(text.text) == result.structured_content
 
 
 async def test_wrapper_reports_untranslated_exceptions_without_their_text() -> None:
@@ -214,16 +214,16 @@ async def test_wrapper_reports_untranslated_exceptions_without_their_text() -> N
     result = await app.call_tool("explode", {"secret": "hunter2"})
 
     assert isinstance(result, CallToolResult)
-    assert result.isError is True
-    assert result.structuredContent is not None
-    assert result.structuredContent["code"] == "internal_error"
-    assert "hunter2" not in json.dumps(result.structuredContent)
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "internal_error"
+    assert "hunter2" not in json.dumps(result.structured_content)
 
 
 def test_error_result_omits_absent_detail() -> None:
     result = error_result(ToolError("unknown_task", "no such task"))
 
-    assert result.structuredContent == {
+    assert result.structured_content == {
         "code": "unknown_task",
         "message": "no such task",
     }

@@ -86,10 +86,10 @@ async def call(
     session: ClientSession, evidence: Evidence, tool: str, **arguments: Any
 ) -> dict[str, Any]:
     result = await session.call_tool(tool, arguments)
-    evidence.note(tool, {"arguments": arguments, "result": result.structuredContent})
-    assert result.isError is False, result.structuredContent
-    assert result.structuredContent is not None
-    return result.structuredContent
+    evidence.note(tool, {"arguments": arguments, "result": result.structured_content})
+    assert result.is_error is False, result.structured_content
+    assert result.structured_content is not None
+    return result.structured_content
 
 
 async def poll_until(

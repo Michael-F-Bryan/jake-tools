@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from anyio import to_thread
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from pydantic import TypeAdapter
 
 from ...claude_runs.inbox import MAX_ANSWER_CHARS, InputResponse
@@ -18,7 +18,7 @@ from ._claude import task_errors, task_service
 _RESPONSES = TypeAdapter(dict[str, InputResponse])
 
 
-def register(app: FastMCP, config: Config) -> None:
+def register(app: MCPServer, config: Config) -> None:
     service = task_service(config)
 
     @structured_tool(

@@ -85,13 +85,13 @@ def workdir(tmp_path: Path) -> Path:
 
 async def _start(session: ClientSession, **arguments: Any) -> RunState:
     result = await session.call_tool("claude_start", {**CHEAP, **arguments})
-    assert result.isError is False, result.structuredContent
-    assert result.structuredContent is not None
+    assert result.is_error is False, result.structured_content
+    assert result.structured_content is not None
     status = await session.call_tool(
-        "claude_status", {"task_id": result.structuredContent["task_id"]}
+        "claude_status", {"task_id": result.structured_content["task_id"]}
     )
-    assert status.isError is False, status.structuredContent
-    state = RunState.model_validate(status.structuredContent)
+    assert status.is_error is False, status.structured_content
+    state = RunState.model_validate(status.structured_content)
     assert state.status == "working"
     assert state.pgid is not None and state.pgid > 1
     return state
@@ -99,8 +99,8 @@ async def _start(session: ClientSession, **arguments: Any) -> RunState:
 
 async def _status(session: ClientSession, task_id: str) -> RunState:
     result = await session.call_tool("claude_status", {"task_id": task_id})
-    assert result.isError is False, result.structuredContent
-    return RunState.model_validate(result.structuredContent)
+    assert result.is_error is False, result.structured_content
+    return RunState.model_validate(result.structured_content)
 
 
 async def _wait_terminal(
@@ -402,15 +402,15 @@ async def test_live_cancel_stops_the_task_and_empties_its_group(
         before = time.monotonic()
         result = await session.call_tool("claude_cancel", {"task_id": started.task_id})
         elapsed = time.monotonic() - before
-        assert result.isError is False, result.structuredContent
-        state = RunState.model_validate(result.structuredContent)
+        assert result.is_error is False, result.structured_content
+        state = RunState.model_validate(result.structured_content)
         again = await session.call_tool("claude_cancel", {"task_id": started.task_id})
 
     assert state.status == "cancelled"
     assert state.termination_reason == "cancelled"
     assert state.finished_at is not None
     assert elapsed < 20
-    assert RunState.model_validate(again.structuredContent) == state  # idempotent
+    assert RunState.model_validate(again.structured_content) == state  # idempotent
     await _assert_group_gone(pgid)
 
 
@@ -476,8 +476,8 @@ async def test_live_worker_survives_server_sigkill_and_a_new_server_cancels_it(
     try:
         async with mcp_server(live_env) as session:
             ping = await session.call_tool("ping", {})
-            assert ping.structuredContent is not None
-            server_pid = int(ping.structuredContent["pid"])
+            assert ping.structured_content is not None
+            server_pid = int(ping.structured_content["pid"])
             started = await _start(
                 session,
                 brief=WAIT_FOREVER_BRIEF,
@@ -506,8 +506,8 @@ async def test_live_worker_survives_server_sigkill_and_a_new_server_cancels_it(
         assert state.status == "working"
         assert state.pgid == pgid
         result = await session.call_tool("claude_cancel", {"task_id": started.task_id})
-        assert result.isError is False, result.structuredContent
-        cancelled = RunState.model_validate(result.structuredContent)
+        assert result.is_error is False, result.structured_content
+        cancelled = RunState.model_validate(result.structured_content)
 
     assert cancelled.status == "cancelled"
     assert cancelled.termination_reason == "cancelled"
@@ -578,8 +578,8 @@ async def test_live_sigkill_of_the_worker_group_then_cancel_clears_the_tool_shel
         assert not group_alive(pgid)
         assert _loop_shells(), "the shell should have survived the group kill"
         result = await session.call_tool("claude_cancel", {"task_id": started.task_id})
-        assert result.isError is False, result.structuredContent
-        state = RunState.model_validate(result.structuredContent)
+        assert result.is_error is False, result.structured_content
+        state = RunState.model_validate(result.structured_content)
 
     assert state.status == "failed"
     assert state.termination_reason == "worker_died", state

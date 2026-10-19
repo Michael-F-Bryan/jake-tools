@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import functools
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from ...clockify_time import TimeEntriesResult, time_entries
 from ...config import Config
@@ -12,7 +12,7 @@ from ..server import structured_tool
 from ._clockify import call_clockify
 
 
-def register(app: FastMCP, config: Config) -> None:
+def register(app: MCPServer, config: Config) -> None:
     @structured_tool(
         app,
         name="clockify_time_entries",
