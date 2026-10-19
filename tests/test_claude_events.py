@@ -18,7 +18,7 @@ from jake_tools.claude_runs.inbox import (
     SteerSubmission,
 )
 from jake_tools.claude_runs.models import RunSpec
-from jake_tools.claude_runs.rundir import create_run_dir, new_task_id
+from jake_tools.claude_runs.rundir import create_run_dir, new_task_id, read_state
 
 
 @pytest.fixture
@@ -146,7 +146,6 @@ def test_the_session_head_is_the_latest_by_creation_not_by_id(tmp_path: Path) ->
     from datetime import timedelta
 
     from jake_tools.claude_runs.control import _session_head_locked
-    from jake_tools.claude_runs.rundir import read_state
 
     runs = tmp_path / "runs"
     now = datetime.now(UTC)
@@ -173,3 +172,120 @@ def test_the_session_head_is_the_latest_by_creation_not_by_id(tmp_path: Path) ->
 
     assert later.name < parent.name  # sorts first by ID...
     assert head == later.name  # ...but was created after
+
+
+# --- poll progress coherent with the events it returns ----------------------------
+
+
+def _service_run(tmp_path: Path):
+    from jake_tools.claude_runs.control import RunDefaults
+    from jake_tools.claude_runs.service import TaskService
+
+    runs = tmp_path / "runs"
+    spec = RunSpec(
+        task_id=new_task_id(),
+        created_at=datetime.now(UTC),
+        working_directory=tmp_path,
+        model="m",
+        max_turns=5,
+        timeout_seconds=60,
+        max_budget_usd=1,
+        schema_version=2,
+    )
+    run_dir = create_run_dir(runs, spec, "brief")  # no process yet: stays working
+    service = TaskService(
+        runs, RunDefaults(model="m", max_turns=5, timeout_seconds=60, max_budget_usd=1)
+    )
+    return service, run_dir
+
+
+async def test_poll_reports_progress_from_events_newer_than_the_snapshot(
+    tmp_path: Path,
+) -> None:
+    """The worker appends an event before its throttled status write."""
+    service, run_dir = _service_run(tmp_path)
+    tool = EventLog(run_dir).append(
+        "tool_use", tool="Bash", tool_use_id="t1", text="sleep 20 && wc -l x"
+    )
+    assert read_state(run_dir).status_message is None  # the snapshot lags
+
+    result = await service.poll(run_dir.name, wait_seconds=0)
+
+    assert result.events[-1].kind == "tool_use"
+    assert result.status_message == "Bash: sleep 20 && wc -l x"
+    assert result.last_activity_at == tool.at
+
+
+async def test_an_old_cursor_page_never_rolls_progress_back(tmp_path: Path) -> None:
+    from jake_tools.claude_runs.rundir import update_state, utc_now
+
+    service, run_dir = _service_run(tmp_path)
+    EventLog(run_dir).append("assistant_text", text="old narration")
+    later = utc_now()
+    update_state(
+        run_dir,
+        lambda s: s.model_copy(
+            update={
+                "status_message": "Write: summary.txt",
+                "status_message_at": later,
+                "last_activity_at": later,
+            }
+        ),
+    )
+
+    result = await service.poll(run_dir.name, wait_seconds=0)  # from the start
+
+    assert [e.text for e in result.events] == ["old narration"]
+    assert result.status_message == "Write: summary.txt"
+    assert result.last_activity_at == later
+
+
+async def test_a_question_or_an_end_keeps_its_summary(tmp_path: Path) -> None:
+    from jake_tools.claude_runs.rundir import update_state
+
+    service, run_dir = _service_run(tmp_path)
+    log = EventLog(run_dir)
+    Inbox(run_dir, log).ask("Which colour?", [])
+    log.append("assistant_text", text="narration racing the question")
+
+    waiting = await service.poll(run_dir.name, wait_seconds=0)
+
+    update_state(
+        run_dir,
+        lambda s: s.model_copy(
+            update={
+                "status": "completed",
+                "termination_reason": "finished",
+                "status_message": "Finished: green",
+            }
+        ),
+    )
+    log.append("assistant_text", text="a late line")
+    ended = await service.poll(run_dir.name, wait_seconds=0)
+
+    assert waiting.status == "input_required"
+    assert waiting.status_message == "Waiting for an answer: Which colour?"
+    assert ended.status_message == "Finished: green"
+
+
+def test_the_worker_never_writes_an_older_line_over_a_newer_one(tmp_path: Path) -> None:
+    from jake_tools.claude_runs.rundir import update_state, utc_now
+    from jake_tools.claude_runs.worker import Progress
+
+    _, run_dir = _service_run(tmp_path)
+    log = EventLog(run_dir)
+    old = log.append("assistant_text", text="before the answer")
+    update_state(
+        run_dir,
+        lambda s: s.model_copy(
+            update={
+                "status_message": "Answer received; continuing",
+                "status_message_at": utc_now(),
+            }
+        ),
+    )
+    progress = Progress(run_dir)
+    progress.note(old)
+    progress.flush()
+
+    assert read_state(run_dir).status_message == "Answer received; continuing"

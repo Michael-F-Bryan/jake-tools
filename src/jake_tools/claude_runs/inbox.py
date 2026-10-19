@@ -332,6 +332,7 @@ class Inbox:
                     update={
                         "status": "input_required",
                         "status_message": f"Waiting for an answer: {first}",
+                        "status_message_at": utc_now(),
                     }
                 )
             if state.status != "input_required":
@@ -340,6 +341,7 @@ class Inbox:
                 update={
                     "status": "working",
                     "status_message": "Answer received; continuing",
+                    "status_message_at": utc_now(),
                 }
             )
 

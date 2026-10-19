@@ -530,6 +530,7 @@ class Progress:
     def __init__(self, run_dir: Path) -> None:
         self.run_dir = run_dir
         self.status_message: str | None = None
+        self.status_message_at: datetime | None = None
         self.last_activity_at: datetime | None = None
         self.usage: Usage | None = None
         self.invocation_cost_usd: float | None = None
@@ -543,7 +544,7 @@ class Progress:
             self._dirty = True
         line = progress_line(event)
         if line is not None:
-            self.status_message = line
+            self.status_message, self.status_message_at = line, event.at
             self._dirty = True
         self.tick()
 
@@ -575,8 +576,17 @@ class Progress:
                 "invocation_cost_usd": self.invocation_cost_usd,
                 "session_cost_usd": self.session_cost_usd,
             }
-            if state.status != "input_required" and self.status_message is not None:
+            newer = state.status_message_at is None or (
+                self.status_message_at is not None
+                and self.status_message_at > state.status_message_at
+            )
+            if (
+                state.status != "input_required"
+                and self.status_message is not None
+                and newer
+            ):
                 update["status_message"] = self.status_message
+                update["status_message_at"] = self.status_message_at
             return state.model_copy(update=update)
 
         update_state(self.run_dir, transition)

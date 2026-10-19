@@ -155,7 +155,8 @@ class RunState(BaseModel):
     group. ``final_text`` is the SDK result message's final text, not the
     concatenated per-turn narration; ``final_text_path`` holds it in full.
 
-    ``status_message`` is the latest public progress line and
+    ``status_message`` is the latest public progress line (as of
+    ``status_message_at``, the time of the event it came from) and
     ``last_activity_at`` when the agent last did something observable (a
     message, a tool call or result); neither is a heartbeat.
     ``cancel_requested_at`` is set when a cancel began, before anything was
@@ -184,6 +185,7 @@ class RunState(BaseModel):
     session_id: str | None = None
     resumed_from: str | None = None
     status_message: str | None = None
+    status_message_at: datetime | None = None
     last_activity_at: datetime | None = None
     cancel_requested_at: datetime | None = None
     final_text_path: Path | None = None

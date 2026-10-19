@@ -36,7 +36,7 @@ from .control import (
     reconcile,
     start_task,
 )
-from .events import Cursor, Event, EventLog
+from .events import Cursor, Event, EventLog, progress_line
 from .inbox import (
     AnswerResult,
     Inbox,
@@ -334,6 +334,7 @@ class TaskService:
                 reason = "deadline"
             if reason is not None:
                 view = await to_thread.run_sync(build_view, run_dir, state)
+                view = with_page_progress(view, state, page.events)
                 return PollResult(
                     **view.model_dump(),
                     events=page.events,
@@ -432,6 +433,35 @@ class TaskService:
             task_status=read_state(run_dir).status,
             pending_inputs=inbox.pending_inputs(),
         )
+
+
+def with_page_progress(
+    view: TaskView, state: RunState, events: list[Event]
+) -> TaskView:
+    """``view`` brought up to date with the events returned alongside it.
+
+    The worker appends an event before its (throttled) progress write, and a
+    poll reads state before the page, so a page can hold events newer than
+    the snapshot. A returned event's activity time or progress line is used
+    only when strictly newer than what the snapshot already holds, so an old
+    cursor's page never rolls progress back. A question or an end owns the
+    summary and is never replaced.
+    """
+    update: dict[str, object] = {}
+    activity = [e.at for e in events if e.is_activity]
+    if activity and (
+        view.last_activity_at is None or max(activity) > view.last_activity_at
+    ):
+        update["last_activity_at"] = max(activity)
+    if view.status == "working":
+        for event in reversed(events):
+            line = progress_line(event)
+            if line is None:
+                continue
+            if state.status_message_at is None or event.at > state.status_message_at:
+                update["status_message"] = line
+            break
+    return view.model_copy(update=update) if update else view
 
 
 def build_view(run_dir: Path, state: RunState) -> TaskView:
