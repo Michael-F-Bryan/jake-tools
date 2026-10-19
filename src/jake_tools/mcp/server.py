@@ -1,9 +1,10 @@
-"""The MCPServer app: tool and resource registration only.
+"""The MCPServer app: tool, resource and extension registration only.
 
 Tool logic lives in :mod:`jake_tools.mcp.tools`; each module there exposes a
 ``register(app, config)`` that calls :func:`structured_tool`. Packaged skills
 are served as ``skill://<name>`` resources so an agent can fetch the text
-matching the running server even if its local copy is stale.
+matching the running server even if its local copy is stale. The native
+MCP Tasks extension (:mod:`jake_tools.mcp.tasks`) is the one extension.
 """
 
 from __future__ import annotations
@@ -32,9 +33,16 @@ log = logging.getLogger(__name__)
 
 def build_server(config: Config) -> MCPServer:
     """Assemble the server for one process. Tools read ``config`` by closure."""
+    from .tasks import TasksExtension
     from .tools import register_all
+    from .tools._claude import task_service
 
-    app = MCPServer(SERVER_NAME, instructions=_INSTRUCTIONS, version=package_version())
+    app = MCPServer(
+        SERVER_NAME,
+        instructions=_INSTRUCTIONS,
+        version=package_version(),
+        extensions=[TasksExtension(task_service(config))],
+    )
     register_all(app, config)
     for skill_dir in packaged_skills():
         app.add_resource(
@@ -120,5 +128,8 @@ _INSTRUCTIONS = (
     "invalid_argument, access_denied, plan_stale, unknown_task, "
     "capacity_exceeded, worker_failed, request_conflict, session_busy, "
     "resume_unavailable, task_not_running, upstream_error, internal_error). "
-    "The packaged skills are served as skill://<name> resources."
+    "The packaged skills are served as skill://<name> resources. "
+    "A 2026-07-28 client that declares io.modelcontextprotocol/tasks on a "
+    "claude_start request gets a native task (tasks/get, tasks/update, "
+    "tasks/cancel); every other client gets the ordinary result."
 )

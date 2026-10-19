@@ -1,8 +1,9 @@
 """The MCP Tasks (2026-07-28) projection of the task service.
 
-Not reachable over the transport (no host negotiates the extension yet);
-these check the mapping itself, from real run directories created by the
-real service, worker and SDK against the fake ``claude`` executable.
+These check the mapping itself, from real run directories created by the
+real service, worker and SDK against the fake ``claude`` executable. The
+same projection over the real stdio transport, with Tasks-capable and
+legacy clients, is ``test_mcp_tasks.py``.
 """
 
 from __future__ import annotations
@@ -55,12 +56,11 @@ def test_negotiation_decides_the_result_shape(
     started = start(service, tmp_path, "[[scenario:slow_tool:1]] go")
     view = service.view(started.task_id)
 
-    plain = tp.start_response(started, view, None)
-    native = tp.start_response(started, view, DECLARED)
+    native = tp.create_task_result(view, DECLARED)
 
-    assert "resultType" not in plain  # an ordinary CallToolResult
-    assert plain["structuredContent"]["task_id"] == started.task_id
-    assert plain["isError"] is False
+    with pytest.raises(tp.TasksProtocolError) as refused:
+        tp.create_task_result(view, None)
+    assert refused.value.code == tp.MISSING_REQUIRED_CLIENT_CAPABILITY
     assert native["resultType"] == "task"
     assert native["taskId"] == started.task_id
     assert native["status"] == "working"

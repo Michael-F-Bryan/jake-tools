@@ -1,17 +1,17 @@
-"""The task service projected onto the MCP Tasks extension, for a future adapter.
+"""The task service projected onto the MCP Tasks extension.
 
 Spec: ``io.modelcontextprotocol/tasks``, version ``2026-07-28``, fetched
 from ``modelcontextprotocol/ext-tasks`` at revision :data:`SPEC_REVISION`
 (``specification/2026-07-28/tasks.md``).
 
-**Not wired to the transport.** The server registers ordinary tools only,
-and Hermes does not declare the extension. A request without the extension in its per-request capabilities
-must never get a native task response (:func:`start_response` enforces
-that), so nothing here is reachable in production today. These functions
-are the projection a thin adapter would call, written against the same
-:class:`~.service.TaskService` and :class:`~.service.TaskView` the
-``claude_*`` tools use, and tested, so the mapping is decided once.
-Subscriptions (``notifications/tasks``) are not implemented.
+Wired to the transport by :mod:`jake_tools.mcp.tasks`, which passes each
+request's ``_meta`` (``None`` on a legacy connection, which cannot carry
+per-request capabilities). Every function here that returns a native
+shape first checks that ``_meta`` declares the extension
+(:func:`require_tasks`), so a request without it can never get one. These
+functions are written against the same :class:`~.service.TaskService` and
+:class:`~.service.TaskView` the ``claude_*`` tools use, so the mapping is
+decided once. Subscriptions (``notifications/tasks``) are not implemented.
 
 Mapping (domain -> protocol):
 
@@ -49,14 +49,12 @@ They remain domain extensions on the ordinary tools.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from typing import Any
 
 from pydantic import ValidationError
 
 from .inbox import InputResponse
-from .models import ClaudeStartResult
 from .rundir import UnknownTaskError
 from .service import SUGGESTED_POLL_INTERVAL_MS, TaskService, TaskView
 
@@ -106,22 +104,16 @@ def require_tasks(meta: Mapping[str, Any] | None) -> None:
         )
 
 
-def start_response(
-    started: ClaudeStartResult, view: TaskView, meta: Mapping[str, Any] | None
+def create_task_result(
+    view: TaskView, meta: Mapping[str, Any] | None
 ) -> dict[str, Any]:
-    """``claude_start``'s ``tools/call`` result for this request.
+    """The ``CreateTaskResult`` for a started task.
 
-    A ``CreateTaskResult`` only when the request declared the extension
-    (the task is already durable, so ``tasks/get`` resolves); otherwise the
-    ordinary ``CallToolResult`` the server returns today.
+    Call it only once the task is durable (``claude_start`` has returned),
+    so ``tasks/get`` resolves. Raises ``-32021`` unless the request declared
+    the extension: a non-declaring request gets the ordinary tool result.
     """
-    if not client_declares_tasks(meta):
-        payload = started.model_dump(mode="json")
-        return {
-            "content": [{"type": "text", "text": json.dumps(payload)}],
-            "structuredContent": payload,
-            "isError": False,
-        }
+    require_tasks(meta)
     return {"resultType": "task", **task_object(view)}
 
 
