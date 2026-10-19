@@ -201,7 +201,7 @@ def jira_name(key: str, summary: str, kind: str, as_json: bool) -> None:
     multiple=True,
     help=(
         "Reconcile an exact Jira issue regardless of assignee. Repeat for multiple "
-        "issues; otherwise sync active work assigned to currentUser()."
+        "issues; otherwise sync planned or underway work assigned to currentUser()."
     ),
 )
 @click.pass_context
@@ -218,8 +218,9 @@ def jira_sync(
     """Reconcile Jira work with Clockify.
 
     Dry runs are read-only. Use --apply to create, rename, reactivate, or complete
-    Clockify records from the emitted plan. By default, only active Jira work
-    assigned to currentUser() is selected. --issue selects exact work items
+    Clockify records from the emitted plan. By default, planned or underway Jira
+    work (To Do, In Progress, Blocked, In Review) assigned to currentUser() is
+    selected. --issue selects exact work items
     regardless of assignee. The command never deletes records.
     """
     try:
@@ -298,7 +299,7 @@ def _emit_applied_before_failure(report: SyncReport) -> None:
 def _scope_description(report: SyncReport) -> str:
     if report.scope.issue_keys:
         return ", ".join(report.scope.issue_keys)
-    return "active Jira issues assigned to currentUser()"
+    return "planned or underway Jira issues assigned to currentUser()"
 
 
 def _describe_action(action: SyncReportAction) -> str:

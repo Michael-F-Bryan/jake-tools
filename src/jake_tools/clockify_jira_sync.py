@@ -41,6 +41,7 @@ class SyncActionKind(StrEnum):
 
 
 class SyncScope(StrEnum):
+    # Retain the report value: active covers planned or underway work.
     ASSIGNED_ACTIVE = "assigned-active"
     ISSUES = "issues"
 
@@ -590,6 +591,8 @@ def plan_jira_sync(
         if issue is None:
             continue
         desired_name = clockify_task_name_for_jira(issue.key, issue.summary)
+        # Falling out of the selected scope (e.g. backlog deferral) is not
+        # completion. Only the Done category closes an existing task.
         if issue.status_category == "Done" and task.status == "ACTIVE":
             actions.append(
                 CompleteTaskAction(

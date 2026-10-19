@@ -113,7 +113,14 @@ class FakeUpstream:
 
 
 def _jira_issue(key: str, summary: str, status: str, issue_type: str) -> dict[str, Any]:
-    category = {"Done": "Done", "To Do": "To Do"}.get(status, "In Progress")
+    category = {
+        "Done": "Done",
+        "Won’t Do": "Done",
+        "To Do": "To Do",
+        "Backlog": "To Do",
+        "TRIAGE": "To Do",
+        "Investigate": "To Do",
+    }.get(status, "In Progress")
     fields: dict[str, Any] = {
         "summary": summary,
         "status": {"name": status, "statusCategory": {"name": category}},
@@ -236,7 +243,14 @@ def _jira(
         if match := re.match(r"key in \(([^)]*)\)", jql):
             keys = [key for key in match.group(1).split(",") if key]
         else:
-            keys = list(upstream.assigned_active)
+            match = re.search(r"status in \(([^)]*)\)", jql)
+            assert match is not None, jql
+            statuses = re.findall(r'"([^"]*)"', match.group(1))
+            keys = [
+                key
+                for key in upstream.assigned_active
+                if upstream.issues[key]["fields"]["status"]["name"] in statuses
+            ]
         return 200, {
             "issues": [upstream.issues[key] for key in keys if key in upstream.issues]
         }
@@ -304,6 +318,7 @@ async def test_tool_is_listed_with_its_input_schema(
     assert tool.inputSchema.get("required", []) == []
     assert tool.outputSchema is None
     assert tool.description is not None
+    assert "planned or underway" in tool.description
     assert "plan_digest" in tool.description
     assert "Never deletes" in tool.description
 
@@ -479,9 +494,21 @@ async def test_preview_scoped_to_issues(
 # --- Apply --------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("selected_status", ["To Do", "In Progress"])
+@pytest.mark.parametrize("finished_status", ["Done", "Won’t Do"])
 async def test_apply_with_the_preview_digest_applies_and_verifies(
-    mcp_server: ServerFactory, sync_env: dict[str, str], upstream: FakeUpstream
+    mcp_server: ServerFactory,
+    sync_env: dict[str, str],
+    upstream: FakeUpstream,
+    selected_status: str,
+    finished_status: str,
 ) -> None:
+    upstream.issues["SF-427"] = _jira_issue(
+        "SF-427", "Evaluate PX4 external control methods", selected_status, "Task"
+    )
+    upstream.issues["SF-304"] = _jira_issue(
+        "SF-304", "Bench test PX4", finished_status, "Task"
+    )
     async with mcp_server(sync_env) as session:
         preview = _ok(await session.call_tool("clockify_jira_sync", {}))
         result = await session.call_tool(
@@ -503,6 +530,51 @@ async def test_apply_with_the_preview_digest_applies_and_verifies(
     assert upstream.writes == ["PUT task t-427", "PUT task t-304"]
     assert upstream.tasks["t-427"]["status"] == "ACTIVE"
     assert upstream.tasks["t-304"]["status"] == "DONE"
+
+
+@pytest.mark.parametrize("status", ["Backlog", "TRIAGE", "Investigate"])
+@pytest.mark.parametrize("renamed", [False, True])
+async def test_backlog_excluded_from_creation_and_deferral_preserves_existing_task(
+    mcp_server: ServerFactory,
+    sync_env: dict[str, str],
+    upstream: FakeUpstream,
+    status: str,
+    renamed: bool,
+) -> None:
+    upstream.tasks.pop("t-304")
+    upstream.tasks["t-427"]["status"] = "ACTIVE"
+    summary = (
+        "Deferred investigation" if renamed else "Evaluate PX4 external control methods"
+    )
+    upstream.issues["SF-427"] = _jira_issue("SF-427", summary, status, "Task")
+    upstream.issues["SF-500"] = _jira_issue("SF-500", "Future work", status, "Task")
+    upstream.assigned_active = ["SF-427", "SF-500"]
+
+    async with mcp_server(sync_env) as session:
+        preview = _ok(await session.call_tool("clockify_jira_sync", {}))
+        assert preview["inventory"]["active_issues"] == 0
+        assert preview["conflicts"] == []
+        assert [(a["kind"], a["jira_key"]) for a in preview["actions"]] == (
+            [("RENAME_TASK", "SF-427")] if renamed else []
+        )
+        report = _ok(
+            await session.call_tool(
+                "clockify_jira_sync",
+                {"apply": True, "plan_digest": preview["plan_digest"]},
+            )
+        )
+
+    assert report["failure"] is None
+    assert all(a["applied"] and a["verified"] for a in report["actions"])
+    assert upstream.writes == (["PUT task t-427"] if renamed else [])
+    assert upstream.tasks == {
+        "t-427": {
+            "id": "t-427",
+            "name": f"SF-427 {summary}",
+            "projectId": "p-131",
+            "status": "ACTIVE",
+        }
+    }
 
 
 async def test_apply_against_a_changed_upstream_is_plan_stale_and_writes_nothing(

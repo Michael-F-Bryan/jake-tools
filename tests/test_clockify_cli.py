@@ -570,7 +570,7 @@ def test_jira_sync_reports_when_no_changes_are_required(monkeypatch) -> None:
     assert result.exit_code == 0
     assert (
         result.output
-        == "No Clockify changes required for active Jira issues assigned to currentUser().\n"
+        == "No Clockify changes required for planned or underway Jira issues assigned to currentUser().\n"
     )
 
 

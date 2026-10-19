@@ -143,6 +143,7 @@ class JiraClient:
         self._request_json("GET", "/rest/api/3/myself")
 
     def get_active_assigned_issues(self, project_key: str) -> list[JiraIssue]:
+        """Fetch assigned planned or underway work using explicit status names."""
         project = self._normalise_project_key(project_key)
         statuses = ", ".join(f'"{status}"' for status in ACTIVE_ISSUE_STATUSES)
         jql = (

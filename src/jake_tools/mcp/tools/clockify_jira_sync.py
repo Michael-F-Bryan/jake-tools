@@ -47,7 +47,10 @@ result is still a report: actions written before the failure are marked
 applied, and `failure` names the action that failed and why.
 
 issues: optional Jira keys (e.g. ["SF-304"]) to reconcile regardless of
-assignee; omitted means active Jira work assigned to the credentialled user.
+assignee; omitted means planned or underway Jira work assigned to the
+credentialled user: status To Do, In Progress, Blocked, or In Review. Backlog,
+TRIAGE, and Investigate are not automatically created. Existing deferred tasks
+are kept and renamed as needed; only Jira status category Done completes them.
 
 Never deletes anything in Clockify or Jira, and never writes to Jira.
 """

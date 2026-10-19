@@ -109,12 +109,16 @@ def build_index(
     return ClockifyIndex.build(projects, tasks)
 
 
-def test_plan_creates_missing_projects_and_task_for_active_issues() -> None:
+@pytest.mark.parametrize("status", ["To Do", "In Progress"])
+def test_plan_creates_missing_projects_and_task_for_planned_or_underway_issues(
+    status: str,
+) -> None:
+    category: JiraStatusCategory = "To Do" if status == "To Do" else "In Progress"
     phase = jira_issue(
         "SF-1",
         "Software in the Loop (SITL) / Simulator",
-        status="In Progress",
-        status_category="In Progress",
+        status=status,
+        status_category=category,
         issue_type="Project / Phase",
         parent_key=None,
         parent_summary=None,
@@ -122,8 +126,8 @@ def test_plan_creates_missing_projects_and_task_for_active_issues() -> None:
     task = jira_issue(
         "SF-427",
         "Evaluate PX4 external control methods",
-        status="In Progress",
-        status_category="In Progress",
+        status=status,
+        status_category=category,
     )
     parent = jira_issue(
         "SF-131",
@@ -152,7 +156,8 @@ def test_plan_creates_missing_projects_and_task_for_active_issues() -> None:
     )
 
 
-def test_plan_renames_drift_and_completes_done_jira_tasks() -> None:
+@pytest.mark.parametrize("status", ["Done", "Won’t Do"])
+def test_plan_renames_drift_and_completes_done_category_jira_tasks(status: str) -> None:
     project = clockify_project("SF-131", "Old project name")
     tasks = [
         clockify_task("SF-305", "Wet test PX4 using Tom's thesis bot"),
@@ -164,7 +169,7 @@ def test_plan_renames_drift_and_completes_done_jira_tasks() -> None:
         jira_issue(
             "SF-304",
             "Bench test PX4",
-            status="Done",
+            status=status,
             status_category="Done",
         ),
     ]
@@ -749,7 +754,10 @@ def test_prepare_jira_sync_collects_inventory_and_builds_plan() -> None:
     assert snapshot.index.projects_by_jira_key["SF-131"] == project
 
 
-def test_prepare_jira_sync_targets_exact_issue_regardless_of_assignee() -> None:
+@pytest.mark.parametrize("status", ["In Progress", "Backlog", "TRIAGE", "Investigate"])
+def test_prepare_jira_sync_targets_exact_issue_regardless_of_assignee_or_status(
+    status: str,
+) -> None:
     project = clockify_project("SF-131", "Production Vehicle")
     done_task = clockify_task("SF-304", "Bench test PX4", status="DONE")
     unrelated_tasks = [
@@ -759,7 +767,7 @@ def test_prepare_jira_sync_targets_exact_issue_regardless_of_assignee() -> None:
     issue = jira_issue(
         "SF-304",
         "Bench test PX4",
-        status="In Progress",
+        status=status,
         status_category="In Progress",
         assignee="David Htet",
     )

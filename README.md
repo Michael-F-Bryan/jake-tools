@@ -39,13 +39,17 @@ The command reconciles Jira project `SF` with the active Clockify projects for
 the `Sunfish Robotics` client. These defaults can be overridden with
 `--jira-project` and `--clockify-client`.
 
-Dry-run is the default. Without `--issue`, the command reconciles active Jira
-work assigned to `currentUser()`. Repeat `--issue KEY` to reconcile exact work
-items regardless of assignee. The plan can create projects and tasks, rename
-records, reactivate non-Done Jira tasks, and mark tasks done when Jira's status
-category is Done. It ignores archived Clockify projects and never deletes
-projects, tasks, or time entries. Ambiguous active duplicates are reported as
-conflicts and block `--apply`.
+Dry-run is the default. Without `--issue`, the command reconciles planned or
+underway Jira work assigned to `currentUser()`: an explicit status allowlist of
+To Do, In Progress, Blocked, and In Review. To Do is SF’s Planned This Week
+column; Backlog, TRIAGE, and Investigate are not automatically created. Existing
+Clockify tasks deferred to the backlog stay intact and are still renamed as
+needed; deferral is not completion. Repeat `--issue KEY` to reconcile exact work
+items regardless of assignee or status. The plan can create projects and tasks,
+rename records, reactivate eligible tasks, and mark tasks done when Jira’s status
+category is Done (including Done and Won’t Do). It ignores archived Clockify
+projects and never deletes projects, tasks, or time entries. Ambiguous active
+duplicates are reported as conflicts and block `--apply`.
 
 JSON output identifies the selection scope and inventory counts. Applied writes
 are verified by fetching the changed Clockify object again; the command fails

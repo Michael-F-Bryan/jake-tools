@@ -14,10 +14,17 @@ It creates projects and tasks, renames them, reactivates tasks, and marks
 tasks done. It never deletes anything, and it has no other Clockify or Jira
 write surface.
 
+Backlog, TRIAGE, and Investigate are excluded from automatic creation. Existing
+tasks deferred to the backlog stay intact and can still be renamed; only Jira
+status category Done (including Done and Won’t Do) completes them. The report
+retains the `assigned-active` scope and `active_issues` count for planned or
+underway work.
+
 ## The loop: preview, read, apply with the digest
 
-1. **Preview.** Call with no arguments to cover active Jira work assigned to
-   the authenticated user, or `issues: ["SF-304", ...]` for exact keys
+1. **Preview.** Call with no arguments to cover planned or underway Jira work
+   (To Do, In Progress, Blocked, In Review) assigned to the authenticated user,
+   or `issues: ["SF-304", ...]` for exact keys
    regardless of assignee. Preview is read-only. `apply` defaults to false.
 2. **Read the report** before doing anything else (fields below). If
    `actions` is empty and `conflicts` is empty, there is nothing to do; say
