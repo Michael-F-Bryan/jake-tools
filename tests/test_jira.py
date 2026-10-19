@@ -83,7 +83,11 @@ def test_normalise_jira_key_rejects_malformed_keys() -> None:
         normalise_jira_key("not a key")
 
 
-def test_jira_client_fetches_active_assigned_issues_with_parent_data() -> None:
+@pytest.mark.parametrize("status", ["To Do", "In Progress", "Blocked", "In Review"])
+def test_jira_client_fetches_planned_or_underway_assigned_issues_with_parent_data(
+    status: str,
+) -> None:
+    category = "To Do" if status == "To Do" else "In Progress"
     session = FakeSession(
         FakeResponse(
             200,
@@ -93,6 +97,8 @@ def test_jira_client_fetches_active_assigned_issues_with_parent_data() -> None:
                     issue_payload(
                         "SF-427",
                         summary="Evaluate PX4 external control methods",
+                        status=status,
+                        status_category=category,
                         assignee="Michael Bryan",
                         parent_key="SF-131",
                         parent_summary="Production Vehicle - Investigations and Overhead",
@@ -120,8 +126,8 @@ def test_jira_client_fetches_active_assigned_issues_with_parent_data() -> None:
         JiraIssue(
             key="SF-427",
             summary="Evaluate PX4 external control methods",
-            status="In Progress",
-            statusCategory="In Progress",
+            status=status,
+            statusCategory=category,
             assignee="Michael Bryan",
             issueType="Task",
             parentKey="SF-131",
@@ -146,7 +152,7 @@ def test_jira_client_fetches_active_assigned_issues_with_parent_data() -> None:
                 "Content-Type": "application/json",
             },
             "json": {
-                "jql": 'project = SF AND assignee = currentUser() AND status in ("In Progress", "Blocked", "In Review") ORDER BY key',
+                "jql": 'project = SF AND assignee = currentUser() AND status in ("To Do", "In Progress", "Blocked", "In Review") ORDER BY key',
                 "fields": [
                     "summary",
                     "status",

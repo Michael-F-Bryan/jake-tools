@@ -24,9 +24,14 @@ JIRA_FIELDS: tuple[str, ...] = (
 # exactly one of these regardless of how many custom statuses a project has.
 JiraStatusCategory = Literal["To Do", "In Progress", "Done"]
 
-# The Jira statuses treated as "currently being worked" for the default
-# assigned-active sync scope.
-ACTIVE_ISSUE_STATUSES: tuple[str, ...] = ("In Progress", "Blocked", "In Review")
+# Planned or underway work for the default assigned-active sync scope.
+# "To Do" is SF's "Planned This Week" column, not its separate backlog statuses.
+ACTIVE_ISSUE_STATUSES: tuple[str, ...] = (
+    "To Do",
+    "In Progress",
+    "Blocked",
+    "In Review",
+)
 
 
 class JiraError(UpstreamError):
