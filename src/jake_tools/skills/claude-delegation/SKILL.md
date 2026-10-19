@@ -222,5 +222,43 @@ Errors come back with `isError: true` and `{code, message, detail}`:
   no steering). Restart every server sharing a runs directory together
   when upgrading: an older server does not understand `input_required` or
   the longer task IDs.
-- **MCP Tasks:** these are ordinary tools. Native MCP Tasks responses and
-  notifications are not offered, because no host negotiates them yet.
+- **Native MCP Tasks:** see the next section. Everything above is the
+  ordinary-tool contract, which every client gets.
+
+## Native MCP Tasks (2026-07-28)
+
+Only for a client on a 2026-07-28 connection that declares
+`io.modelcontextprotocol/tasks` in the request's own `_meta` capabilities.
+Hermes connects with `initialize`, so it always gets the ordinary tools, and
+nothing below changes them. Hosts are not verified against this server; only
+the server side is tested.
+
+- `claude_start` returns `{"resultType": "task", "taskId", "status",
+  "createdAt", "lastUpdatedAt", "ttlMs": null, "pollIntervalMs"}` once the
+  task is durable. `status` is normally `working` (a replayed `request_id`
+  returns the original task as it is now). `taskId` is the same `task_id`
+  every `claude_*` tool accepts. A start that fails (bad argument,
+  capacity) is still an ordinary `isError` tool result, not a task.
+- `tasks/get` returns `working`, `input_required` (with `inputRequests`),
+  `completed` (with `result`, a `CallToolResult` whose `content` is the
+  final text, or the error when there is none, and whose
+  `structuredContent` is the `result` object from section 7) or
+  `cancelled`. Every worker outcome other than `finished` (limits, SDK
+  errors, a dead worker) is `completed` with `result.isError: true`.
+  `failed` is reserved for JSON-RPC errors and is never returned.
+- `inputRequests` are keyed by the same `request_id` as `pending_inputs`.
+  Each is an `elicitation/create` form asking for one string, `answer`
+  (`choices` appear as `examples`). Answer with `tasks/update
+  {"taskId", "inputResponses": {"<request_id>": {"action": "accept",
+  "content": {"answer": "…"}}}}`, or `"action": "decline"`/`"cancel"`
+  (both decline). Partial answers are fine. Keys that are not outstanding
+  are ignored; a bad action or a missing `content.answer` is `-32602`.
+- `tasks/cancel` acknowledges at once; poll `tasks/get` for `cancelled`.
+  It is the same cancellation as `claude_cancel`.
+- `pollIntervalMs` is a suggestion (5000). Run directories are never
+  purged, so `ttlMs` is `null`.
+- Not part of the extension, so use the ordinary tools for them:
+  `claude_steer`, `claude_poll` events, `claude_transcript`, and resume.
+  `notifications/tasks` subscriptions are not offered.
+- Errors: no capability on the request is `-32021`; an unknown task ID is
+  `-32602`; an unreadable task is `-32603`.

@@ -146,9 +146,18 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   cursor. It pumps `messages/` (steering) into the conversation and serves
   the opt-in `ask_parent` local tool from `inputs/`.
   `claude_runs.service.TaskService` is the one service every `claude_*` tool
-  calls. `claude_runs.tasks_protocol` projects it onto MCP Tasks 2026-07-28;
-  that module is deliberately not wired to the transport until a host
-  negotiates the extension.
+  calls. `claude_runs.tasks_protocol` projects it onto MCP Tasks 2026-07-28,
+  and `mcp/tasks.py` serves that projection natively through `mcp`'s
+  `Extension` API (`mcp` 2.3 has no Tasks implementation of its own):
+  `server/discover` advertises it, `tasks/get|update|cancel` are bound, and
+  a `tools/call` interceptor turns a successful `claude_start` into a
+  `CreateTaskResult`. That happens only when the request is on a 2026-07-28
+  connection and its own `_meta` declares the extension; legacy
+  (`initialize`) requests, Hermes included, always get the ordinary tool
+  result, and undeclared `tasks/*` is `-32021`. Worker failures are
+  `completed` tasks with an `isError` result; protocol `failed` is never
+  produced. Steering, bounded polls and transcripts stay ordinary tools.
+  No `notifications/tasks` subscriptions.
 - Real CLI semantics this relies on (CLI 2.1.293, see the module docs):
   - A user message sent mid-turn joins the turn after the running tool
     call. `--replay-user-messages` echoes it with its `uuid`.
@@ -169,7 +178,12 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   `tests/fake_claude.py` first on PATH as `claude`. It speaks the CLI's
   stream-json and control protocol, so the real server, worker and SDK run.
   It proves mechanics only; `test_claude_tasks_live.py` (slow) is the
-  real-model acceptance. Inside a delegated worker, which is a child
+  real-model acceptance, over both the ordinary tools and native Tasks.
+  `tests/tasks_client.py` is a minimal Tasks client on `mcp`'s
+  `ClientExtension` API; `test_mcp_tasks.py` drives the real server with it
+  and with a legacy session. The fake must keep speaking to the in-process
+  `ask_parent` server as the real CLI does (MCP handshake, fresh JSON-RPC
+  ids, `notifications/cancelled` to abandon): `mcp` 2 enforces all three. Inside a delegated worker, which is a child
   subreaper, orphaned test processes linger as zombies until it exits, so
   two zombie-only group assertions in `test_claude_runs_live.py` fail
   there. They pass under a reaping init.

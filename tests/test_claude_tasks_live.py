@@ -1,5 +1,10 @@
 """The interactive delegation workflow against the real CLI and a real model.
 
+Through both surfaces: the ordinary ``claude_*`` tools (a legacy
+``initialize`` session, as Hermes connects) and native MCP Tasks (a
+2026-07-28 client declaring ``io.modelcontextprotocol/tasks``, from
+``tasks_client.py``).
+
 ``slow`` (``uv run pytest --slow -k claude_tasks_live``). Nothing is
 stubbed: the real stdio server, worker, SDK and ``claude`` CLI, with the
 cheapest model and tight limits, in a scratch directory under ``tmp_path``.
@@ -27,6 +32,15 @@ from typing import Any
 import anyio
 import pytest
 from mcp import ClientSession
+from tasks_client import (
+    TERMINAL,
+    CreateTaskResult,
+    cancel_task,
+    create_task,
+    get_task,
+    start_modern_client,
+    update_task,
+)
 
 pytestmark = pytest.mark.slow
 
@@ -331,6 +345,215 @@ async def test_live_cancel_after_a_server_restart_stops_the_real_tree(
     assert cancelled["cancel_requested_at"] is not None
     assert after["result"]["outcome"] == "cancelled"
     assert after["result"]["session_id"]
+    deadline = time.monotonic() + 30
+    while _loop_shells() and time.monotonic() < deadline:
+        await anyio.sleep(0.25)
+    assert _loop_shells() == ""
+
+
+# --- native MCP Tasks -----------------------------------------------------------
+
+
+async def native_poll(
+    session: ClientSession,
+    evidence: Evidence,
+    task_id: str,
+    until: set[str] | frozenset[str],
+    *,
+    timeout: float = 360,
+) -> dict[str, Any]:
+    """``tasks/get`` at the server's suggested interval until ``until``."""
+    with anyio.fail_after(timeout):
+        while True:
+            task = await get_task(session, task_id)
+            evidence.note("tasks/get", task)
+            assert task["status"] != "failed", task  # reserved for JSON-RPC errors
+            if task["status"] in until:
+                return task
+            await anyio.sleep(task.get("pollIntervalMs", 5000) / 1000)
+
+
+async def native_start(
+    session: ClientSession, evidence: Evidence, arguments: dict[str, Any]
+) -> CreateTaskResult:
+    created = await create_task(session, "claude_start", arguments)
+    evidence.note(
+        "claude_start (native)", created.model_dump(mode="json", by_alias=True)
+    )
+    assert isinstance(created, CreateTaskResult), created
+    return created
+
+
+async def test_live_native_task_observe_steer_clarify_and_complete(
+    live_env: dict[str, str], tmp_path: Path
+) -> None:
+    evidence = Evidence("native-workflow")
+    workdir = tmp_path / "scratch"
+    workdir.mkdir()
+    (workdir / "inventory.txt").write_text(INVENTORY)
+    brief = (
+        "You are reviewing a scratch file. Do these steps in order:\n"
+        "1. Run exactly `sleep 20 && wc -l inventory.txt` with the Bash tool, in "
+        "the foreground, and wait for it.\n"
+        "2. Read inventory.txt.\n"
+        "3. Call the ask_parent tool exactly once to ask how the widget count "
+        "should be formatted in your answer.\n"
+        "4. Give a short final review of the file that follows the parent's "
+        "answer and any later instructions from the parent.\n"
+        "Do not modify any file."
+    )
+    async with start_modern_client(live_env) as client:
+        session = client.session
+        created = await native_start(
+            session,
+            evidence,
+            {
+                "brief": brief,
+                "working_directory": str(workdir),
+                "tools": ["Read", "Bash"],
+                "allow_questions": True,
+                **CHEAP,
+            },
+        )
+        task_id = created.task_id
+        assert created.status == "working"
+
+        # Observe with the domain tool (tasks/get has no event stream), then
+        # steer while the 20 s command runs: steering stays a domain tool.
+        _, events, cursor = await poll_until(
+            session,
+            evidence,
+            task_id,
+            lambda _, evs: any(
+                e["kind"] == "tool_use" and e["tool"] == "Bash" for e in evs
+            ),
+        )
+        steer = await call(
+            session,
+            evidence,
+            "claude_steer",
+            task_id=task_id,
+            message_id="correction-1",
+            message=(
+                "Correction from your parent: in your final answer also count the "
+                "lines that mention 'gadget' and include them exactly as GADGETS=<n>."
+            ),
+        )
+        assert steer["state"] in ("queued", "delivered")
+
+        # Clarify natively: a keyed elicitation, answered with tasks/update.
+        waiting = await native_poll(
+            session, evidence, task_id, {"input_required", *TERMINAL}
+        )
+        assert waiting["status"] == "input_required", waiting
+        ((key, request),) = waiting["inputRequests"].items()
+        assert request["method"] == "elicitation/create"
+        assert request["params"]["message"].strip()
+        ack = await update_task(
+            session,
+            task_id,
+            {
+                key: {
+                    "action": "accept",
+                    "content": {
+                        "answer": "Report the number of lines that mention 'widget' exactly as WIDGETS=<n>."
+                    },
+                }
+            },
+        )
+        evidence.note("tasks/update", ack)
+        assert ack["resultType"] == "complete"
+
+        final = await native_poll(session, evidence, task_id, TERMINAL)
+        # The same task through the ordinary tool: one task system.
+        status = await call(session, evidence, "claude_status", task_id=task_id)
+
+    assert final["status"] == "completed", final
+    result = final["result"]
+    assert result["isError"] is False, result
+    text = result["content"][0]["text"]
+    # Counts that only appear if the steering message and the answer arrived.
+    assert f"WIDGETS={WIDGETS}" in text.replace(" ", ""), text
+    assert f"GADGETS={GADGETS}" in text.replace(" ", ""), text
+    assert result["structuredContent"]["termination_reason"] == "finished"
+    assert result["structuredContent"]["final_text"] == status["final_text"]
+    assert status["status"] == "completed"
+    assert "error" not in final and "inputRequests" not in final
+    assert (workdir / "inventory.txt").read_text() == INVENTORY
+    evidence.note("final", final)
+
+
+async def test_live_native_turn_limit_is_a_completed_task_with_an_error_result(
+    live_env: dict[str, str], tmp_path: Path
+) -> None:
+    evidence = Evidence("native-turn-limit")
+    workdir = tmp_path / "scratch"
+    workdir.mkdir()
+    (workdir / "inventory.txt").write_text(INVENTORY)
+    async with start_modern_client(live_env) as client:
+        created = await native_start(
+            client.session,
+            evidence,
+            {
+                "brief": (
+                    "Read inventory.txt with the Read tool, then run `wc -l "
+                    "inventory.txt` with the Bash tool, then report both results."
+                ),
+                "working_directory": str(workdir),
+                "tools": ["Read", "Bash"],
+                **{**CHEAP, "max_turns": 1},
+            },
+        )
+        final = await native_poll(client.session, evidence, created.task_id, TERMINAL)
+
+    assert final["status"] == "completed", final  # never protocol "failed"
+    assert final["result"]["isError"] is True
+    assert final["result"]["structuredContent"]["termination_reason"] == "max_turns"
+    assert "error" not in final
+
+
+async def test_live_native_cancel_from_a_new_server_stops_the_real_tree(
+    live_env: dict[str, str], tmp_path: Path
+) -> None:
+    evidence = Evidence("native-cancel-reconnect")
+    workdir = tmp_path / "scratch"
+    workdir.mkdir()
+    brief = (
+        "Using the Bash tool, run exactly this command in the foreground and wait "
+        "for it to finish (do not use run_in_background, do not modify it):\n"
+        "until [ -e ./never-created-live ]; do sleep 1; done\n"
+        "When it finishes, reply DONE."
+    )
+    async with start_modern_client(live_env) as client:
+        first_pid = (await call(client.session, evidence, "ping"))["pid"]
+        created = await native_start(
+            client.session,
+            evidence,
+            {
+                "brief": brief,
+                "working_directory": str(workdir),
+                "tools": ["Bash"],
+                **CHEAP,
+            },
+        )
+        with anyio.fail_after(180):
+            while not _loop_shells():
+                await anyio.sleep(1)
+        await anyio.sleep(2)  # let the worker record the shell's group
+    # The first server process is gone; the task is not.
+
+    async with start_modern_client(live_env) as client:
+        assert (await call(client.session, evidence, "ping"))["pid"] != first_pid
+        still = await get_task(client.session, created.task_id)
+        ack = await cancel_task(client.session, created.task_id)
+        evidence.note("tasks/cancel", ack)
+        final = await native_poll(
+            client.session, evidence, created.task_id, TERMINAL, timeout=60
+        )
+
+    assert still["status"] == "working", still
+    assert ack["resultType"] == "complete"
+    assert final["status"] == "cancelled", final
     deadline = time.monotonic() + 30
     while _loop_shells() and time.monotonic() < deadline:
         await anyio.sleep(0.25)

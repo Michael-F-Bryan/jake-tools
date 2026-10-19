@@ -133,10 +133,14 @@ so they survive server restarts:
 At most two tasks run at once. The packaged
 [`claude-delegation` skill](src/jake_tools/skills/claude-delegation/SKILL.md)
 documents the contract, including retention, the local trust model and the
-upgrade note: restart every server sharing a runs directory together. Native
-MCP Tasks (2026-07-28) responses are not offered. The projection is
-implemented in `claude_runs/tasks_protocol.py` for when a host negotiates the
-extension.
+upgrade note: restart every server sharing a runs directory together.
+
+`claude_start` is also available as a native MCP Tasks (2026-07-28) task, for a
+client that declares `io.modelcontextprotocol/tasks` in the request's own
+capabilities: it then gets a `CreateTaskResult` and polls with `tasks/get`,
+answers questions with `tasks/update` and cancels with `tasks/cancel`. Every
+other client, including Hermes on its `initialize` connection, gets the
+ordinary tools unchanged. Both are views of the same task.
 
 ## Codex usage alerts
 
