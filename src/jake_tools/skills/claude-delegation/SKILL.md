@@ -1,140 +1,198 @@
 ---
 name: claude-delegation
-description: Delegate a bounded, non-interactive task to a separate Claude Code agent with the jake-tools `claude_start`, `claude_status` and `claude_cancel` MCP tools, then check its work. Use for self-contained coding, file, or research jobs in a known directory that can run unattended for minutes, not for anything needing a conversation or mid-task questions.
+description: Delegate a bounded task to a separate Claude Code agent with the jake-tools `claude_*` MCP tools, watch it, steer it, answer its questions, collect and check the result, and resume the conversation later. Use for self-contained coding, file or research jobs in a known directory.
 ---
 
 # Delegating to Claude
 
-Three tools from the `jake-tools` MCP server: `claude_start`, `claude_status`,
-`claude_cancel`. Hermes registers them as `mcp_<server>_<tool>`; this skill
-uses the bare names.
+Tools from the `jake-tools` MCP server (Hermes registers them as
+`mcp_<server>_<tool>`; this skill uses the bare names):
 
-A delegated task runs once and unattended. It cannot ask you anything, you
-cannot add instructions once it has started, and it can't be resumed. It runs in its own
-process, so it survives the MCP server restarting, and you poll it by ID.
+| Tool | Use |
+| --- | --- |
+| `claude_start` | Start a task, or resume a finished one as a new task. |
+| `claude_poll` | Wait (at most 25 s) for progress; get new events and state. |
+| `claude_steer` | Send a running task an extra message. |
+| `claude_update` | Answer the task's questions (only with `allow_questions`). |
+| `claude_transcript` | Page through the full normalised event log. |
+| `claude_status` | Instant snapshot (prefer `claude_poll`). |
+| `claude_cancel` | Stop the task and its whole process tree. |
+
+The shortest path: `claude_start` → loop `claude_poll` with `cursor` →
+(`claude_steer` / `claude_update` as needed) → read `result` → check the
+work → optionally `claude_start(resume_task_id=...)`.
+
+Every task runs in its own process and survives MCP server restarts; task
+IDs, cursors and message IDs stay valid across them.
 
 ## 1. Write a self-contained brief
 
 The worker sees the `brief` and the files in `working_directory`. It sees no
 conversation, no Hermes memory, no skills, no MCP servers and no settings
-files. Put in the brief:
-
-- the goal, in one or two sentences;
-- the context it can't discover itself (why, constraints, names, decisions
-  already made);
-- the exact files or commands involved, as paths relative to
-  `working_directory`;
-- acceptance criteria it can check itself ("`pytest -q tests/test_x.py`
-  passes", "reply with only the number");
-- what to put in its final message (a summary of the changes, the command
-  output, or a single value). That message comes back as `final_text`.
-
-If the job needs back-and-forth, keep it yourself instead of delegating.
+files. Put in the brief: the goal; context it can't discover; exact paths
+(relative to `working_directory`) and commands; acceptance criteria it can
+check itself; and what its final message must contain (that comes back as
+`final_text`).
 
 ## 2. Grant the smallest set of tools
 
 `tools` is an explicit list from `Read`, `Glob`, `Grep`, `WebSearch`,
-`WebFetch`, `Edit`, `Write`, `Bash`. The default is **none**: the agent can
-only think and answer. Granted tools run without prompts; anything else is
-denied.
+`WebFetch`, `Edit`, `Write`, `Bash`. The default is **none**. Granted tools
+run without prompts; anything else is denied. `Bash` is not a sandbox: it can
+run anything the server's user can, anywhere, with network access.
 
-| Job | Grant |
-| --- | --- |
-| Answer from files | `Read`, `Glob`, `Grep` |
-| Research online | `WebSearch`, `WebFetch` |
-| Edit files | add `Edit`, `Write` |
-| Run tests or commands | add `Bash` |
-
-`Bash` is broad. It is not a sandbox: it can run anything the server's user
-can, anywhere on the filesystem, and reach the network. Grant it only when
-the task needs to run commands, and only with a `working_directory` you'd be
-comfortable having changed.
+`allow_questions: true` gives the worker one more tool, `ask_parent`, to ask
+**you** a question. Set it only when you will watch with `claude_poll`: an
+unanswered question blocks the task until its timeout. It grants no
+permissions; a worker cannot use it to get more tools.
 
 ## 3. Start
 
 ```json
-{"brief": "Read notes.txt and reply with only the number of lines it has.",
- "working_directory": "/abs/path/to/checkout",
- "tools": ["Read"]}
+{"brief": "…", "working_directory": "/abs/path", "tools": ["Read"],
+ "allow_questions": true, "request_id": "review-2026-10-19-1"}
 ```
 
-`working_directory` must be absolute and must already exist. `model`,
-`effort` (`low`…`max`), `max_turns`, `timeout_seconds` and `max_budget_usd`
-default to the server's configuration and are hard limits. Lower them for
-small jobs. Raise `timeout_seconds` only when the job really needs it.
+`model`, `effort` (`low`…`max`), `max_turns`, `timeout_seconds` and
+`max_budget_usd` default to the server's configuration and are hard limits
+for this invocation:
 
-The result comes back immediately:
+- `timeout_seconds` is wall-clock time for the whole task, **including time
+  spent waiting for your answers**.
+- `max_turns` counts model turns across the whole task, steered turns
+  included.
+- `max_budget_usd` is this invocation's spend.
+
+Steering never changes any limit or grant.
+
+The result returns once the task is durably created:
+`{"task_id", "status": "working", "session_id", "run_dir", "replayed": false}`.
+
+`request_id` (your choice, 1–128 of `A-Z a-z 0-9 . _ : -`) makes the call safe
+to retry after a timeout or disconnect. The same `request_id` with the same
+request returns the original task (`replayed: true`, its current `status`),
+even when capacity is full. The same `request_id` with a different request
+is `request_conflict`.
+
+At most two tasks run at once (`capacity_exceeded`, no queue).
+
+## 4. Watch with `claude_poll`
+
+Call `claude_poll {"task_id": …, "cursor": <previous next_cursor>}`. It waits
+up to `wait_seconds` (default 20, max 25) and returns early when there are new
+events, the task needs input, or it ended (`wake_reason`). The wait is not the
+task's timeout; cancelling a poll never affects the task. Don't sleep in a
+shell between polls: just poll again.
+
+Each result carries:
+
+- `status`: `working`, `input_required`, `completed`, `failed` or
+  `cancelled`. `termination_reason` gives the worker's outcome.
+- `status_message`: the latest progress line.
+- `last_activity_at`: when the agent last did something. This is real
+  activity, not a heartbeat.
+- `usage`, `invocation_cost_usd` and `limits` (with `deadline_at`).
+- `events`: only those after your cursor, at most `limit` (default 20).
+  Their kinds are `assistant_text` (public narration only, never private
+  thinking), `tool_use` (tool plus input summary), `tool_result`,
+  `turn_result`, `message_*`, `input_*`, `cancel_requested` and `finished`.
+  Text is cut to 1000 characters, marked by `text_truncated`/`text_chars`.
+- `next_cursor` and `has_more`.
+
+Omit `cursor` to start from the first event. A cursor from another task,
+malformed, or past the end is `invalid_argument`.
+
+For more text per event, use `claude_transcript` (`max_text_chars` up to
+50 000, `limit` up to 200). Tool results are stored up to 8000 characters.
+`raw_transcript_path` is the raw SDK stream, for diagnosis only; you
+shouldn't need to parse it.
+
+## 5. Steer
+
+`claude_steer {"task_id", "message", "message_id"}` adds a user message to
+the same conversation. `message_id` is yours: retrying with the same ID and
+text is safe (`replayed: true`); the same ID with different text is
+`request_conflict`. `state` progresses:
+
+| `state` | Meaning |
+| --- | --- |
+| `queued` | Stored; not yet sent to Claude. |
+| `delivered` | Written to Claude's input. |
+| `in_conversation` | Claude Code added it to the conversation. Sent mid-turn, it lands after the running tool call finishes (never interrupting it); sent at a turn's end, it starts a new turn. |
+| `not_delivered` | The task ended first; `reason` says why. |
+
+None of these proves the model acted on it. Check its later events and
+output. An ended task returns `task_not_running`.
+
+## 6. Answer questions
+
+With `allow_questions`, the task may go `input_required`.
+`pending_inputs[]` has `request_id`, `question` and optional `choices`
+(suggestions only). Reply with:
 
 ```json
-{"task_id": "20261008T085540Z-e19e7f4a", "status": "working",
- "run_dir": "/…/jake-tools/runs/20261008T085540Z-e19e7f4a"}
+{"task_id": "…", "responses": {"q1-1a2b3c4d": {"answer": "green"}}}
 ```
 
-At most two tasks run at once. A third start returns `capacity_exceeded`
-(`detail.live`, `detail.limit`). Wait for one of the two to finish, or cancel
-one. There is no queue.
+or `{"action": "decline"}`. You may answer some and leave others pending.
+Each key reports `accepted`, `duplicate` (already applied identically),
+`conflict` (settled differently), `not_pending` (expired when the task ended
+or its tool call was abandoned) or `unknown`. The task continues in the same
+turn with your answer.
 
-## 4. Poll
+## 7. Collect the result, then check it
 
-Call `claude_status` with the `task_id` every 15–60 s, depending on how long
-the job is. Back off rather than polling in a tight loop. It keeps working
-across server restarts. While running, the result is `status: "working"`,
-with `termination_reason`, `final_text` and `usage` all null.
+Once ended, `result` holds:
 
-The run ends in one of these states:
+- `final_text` (up to 20 000 characters; `final_text_path` has it in full),
+  `termination_reason` and `error`;
+- `session_id` and `resumable`;
+- `usage` and `invocation_cost_usd`;
+- `last_narration`, which on limits, errors and cancels shows how far it got;
+- `transcript_path`.
 
 | `status` | `termination_reason` | Meaning |
 | --- | --- | --- |
-| `completed` | `finished` | The run ended normally. **This does not mean the work is right.** |
-| `failed` | `max_turns`, `budget`, `timeout` | It hit a limit. Any partial work is still on disk. |
-| `failed` | `sdk_error` | The Claude CLI or SDK failed. The reason is in `error`. |
-| `failed` | `worker_died` | The worker process vanished without recording an outcome. |
+| `completed` | `finished` | Ended normally. **Not proof the work is right.** |
+| `failed` | `max_turns`, `budget`, `timeout` | Hit a limit; partial work stays on disk. |
+| `failed` | `sdk_error` | The CLI/SDK failed (auth problems show here); see `error`. |
+| `failed` | `resume_failed` | Claude could not resume the session (it may have been deleted). Nothing ran. |
+| `failed` | `worker_died` | The worker vanished without recording an outcome. |
 | `cancelled` | `cancelled` | You cancelled it. |
 
-Example of a finished task:
+`final_text` is the agent's claim, including any "tests pass". Before you
+report the work as done, read the changed files or `git diff` and re-run the
+acceptance checks yourself. Report what you verified separately from what the
+agent claimed.
 
-```json
-{"status": "completed", "termination_reason": "finished",
- "final_text": "4",
- "usage": {"api_calls": 3, "total_tokens": 5074, "estimated_cost_usd": 0.007051},
- "error": null}
-```
+## 8. Resume
 
-In that example the file had **3** lines. The agent finished normally and
-was wrong. That's why step 5 exists.
+`claude_start {"brief": "…", "resume_task_id": "<task>", "tools": […]}` continues
+that task's Claude conversation as a **new** task, with the same
+`session_id` and `resumed_from` set:
 
-On a limit, `error` names it, e.g. `"… subtype='error_max_budget_usd' …
-errors='Reached maximum budget ($0.0001)'"`. Use `usage.estimated_cost_usd`
-for cost. The per-model token counts in `usage.model_usage` are more complete
-than the top-level token fields on failed runs.
+- Nothing is inherited except the conversation. Tools, limits and
+  `allow_questions` are this call's own.
+- `working_directory` must be the parent's (omit it to use the parent's).
+- Only the session's latest task can be resumed. An older one returns
+  `resume_unavailable` with `detail.latest_task_id`.
+- A still-running parent, or another live task on the session, returns
+  `session_busy`.
+- A missing session ends as `resume_failed`; it never silently starts a
+  fresh conversation.
+- `invocation_cost_usd` is this invocation's spend.
+  `invocation_cost_exact: false` means the parent ended mid-turn, so the
+  figure may be overstated.
 
-## 5. Check the work before reporting it
+## 9. Cancel, and inspect before retrying
 
-`final_text` is the agent's claim, not evidence. Before telling anyone the
-job is done:
-
-- Read the files it says it changed, or run `git diff`/`git status` in
-  `working_directory`.
-- Re-run the acceptance check yourself (the tests, the command, the count).
-- For anything surprising, read `transcript.jsonl` in `run_dir`. It holds
-  one JSON object per SDK message, including every tool call and its output.
-  `brief.md`, `spec.json`, `status.json` and `result.json` are there too.
-
-Report what you verified, separately from what the agent claimed.
-
-## 6. Cancel, and inspect before retrying
-
-`claude_cancel` with the `task_id` stops the task: it sends SIGTERM, waits up
-to 10 s, then SIGKILL. It can take up to about 15 s to return. Cancelling an
-already-finished task returns its state unchanged.
-
-Neither cancellation nor a failure undoes anything. Files edited, commands
-run and network calls made before the stop all stand. Before retrying:
-
-1. Look at the state of `working_directory` (`git status`, the files).
-2. Read the end of `transcript.jsonl` to see how far it got.
-3. Either write a new brief that starts from the current state, or clean up
-   first. Don't blindly re-run the same brief over half-done work.
+`claude_cancel` records `cancel_requested_at`, sends SIGTERM to every process
+group the task used, waits up to 10 s, then sends SIGKILL (up to about 15 s
+in total). It reports `cancelled` only once every process is confirmed gone,
+and `failed` with an error if some are not. Queued messages become
+`not_delivered`, pending questions expire, and partial output is kept.
+Nothing is rolled back: before retrying, look at `working_directory` and the
+result's `last_narration` and events.
 
 ## Errors
 
@@ -142,7 +200,27 @@ Errors come back with `isError: true` and `{code, message, detail}`:
 
 | `code` | Cause |
 | --- | --- |
-| `invalid_argument` | `detail.argument` names the field: relative or missing `working_directory`, empty `brief`, an unknown tool, or a non-positive limit. |
+| `invalid_argument` | `detail.argument` names it (bad path, empty brief, unknown tool, bad limit, bad cursor or bounds, malformed response). |
 | `capacity_exceeded` | Two tasks are already running. |
-| `unknown_task` | No such `task_id` on this server's runs directory. Check you copied it exactly. |
-| `worker_failed` | The worker process could not be started. Report it; don't loop. |
+| `unknown_task` | No such task ID in this server's runs directory. |
+| `request_conflict` | `request_id`/`message_id` reused with a different payload. |
+| `session_busy` | The session to resume is being written by a live task. |
+| `resume_unavailable` | No session on record, a failed resume, a different directory, or not the latest task (`detail.latest_task_id`). |
+| `task_not_running` | The task can't take messages any more. |
+| `worker_failed` | The worker process could not start. Report it; don't loop. |
+
+## Retention, trust and versions
+
+- **Retention:** run directories (results, events, transcripts) are kept
+  until someone deletes them; nothing is pruned. Claude Code keeps its
+  sessions under its own retention, so a resume can fail with
+  `resume_failed` even when the run directory still exists.
+- **Trust:** task IDs carry 128 random bits, but the trust boundary is the
+  local user. Anyone who can call this stdio server, or read its runs
+  directory, can observe and steer every task in it.
+- **Versions:** older runs stay readable (`legacy_run: true`, no events,
+  no steering). Restart every server sharing a runs directory together
+  when upgrading: an older server does not understand `input_required` or
+  the longer task IDs.
+- **MCP Tasks:** these are ordinary tools. Native MCP Tasks responses and
+  notifications are not offered, because no host negotiates them yet.

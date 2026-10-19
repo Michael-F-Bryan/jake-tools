@@ -107,6 +107,33 @@ Create errors report `post_uncertain`, `verification_unavailable`, or
 A failed POST (even HTTP 500) may have committed. Inspect history/the known ID
 before deciding whether to try again; **never automatically retry**.
 
+## Claude delegation MCP tools
+
+The stdio server also runs bounded Claude Code tasks in the background, each in
+its own process and run directory (`$XDG_STATE_HOME/jake-tools/runs/<task_id>/`),
+so they survive server restarts:
+
+- `claude_start` starts a task with an explicit tool grant and hard limits. It
+  also takes an idempotent `request_id`, an opt-in `allow_questions`, and
+  `resume_task_id` to continue a finished task's conversation as a new task.
+- `claude_poll` waits at most 25 s for change and returns state plus
+  cursor-paged normalised events (no private thinking). `claude_transcript`
+  returns larger pages.
+- `claude_steer` adds an idempotent message to the running conversation and
+  reports delivery honestly (`queued`, `delivered`, `in_conversation`,
+  `not_delivered`).
+- `claude_update` answers the worker's questions.
+- `claude_status` returns a snapshot; `claude_cancel` stops the whole
+  process tree.
+
+At most two tasks run at once. The packaged
+[`claude-delegation` skill](src/jake_tools/skills/claude-delegation/SKILL.md)
+documents the contract, including retention, the local trust model and the
+upgrade note: restart every server sharing a runs directory together. Native
+MCP Tasks (2026-07-28) responses are not offered. The projection is
+implemented in `claude_runs/tasks_protocol.py` for when a host negotiates the
+extension.
+
 ## Codex usage alerts
 
 ```bash

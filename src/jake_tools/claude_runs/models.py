@@ -69,7 +69,11 @@ runs created before that change have 8 hex digits and stay valid.
 Compatibility: every field added since the first release is optional, so a
 run directory written by an older server or worker still loads.
 ``spec.schema_version`` is 1 for those runs; they have no ``events.jsonl``,
-and the event tools say so (``legacy_run``) instead of failing.
+and the event tools say so (``legacy_run``) instead of failing. The reverse
+does not hold: an older server misreads ``input_required`` and rejects the
+longer task IDs, so every server sharing a runs directory must be restarted
+together on upgrade. A run left ``working`` by an older worker still reads
+and cancels, but takes no messages.
 """
 
 from __future__ import annotations

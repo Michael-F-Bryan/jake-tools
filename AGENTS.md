@@ -12,6 +12,7 @@ When in doubt, run `jake-tools <command> --help` for current flags.
 src/jake_tools/
   cli/            # Click commands (keep thin)
   claude.py       # Claude Agent SDK wrapper — the only LLM seam
+  claude_runs/    # delegated tasks: run dirs, worker, events, inbox, service
   prompting.py    # typed Jinja prompts bound to a response model
   newsletters.py  # SharePoint Graph client
 tests/            # mirrors packages above
@@ -137,17 +138,41 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   `wait_for`: the Claude SDK's child-process cleanup only runs under anyio
   cancellation.
 - The server holds no state that matters. Delegated tasks live in run
-  directories (`claude_runs/models.py` documents the files); the worker is
-  its own process group and outlives the server. No queue, no database.
+  directories (`claude_runs/models.py` documents the files and lock order);
+  the worker is its own process group and outlives the server. No queue, no
+  database. The worker holds one streaming conversation
+  (`ClaudeAgent.converse`). It writes normalised `events.jsonl`, which
+  `claude_poll`/`claude_transcript` page by `<task_id>:<seq>:<offset>`
+  cursor. It pumps `messages/` (steering) into the conversation and serves
+  the opt-in `ask_parent` local tool from `inputs/`.
+  `claude_runs.service.TaskService` is the one service every `claude_*` tool
+  calls. `claude_runs.tasks_protocol` projects it onto MCP Tasks 2026-07-28;
+  that module is deliberately not wired to the transport until a host
+  negotiates the extension.
+- Real CLI semantics this relies on (CLI 2.1.293, see the module docs):
+  - A user message sent mid-turn joins the turn after the running tool
+    call. `--replay-user-messages` echoes it with its `uuid`.
+  - `num_turns`/`--max-turns` restart per prompt, so the worker enforces
+    `max_turns` itself.
+  - Token usage is per prompt, but `total_cost_usd` is a running session
+    total carried across `--resume`.
 - Contract models the tools return live with their domain, not in `mcp/`:
   `clockify_jira_sync.SyncReport` (also what `clockify jira-sync --json`
-  prints) and `claude_runs.RunState`/`ClaudeStartResult`.
+  prints), `claude_runs.RunState`/`ClaudeStartResult`, and the
+  `claude_runs.service` results (`PollResult`, `SteerResult`, …).
 - Tests: `tests/conftest.py` provides `mcp_server`/`mcp_env` fixtures that
   spawn the real server over stdio under an isolated `HOME` with no
   secrets. Protocol and result-shape tests go through them. Process
   lifecycle tests (worker, cancel, timeout, server death) use real processes
   and check the process table afterwards; a lifecycle test that stubs the
-  process is not a lifecycle test.
+  process is not a lifecycle test. The `fake_env` fixture puts
+  `tests/fake_claude.py` first on PATH as `claude`. It speaks the CLI's
+  stream-json and control protocol, so the real server, worker and SDK run.
+  It proves mechanics only; `test_claude_tasks_live.py` (slow) is the
+  real-model acceptance. Inside a delegated worker, which is a child
+  subreaper, orphaned test processes linger as zombies until it exits, so
+  two zombie-only group assertions in `test_claude_runs_live.py` fail
+  there. They pass under a reaping init.
 - Packaged skills live in `src/jake_tools/skills/<name>/SKILL.md`, are served
   as `skill://<name>` resources, and are installed by `install-skills`. They
   describe what the tools actually return.
