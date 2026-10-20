@@ -14,6 +14,12 @@ It creates projects and tasks, renames them, reactivates tasks, and marks
 tasks done. It never deletes anything, and it has no other Clockify or Jira
 write surface.
 
+Jira `Project / Phase` issues become Clockify projects. Ordinary issues and
+subtasks become sibling Clockify tasks under their ancestor `Project / Phase`,
+regardless of intermediate parents. Ancestors are loaded for placement, not
+selected for task creation. Missing ancestors, chains with no phase, and cycles
+are conflicts; the sync never guesses a project or moves existing tasks.
+
 Backlog, TRIAGE, and Investigate are excluded from automatic creation. Existing
 tasks deferred to the backlog stay intact and can still be renamed; only Jira
 status category Done (including Done and Won’t Do) completes them. The report

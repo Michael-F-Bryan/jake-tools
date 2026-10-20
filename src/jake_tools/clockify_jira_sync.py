@@ -26,7 +26,7 @@ from .jira import JiraIssue, normalise_jira_key
 JIRA_REFERENCE_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
 
 # Sunfish's Jira convention: a "Project / Phase" issue becomes a Clockify
-# project; every other issue type becomes a task under its parent.
+# project; every other issue type becomes a task under its ancestor phase.
 PROJECT_PHASE_ISSUE_TYPE = "Project / Phase"
 
 
@@ -423,7 +423,31 @@ def prepare_jira_sync(
         jira_keys.update(index.conflicted_task_keys)
 
     jira_by_key = {issue.key: issue for issue in jira.get_issues(sorted(jira_keys))}
+    jira_by_key.update({issue.key: issue for issue in active_issues})
     jira_by_key.update({issue.key: issue for issue in selected_issues})
+    # Ancestors provide placement, not additional task selection. Fetch each
+    # key at most once, including unavailable keys and cyclic hierarchies.
+    frontier = list(active_issues)
+    visited: set[str] = set()
+    while frontier:
+        visited.update(issue.key for issue in frontier)
+        parent_keys = {
+            issue.parent_key
+            for issue in frontier
+            if issue.issue_type != PROJECT_PHASE_ISSUE_TYPE
+            and issue.parent_key is not None
+        }
+        missing_keys = parent_keys - jira_keys
+        jira_keys.update(parent_keys)
+        if missing_keys:
+            jira_by_key.update(
+                (issue.key, issue) for issue in jira.get_issues(sorted(missing_keys))
+            )
+        frontier = [
+            jira_by_key[key]
+            for key in sorted(parent_keys - visited)
+            if key in jira_by_key
+        ]
     jira_issues = [jira_by_key[key] for key in sorted(jira_by_key)]
     plan = plan_jira_sync(
         active_issues=active_issues,
@@ -443,6 +467,23 @@ def prepare_jira_sync(
         index=index,
         plan=plan,
     )
+
+
+def _project_phase_ancestor(
+    issue: JiraIssue, jira_by_key: dict[str, JiraIssue]
+) -> JiraIssue:
+    visited: set[str] = set()
+    while issue.issue_type != PROJECT_PHASE_ISSUE_TYPE:
+        if issue.key in visited:
+            raise ValueError(f"cycle in Jira ancestry at {issue.key}")
+        visited.add(issue.key)
+        if not issue.parent_key:
+            raise ValueError(f"{issue.key} has no parent Project / Phase")
+        parent = jira_by_key.get(issue.parent_key)
+        if parent is None:
+            raise ValueError(f"Jira ancestor {issue.parent_key} is unavailable")
+        issue = parent
+    return issue
 
 
 def plan_jira_sync(
@@ -520,18 +561,20 @@ def plan_jira_sync(
                 plan_project(issue.key, issue.summary)
             continue
 
-        if not issue.parent_key or not issue.parent_summary:
+        try:
+            phase = _project_phase_ancestor(issue, jira_by_key)
+        except ValueError as exc:
             actions.append(
                 ConflictAction(
                     jira_key=issue.key,
-                    message="active Jira task has no parent Project / Phase",
+                    message=str(exc),
                 )
             )
             continue
-        if issue.parent_key in conflict_project_keys:
+        if phase.key in conflict_project_keys:
             continue
 
-        plan_project(issue.parent_key, issue.parent_summary)
+        plan_project(phase.key, phase.summary)
         if issue.key in conflict_task_keys:
             continue
 
@@ -542,17 +585,17 @@ def plan_jira_sync(
                 CreateTaskAction(
                     jira_key=issue.key,
                     desired_name=desired_name,
-                    project_key=issue.parent_key,
+                    project_key=phase.key,
                 )
             )
             continue
 
-        parent = project_by_key.get(issue.parent_key)
+        parent = project_by_key.get(phase.key)
         if parent is None or task.project_id != parent.id:
             actions.append(
                 ConflictAction(
                     jira_key=issue.key,
-                    project_key=issue.parent_key,
+                    project_key=phase.key,
                     task_id=task.id,
                     message=(
                         f"Clockify task {issue.key} belongs to a different active project"
@@ -567,7 +610,7 @@ def plan_jira_sync(
                     jira_key=issue.key,
                     current_name=task.name,
                     desired_name=desired_name,
-                    project_key=issue.parent_key,
+                    project_key=phase.key,
                     project_id=task.project_id,
                     task_id=task.id,
                 )
@@ -578,7 +621,7 @@ def plan_jira_sync(
                     jira_key=issue.key,
                     current_name=task.name,
                     desired_name=desired_name,
-                    project_key=issue.parent_key,
+                    project_key=phase.key,
                     project_id=task.project_id,
                     task_id=task.id,
                 )

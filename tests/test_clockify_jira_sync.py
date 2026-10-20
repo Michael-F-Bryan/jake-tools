@@ -226,7 +226,16 @@ def test_plan_reactivates_done_task_when_it_is_active_and_assigned() -> None:
 
     plan = plan_jira_sync(
         active_issues=[issue],
-        jira_issues=[issue],
+        jira_issues=[
+            issue,
+            jira_issue(
+                "SF-131",
+                "Production Vehicle",
+                issue_type="Project / Phase",
+                parent_key=None,
+                parent_summary=None,
+            ),
+        ],
         index=build_index([project], [task]),
     )
 
@@ -252,7 +261,16 @@ def test_plan_conflicts_when_existing_task_cannot_belong_to_missing_parent() -> 
 
     plan = plan_jira_sync(
         active_issues=[issue],
-        jira_issues=[issue],
+        jira_issues=[
+            issue,
+            jira_issue(
+                "SF-131",
+                "Production Vehicle",
+                issue_type="Project / Phase",
+                parent_key=None,
+                parent_summary=None,
+            ),
+        ],
         index=build_index([wrong_project], [task]),
     )
 
@@ -284,7 +302,16 @@ def test_plan_ignores_archived_project_and_creates_usable_replacements() -> None
 
     plan = plan_jira_sync(
         active_issues=[issue],
-        jira_issues=[issue],
+        jira_issues=[
+            issue,
+            jira_issue(
+                "SF-131",
+                "Production Vehicle",
+                issue_type="Project / Phase",
+                parent_key=None,
+                parent_summary=None,
+            ),
+        ],
         index=build_index([archived], [archived_task]),
     )
 
@@ -338,7 +365,16 @@ def test_plan_reports_ambiguous_active_task_duplicates_as_conflict() -> None:
 
     plan = plan_jira_sync(
         active_issues=[issue],
-        jira_issues=[issue],
+        jira_issues=[
+            issue,
+            jira_issue(
+                "SF-131",
+                "Production Vehicle",
+                issue_type="Project / Phase",
+                parent_key=None,
+                parent_summary=None,
+            ),
+        ],
         index=build_index([project], tasks),
     )
 
@@ -365,7 +401,20 @@ def test_plan_and_apply_agree_on_duplicate_task_handling_through_shared_index() 
     )
     index = build_index([project], tasks)
 
-    plan = plan_jira_sync(active_issues=[issue], jira_issues=[issue], index=index)
+    plan = plan_jira_sync(
+        active_issues=[issue],
+        jira_issues=[
+            issue,
+            jira_issue(
+                "SF-131",
+                "Production Vehicle",
+                issue_type="Project / Phase",
+                parent_key=None,
+                parent_summary=None,
+            ),
+        ],
+        index=index,
+    )
 
     assert plan.has_conflicts
     client = FakeClockifySyncClient()
@@ -807,6 +856,243 @@ def test_prepare_jira_sync_targets_exact_issue_regardless_of_assignee_or_status(
     assert [(action.kind, action.jira_key) for action in snapshot.plan.actions] == [
         (SyncActionKind.REACTIVATE_TASK, "SF-304")
     ]
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("select_feature", [False, True])
+def test_prepare_flattens_subtasks_under_ancestor_phase(
+    explicit: bool, existing: bool, select_feature: bool
+) -> None:
+    phase = jira_issue(
+        "SF-4",
+        "Zoda - Internal Tooling & Upkeep",
+        issue_type="Project / Phase",
+        parent_key=None,
+        parent_summary=None,
+    )
+    feature = jira_issue(
+        "SF-325",
+        "Stream autopilot logs and store them on the companion computer",
+        issue_type="Feature",
+        parent_key=phase.key,
+        parent_summary=phase.summary,
+        status="To Do" if select_feature else "Backlog",
+    )
+    subtasks = [
+        jira_issue(
+            key,
+            f"Subtask {key}",
+            issue_type="Subtask",
+            parent_key=feature.key,
+            parent_summary=feature.summary,
+        )
+        for key in ("SF-326", "SF-327", "SF-328", "SF-398")
+    ]
+    selected = [feature, *subtasks] if select_feature else subtasks
+    project = clockify_project(phase.key, phase.summary)
+    tasks = [
+        clockify_task(issue.key, issue.summary, project_id=project.id)
+        for issue in selected
+    ]
+    clockify = FakeClockifyInventoryClient(
+        clients=[ClockifyClientRecord(id="client-1", name="Sunfish Robotics")],
+        projects=[project] if existing else [],
+        active_tasks=tasks if existing else [],
+        done_tasks=[],
+    )
+    jira = FakeJiraInventoryClient(
+        active_issues=[] if explicit else selected,
+        issues=[phase, feature, *subtasks],
+    )
+
+    snapshot = prepare_jira_sync(
+        clockify=clockify,
+        jira=jira,
+        jira_project="SF",
+        clockify_client="Sunfish Robotics",
+        issue_keys=[issue.key for issue in selected] if explicit else (),
+    )
+
+    assert snapshot.active_issues == tuple(selected)
+    assert {issue.key for issue in snapshot.jira_issues} == {
+        phase.key,
+        feature.key,
+        *(issue.key for issue in subtasks),
+    }
+    assert not snapshot.plan.has_conflicts
+    if existing:
+        assert snapshot.plan.actions == ()
+    else:
+        assert snapshot.plan.actions == (
+            CreateProjectAction(
+                jira_key=phase.key,
+                project_key=phase.key,
+                desired_name=phase.summary,
+            ),
+            *(
+                CreateTaskAction(
+                    jira_key=issue.key,
+                    project_key=phase.key,
+                    desired_name=f"{issue.key} {issue.summary}",
+                )
+                for issue in selected
+            ),
+        )
+        result = apply_sync_plan(
+            snapshot.plan,
+            clockify=clockify,
+            workspace_id=snapshot.workspace_id,
+            client_id=snapshot.client_id,
+            index=snapshot.index,
+        )
+        assert all(
+            item.task.project_id == "created-SF-4"
+            for item in result.applied
+            if item.task is not None
+        )
+    assert clockify.operations == (
+        []
+        if existing
+        else [
+            "create_project:Jira: SF-4",
+            *["create_task:created-SF-4"] * len(selected),
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_kind", "message"),
+    [
+        ("rename", SyncActionKind.RENAME_TASK, ""),
+        ("reactivate", SyncActionKind.REACTIVATE_TASK, ""),
+        ("wrong-project", SyncActionKind.CONFLICT, "different active project"),
+        (
+            "duplicate-phase",
+            SyncActionKind.CONFLICT,
+            "multiple active Clockify projects",
+        ),
+        ("duplicate-task", SyncActionKind.CONFLICT, "multiple active Clockify tasks"),
+    ],
+)
+def test_deep_ancestry_preserves_task_updates_and_conflict_guards(
+    state: str, expected_kind: SyncActionKind, message: str
+) -> None:
+    phase = jira_issue(
+        "SF-4",
+        "Phase",
+        issue_type="Project / Phase",
+        parent_key=None,
+    )
+    intermediate = jira_issue("SF-100", "Intermediate", parent_key=phase.key)
+    feature = jira_issue("SF-325", "Feature", parent_key=intermediate.key)
+    issue = jira_issue(
+        "SF-326",
+        "New summary",
+        issue_type="Subtask",
+        parent_key=feature.key,
+        parent_summary=None,
+    )
+    project = clockify_project(phase.key, phase.summary)
+    wrong_project = clockify_project("SF-999", "Unrelated")
+    task = clockify_task(
+        issue.key,
+        "Old summary",
+        project_id=wrong_project.id if state == "wrong-project" else project.id,
+        status="DONE" if state == "reactivate" else "ACTIVE",
+    )
+    projects = [project, wrong_project]
+    if state == "duplicate-phase":
+        projects.append(project.model_copy(update={"id": "duplicate-project"}))
+    tasks = [task]
+    if state == "duplicate-task":
+        tasks.append(task.model_copy(update={"id": "duplicate-task"}))
+    clockify = FakeClockifyInventoryClient(
+        clients=[ClockifyClientRecord(id="client-1", name="Sunfish Robotics")],
+        projects=projects,
+        active_tasks=[task for task in tasks if task.status == "ACTIVE"],
+        done_tasks=[task for task in tasks if task.status == "DONE"],
+    )
+    jira = FakeJiraInventoryClient(
+        active_issues=[],
+        issues=[phase, intermediate, feature, issue],
+    )
+
+    snapshot = prepare_jira_sync(
+        clockify=clockify,
+        jira=jira,
+        jira_project="SF",
+        clockify_client="Sunfish Robotics",
+        issue_keys=[issue.key],
+    )
+
+    assert len(snapshot.plan.actions) == 1
+    action = snapshot.plan.actions[0]
+    assert action.kind == expected_kind
+    if expected_kind == SyncActionKind.CONFLICT:
+        assert message in action.message
+        with pytest.raises(SyncApplyError, match=message):
+            apply_sync_plan(
+                snapshot.plan,
+                clockify=clockify,
+                workspace_id=snapshot.workspace_id,
+                client_id=snapshot.client_id,
+                index=snapshot.index,
+            )
+    else:
+        assert action.jira_key == issue.key
+        assert action.project_key == phase.key
+        assert action.project_id == project.id
+        assert action.task_id == task.id
+        assert action.desired_name == "SF-326 New summary"
+    assert clockify.operations == []
+
+
+@pytest.mark.parametrize("problem", ["missing", "orphan", "cycle"])
+def test_prepare_reports_unresolvable_ancestor_without_guessing(problem: str) -> None:
+    issue = jira_issue("SF-326", "Subtask", parent_key="SF-325")
+    parent = jira_issue(
+        "SF-325",
+        "Feature",
+        issue_type="Feature",
+        parent_key="SF-326" if problem == "cycle" else None,
+    )
+    clockify = FakeClockifyInventoryClient(
+        clients=[ClockifyClientRecord(id="client-1", name="Sunfish Robotics")],
+        projects=[],
+        active_tasks=[],
+        done_tasks=[],
+    )
+    jira = FakeJiraInventoryClient(
+        active_issues=[issue],
+        issues=[issue] if problem == "missing" else [issue, parent],
+    )
+
+    snapshot = prepare_jira_sync(
+        clockify=clockify,
+        jira=jira,
+        jira_project="SF",
+        clockify_client="Sunfish Robotics",
+    )
+
+    assert len(snapshot.plan.actions) == 1
+    conflict = snapshot.plan.actions[0]
+    assert isinstance(conflict, ConflictAction)
+    assert conflict.jira_key == issue.key
+    assert {
+        "missing": "ancestor SF-325 is unavailable",
+        "orphan": "SF-325 has no parent Project / Phase",
+        "cycle": "cycle",
+    }[problem] in conflict.message
+    with pytest.raises(SyncApplyError, match="Refusing to apply"):
+        apply_sync_plan(
+            snapshot.plan,
+            clockify=clockify,
+            workspace_id=snapshot.workspace_id,
+            client_id=snapshot.client_id,
+            index=snapshot.index,
+        )
+    assert clockify.operations == []
 
 
 def test_prepare_jira_sync_requires_exact_active_clockify_client() -> None:
