@@ -36,10 +36,41 @@ check itself; and what its final message must contain (that comes back as
 
 ## 2. Grant the smallest set of tools
 
-`tools` is an explicit list from `Read`, `Glob`, `Grep`, `WebSearch`,
-`WebFetch`, `Edit`, `Write`, `Bash`. The default is **none**. Granted tools
-run without prompts; anything else is denied. `Bash` is not a sandbox: it can
-run anything the server's user can, anywhere, with network access.
+Two separate lists:
+
+- `tools` is the Claude Code built-in tools the worker can **see**, by
+  name: for example `Read`, `Glob`, `Grep`, `Edit`, `Write`, `Bash`,
+  `WebFetch`, `WebSearch`, `NotebookEdit`, `Monitor`. The default is
+  **none**: the worker gets no tools at all. Any well-formed name is
+  passed to Claude Code, which decides what exists. This server keeps no
+  list of tool names. If the session doesn't provide a tool you named, the
+  task ends at once as `failed` / `tools_unavailable`, and `error` names
+  the missing tools. The tool may be unknown to that Claude Code version,
+  or unavailable to the account or surface. For example, `Artifact` is off
+  by default in Agent SDK sessions, and delegated tasks are those.
+- `allowed_tools` is the permission rules that **approve** calls without a
+  prompt. Each rule must be for a tool in `tools`:
+  - `"Read"` approves every `Read` call.
+  - `"Bash(git status)"` approves only that command.
+  - `"Bash(uv run pytest *)"` approves that command with any arguments.
+  - `"Edit(/src/**)"` approves edits to paths matching the pattern.
+  - `"WebFetch(domain:example.com)"` approves fetches from that domain.
+
+  If you omit `allowed_tools`, every tool in `tools` is approved outright.
+  A rule may not contain a comma.
+
+Anything not approved is **denied**. The worker never waits on a prompt.
+Some calls run even with no rule, because Claude Code never asks about
+them: reads inside `working_directory`, and read-only Bash commands such as
+`ls`, `cat` or `git status`. So `tools: ["Bash"]` with
+`allowed_tools: ["Bash(uv run pytest *)"]` lets the worker run the tests
+and inspect files. It cannot run `touch`, `rm`, `git commit` or other
+commands that change things.
+
+Approval patterns that constrain arguments are fragile, because the
+command text has to match the pattern as written. `Bash` is not a sandbox:
+an approved command can do anything the server's user can, anywhere, with
+network access. That includes `uv run pytest`, which runs project code.
 
 `allow_questions: true` gives the worker one more tool, `ask_parent`, to ask
 **you** a question. Set it only when you will watch with `claude_poll`: an
@@ -49,7 +80,9 @@ permissions; a worker cannot use it to get more tools.
 ## 3. Start
 
 ```json
-{"brief": "…", "working_directory": "/abs/path", "tools": ["Read"],
+{"brief": "…", "working_directory": "/abs/path",
+ "tools": ["Read", "Grep", "Bash"],
+ "allowed_tools": ["Read", "Grep", "Bash(uv run pytest *)"],
  "allow_questions": true, "request_id": "review-2026-10-19-1"}
 ```
 
@@ -63,7 +96,10 @@ for this invocation:
   included.
 - `max_budget_usd` is this invocation's spend.
 
-Steering never changes any limit or grant.
+Steering never changes any limit, grant or rule. `limits.tools` and
+`limits.allowed_tools` show what this invocation requested and approved.
+When you omit `allowed_tools`, `limits.allowed_tools` is the same list as
+`tools`.
 
 The result returns once the task is durably created:
 `{"task_id", "status": "working", "session_id", "run_dir", "replayed": false}`.
@@ -157,6 +193,7 @@ Once ended, `result` holds:
 | `failed` | `max_turns`, `budget`, `timeout` | Hit a limit; partial work stays on disk. |
 | `failed` | `sdk_error` | The CLI/SDK failed (auth problems show here); see `error`. |
 | `failed` | `resume_failed` | Claude could not resume the session (it may have been deleted). Nothing ran. |
+| `failed` | `tools_unavailable` | The session lacked a tool in `tools`; `error` names it and what was exposed. Stopped at the start. Retry without it. |
 | `failed` | `worker_died` | The worker vanished without recording an outcome. |
 | `cancelled` | `cancelled` | You cancelled it. |
 
@@ -171,8 +208,8 @@ agent claimed.
 that task's Claude conversation as a **new** task, with the same
 `session_id` and `resumed_from` set:
 
-- Nothing is inherited except the conversation. Tools, limits and
-  `allow_questions` are this call's own.
+- Nothing is inherited except the conversation. `tools`,
+  `allowed_tools`, limits and `allow_questions` are this call's own.
 - `working_directory` must be the parent's (omit it to use the parent's).
 - Only the session's latest task can be resumed. An older one returns
   `resume_unavailable` with `detail.latest_task_id`.
@@ -200,7 +237,7 @@ Errors come back with `isError: true` and `{code, message, detail}`:
 
 | `code` | Cause |
 | --- | --- |
-| `invalid_argument` | `detail.argument` names it (bad path, empty brief, unknown tool, bad limit, bad cursor or bounds, malformed response). |
+| `invalid_argument` | `detail.argument` names it. Causes: bad path, empty brief, a malformed tool name, a rule in `tools`, an `allowed_tools` rule that is malformed or names a tool not in `tools`, bad limit, bad cursor or bounds, malformed response. |
 | `capacity_exceeded` | Two tasks are already running. |
 | `unknown_task` | No such task ID in this server's runs directory. |
 | `request_conflict` | `request_id`/`message_id` reused with a different payload. |

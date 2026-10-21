@@ -93,6 +93,13 @@ instructions, or that generated output meets a semantic quality bar.
 - `AgentSpec.tools` defaults to an empty tuple, which is genuinely tool-less.
   Never pass `tools=None` to `ClaudeAgentOptions`: the SDK then omits `--tools`
   and the agent inherits Claude Code's full default toolset.
+- `AgentSpec.tools` is exposure (bare built-in names); `allowed_tools` is
+  approval (permission rules such as `Bash(git status)`), defaulting to the
+  exposed tools. Never put a rule in `tools`, and never add a hard-coded
+  list of tool names: the CLI is the authority and silently drops names it
+  does not provide, so check the session's `init` tool list
+  (`MessageView.tools`). Evidence, and the artifact-publishing blocker:
+  `docs/claude-tools.md`.
 - `ctx.obj` is never set or read anywhere in this codebase. Every CLI
   dependency is built by the command that needs it: a decorator (see
   `cli/clockify.py`) stacks the
@@ -165,6 +172,9 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
     `max_turns` itself.
   - Token usage is per prompt, but `total_cost_usd` is a running session
     total carried across `--resume`.
+  - `--tools` drops unknown or unavailable names without an error, and
+    reports `Agent` as `Task`. The worker fails a session that lacks a
+    requested tool as `tools_unavailable`.
 - Contract models the tools return live with their domain, not in `mcp/`:
   `clockify_jira_sync.SyncReport` (also what `clockify jira-sync --json`
   prints), `claude_runs.RunState`/`ClaudeStartResult`, and the

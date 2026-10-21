@@ -117,9 +117,18 @@ The stdio server also runs bounded Claude Code tasks in the background, each in
 its own process and run directory (`$XDG_STATE_HOME/jake-tools/runs/<task_id>/`),
 so they survive server restarts:
 
-- `claude_start` starts a task with an explicit tool grant and hard limits. It
-  also takes an idempotent `request_id`, an opt-in `allow_questions`, and
-  `resume_task_id` to continue a finished task's conversation as a new task.
+- `claude_start` starts a task with hard limits and two explicit lists:
+  - `tools`, the Claude Code built-ins the session exposes. Any name is
+    accepted, and the runtime decides what exists: a missing tool fails the
+    task as `tools_unavailable`.
+  - `allowed_tools`, optional permission rules such as
+    `Bash(uv run pytest *)` that approve calls. Omitted, every exposed tool
+    is approved.
+
+  It also takes an idempotent `request_id`, an opt-in `allow_questions`,
+  and `resume_task_id` to continue a finished task's conversation as a new
+  task. [docs/claude-tools.md](docs/claude-tools.md) records the evidence
+  behind this, and why there is no artifact-publishing tool.
 - `claude_poll` waits at most 25 s for change and returns state plus
   cursor-paged normalised events (no private thinking). `claude_transcript`
   returns larger pages.

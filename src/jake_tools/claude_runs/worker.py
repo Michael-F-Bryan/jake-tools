@@ -469,8 +469,8 @@ def _unavailable_error(missing: list[str], exposed: list[str]) -> str:
         f"{', '.join(missing)}; it exposed only "
         f"{', '.join(builtins) or 'no built-in tools'}. The name may be unknown "
         "to this CLI version, or the tool unavailable to this account, provider "
-        "or execution surface (Artifact, for example, is off in Agent SDK "
-        "sessions). The conversation was stopped as soon as the session started."
+        "or execution surface (Artifact, for example, is off by default in "
+        "Agent SDK sessions). The conversation was stopped as soon as the session started."
     )
 
 

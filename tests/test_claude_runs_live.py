@@ -587,3 +587,123 @@ async def test_live_sigkill_of_the_worker_group_then_cancel_clears_the_tool_shel
     assert on_disk == state
     await _assert_group_gone(pgid)
     assert not group_alive(shell_pgid)
+
+
+# 10. exposure is not approval: a narrow Bash rule approves only its command ----
+
+
+async def test_live_narrow_bash_rule_approves_only_matching_commands(
+    mcp_server: ServerFactory, live_env: dict[str, str], workdir: Path
+) -> None:
+    """``Bash`` exposed, only ``Bash(touch approved-*)`` approved, ``dontAsk``.
+
+    ``touch`` changes the filesystem, so it is never one of the CLI's
+    intrinsically approved read-only commands: the approved one must run
+    and the unapproved one must be denied. ``ls`` is read-only, and runs
+    with no rule at all: "not approved by our rules" is not "forbidden".
+    """
+    brief = (
+        "Use the Bash tool to run each of these three commands exactly as "
+        "written, as three separate Bash tool calls, in this order, even if "
+        "one is denied or fails:\n1. touch approved-1\n2. touch denied-1\n"
+        "3. ls\nDo not try any other command. Then reply with one line per "
+        "command saying whether it ran or was denied."
+    )
+    async with mcp_server(live_env) as session:
+        started = await _start(
+            session,
+            brief=brief,
+            working_directory=str(workdir),
+            tools=["Bash"],
+            allowed_tools=["Bash(touch approved-*)"],
+            max_turns=6,
+        )
+        state = await _wait_terminal(session, started.task_id)
+
+    assert state.status == "completed", state
+    assert (workdir / "approved-1").exists()
+    assert not (workdir / "denied-1").exists()
+    transcript = _transcript(state)
+    denials = _result_message(transcript)["permission_denials"] or []
+    denied = [d["tool_input"].get("command") for d in denials]
+    assert "touch denied-1" in denied, denials
+    assert "touch approved-1" not in denied
+    results = {
+        block["tool_use_id"]: block
+        for message in transcript
+        if message["type"] == "UserMessage" and isinstance(message["content"], list)
+        for block in message["content"]
+        if "tool_use_id" in block
+    }
+    ls_calls = [u for u in _tool_uses(transcript) if u["input"].get("command") == "ls"]
+    assert ls_calls, "the model did not run ls"
+    assert not results[ls_calls[0]["id"]].get("is_error"), results[ls_calls[0]["id"]]
+    await _assert_group_gone(started.pgid or 0)
+
+
+# 11. tools outside the old hard-coded list reach the session -------------------
+
+
+async def test_live_tools_outside_the_old_list_are_exposed(
+    mcp_server: ServerFactory, live_env: dict[str, str], workdir: Path
+) -> None:
+    async with mcp_server(live_env) as session:
+        started = await _start(
+            session,
+            brief="Reply with exactly: OK. Do not use any tools.",
+            working_directory=str(workdir),
+            tools=["Read", "NotebookEdit", "Monitor"],
+            max_turns=2,
+        )
+        state = await _wait_terminal(session, started.task_id)
+
+    assert state.status == "completed", state
+    (init,) = [
+        m
+        for m in _transcript(state)
+        if m["type"] == "SystemMessage" and m["subtype"] == "init"
+    ]
+    assert {"Read", "NotebookEdit", "Monitor"} <= set(init["data"]["tools"])
+    await _assert_group_gone(started.pgid or 0)
+
+
+# 12. a tool the session does not provide fails the task, by name ---------------
+
+
+async def test_live_unavailable_tool_fails_the_task_by_name(
+    mcp_server: ServerFactory, live_env: dict[str, str], workdir: Path
+) -> None:
+    """Also the Artifact feasibility gate (``docs/claude-tools.md``).
+
+    Agent SDK sessions do not provide ``Artifact`` (documented, and observed
+    with a claude.ai Max login on CLI 2.1.293): the CLI drops it from
+    ``--tools`` silently. If this starts failing because the session lists
+    ``Artifact``, re-run the publishing feasibility checks.
+    """
+    async with mcp_server(live_env) as session:
+        result = await session.call_tool(
+            "claude_start",
+            {
+                **CHEAP,
+                "brief": "Reply with exactly: OK. Do not use any tools.",
+                "working_directory": str(workdir),
+                "tools": ["Read", "Artifact"],
+                "max_turns": 2,
+            },
+        )
+        assert result.is_error is False, result.structured_content
+        assert result.structured_content is not None
+        task_id = result.structured_content["task_id"]
+        state = await _wait_terminal(session, task_id)
+
+    assert state.status == "failed", state
+    assert state.termination_reason == "tools_unavailable", state
+    assert state.error is not None and "Artifact" in state.error
+    (init,) = [
+        m
+        for m in _transcript(state)
+        if m["type"] == "SystemMessage" and m["subtype"] == "init"
+    ]
+    assert "Read" in init["data"]["tools"]
+    assert "Artifact" not in init["data"]["tools"]
+    await _assert_group_gone(state.pgid or 0)
