@@ -35,22 +35,23 @@ from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
-from ..claude import EffortLevel
+from ..claude import EffortLevel, permission_rule_tool
 from ..config import Config
 from .events import EventLog
 from .inbox import Inbox
 from .models import (
     CALLER_ID_PATTERN,
     SCHEMA_VERSION,
-    BuiltinTool,
     ClaudeStartResult,
+    PermissionRule,
     RequestRecord,
     RunSpec,
     RunState,
     RunStatus,
     TerminationReason,
+    ToolName,
 )
 from .procs import process_table
 from .rundir import (
@@ -190,13 +191,22 @@ class StartRequest(BaseModel):
     ``allow_questions`` lets the agent ask its parent (``ask_parent``); a
     caller that will not watch for ``input_required`` leaves it off, so an
     unattended task can never stall on a question nobody answers.
+
+    ``tools`` names the built-in tools to expose; any well-formed name is
+    accepted, because the runtime, not this server, knows what exists (a
+    task whose session lacks one ends ``tools_unavailable``).
+    ``allowed_tools`` is the permission rules that auto-approve calls, each
+    for a tool in ``tools``: ``["Bash(git status)"]`` approves that command
+    and no other ``Bash`` call. Omitted, every exposed tool is approved
+    outright, as before the two were separate.
     """
 
     model_config = ConfigDict(frozen=True)
 
     brief: str = Field(min_length=1)
     working_directory: Path | None = None
-    tools: tuple[BuiltinTool, ...] = ()
+    tools: tuple[ToolName, ...] = ()
+    allowed_tools: tuple[PermissionRule, ...] | None = None
     model: str | None = Field(default=None, min_length=1)
     effort: EffortLevel | None = None
     max_turns: int | None = Field(default=None, ge=1)
@@ -228,11 +238,25 @@ class StartRequest(BaseModel):
 
     @field_validator("tools")
     @classmethod
-    def _tools_are_unique(
-        cls, value: tuple[BuiltinTool, ...]
-    ) -> tuple[BuiltinTool, ...]:
-        seen: dict[BuiltinTool, None] = dict.fromkeys(value)
-        return tuple(seen)
+    def _tools_are_unique(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(value))
+
+    @field_validator("allowed_tools")
+    @classmethod
+    def _rules_name_exposed_tools(
+        cls, value: tuple[str, ...] | None, info: ValidationInfo
+    ) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        exposed = set(info.data.get("tools") or ())
+        for rule in value:
+            tool = permission_rule_tool(rule)
+            if tool not in exposed:
+                raise ValueError(
+                    f"{rule!r} approves {tool}, which is not in tools; an "
+                    "approval cannot expose a tool, so add it to tools too"
+                )
+        return tuple(dict.fromkeys(value))
 
     @field_validator("request_id")
     @classmethod
@@ -249,7 +273,11 @@ class StartRequest(BaseModel):
         Defaults are not resolved first, so a configuration change between a
         call and its retry does not turn the retry into a conflict.
         """
-        payload = self.model_dump(mode="json", exclude={"request_id"})
+        exclude = {"request_id"}
+        if self.allowed_tools is None:
+            # Absent from requests made before it existed: keep their digest.
+            exclude.add("allowed_tools")
+        payload = self.model_dump(mode="json", exclude=exclude)
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -268,6 +296,7 @@ class StartRequest(BaseModel):
             created_at=utc_now(),
             working_directory=working_directory,
             tools=self.tools,
+            allowed_tools=self.allowed_tools,
             model=self.model or defaults.model,
             effort=self.effort if self.effort is not None else defaults.effort,
             max_turns=self.max_turns or defaults.max_turns,

@@ -46,7 +46,6 @@ from .inbox import (
 )
 from .models import (
     SCHEMA_VERSION,
-    BuiltinTool,
     ClaudeStartResult,
     DeliveryState,
     InputRequest,
@@ -100,7 +99,13 @@ class Limits(BaseModel):
 
     model: str
     effort: EffortLevel | None
-    tools: tuple[BuiltinTool, ...]
+    tools: tuple[str, ...]
+    """The built-in tools requested for the session to expose."""
+    allowed_tools: tuple[str, ...]
+    """The permission rules that auto-approve calls (every exposed tool,
+    when the request gave none). Calls the runtime needs no approval for,
+    such as reads inside the working directory and read-only Bash commands,
+    run without a rule; everything else is denied."""
     max_turns: int
     timeout_seconds: float
     max_budget_usd: float
@@ -495,6 +500,7 @@ def build_view(run_dir: Path, state: RunState) -> TaskView:
             model=spec.model,
             effort=spec.effort,
             tools=spec.tools,
+            allowed_tools=spec.approval_rules,
             max_turns=spec.max_turns,
             timeout_seconds=spec.timeout_seconds,
             max_budget_usd=spec.max_budget_usd,

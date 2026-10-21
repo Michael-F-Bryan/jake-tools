@@ -821,10 +821,11 @@ def test_start_request_rejects_blank_brief_bad_tools_and_non_positive_limits(
 ) -> None:
     with pytest.raises(ValidationError):
         StartRequest(brief="   ", working_directory=tmp_path)
-    with pytest.raises(ValidationError):
-        StartRequest.model_validate(
-            {"brief": "x", "working_directory": tmp_path, "tools": ("Task",)}
-        )
+    for bad in ("", "Bash(git status)", "Read,Write", "Read Write", "mcp__x__y-z"):
+        with pytest.raises(ValidationError, match="tools"):
+            StartRequest.model_validate(
+                {"brief": "x", "working_directory": tmp_path, "tools": (bad,)}
+            )
     for field in ("max_turns", "timeout_seconds", "max_budget_usd"):
         with pytest.raises(ValidationError):
             StartRequest.model_validate(
@@ -852,6 +853,95 @@ def test_start_request_fills_defaults_and_keeps_explicit_values(tmp_path: Path) 
     assert spec.model == DEFAULTS.model
     assert spec.timeout_seconds == DEFAULTS.timeout_seconds
     assert spec.max_budget_usd == DEFAULTS.max_budget_usd
+
+
+def test_start_request_accepts_tools_no_list_of_ours_names(tmp_path: Path) -> None:
+    # None of these were in the old hard-coded subset. Whether the runtime
+    # provides them is the session's ``init`` to say, not this server.
+    request = StartRequest(
+        brief="x",
+        working_directory=tmp_path,
+        tools=("NotebookEdit", "Monitor", "Task", "SomeFutureTool"),
+    )
+
+    spec = request.to_spec(
+        "20261008T031500Z-1a2b3c4d",
+        DEFAULTS,
+        working_directory=tmp_path,
+        session_id="11111111-1111-4111-8111-111111111111",
+    )
+
+    assert spec.tools == ("NotebookEdit", "Monitor", "Task", "SomeFutureTool")
+    assert spec.allowed_tools is None
+    assert spec.approval_rules == spec.tools  # unchanged meaning without rules
+
+
+def test_start_request_keeps_exposure_and_narrow_approval_apart(
+    tmp_path: Path,
+) -> None:
+    request = StartRequest(
+        brief="x",
+        working_directory=tmp_path,
+        tools=("Read", "Bash"),
+        allowed_tools=("Read", "Bash(git status)", "Bash(uv run pytest *)", "Read"),
+    )
+
+    spec = request.to_spec(
+        "20261008T031500Z-1a2b3c4d",
+        DEFAULTS,
+        working_directory=tmp_path,
+        session_id="11111111-1111-4111-8111-111111111111",
+    )
+
+    assert spec.tools == ("Read", "Bash")
+    assert spec.approval_rules == ("Read", "Bash(git status)", "Bash(uv run pytest *)")
+    assert "Bash" not in spec.approval_rules  # exposed, not blanket-approved
+    # An explicit empty list exposes the tools and approves nothing.
+    none = StartRequest(
+        brief="x", working_directory=tmp_path, tools=("Bash",), allowed_tools=()
+    )
+    assert none.allowed_tools == ()
+
+
+@pytest.mark.parametrize(
+    ("tools", "rule", "match"),
+    [
+        ((), "Bash(git status)", "not in tools"),
+        (("Read",), "Bash", "not in tools"),
+        (("Bash",), "Bash(git status, git diff)", "not a permission rule"),
+        (("Bash",), "Bash(", "not a permission rule"),
+        (("Bash",), "Bash()", "not a permission rule"),
+        (("Bash",), "Bash(ls\nrm -rf x)", "not a permission rule"),
+        (("Bash",), " Bash", "not a permission rule"),
+    ],
+)
+def test_start_request_rejects_unusable_permission_rules(
+    tmp_path: Path, tools: tuple[str, ...], rule: str, match: str
+) -> None:
+    with pytest.raises(ValidationError, match=match) as raised:
+        StartRequest(
+            brief="x", working_directory=tmp_path, tools=tools, allowed_tools=(rule,)
+        )
+    assert raised.value.errors()[0]["loc"][0] == "allowed_tools"
+
+
+def test_fingerprint_without_rules_matches_requests_made_before_rules_existed(
+    tmp_path: Path,
+) -> None:
+    # Pinned from the previous release (4f38f54): a retry of a request it
+    # recorded must replay, not become a request_conflict.
+    request = StartRequest(
+        brief="fingerprint me",
+        working_directory=Path("/"),
+        tools=("Read", "Bash"),
+        max_turns=3,
+        request_id="r-1",
+    )
+    assert request.fingerprint() == (
+        "9c4ba0a9fac9774c41a6be9c4b6f98f691ad5011e278f371ef230f1e245b024e"
+    )
+    narrowed = request.model_copy(update={"allowed_tools": ("Bash(git status)",)})
+    assert narrowed.fingerprint() != request.fingerprint()
 
 
 def test_run_defaults_come_from_config(tmp_path: Path) -> None:
@@ -891,6 +981,7 @@ async def test_stdio_lists_the_claude_tools(
         "brief",
         "working_directory",
         "tools",
+        "allowed_tools",
         "model",
         "effort",
         "max_turns",
@@ -915,7 +1006,18 @@ async def test_stdio_lists_the_claude_tools(
             {"brief": "x", "working_directory": "/definitely/not/here"},
             "working_directory",
         ),
-        ({"brief": "x", "working_directory": "/", "tools": ["Task"]}, "tools"),
+        (
+            {"brief": "x", "working_directory": "/", "tools": ["Bash(git status)"]},
+            "tools",
+        ),
+        (
+            {
+                "brief": "x",
+                "working_directory": "/",
+                "allowed_tools": ["Bash(git status)"],
+            },
+            "allowed_tools",
+        ),
         ({"brief": "x", "working_directory": "/", "max_turns": 0}, "max_turns"),
         (
             {"brief": "x", "working_directory": "/", "timeout_seconds": -1},

@@ -8,7 +8,7 @@ from anyio import to_thread
 from mcp.server.mcpserver import MCPServer
 
 from ...claude import EffortLevel
-from ...claude_runs import BUILTIN_TOOLS, ClaudeStartResult
+from ...claude_runs import ClaudeStartResult
 from ...claude_runs.control import MAX_LIVE_TASKS, StartRequest
 from ...config import Config
 from ..server import structured_tool
@@ -26,9 +26,23 @@ def register(app: MCPServer, config: Config) -> None:
             "created, with its task_id and Claude session_id. `brief` is the "
             "full task text, context and acceptance criteria (the worker sees "
             "nothing else). `working_directory` must be an absolute path to an "
-            "existing directory. `tools` is the explicit built-in grant from "
-            f"{', '.join(BUILTIN_TOOLS)}; the default is none, and Bash is a "
-            "broad capability, not a sandbox. `allow_questions=true` lets the "
+            "existing directory. `tools` lists the Claude Code built-in tools "
+            "the session exposes, by name (e.g. Read, Grep, Edit, Bash, "
+            "WebFetch, NotebookEdit); the default is none. Any well-formed name "
+            "is accepted and passed to the runtime, which decides what exists: "
+            "if the session does not provide one (unknown name, or unavailable "
+            "to this account or surface) the task fails with "
+            "termination_reason tools_unavailable, naming it. "
+            "`allowed_tools` is the permission rules that auto-approve calls, "
+            "each for a tool in `tools`: 'Read', 'Bash(git status)', "
+            "'Bash(uv run pytest *)', 'Edit(/src/**)', "
+            "'WebFetch(domain:example.com)'. A scoped rule approves only "
+            "matching calls; other calls that need approval are denied (calls "
+            "Claude Code never asks about, such as reads inside the working "
+            "directory and read-only Bash commands like ls or git status, run "
+            "regardless). Omitted, every tool in `tools` is approved outright. "
+            "Bash is a broad capability, not a sandbox. "
+            "`allow_questions=true` lets the "
             "worker ask you questions (status input_required; answer with "
             "claude_update); leave it off unless you will watch with "
             "claude_poll, or an unanswered question stalls the task until its "
@@ -37,8 +51,8 @@ def register(app: MCPServer, config: Config) -> None:
             "`timeout_seconds` (wall clock, including time waiting for your "
             "answers) and `max_budget_usd` default to the server's "
             "configuration and are hard limits. `resume_task_id` continues a "
-            "finished task's Claude conversation as a NEW task: tools and "
-            "limits (and allow_questions) are this call's own (nothing is "
+            "finished task's Claude conversation as a NEW task: tools, "
+            "allowed_tools and limits (and allow_questions) are this call's own (nothing is "
             "inherited), and "
             "working_directory must be the parent's (omit it to use it). "
             "`request_id` (1-128 of [A-Za-z0-9._:-]) makes the call safe to "
@@ -54,6 +68,7 @@ def register(app: MCPServer, config: Config) -> None:
         brief: str,
         working_directory: str | None = None,
         tools: list[str] | None = None,
+        allowed_tools: list[str] | None = None,
         model: str | None = None,
         effort: str | None = None,
         max_turns: int | None = None,
@@ -69,6 +84,9 @@ def register(app: MCPServer, config: Config) -> None:
                     "brief": brief,
                     "working_directory": working_directory,
                     "tools": tuple(tools or ()),
+                    "allowed_tools": (
+                        None if allowed_tools is None else tuple(allowed_tools)
+                    ),
                     "model": model,
                     "effort": effort,
                     "max_turns": max_turns,

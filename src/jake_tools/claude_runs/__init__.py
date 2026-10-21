@@ -23,24 +23,23 @@ from .control import (
     task_status,
 )
 from .models import (
-    BUILTIN_TOOLS,
-    BuiltinTool,
     ClaudeStartResult,
+    PermissionRule,
     RunResult,
     RunSpec,
     RunState,
     RunStatus,
     RunTelemetry,
     TerminationReason,
+    ToolName,
 )
 from .rundir import UnknownTaskError
 
 __all__ = [
-    "BUILTIN_TOOLS",
     "MAX_LIVE_TASKS",
-    "BuiltinTool",
     "CapacityExceededError",
     "ClaudeStartResult",
+    "PermissionRule",
     "RunDefaults",
     "RunResult",
     "RunSpec",
@@ -49,6 +48,7 @@ __all__ = [
     "RunTelemetry",
     "StartRequest",
     "TerminationReason",
+    "ToolName",
     "UnknownTaskError",
     "WorkerSpawnError",
     "cancel_task",

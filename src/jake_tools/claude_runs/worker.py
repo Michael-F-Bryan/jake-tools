@@ -25,11 +25,22 @@ through :meth:`ClaudeAgent.converse`:
   tool result, so the same turn carries on. It is not a permission
   channel: it grants nothing, and no external MCP server is ever loaded.
 
-Isolation: the agent gets exactly the granted built-ins as ``tools`` (an
-empty grant is genuinely tool-less), those plus ``ask_parent`` as
-``allowed_tools``, ``permission_mode="dontAsk"`` so anything else is denied
-rather than waited on, ``setting_sources=()`` so no settings file is read,
-and (via ``AgentSpec.to_options``) ``strict_mcp_config``.
+Isolation: the session exposes exactly the requested built-ins as
+``tools`` (an empty request is genuinely tool-less); the request's
+permission rules (by default, every exposed tool) plus ``ask_parent`` are
+``allowed_tools``; ``permission_mode="dontAsk"`` denies every other call
+that would need approval rather than waiting on it (calls the CLI needs no
+approval for, such as reads inside the working directory and read-only
+Bash commands, still run); ``setting_sources=()`` so no settings file is
+read; and (via ``AgentSpec.to_options``) ``strict_mcp_config``.
+
+Availability: the CLI drops a requested tool it does not provide in this
+session (an unknown name, or one unavailable to this account, provider or
+surface, such as ``Artifact`` in an Agent SDK session) without an error.
+The first ``init`` message lists what the session really exposes; when a
+requested tool is missing the conversation is stopped at once and the task
+ends ``tools_unavailable``, naming it, rather than running with less than
+it was given.
 
 Sessions: a new task's conversation is created with the session ID in
 ``spec.json``; a resumed task passes it as ``resume``. The first ``init``
@@ -84,6 +95,7 @@ from ..claude import (
     ResultView,
     describe,
     message_to_json,
+    unexposed_tools,
 )
 from .events import Event, EventLog, events_from_view, progress_line
 from .inbox import MAX_CHOICES, MAX_QUESTION_CHARS, Inbox
@@ -262,6 +274,7 @@ def agent_spec(spec: RunSpec, *, local_tools: tuple[LocalTool, ...] = ()) -> Age
     return AgentSpec(
         model=spec.model,
         tools=spec.tools,
+        allowed_tools=spec.allowed_tools,
         effort=spec.effort,
         max_turns=spec.max_turns,
         max_budget_usd=spec.max_budget_usd,
@@ -390,6 +403,17 @@ class Driver:
                             f"expected {expected}; the conversation was stopped"
                         ),
                     )
+                missing = (
+                    unexposed_tools(self.spec.tools, view.tools)
+                    if view.tools is not None
+                    else []
+                )
+                if missing:
+                    return self.partial(
+                        "failed",
+                        "tools_unavailable",
+                        error=_unavailable_error(missing, view.tools or []),
+                    )
                 continue
             if view.kind == "user_input":
                 if view.uuid:
@@ -436,6 +460,18 @@ class Driver:
             "sdk_error",
             error="the Claude stream ended without a final result",
         )
+
+
+def _unavailable_error(missing: list[str], exposed: list[str]) -> str:
+    builtins = [t for t in exposed if not t.startswith("mcp__")]
+    return (
+        f"this Claude Code session does not provide the requested tool(s) "
+        f"{', '.join(missing)}; it exposed only "
+        f"{', '.join(builtins) or 'no built-in tools'}. The name may be unknown "
+        "to this CLI version, or the tool unavailable to this account, provider "
+        "or execution surface (Artifact, for example, is off in Agent SDK "
+        "sessions). The conversation was stopped as soon as the session started."
+    )
 
 
 class AskParent:

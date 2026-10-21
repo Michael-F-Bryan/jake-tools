@@ -23,8 +23,15 @@ external MCP server.
 from __future__ import annotations
 
 import dataclasses
+import re
 import shutil
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
+from collections.abc import (
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+)
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -70,11 +77,15 @@ __all__ = [
     "Reply",
     "ResultView",
     "SettingSource",
+    "TOOL_NAME_PATTERN",
     "ToolResultView",
     "ToolUseView",
+    "check_tool_name",
     "describe",
     "local_tool_name",
     "message_to_json",
+    "permission_rule_tool",
+    "unexposed_tools",
 ]
 
 DEFAULT_MODEL = "claude-sonnet-5"
@@ -159,13 +170,89 @@ def local_tool_name(name: str) -> str:
     return f"mcp__{LOCAL_MCP_SERVER}__{name}"
 
 
+TOOL_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
+"""What a built-in tool name looks like. Shape only: there is no catalogue."""
+
+_RULE_PATTERN = re.compile(
+    r"(?P<tool>[A-Za-z][A-Za-z0-9_]*)\((?P<specifier>[^,\n\r]+)\)"
+)
+
+_RUNTIME_ALIASES: tuple[frozenset[str], ...] = (frozenset({"Agent", "Task"}),)
+"""Names the CLI reports differently from how they were requested.
+
+Observed with CLI 2.1.293: ``--tools Agent`` is reported as ``Task`` in the
+session's ``init`` tool list."""
+
+
+def check_tool_name(name: str) -> str:
+    """``name`` if it is shaped like a built-in tool name, else ``ValueError``.
+
+    The SDK passes ``tools`` to the CLI as an opaque comma-joined list and
+    neither publishes a catalogue nor validates it: the CLI silently drops a
+    name it does not provide (observed, CLI 2.1.293). So this checks shape
+    only; what a session really exposes is its ``init`` message's tool list
+    (:attr:`MessageView.tools`, :func:`unexposed_tools`).
+    """
+    if not TOOL_NAME_PATTERN.fullmatch(name):
+        raise ValueError(
+            f"{name!r} is not a tool name (letters, digits and '_'; a permission "
+            "rule such as 'Bash(git status)' belongs in allowed_tools)"
+        )
+    return name
+
+
+def permission_rule_tool(rule: str) -> str:
+    """The tool a permission rule (``Read``, ``Bash(git status)``) applies to.
+
+    The grammar is the CLI's ``ToolName`` or ``ToolName(specifier)``. A
+    specifier may not contain a comma or a line break: the SDK joins
+    ``allowed_tools`` with commas for ``--allowedTools``, so such a rule
+    would reach the CLI as two different rules. Raises ``ValueError``.
+    """
+    if TOOL_NAME_PATTERN.fullmatch(rule):
+        return rule
+    match = _RULE_PATTERN.fullmatch(rule)
+    if match is None or not match["specifier"].strip():
+        raise ValueError(
+            f"{rule!r} is not a permission rule: use ToolName or "
+            "ToolName(specifier), e.g. 'Bash(uv run pytest *)', with no comma "
+            "or line break in the specifier"
+        )
+    return match["tool"]
+
+
+def unexposed_tools(requested: Iterable[str], exposed: Iterable[str]) -> list[str]:
+    """The requested built-in tools a session's ``init`` tool list lacks."""
+    available = set(exposed)
+    missing: list[str] = []
+    for name in requested:
+        names = {name}
+        for group in _RUNTIME_ALIASES:
+            if name in group:
+                names |= group
+        if not names & available:
+            missing.append(name)
+    return missing
+
+
 class AgentSpec(BaseModel):
     """How one agent call is configured.
 
-    ``tools`` is the set of built-in tools the agent may use, and it defaults to
-    nothing. That default is load-bearing: the SDK omits ``--tools`` when the
-    option is ``None``, which hands the agent Claude Code's *full* default
-    toolset, so :meth:`to_options` always passes an explicit list.
+    ``tools`` is the set of built-in tools the session *exposes*, and it
+    defaults to nothing. That default is load-bearing: the SDK omits
+    ``--tools`` when the option is ``None``, which hands the agent Claude
+    Code's *full* default toolset, so :meth:`to_options` always passes an
+    explicit list. The CLI drops names it does not provide without an error;
+    the ``init`` message says what it actually exposed.
+
+    ``allowed_tools`` is the set of permission rules that *auto-approve*
+    calls (the SDK's ``allowed_tools``): ``"Read"`` approves every ``Read``
+    call, ``"Bash(git status)"`` only that command. ``None`` (the default)
+    approves every exposed tool outright, which is what ``tools`` alone has
+    always meant. An approval is not the only way a call runs: the CLI runs
+    calls that need no approval (reads inside the working directory,
+    read-only Bash commands) under any rules, and under ``dontAsk`` denies
+    everything else.
 
     :meth:`to_options` always sets ``strict_mcp_config``: the only MCP servers
     an agent sees are the ones in ``mcp_servers``, never user- or
@@ -185,6 +272,7 @@ class AgentSpec(BaseModel):
 
     model: str = DEFAULT_MODEL
     tools: tuple[str, ...] = ()
+    allowed_tools: tuple[str, ...] | None = None
     mcp_servers: dict[str, McpServerConfig] = Field(default_factory=dict)
     mcp_tools: tuple[str, ...] = ()
     system_prompt: str | None = None
@@ -229,15 +317,17 @@ class AgentSpec(BaseModel):
                 LOCAL_MCP_SERVER, tools=[_sdk_tool(t) for t in self.local_tools]
             )
             local_names = [local_tool_name(t.name) for t in self.local_tools]
+        rules = self.tools if self.allowed_tools is None else self.allowed_tools
         return ClaudeAgentOptions(
             # The SDK's bundled ELF may require a loader absent on Nix.
             # Prefer the installed CLI; retain SDK discovery if none exists.
             cli_path=shutil.which("claude"),
             model=self.model,
+            # Exposure: bare built-in names only, never permission rules.
             tools=list(self.tools),
-            # Everything granted is also auto-approved: these runs are
-            # non-interactive, so an unapproved call would block on a prompt.
-            allowed_tools=[*self.tools, *self.mcp_tools, *local_names],
+            # Approval: the caller's rules (by default every exposed tool),
+            # plus the MCP and local tools this spec configured itself.
+            allowed_tools=[*rules, *self.mcp_tools, *local_names],
             mcp_servers=mcp_servers,
             system_prompt=self.system_prompt,
             max_turns=self.max_turns,
@@ -665,7 +755,9 @@ class MessageView(BaseModel):
     ``kind`` says which fields are meaningful. ``texts`` holds only public
     text blocks: thinking blocks are dropped here and never reach a caller.
     ``user_text``/``uuid`` on a ``user_input`` view is a user message the CLI
-    replayed into the conversation.
+    replayed into the conversation. ``tools`` on an ``init`` view is every
+    tool the session actually exposes, as the CLI reports it (``None`` when
+    the message did not say).
     """
 
     kind: Literal[
@@ -680,6 +772,7 @@ class MessageView(BaseModel):
     user_text: str | None = None
     result: ResultView | None = None
     notice: str | None = None
+    tools: list[str] | None = None
 
 
 def describe(message: Message) -> MessageView:
@@ -748,7 +841,12 @@ def describe(message: Message) -> MessageView:
         session_id = data.get("session_id")
         session = session_id if isinstance(session_id, str) else None
         if message.subtype == "init":
-            return MessageView(kind="init", session_id=session)
+            tools = data.get("tools")
+            return MessageView(
+                kind="init",
+                session_id=session,
+                tools=[str(t) for t in tools] if isinstance(tools, list) else None,
+            )
         if message.subtype == "api_retry":
             attempt = data.get("attempt")
             error = data.get("error") or data.get("error_status")

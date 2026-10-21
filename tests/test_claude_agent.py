@@ -249,6 +249,98 @@ async def test_granted_tools_are_also_auto_approved() -> None:
     assert options.model == "claude-opus-4-8"
 
 
+def test_exposure_and_approval_are_separate_sdk_options() -> None:
+    options = AgentSpec(
+        tools=("Read", "Bash"),
+        allowed_tools=("Read", "Bash(git status)", "Bash(uv run pytest *)"),
+    ).to_options()
+
+    # Exposure is bare names only; a rule never reaches the ``tools`` field.
+    assert options.tools == ["Read", "Bash"]
+    assert options.allowed_tools == [
+        "Read",
+        "Bash(git status)",
+        "Bash(uv run pytest *)",
+    ]
+    # The narrow Bash rules did not turn into a blanket Bash approval.
+    assert "Bash" not in options.allowed_tools
+
+
+def test_an_empty_rule_list_exposes_tools_but_approves_none() -> None:
+    options = AgentSpec(tools=("Bash",), allowed_tools=()).to_options()
+
+    assert options.tools == ["Bash"]
+    assert options.allowed_tools == []
+
+
+def test_tool_names_are_checked_for_shape_only() -> None:
+    from jake_tools.claude import check_tool_name
+
+    for name in ("Read", "NotebookEdit", "Monitor", "Task", "AToolFromNextYear"):
+        assert check_tool_name(name) == name
+    for bad in ("", "Bash(git status)", "Read,Write", "Read Write", "1Read"):
+        with pytest.raises(ValueError, match="not a tool name"):
+            check_tool_name(bad)
+
+
+@pytest.mark.parametrize(
+    ("rule", "tool"),
+    [
+        ("Read", "Read"),
+        ("Bash(git status)", "Bash"),
+        ("Bash(uv run pytest *)", "Bash"),
+        ("Bash(*)", "Bash"),
+        ("Edit(/src/**)", "Edit"),
+        ("WebFetch(domain:example.com)", "WebFetch"),
+        ("Agent(Explore)", "Agent"),
+    ],
+)
+def test_permission_rules_name_their_tool(rule: str, tool: str) -> None:
+    from jake_tools.claude import permission_rule_tool
+
+    assert permission_rule_tool(rule) == tool
+
+
+@pytest.mark.parametrize(
+    "rule", ["", "Bash(", "Bash()", "Bash(  )", "Bash(a, b)", "Bash(a\nb)", "(x)"]
+)
+def test_malformed_permission_rules_are_refused(rule: str) -> None:
+    from jake_tools.claude import permission_rule_tool
+
+    with pytest.raises(ValueError, match="not a permission rule"):
+        permission_rule_tool(rule)
+
+
+def test_unexposed_tools_compares_against_the_session_and_knows_observed_aliases() -> (
+    None
+):
+    from jake_tools.claude import unexposed_tools
+
+    exposed = ["Read", "Task", "mcp__jake__ask_parent"]
+    assert unexposed_tools(["Read", "Agent"], exposed) == []  # Agent shows as Task
+    assert unexposed_tools(["Read", "Artifact", "Nope"], exposed) == [
+        "Artifact",
+        "Nope",
+    ]
+    assert unexposed_tools([], []) == []
+
+
+def test_describe_reports_the_tools_an_init_message_lists() -> None:
+    from claude_agent_sdk import SystemMessage
+
+    from jake_tools.claude import describe
+
+    listed = describe(
+        SystemMessage(
+            subtype="init", data={"session_id": "s", "tools": ["Read", "Bash"]}
+        )
+    )
+    silent = describe(SystemMessage(subtype="init", data={"session_id": "s"}))
+
+    assert listed.kind == "init" and listed.tools == ["Read", "Bash"]
+    assert silent.tools is None
+
+
 async def test_mcp_tools_are_approved_but_not_granted_as_builtins() -> None:
     fake = RecordingQuery(_result())
     agent = ClaudeAgent(run_query=fake)

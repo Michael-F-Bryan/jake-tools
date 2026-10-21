@@ -81,12 +81,12 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, get_args
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from ..ai_usage import AICallTelemetry, Usage
-from ..claude import EffortLevel
+from ..claude import EffortLevel, check_tool_name, permission_rule_tool
 
 RunStatus = Literal["working", "input_required", "completed", "failed", "cancelled"]
 TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
@@ -100,15 +100,28 @@ TerminationReason = Literal[
     "worker_died",
     "sdk_error",
     "resume_failed",
+    "tools_unavailable",
 ]
 
 SCHEMA_VERSION = 2
 """The run-directory schema new tasks are written with (see the module doc)."""
 
-BuiltinTool = Literal[
-    "Read", "Glob", "Grep", "WebSearch", "WebFetch", "Edit", "Write", "Bash"
-]
-BUILTIN_TOOLS: tuple[str, ...] = get_args(BuiltinTool)
+
+def _check_rule(rule: str) -> str:
+    permission_rule_tool(rule)
+    return rule
+
+
+ToolName = Annotated[str, AfterValidator(check_tool_name)]
+"""A built-in tool to expose, by name (``Read``, ``Bash``, ``NotebookEdit``).
+
+Checked for shape only. There is deliberately no list of permitted names:
+the SDK accepts any string, the CLI is the authority on what exists, and it
+varies by version, account, provider and surface. The worker checks the
+session's ``init`` tool list instead (``tools_unavailable``)."""
+
+PermissionRule = Annotated[str, AfterValidator(_check_rule)]
+"""A Claude Code permission rule: ``Read`` or ``Bash(git status)``."""
 
 TASK_ID_PATTERN = re.compile(r"^\d{8}T\d{6}Z-(?:[0-9a-f]{32}|[0-9a-f]{8})$")
 
@@ -124,7 +137,8 @@ class RunSpec(BaseModel):
     task_id: str
     created_at: datetime
     working_directory: Path
-    tools: tuple[BuiltinTool, ...] = ()
+    tools: tuple[str, ...] = ()
+    allowed_tools: tuple[str, ...] | None = None
     model: str
     effort: EffortLevel | None = None
     max_turns: int = Field(ge=1)
@@ -143,7 +157,15 @@ class RunSpec(BaseModel):
     ``cost_baseline_usd`` is the session's cumulative cost when this
     invocation began, because the CLI carries it across a resume.
     ``allow_questions`` gives the agent the ``ask_parent`` tool; off, the
-    task can never block waiting for an answer."""
+    task can never block waiting for an answer. ``tools`` is what the
+    session exposes and ``allowed_tools`` the permission rules that
+    auto-approve calls; ``None`` (every run written before the two were
+    separate) approves each exposed tool outright."""
+
+    @property
+    def approval_rules(self) -> tuple[str, ...]:
+        """The permission rules this run auto-approves calls with."""
+        return self.tools if self.allowed_tools is None else self.allowed_tools
 
 
 class RunState(BaseModel):

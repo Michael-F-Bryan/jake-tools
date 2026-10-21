@@ -25,6 +25,12 @@ The scenario comes from a marker in the first user message:
 ``$FAKE_CLAUDE_STATE/<session>.json`` so ``--resume`` works across
 processes and fails, like the real CLI, for an unknown session. Every
 invocation's argv is saved to ``$FAKE_CLAUDE_STATE/argv-<n>.json``.
+
+``init`` lists the session's tools as the real CLI does (observed on
+2.1.293): the ``--tools`` names, minus any it does not provide, silently,
+with ``Agent`` reported as ``Task``. Which names are unavailable is the
+test's choice, ``$FAKE_CLAUDE_UNAVAILABLE_TOOLS`` (comma-separated); the
+fake has no catalogue either.
 """
 
 from __future__ import annotations
@@ -177,6 +183,14 @@ class Session:
 
     # --- outgoing messages ------------------------------------------------------
 
+    def exposed_tools(self) -> list[str]:
+        requested = [t for t in (self.args.get("tools") or "").split(",") if t]
+        unavailable = set(
+            os.environ.get("FAKE_CLAUDE_UNAVAILABLE_TOOLS", "").split(",")
+        )
+        renamed = {"Agent": "Task"}
+        return [renamed.get(t, t) for t in requested if t not in unavailable]
+
     def init(self) -> None:
         emit(
             {
@@ -185,6 +199,7 @@ class Session:
                 "session_id": self.reported_id,
                 "cwd": os.getcwd(),
                 "model": self.args.get("model"),
+                "tools": self.exposed_tools(),
                 "uuid": str(uuid.uuid4()),
             }
         )

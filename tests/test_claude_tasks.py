@@ -147,9 +147,12 @@ async def test_stdio_lists_the_delegation_tools_with_their_arguments(
     for name, required in expected.items():
         assert set(tools[name].input_schema.get("required", [])) == required, name
         assert tools[name].output_schema is None
-    assert {"resume_task_id", "request_id", "allow_questions"} <= set(
+    assert {"resume_task_id", "request_id", "allow_questions", "allowed_tools"} <= set(
         tools["claude_start"].input_schema["properties"]
     )
+    # No catalogue of tool names is advertised: the runtime is the authority.
+    start_schema = tools["claude_start"].input_schema["properties"]["tools"]
+    assert "enum" not in json.dumps(start_schema)
     assert {"cursor", "wait_seconds", "limit"} <= set(
         tools["claude_poll"].input_schema["properties"]
     )
@@ -799,7 +802,11 @@ async def test_resume_continues_the_conversation_as_a_new_task_with_its_own_gran
 ) -> None:
     async with mcp_server(fake_env) as session:
         parent = await start(
-            session, workdir, "[[scenario:echo]] remember me", tools=["Bash", "Edit"]
+            session,
+            workdir,
+            "[[scenario:echo]] remember me",
+            tools=["Bash", "Edit"],
+            allowed_tools=["Edit", "Bash(git status)"],
         )
         await poll_until(session, parent["task_id"], terminal)
         child = await call(
@@ -826,10 +833,12 @@ async def test_resume_continues_the_conversation_as_a_new_task_with_its_own_gran
     assert parent_after["status"] == "completed"  # untouched
     first_argv, resume_argv = argv_files(fake_claude_state)
     assert flag(first_argv, "--tools") == "Bash,Edit"
+    assert flag(first_argv, "--allowedTools") == "Edit,Bash(git status)"
     assert flag(resume_argv, "--resume") == parent["session_id"]
     assert flag(resume_argv, "--session-id") is None
     assert flag(resume_argv, "--tools") == "Read"  # nothing inherited
-    assert flag(resume_argv, "--allowedTools") == "Read"
+    assert flag(resume_argv, "--allowedTools") == "Read"  # nor are its rules
+    assert final["limits"]["allowed_tools"] == ["Read"]
 
 
 async def test_resume_refuses_busy_sessions_and_mismatched_directories(
@@ -964,6 +973,81 @@ async def test_a_session_id_mismatch_stops_the_conversation(
     assert final["status"] == "failed"
     assert final["termination_reason"] == "sdk_error"
     assert "not the expected" in final["result"]["error"]
+
+
+# --- tool exposure and permission rules -------------------------------------------
+
+
+async def test_a_narrow_bash_rule_reaches_the_cli_without_a_blanket_approval(
+    mcp_server: ServerFactory,
+    fake_env: dict[str, str],
+    fake_claude_state: Path,
+    workdir: Path,
+) -> None:
+    rules = ["Read", "Bash(git status)", "Bash(uv run pytest *)"]
+    async with mcp_server(fake_env) as session:
+        started = await start(
+            session,
+            workdir,
+            "[[scenario:echo]] narrow",
+            tools=["Read", "Bash"],
+            allowed_tools=rules,
+        )
+        final, _, _ = await poll_until(session, started["task_id"], terminal)
+
+    assert final["status"] == "completed"
+    assert final["limits"]["tools"] == ["Read", "Bash"]
+    assert final["limits"]["allowed_tools"] == rules
+    (argv,) = argv_files(fake_claude_state)
+    assert flag(argv, "--tools") == "Read,Bash"
+    approved = flag(argv, "--allowedTools")
+    assert approved == "Read,Bash(git status),Bash(uv run pytest *)"
+    assert approved is not None and "Bash" not in approved.split(",")
+    assert flag(argv, "--permission-mode") == "dontAsk"
+
+
+async def test_tools_outside_the_old_list_are_requested_from_the_runtime(
+    mcp_server: ServerFactory,
+    fake_env: dict[str, str],
+    fake_claude_state: Path,
+    workdir: Path,
+) -> None:
+    async with mcp_server(fake_env) as session:
+        started = await start(
+            session,
+            workdir,
+            "[[scenario:echo]] new tools",
+            tools=["NotebookEdit", "Monitor", "Agent"],
+        )
+        final, _, _ = await poll_until(session, started["task_id"], terminal)
+
+    # The session reported them (Agent as Task, as the real CLI does).
+    assert final["status"] == "completed", final["result"]
+    (argv,) = argv_files(fake_claude_state)
+    assert flag(argv, "--tools") == "NotebookEdit,Monitor,Agent"
+    assert flag(argv, "--allowedTools") == "NotebookEdit,Monitor,Agent"
+
+
+async def test_a_tool_the_session_does_not_provide_fails_the_task_by_name(
+    mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
+) -> None:
+    env = {**fake_env, "FAKE_CLAUDE_UNAVAILABLE_TOOLS": "Artifact"}
+    async with mcp_server(env) as session:
+        started = await start(
+            session,
+            workdir,
+            "[[scenario:slow_tool:30]] never runs",
+            tools=["Read", "Artifact"],
+        )
+        final, events, _ = await poll_until(
+            session, started["task_id"], terminal, timeout=20
+        )
+
+    assert final["status"] == "failed"
+    assert final["termination_reason"] == "tools_unavailable"
+    error = final["result"]["error"]
+    assert "Artifact" in error and "exposed only Read" in error
+    assert "tool_use" not in kinds(events)  # stopped at the session's start
 
 
 # --- old run directories -----------------------------------------------------------
