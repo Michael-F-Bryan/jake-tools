@@ -383,6 +383,7 @@ async def test_a_turn_limit_hands_off_in_the_same_session_without_tools(
     assert Path(handoff["text_path"]).read_text() == handoff["text"]
     assert handoff["cost_usd"] == pytest.approx(0.01)
     assert result["invocation_cost_usd"] == pytest.approx(0.02)  # both calls
+    assert final["session_cost_usd"] == pytest.approx(0.02)  # next baseline
     order = kinds(events)
     assert order[-3:] == ["handoff_started", "handoff_finished", "finished"]
     assert events[-2]["detail"]["status"] == "written"
@@ -826,7 +827,11 @@ async def test_max_turns_bounds_the_whole_task_across_steered_prompts(
     assert final["turns_used"] == 4  # the one past the limit stopped it
     near = [e for e in events if e["kind"] == "notice"]
     assert near and near[0]["detail"] == {"turns_used": 2, "max_turns": 3}
-    assert final["result"]["handoff"]["status"] == "written"
+    # Stopped mid-prompt: that prompt's cost was never reported, so the
+    # budget left is unknown and no handoff call is made.
+    handoff = final["result"]["handoff"]
+    assert handoff["status"] == "skipped"
+    assert "budget is unknown" in handoff["error"]
 
 
 # --- idempotent start --------------------------------------------------------------

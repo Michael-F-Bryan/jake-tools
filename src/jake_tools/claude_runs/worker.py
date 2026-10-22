@@ -179,6 +179,8 @@ class Outcome:
     error: str | None = None
     turns_used: int | None = None
     handoff: Handoff | None = None
+    session_cost_usd: float | None = None
+    """Set only when a handoff call moved the session's running cost."""
 
 
 def main(run_dir: Path) -> int:
@@ -329,6 +331,9 @@ class Driver:
         self.saw_init = False
         self.handoff: Handoff | None = None
         self.handoff_usage: Usage | None = None
+        self.handoff_session_cost: float | None = None
+        self.unreported = False
+        """True while a prompt is in progress: its cost is not reported yet."""
         self._warned_turns = False
         self._send_lock = anyio.Lock()
         self.deadline = time.monotonic() + spec.timeout_seconds
@@ -370,13 +375,18 @@ class Driver:
             )
         )
         self.progress.flush()
-        spent = (self.usage.estimated_cost_usd or 0.0) if self.usage else 0.0
+        spent = self.usage.estimated_cost_usd if self.usage is not None else None
+        budget_left = (
+            None
+            if self.unreported or spent is None
+            else self.spec.max_budget_usd - spent
+        )
         self.handoff = Handoff(
             status="failed",
             started_at=utc_now(),
             error="the task was cancelled before the handoff finished",
         )
-        self.handoff, self.handoff_usage = await write_handoff(
+        call = await write_handoff(
             self.agent,
             self.run_dir,
             session_id=self.spec.session_id or "",
@@ -384,8 +394,11 @@ class Driver:
             if self.progress.session_cost_usd is not None
             else self.spec.cost_baseline_usd,
             seconds_left=self.deadline - time.monotonic(),
-            budget_left_usd=self.spec.max_budget_usd - spent,
+            budget_left_usd=budget_left,
         )
+        self.handoff, self.handoff_usage = call.handoff, call.usage
+        if call.usage is not None:
+            self.handoff_session_cost = call.session_cost_usd
 
     def settled(self, outcome: Outcome) -> Outcome:
         """``outcome`` with the turn count, any handoff and its usage attached."""
@@ -397,6 +410,7 @@ class Driver:
             usage=usage,
             turns_used=len(self.model_turns),
             handoff=self.handoff,
+            session_cost_usd=self.handoff_session_cost,
         )
 
     def partial(
@@ -484,6 +498,8 @@ class Driver:
                 continue
             for kind, fields in events_from_view(view):
                 self.progress.note(self.events.append(kind, **fields))
+            if view.kind in ("assistant", "tool_results") and view.result is None:
+                self.unreported = True
             if view.kind == "assistant" and view.message_id:
                 self.model_turns.add(view.message_id)
                 self._note_turns()
@@ -500,6 +516,7 @@ class Driver:
                 continue
             result = view.result
             self.last_result = result
+            self.unreported = False
             self.usage = conversation.usage
             self.progress.record_usage(self.usage, conversation.session_cost_usd)
             if result.is_error:
@@ -786,6 +803,11 @@ def _record(run_dir: Path, spec: RunSpec, outcome: Outcome, events: EventLog) ->
                 "invocation_cost_usd": cost,
                 "turns_used": outcome.turns_used,
                 "handoff": outcome.handoff,
+                **(
+                    {"session_cost_usd": outcome.session_cost_usd}
+                    if outcome.session_cost_usd is not None
+                    else {}
+                ),
             }
         )
 

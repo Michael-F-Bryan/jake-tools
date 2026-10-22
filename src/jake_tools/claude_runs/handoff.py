@@ -20,15 +20,19 @@ an empty tool list (``test_live_max_turns_handoff_*``).
 
 It is never attempted after a cancel, a timeout or a budget stop, and it
 is ``skipped`` (no model call) when less than :data:`HANDOFF_MIN_SECONDS`
-or :data:`HANDOFF_MIN_BUDGET_USD` is left. The CLI checks the budget only
-after a reply, so a single handoff reply can overrun what was left by its
-own cost; the floor and the output cap keep that small.
+or :data:`HANDOFF_MIN_BUDGET_USD` is left, or when what was left cannot be
+established: a stop the worker enforces mid-prompt comes before Claude
+reports that prompt's cost, and unknown spend is not zero spend. The CLI
+checks the budget only after a reply, so a single handoff reply can
+overrun what was left by its own cost; the floor and the output cap keep
+that small.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 import anyio
@@ -70,9 +74,14 @@ async def write_handoff(
     session_id: str,
     session_cost_usd: float | None,
     seconds_left: float,
-    budget_left_usd: float,
-) -> tuple[Handoff, Usage | None]:
-    """Ask for the handoff; the record and the usage the call added.
+    budget_left_usd: float | None,
+) -> HandoffCall:
+    """Ask for the handoff: the record, the usage it added, the session total.
+
+    ``budget_left_usd`` is ``None`` when what the task has spent is not
+    known (execution stopped mid-prompt, before Claude reported that
+    prompt's cost); the handoff is then skipped, not run against an
+    allowance that cannot be established.
 
     ``agent`` carries the run's telemetry and transcript observers and its
     default spec, whose tools, rules, local tools and turn limit are all
@@ -80,14 +89,14 @@ async def write_handoff(
     caller's scope propagates (the caller records it).
     """
     if seconds_left < HANDOFF_MIN_SECONDS:
+        return _skipped(f"only {seconds_left:.0f}s of the task's timeout was left")
+    if budget_left_usd is None:
         return _skipped(
-            f"only {seconds_left:.0f}s of the task's timeout was left"
-        ), None
-    if budget_left_usd < HANDOFF_MIN_BUDGET_USD:
-        return (
-            _skipped(f"only ${budget_left_usd:.4f} of the task's budget was left"),
-            None,
+            "the remaining budget is unknown: execution stopped mid-prompt, "
+            "before Claude reported what that prompt cost"
         )
+    if budget_left_usd < HANDOFF_MIN_BUDGET_USD:
+        return _skipped(f"only ${budget_left_usd:.4f} of the task's budget was left")
     spec = AgentSpec(
         tools=(),
         allowed_tools=(),
@@ -102,6 +111,7 @@ async def write_handoff(
     started_at = utc_now()
     texts: list[str] = []
     usage: Usage | None = None
+    session_total: float | None = session_cost_usd
     error: str | None = None
     result_text: str | None = None
     finished = False
@@ -137,6 +147,7 @@ async def write_handoff(
                         finished = True
                         break
                 usage = conversation.usage if usage is None else usage
+                session_total = conversation.session_cost_usd
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}".strip()[:2000]
     text = result_text or ("\n".join(texts) if texts else None)
@@ -155,8 +166,21 @@ async def write_handoff(
         cost_usd=cost,
     )
     log.info("handoff %s: %s", handoff.status, handoff.error or "ok")
-    return handoff, usage
+    return HandoffCall(handoff, usage, session_total)
 
 
-def _skipped(reason: str) -> Handoff:
-    return Handoff(status="skipped", error=f"no handoff was attempted: {reason}")
+@dataclass(frozen=True)
+class HandoffCall:
+    """What :func:`write_handoff` left: the record, the usage the call
+    added (``None`` if it made none or none was reported), and the
+    session's running cost after it (for the next resume's baseline)."""
+
+    handoff: Handoff
+    usage: Usage | None = None
+    session_cost_usd: float | None = None
+
+
+def _skipped(reason: str) -> HandoffCall:
+    return HandoffCall(
+        Handoff(status="skipped", error=f"no handoff was attempted: {reason}")
+    )
