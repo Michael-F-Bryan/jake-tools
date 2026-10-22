@@ -46,6 +46,7 @@ from .inbox import (
 )
 from .models import (
     SCHEMA_VERSION,
+    TASK_ID_PATTERN,
     ClaudeStartResult,
     DeliveryState,
     Handoff,
@@ -61,6 +62,7 @@ from .rundir import (
     EVENTS_FILE,
     STATUS_FILE,
     TRANSCRIPT_FILE,
+    read_brief,
     read_spec,
     read_state,
     task_dir,
@@ -84,6 +86,10 @@ MESSAGES_SHOWN = 20
 SUGGESTED_POLL_INTERVAL_MS = 5_000
 WAIT_TICK_SECONDS = 0.25
 LIVENESS_CHECK_SECONDS = 2.0
+LIST_DEFAULT_TASKS = 20
+LIST_MAX_TASKS = 100
+LIST_MAX_SCANNED = 500
+LABEL_CHARS = 120
 
 
 class TaskNotRunningError(RuntimeError):
@@ -284,6 +290,53 @@ class UpdateResult(BaseModel):
     pending_inputs: list[InputRequest]
 
 
+class TaskSummary(BaseModel):
+    """One task in a listing: enough to pick it, not its full record.
+
+    ``label`` is the brief's first non-blank line, cut to
+    :data:`LABEL_CHARS`; ``claude_poll`` returns the rest. ``resumable``
+    has :class:`TaskResult`'s meaning, and only the session's latest task
+    is accepted by ``claude_start(resume_task_id=...)``.
+    """
+
+    task_id: str
+    label: str
+    status: RunStatus
+    termination_reason: TerminationReason | None = None
+    status_message: str | None = None
+    created_at: datetime
+    finished_at: datetime | None = None
+    last_activity_at: datetime | None = None
+    session_id: str | None = None
+    resumed_from: str | None = None
+    resumable: bool = False
+    handoff_status: str | None = None
+    legacy_run: bool = False
+
+
+class UnreadableTask(BaseModel):
+    """A run directory whose records could not be read; listed, not fatal."""
+
+    task_id: str
+    error: str
+
+
+class TaskList(BaseModel):
+    """A page of tasks, newest first by task ID: to the second of creation,
+    then (for tasks created in the same second) by the ID's random part.
+
+    Pass ``next_before`` as ``before`` for the next (older) page; it is
+    ``None`` once every run directory has been seen. ``scanned`` is how
+    many run directories this page read; a status filter can return fewer
+    than ``limit`` tasks with more still to scan.
+    """
+
+    tasks: list[TaskSummary]
+    unreadable: list[UnreadableTask] = Field(default_factory=list)
+    next_before: str | None = None
+    scanned: int
+
+
 class TaskService:
     """Delegated tasks under one runs directory."""
 
@@ -303,6 +356,58 @@ class TaskService:
         return await cancel_task(self.runs_dir, task_id)
 
     # --- observation ------------------------------------------------------------
+
+    def list(
+        self,
+        *,
+        before: str | None = None,
+        limit: int = LIST_DEFAULT_TASKS,
+        status: RunStatus | None = None,
+    ) -> TaskList:
+        """Tasks newest first, from run directories alone (no index).
+
+        Reads at most ``limit`` matching tasks and :data:`LIST_MAX_SCANNED`
+        directories. Unfinished tasks are reconciled, so a dead worker is
+        reported as such. Raises :class:`~.control.ArgumentError`.
+        """
+        if not 1 <= limit <= LIST_MAX_TASKS:
+            raise ArgumentError("limit", f"must be between 1 and {LIST_MAX_TASKS}")
+        if before is not None and not TASK_ID_PATTERN.fullmatch(before):
+            raise ArgumentError("before", "must be a task_id from an earlier page")
+        names = sorted(
+            (
+                entry.name
+                for entry in (self.runs_dir.iterdir() if self.runs_dir.is_dir() else [])
+                if TASK_ID_PATTERN.fullmatch(entry.name) and entry.is_dir()
+            ),
+            reverse=True,
+        )
+        if before is not None:
+            names = [name for name in names if name < before]
+        tasks: list[TaskSummary] = []
+        unreadable: list[UnreadableTask] = []
+        scanned = 0
+        for name in names:
+            if len(tasks) >= limit or scanned >= LIST_MAX_SCANNED:
+                break
+            scanned += 1
+            try:
+                summary = _summary(self.runs_dir / name)
+            except Exception as exc:  # a malformed record must not hide the rest
+                unreadable.append(
+                    UnreadableTask(
+                        task_id=name, error=f"{type(exc).__name__}: {exc}"[:300]
+                    )
+                )
+                continue
+            if status is None or summary.status == status:
+                tasks.append(summary)
+        return TaskList(
+            tasks=tasks,
+            unreadable=unreadable,
+            next_before=names[scanned - 1] if scanned < len(names) else None,
+            scanned=scanned,
+        )
 
     def view(self, task_id: str) -> TaskView:
         run_dir = task_dir(self.runs_dir, task_id)
@@ -564,6 +669,35 @@ def _result(run_dir: Path, spec: RunSpec, state: RunState) -> TaskResult:
         handoff=state.handoff,
         transcript_path=run_dir / TRANSCRIPT_FILE,
         events_path=events_path if events_path.exists() else None,
+    )
+
+
+def _summary(run_dir: Path) -> TaskSummary:
+    spec = read_spec(run_dir)
+    state = read_state(run_dir)
+    if not state.is_terminal:
+        state = reconcile(run_dir)
+    lines = [line.strip() for line in read_brief(run_dir).splitlines()]
+    label = next((line for line in lines if line), "")
+    if len(label) > LABEL_CHARS:
+        label = label[: LABEL_CHARS - 1] + "…"
+    session_id = state.session_id or spec.session_id
+    return TaskSummary(
+        task_id=state.task_id,
+        label=label,
+        status=state.status,
+        termination_reason=state.termination_reason,
+        status_message=state.status_message,
+        created_at=state.created_at,
+        finished_at=state.finished_at,
+        last_activity_at=state.last_activity_at,
+        session_id=session_id,
+        resumed_from=state.resumed_from or spec.resume_task_id,
+        resumable=state.is_terminal
+        and session_id is not None
+        and state.termination_reason != "resume_failed",
+        handoff_status=state.handoff.status if state.handoff else None,
+        legacy_run=_is_legacy(spec),
     )
 
 

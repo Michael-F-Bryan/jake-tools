@@ -15,6 +15,7 @@ from mcp.server.mcpserver import MCPServer
 from ...config import Config
 from . import (
     claude_cancel,
+    claude_list,
     claude_poll,
     claude_start,
     claude_status,
@@ -38,6 +39,7 @@ def register_all(app: MCPServer, config: Config) -> None:
     claude_start.register(app, config)
     claude_status.register(app, config)
     claude_poll.register(app, config)
+    claude_list.register(app, config)
     claude_transcript.register(app, config)
     claude_steer.register(app, config)
     claude_update.register(app, config)
