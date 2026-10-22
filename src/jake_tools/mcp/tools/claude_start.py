@@ -61,7 +61,9 @@ def register(app: MCPServer, config: Config) -> None:
             "with request_conflict. At most "
             f"{MAX_LIVE_TASKS} tasks run at once (capacity_exceeded otherwise). "
             "Observe with claude_poll, steer with claude_steer, stop with "
-            "claude_cancel."
+            "claude_cancel, find tasks with claude_list. A max_turns stop "
+            "adds a tool-free, worker-reported result.handoff. Guide: "
+            "skill://claude-delegation."
         ),
     )
     async def claude_start(

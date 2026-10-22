@@ -33,16 +33,19 @@ def register(app: MCPServer, config: Config) -> None:
             "cancelling a poll never affects the task. Returns status, "
             "termination_reason, status_message (latest progress), "
             "last_activity_at (agent activity, not a heartbeat), usage, "
-            "limits (with deadline_at), pending_inputs, steering message "
+            "limits (with deadline_at), turns_used, permission_denials "
+            "(requested operation, runtime_message), pending_inputs, steering message "
             f"states, up to `limit` (1-{POLL_MAX_EVENTS}, default "
             f"{POLL_DEFAULT_EVENTS}) normalised events (assistant_text, "
-            "tool_use, tool_result, turn_result, message_*, input_*, "
+            "tool_use, tool_result, turn_result, permission_denied, notice, "
+            "message_*, input_*, handoff_*, "
             f"finished; text cut to {POLL_TEXT_CHARS} chars, marked "
             "text_truncated), next_cursor, has_more, and, once ended, result "
             "(final_text, final_text_path, session_id, resumable, usage, "
-            "error, last_narration). Pass next_cursor back to get only newer "
+            "error, last_narration, handoff). Pass next_cursor back to get only newer "
             "events; omit cursor to start from the first. A cursor from "
-            "another task, malformed or past the end is invalid_argument."
+            "another task, malformed or past the end is invalid_argument. "
+            "Guide: skill://claude-delegation."
         ),
     )
     async def claude_poll(

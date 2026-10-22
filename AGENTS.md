@@ -175,6 +175,15 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   - `--tools` drops unknown or unavailable names without an error, and
     reports `Agent` as `Task`. The worker fails a session that lacks a
     requested tool as `tools_unavailable`.
+- After a `max_turns` stop the worker asks for one handoff
+  (`claude_runs/handoff.py`): the same session resumed through
+  `ClaudeAgent` with no tools, `max_turns=1`, capped output, inside the
+  task's deadline, cancel scope and remaining budget (skipped when spend is
+  unknown). It is a separate worker-reported record; the outcome stays
+  `failed`/`max_turns`. `permission_denials` on the task view join the
+  result's denials with the CLI's error result for that call; nothing is
+  inferred. `claude_list` pages run directories newest first. The server
+  sends no notifications; callers poll.
 - Contract models the tools return live with their domain, not in `mcp/`:
   `clockify_jira_sync.SyncReport` (also what `clockify jira-sync --json`
   prints), `claude_runs.RunState`/`ClaudeStartResult`, and the

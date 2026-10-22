@@ -17,6 +17,7 @@ Tools from the `jake-tools` MCP server (Hermes registers them as
 | `claude_transcript` | Page through the full normalised event log. |
 | `claude_status` | Instant snapshot (prefer `claude_poll`). |
 | `claude_cancel` | Stop the task and its whole process tree. |
+| `claude_list` | Find tasks, newest first (labels, status, resumable), e.g. after a restart. |
 
 The shortest path: `claude_start` → loop `claude_poll` with `cursor` →
 (`claude_steer` / `claude_update` as needed) → read `result` → check the
@@ -144,11 +145,18 @@ Each result carries:
 - `status_message`: the latest progress line.
 - `last_activity_at`: when the agent last did something. This is real
   activity, not a heartbeat.
-- `usage`, `invocation_cost_usd` and `limits` (with `deadline_at`).
+- `usage`, `invocation_cost_usd` and `limits` (with `deadline_at` and
+  `permission_mode`), plus `turns_used` against `limits.max_turns`.
+- `permission_denials` (latest, with `permission_denials_total`): each
+  refused call's `tool`, `requested` operation and the runtime's own
+  `runtime_message`. Compare with `limits.allowed_tools`; a scoped file
+  rule is written `Edit(path/**)` (see `docs/claude-tools.md`).
 - `events`: only those after your cursor, at most `limit` (default 20).
   Their kinds are `assistant_text` (public narration only, never private
   thinking), `tool_use` (tool plus input summary), `tool_result`,
-  `turn_result`, `message_*`, `input_*`, `cancel_requested` and `finished`.
+  `turn_result`, `permission_denied`, `notice` (including a one-off
+  "turn limit is near"), `message_*`, `input_*`, `cancel_requested`,
+  `handoff_started`/`handoff_finished` and `finished`.
   Text is cut to 1000 characters, marked by `text_truncated`/`text_chars`.
 - `next_cursor` and `has_more`.
 
@@ -202,6 +210,13 @@ Once ended, `result` holds:
 - `session_id` and `resumable`;
 - `usage` and `invocation_cost_usd`;
 - `last_narration`, which on limits, errors and cancels shows how far it got;
+- `handoff`, only after a `max_turns` stop: the same session, resumed once
+  with no tools for a single bounded reply, reports completed work, paths
+  and commits, checks run, blockers, uncertain state and the remaining
+  delta. `status` is `written`, `failed` or `skipped` (too little time,
+  budget, or unknown spend); `source` is `worker_reported`: a claim, like
+  `final_text`. The task stays `failed`/`max_turns`. Never after a cancel,
+  timeout or budget stop;
 - `transcript_path`.
 
 | `status` | `termination_reason` | Meaning |
@@ -263,12 +278,38 @@ Errors come back with `isError: true` and `{code, message, detail}`:
 | `task_not_running` | The task can't take messages any more. |
 | `worker_failed` | The worker process could not start. Report it; don't loop. |
 
+## Supervision judgement
+
+- One implementation owner per piece of work. Stabilise an interface
+  before starting parallel consumers of it.
+- Ask for early durable checkpoints in the brief (commits, files), so a
+  limit or cancel leaves usable evidence.
+- Poll with `cursor`; use `request_id` on `claude_start` and `message_id`
+  on `claude_steer` so retries are safe.
+- Repeated steering of the same point, or repeated `permission_denials`,
+  means the brief or the grant is wrong: stop and re-evaluate rather than
+  pushing harder.
+- To resume, give the concrete remaining delta (from `handoff`,
+  `last_narration` and your own checks), not "continue".
+- `completed` is not verified. A cancel does not roll anything back:
+  inspect the working directory before retrying.
+
 ## Retention, trust and versions
 
 - **Retention:** run directories (results, events, transcripts) are kept
   until someone deletes them; nothing is pruned. Claude Code keeps its
   sessions under its own retention, so a resume can fail with
   `resume_failed` even when the run directory still exists.
+- **Sensitivity:** `brief.md`, `events.jsonl`, `transcript.jsonl`,
+  `final.md` and `handoff.md` hold whatever the task saw or wrote,
+  including tool output; treat a runs directory as sensitive.
+- **Accounting:** cost comes from the CLI's running session total. A turn
+  cut off mid-prompt (a cancel, a timeout, a stop the worker enforces)
+  never reports its cost, so `invocation_cost_usd` can understate it;
+  `invocation_cost_exact: false` marks a resume whose baseline is uncertain.
+- **Notifications:** this server sends no notifications and keeps no
+  subscriptions. Nothing wakes the parent: poll. Whether a host surfaces
+  anything else is the host's business.
 - **Trust:** task IDs carry 128 random bits, but the trust boundary is the
   local user. Anyone who can call this stdio server, or read its runs
   directory, can observe and steer every task in it.
