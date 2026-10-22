@@ -36,7 +36,7 @@ from .control import (
     reconcile,
     start_task,
 )
-from .events import Cursor, Event, EventLog, progress_line
+from .events import Cursor, Event, EventLog, InvalidCursorError, progress_line
 from .inbox import (
     AnswerResult,
     Inbox,
@@ -62,6 +62,7 @@ from .rundir import (
     EVENTS_FILE,
     STATUS_FILE,
     TRANSCRIPT_FILE,
+    UnknownTaskError,
     read_brief,
     read_spec,
     read_state,
@@ -234,6 +235,7 @@ class TaskView(BaseModel):
 
 
 WakeReason = Literal["events", "input_required", "terminal", "deadline"]
+PollUntil = Literal["attention", "terminal"]
 
 
 class PollResult(TaskView):
@@ -251,6 +253,28 @@ class PollResult(TaskView):
     has_more: bool
     events_truncated: bool
     wake_reason: WakeReason
+    waited_seconds: float
+
+
+MAX_POLL_TASKS = 16
+
+
+class PollTask(BaseModel):
+    """One watched task, with its own last-consumed event cursor."""
+
+    task_id: str
+    cursor: str | None = None
+
+
+class MultiPollResult(BaseModel):
+    """Ready task pages in request order; an empty list on the shared deadline.
+
+    Cursors for tasks not returned are unchanged. Reading a page is not an
+    acknowledgement: only pass its next_cursor after consuming its events.
+    """
+
+    ready: list[PollResult]
+    wake_reason: Literal["ready", "deadline"]
     waited_seconds: float
 
 
@@ -420,6 +444,7 @@ class TaskService:
         cursor: str | None = None,
         wait_seconds: float = DEFAULT_WAIT_SECONDS,
         limit: int = POLL_DEFAULT_EVENTS,
+        until: PollUntil = "attention",
     ) -> PollResult:
         """Wait up to ``wait_seconds`` for something worth reporting.
 
@@ -455,11 +480,11 @@ class TaskService:
                 max_bytes=POLL_MAX_BYTES,
             )
             reason: WakeReason | None = None
-            if page.events:
+            if page.events and until == "attention":
                 reason = "events"
             elif state.is_terminal:
                 reason = "terminal"
-            elif state.status == "input_required":
+            elif state.status == "input_required" and until == "attention":
                 reason = "input_required"
             elif now >= deadline:
                 reason = "deadline"
@@ -474,6 +499,70 @@ class TaskService:
                     events_truncated=page.truncated,
                     wake_reason=reason,
                     waited_seconds=round(time.monotonic() - started, 3),
+                )
+            await anyio.sleep(min(WAIT_TICK_SECONDS, max(0.0, deadline - now)))
+
+    async def poll_many(
+        self,
+        tasks: list[PollTask],
+        *,
+        wait_seconds: float = DEFAULT_WAIT_SECONDS,
+        limit: int = POLL_DEFAULT_EVENTS,
+        until: PollUntil = "attention",
+    ) -> MultiPollResult:
+        """Select ready tasks under one deadline, without affecting workers."""
+        if not 1 <= len(tasks) <= MAX_POLL_TASKS:
+            raise ArgumentError("tasks", f"must contain 1-{MAX_POLL_TASKS} tasks")
+        if len({task.task_id for task in tasks}) != len(tasks):
+            raise ArgumentError("tasks", "task IDs must be unique")
+        if not 0 <= wait_seconds <= MAX_WAIT_SECONDS:
+            raise ArgumentError(
+                "wait_seconds", f"must be between 0 and {MAX_WAIT_SECONDS:g}"
+            )
+        if not 1 <= limit <= POLL_MAX_EVENTS:
+            raise ArgumentError("limit", f"must be between 1 and {POLL_MAX_EVENTS}")
+        # Validate the whole watch set before observing/reconciling any task.
+        for task in tasks:
+            run_dir = task_dir(self.runs_dir, task.task_id)
+            position = (
+                Cursor.parse(task.cursor, task.task_id)
+                if task.cursor
+                else Cursor.start(task.task_id)
+            )
+            EventLog(run_dir).page(position, limit=1, max_text_chars=0, max_bytes=0)
+
+        async def observe(task: PollTask, pages: dict[str, PollResult]) -> None:
+            pages[task.task_id] = await self.poll(
+                task.task_id,
+                cursor=task.cursor,
+                wait_seconds=0,
+                limit=limit,
+                until=until,
+            )
+
+        started = time.monotonic()
+        deadline = started + wait_seconds
+        while True:
+            pages: dict[str, PollResult] = {}
+            try:
+                async with anyio.create_task_group() as group:
+                    for task in tasks:
+                        group.start_soon(observe, task, pages)
+            except* (ArgumentError, InvalidCursorError, UnknownTaskError) as errors:
+                # A task/log can disappear after upfront validation. Keep the
+                # ordinary tool error contract, not an opaque exception group.
+                raise errors.exceptions[0] from errors
+            ready = [
+                pages[task.task_id]
+                for task in tasks
+                if pages[task.task_id].wake_reason != "deadline"
+            ]
+            now = time.monotonic()
+            if ready or now >= deadline:
+                return MultiPollResult(
+                    ready=ready,
+                    wake_reason="ready" if ready else "deadline",
+                    waited_seconds=round(now - started, 3),
                 )
             await anyio.sleep(min(WAIT_TICK_SECONDS, max(0.0, deadline - now)))
 

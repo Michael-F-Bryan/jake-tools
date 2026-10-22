@@ -138,7 +138,7 @@ async def test_stdio_lists_the_delegation_tools_with_their_arguments(
     expected = {
         "claude_start": {"brief"},
         "claude_status": {"task_id"},
-        "claude_poll": {"task_id"},
+        "claude_poll": set(),  # task_id or tasks; checked at the tool boundary
         "claude_transcript": {"task_id"},
         "claude_steer": {"task_id", "message", "message_id"},
         "claude_update": {"task_id", "responses"},
@@ -207,6 +207,56 @@ async def test_poll_returns_new_events_once_and_a_complete_result(
     assert flag(argv, "--allowedTools") is None  # and no ask_parent by default
     assert flag(argv, "--mcp-config") is None
     assert final["limits"]["allow_questions"] is False
+
+
+async def test_multi_poll_returns_all_ready_tasks_with_independent_cursors(
+    mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
+) -> None:
+    async with mcp_server(fake_env) as session:
+        tasks = []
+        for text in ("first", "second"):
+            started = await start(session, workdir, f"[[scenario:echo]] {text}")
+            await poll_until(session, started["task_id"], terminal)
+            tasks.append({"task_id": started["task_id"]})
+        page = await call(session, "claude_poll", tasks=tasks, wait_seconds=20, limit=1)
+        assert page["wake_reason"] == "ready"
+        assert [r["task_id"] for r in page["ready"]] == [t["task_id"] for t in tasks]
+        assert all(len(r["events"]) == 1 and r["has_more"] for r in page["ready"])
+        next_page = await call(
+            session,
+            "claude_poll",
+            wait_seconds=0,
+            limit=1,
+            tasks=[
+                {"task_id": r["task_id"], "cursor": r["next_cursor"]}
+                for r in page["ready"]
+            ],
+        )
+        assert all(r["events"][0]["seq"] == 2 for r in next_page["ready"])
+
+
+async def test_multi_poll_terminal_wait_ignores_progress_and_returns_first_finished(
+    mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
+) -> None:
+    async with mcp_server(fake_env) as session:
+        slow = await start(session, workdir, "[[scenario:slow_tool:8]] go")
+        fast = await start(session, workdir, "[[scenario:slow_tool:2]] go")
+        began = time.monotonic()
+        page = await call(
+            session,
+            "claude_poll",
+            tasks=[{"task_id": slow["task_id"]}, {"task_id": fast["task_id"]}],
+            until="terminal",
+            wait_seconds=20,
+        )
+        assert time.monotonic() - began < 7
+        assert [r["task_id"] for r in page["ready"]] == [fast["task_id"]]
+        assert page["ready"][0]["wake_reason"] == "terminal"
+        assert page["ready"][0]["result"]["final_text"]
+        assert (await call(session, "claude_status", task_id=slow["task_id"]))[
+            "status"
+        ] == "working"
+        await call(session, "claude_cancel", task_id=slow["task_id"])
 
 
 async def test_poll_waits_for_change_and_stops_at_its_own_deadline(

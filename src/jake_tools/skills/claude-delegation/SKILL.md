@@ -168,6 +168,36 @@ For more text per event, use `claude_transcript` (`max_text_chars` up to
 `raw_transcript_path` is the raw SDK stream, for diagnosis only; you
 shouldn't need to parse it.
 
+### Watch several tasks (select-style)
+
+Supply `tasks` instead of `task_id`/`cursor`, with a separate cursor for
+each task (task IDs, not Claude session IDs):
+
+```json
+{"tasks": [{"task_id": "…", "cursor": "…"}, {"task_id": "…"}],
+ "wait_seconds": 20, "until": "attention", "limit": 20}
+```
+
+The result is `{ready: [<ordinary poll result>, …], wake_reason,
+waited_seconds}`. It uses one shared deadline and returns all tasks ready
+in an observation pass, in request order—not just an arbitrary winner.
+`ready` is empty and `wake_reason` is `deadline` if nothing is ready before
+the wait expires. There are 1–16 distinct watched tasks; `limit` applies
+per task. Every ID and cursor is validated before waiting.
+
+`until` defaults to `attention`: new events, input required or any terminal
+outcome. Use `terminal` only when you deliberately want to ignore progress
+and questions until a task completes, fails or is cancelled. A question can
+block its worker, so attention is normally the right supervision mode.
+`until` also works with the existing single-task call, whose result shape
+is unchanged.
+
+Update each returned task's cursor after consuming its events. Keep the
+original cursors for tasks not returned, including after a timeout; ignored
+progress is not consumed. Remove terminal tasks after collecting their
+results, or they will keep returning immediately. Cancelling the wait does
+not cancel any worker.
+
 ## 5. Steer
 
 `claude_steer {"task_id", "message", "message_id"}` adds a user message to
