@@ -101,8 +101,10 @@ from .events import Event, EventLog, events_from_view, progress_line
 from .handoff import write_handoff
 from .inbox import MAX_CHOICES, MAX_QUESTION_CHARS, Inbox
 from .models import (
+    MAX_DENIALS_KEPT,
     Handoff,
     InputRequest,
+    PermissionDenial,
     RunResult,
     RunSpec,
     RunState,
@@ -332,6 +334,9 @@ class Driver:
         self.handoff: Handoff | None = None
         self.handoff_usage: Usage | None = None
         self.handoff_session_cost: float | None = None
+        self.tool_errors: dict[str, str] = {}
+        """Recent error results by tool-use ID: the runtime's own message for
+        a call it refused (bounded; only denials look them up)."""
         self.unreported = False
         """True while a prompt is in progress: its cost is not reported yet."""
         self._warned_turns = False
@@ -496,8 +501,19 @@ class Driver:
                 if view.uuid:
                     self.inbox.mark_in_conversation(view.uuid)
                 continue
+            for result in view.tool_results:
+                if result.is_error:
+                    self.tool_errors[result.tool_use_id] = result.text[:500]
+                    while len(self.tool_errors) > 200:
+                        del self.tool_errors[next(iter(self.tool_errors))]
             for kind, fields in events_from_view(view):
-                self.progress.note(self.events.append(kind, **fields))
+                if kind == "permission_denied":
+                    message = self.tool_errors.get(fields.get("tool_use_id") or "")
+                    fields = {**fields, "detail": {"runtime_message": message}}
+                event = self.events.append(kind, **fields)
+                if kind == "permission_denied":
+                    self.progress.deny(event)
+                self.progress.note(event)
             if view.kind in ("assistant", "tool_results") and view.result is None:
                 self.unreported = True
             if view.kind == "assistant" and view.message_id:
@@ -670,8 +686,26 @@ class Progress:
         self.invocation_cost_usd: float | None = None
         self.session_cost_usd: float | None = None
         self.turns_used: int | None = None
+        self.denials: list[PermissionDenial] = []
+        self.denials_total = 0
         self._last_flush = 0.0
         self._dirty = False
+
+    def deny(self, event: Event) -> None:
+        """Record a refused call; written with the result that reported it."""
+        message = (event.detail or {}).get("runtime_message")
+        self.denials = [
+            *self.denials,
+            PermissionDenial(
+                at=event.at,
+                tool=event.tool or "unknown",
+                tool_use_id=event.tool_use_id,
+                requested=event.text,
+                runtime_message=message if isinstance(message, str) else None,
+            ),
+        ][-MAX_DENIALS_KEPT:]
+        self.denials_total += 1
+        self._dirty = True
 
     def dirty(self) -> None:
         self._dirty = True
@@ -715,6 +749,8 @@ class Progress:
                 "invocation_cost_usd": self.invocation_cost_usd,
                 "session_cost_usd": self.session_cost_usd,
                 "turns_used": self.turns_used,
+                "permission_denials": self.denials,
+                "permission_denials_total": self.denials_total,
             }
             newer = state.status_message_at is None or (
                 self.status_message_at is not None

@@ -693,6 +693,68 @@ async def test_live_narrow_bash_rule_approves_only_matching_commands(
 # 11. tools outside the old hard-coded list reach the session -------------------
 
 
+async def test_live_scoped_write_and_compound_bash_denials_are_reported(
+    mcp_server: ServerFactory, live_env: dict[str, str], workdir: Path
+) -> None:
+    """What the real runtime refuses is reported as structured denials.
+
+    The runtime, not this server, decides each call; the test asserts that
+    whatever it refused shows up in ``permission_denials`` with the
+    requested operation and the runtime's own message, and that what it
+    allowed left its file."""
+    (workdir / "allowed").mkdir()
+    (workdir / "outside").mkdir()
+    (workdir / "sub").mkdir()
+    brief = (
+        "Make each of these four tool calls exactly once, in order, even if "
+        "one fails, then reply DONE:\n"
+        "1. Write the file allowed/a.txt containing `a`.\n"
+        "2. Write the file outside/b.txt containing `b`.\n"
+        "3. Bash: cd sub && touch approved-2\n"
+        "4. Bash: python3 -c \"open('py.txt', 'w').write('x')\""
+    )
+    async with mcp_server(live_env) as session:
+        started = await _start(
+            session,
+            brief=brief,
+            working_directory=str(workdir),
+            tools=["Bash", "Write", "Edit"],
+            allowed_tools=["Edit(./allowed/**)", "Bash(touch approved-*)"],
+            max_turns=8,
+        )
+        state = await _wait_terminal(session, started.task_id)
+        view = await session.call_tool("claude_poll", {"task_id": started.task_id})
+
+    assert state.status == "completed", state
+    denials = {d.tool_use_id: d for d in state.permission_denials}
+    assert state.permission_denials_total == len(state.permission_denials)
+    uses = {u["id"]: u for u in _tool_uses(_transcript(state))}
+    for tool_use_id, denial in denials.items():
+        assert tool_use_id in uses, denial
+        assert denial.runtime_message, denial  # the CLI's message to the model
+    by_effect = {
+        "allowed/a.txt": workdir / "allowed" / "a.txt",
+        "outside/b.txt": workdir / "outside" / "b.txt",
+        "approved-2": workdir / "sub" / "approved-2",
+        "py.txt": workdir / "py.txt",
+    }
+    report = {name: path.exists() for name, path in by_effect.items()}
+    denied = {
+        name
+        for name in by_effect
+        if any(name in (d.requested or "") for d in state.permission_denials)
+    }
+    print("live permission outcome:", report, "denied:", sorted(denied))
+    assert report["allowed/a.txt"], (report, denied)
+    assert "allowed/a.txt" not in denied
+    for name in ("outside/b.txt", "py.txt"):
+        assert not report[name] and name in denied, (name, report, denied)
+    # The compound command: either it ran or it was reported as denied.
+    assert report["approved-2"] != ("approved-2" in denied), (report, denied)
+    assert view.structured_content is not None
+    assert view.structured_content["limits"]["permission_mode"] == "dontAsk"
+
+
 async def test_live_tools_outside_the_old_list_are_exposed(
     mcp_server: ServerFactory, live_env: dict[str, str], workdir: Path
 ) -> None:
