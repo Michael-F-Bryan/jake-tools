@@ -242,8 +242,11 @@ class PermissionDenial(BaseModel):
 
     ``requested`` is the call's input summary (the command, the path).
     ``runtime_message`` is what the CLI told the model in that call's error
-    result, when the stream carried one; the CLI gives no other reason, and
-    none is inferred. The effective policy is the task's ``limits``
+    result, when the stream carried one, cut to ``RUNTIME_MESSAGE_CHARS``
+    (``runtime_message_chars`` is its full length, and the call's
+    ``tool_result`` event, matched by ``tool_use_id``, holds more); the CLI
+    gives no other reason, and none is inferred. ``event_seq`` is this
+    denial's ``permission_denied`` event. The effective policy is the task's ``limits``
     (``tools``, ``allowed_tools``, ``permission_mode``).
     """
 
@@ -254,6 +257,9 @@ class PermissionDenial(BaseModel):
     tool_use_id: str | None = None
     requested: str | None = None
     runtime_message: str | None = None
+    runtime_message_chars: int | None = None
+    runtime_message_truncated: bool = False
+    event_seq: int | None = None
 
 
 class Handoff(BaseModel):

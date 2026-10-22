@@ -445,6 +445,34 @@ async def test_cancel_during_a_handoff_keeps_max_turns_and_fails_the_handoff(
     assert final["result"]["resumable"] is True
 
 
+@pytest.mark.parametrize(
+    ("bend", "said"),
+    [
+        ("omit", "matching init"),
+        ("no_tools", "session and tools"),
+        ("no_session", "session and tools"),
+        ("wrong_result", "reported session"),
+    ],
+)
+async def test_a_handoff_without_a_verified_session_is_not_written(
+    mcp_server: ServerFactory,
+    fake_env: dict[str, str],
+    workdir: Path,
+    bend: str,
+    said: str,
+) -> None:
+    env = {**fake_env, "FAKE_CLAUDE_RESUME_INIT": bend}
+    async with mcp_server(env) as session:
+        started = await start(session, workdir, "[[scenario:max_turns]] go")
+        final, _, _ = await poll_until(session, started["task_id"], terminal)
+
+    assert final["termination_reason"] == "max_turns"
+    handoff = final["result"]["handoff"]
+    assert handoff["status"] == "failed", handoff
+    assert said in handoff["error"]
+    assert final["result"]["final_text"] == "partial answer"
+
+
 async def test_a_tool_call_during_a_handoff_fails_the_handoff(
     mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
 ) -> None:
@@ -498,10 +526,14 @@ async def test_permission_denials_are_structured_and_resume_uses_its_own_rules(
         ("Bash", "cd sub && touch approved-2"),
         ("Bash", "python3 -c \"open('py.txt', 'w')\""),
     ]
-    assert all(
-        d["runtime_message"] == f"Permission to use {d['tool']} has been denied."
-        for d in denials
-    )
+    full = len("Permission to use Bash has been denied." + " pad" * 200)
+    for d in denials:
+        assert d["runtime_message"].startswith(f"Permission to use {d['tool']} ")
+        assert len(d["runtime_message"]) == 500
+        assert d["runtime_message_truncated"] is True
+        assert d["runtime_message_chars"] in (full, full + 1)  # Bash/Write
+    by_seq = {e["seq"]: e for e in events}
+    assert all(by_seq[d["event_seq"]]["kind"] == "permission_denied" for d in denials)
     assert final["limits"]["allowed_tools"] == rules
     assert final["limits"]["permission_mode"] == "dontAsk"
     denied = [e for e in events if e["kind"] == "permission_denied"]

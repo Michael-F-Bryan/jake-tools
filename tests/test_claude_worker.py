@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import anyio
+import pytest
 from claude_agent_sdk import ClaudeAgentOptions, Message, ResultMessage
 
 from jake_tools.claude import ClaudeAgent
@@ -102,3 +103,28 @@ async def test_a_cancel_during_shutdown_keeps_the_resolved_outcome(
 
     assert driver.resolved is not None
     assert driver.resolved.status == "completed"
+
+
+def test_add_usage_sums_tokens_and_cost_but_keeps_the_latest_model_breakdown() -> None:
+    from jake_tools.ai_usage import Usage
+    from jake_tools.claude_runs.worker import add_usage
+
+    first = Usage(
+        input_tokens=10,
+        output_tokens=5,
+        estimated_cost_usd=0.01,
+        model_usage={"m": {"inputTokens": 10}},
+    )
+    later = Usage(
+        input_tokens=3,
+        output_tokens=2,
+        estimated_cost_usd=0.002,
+        model_usage={"m": {"inputTokens": 13}},
+    )
+    total = add_usage(first, later)
+    assert total is not None
+    assert (total.input_tokens, total.output_tokens) == (13, 7)
+    assert total.estimated_cost_usd == pytest.approx(0.012)
+    assert total.model_usage == {"m": {"inputTokens": 13}}
+    assert add_usage(None, later) is later
+    assert add_usage(first, None) is first
