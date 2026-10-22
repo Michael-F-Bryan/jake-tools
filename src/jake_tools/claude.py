@@ -737,6 +737,18 @@ class ToolResultView(BaseModel):
     is_error: bool = False
 
 
+class PermissionDenialView(BaseModel):
+    """A call the runtime refused, as the result message lists it.
+
+    The CLI reports which tool and input it refused; it gives no reason
+    here. Its message to the model, if any, is the call's error result.
+    """
+
+    tool: str
+    tool_use_id: str | None = None
+    tool_input: dict[str, Any] = Field(default_factory=dict)
+
+
 class ResultView(BaseModel):
     """One turn's result message: how it ended, its final text and usage."""
 
@@ -747,6 +759,7 @@ class ResultView(BaseModel):
     errors: list[str] = Field(default_factory=list)
     num_turns: int = 0
     usage: Usage = Field(default_factory=Usage)
+    permission_denials: list[PermissionDenialView] = Field(default_factory=list)
 
 
 class MessageView(BaseModel):
@@ -834,6 +847,7 @@ def describe(message: Message) -> MessageView:
                 errors=list(message.errors or []),
                 num_turns=message.num_turns,
                 usage=_usage_of(message),
+                permission_denials=_denials_of(message),
             ),
         )
     if isinstance(message, SystemMessage):
@@ -873,6 +887,23 @@ def _flatten_tool_content(content: str | list[dict[str, Any]] | None) -> str:
         else:
             parts.append(f"[{item.get('type', 'content')}]")
     return "\n".join(parts)
+
+
+def _denials_of(result: ResultMessage) -> list[PermissionDenialView]:
+    denials: list[PermissionDenialView] = []
+    for raw in result.permission_denials or []:
+        if not isinstance(raw, dict):
+            continue
+        tool_input = raw.get("tool_input")
+        tool_use_id = raw.get("tool_use_id")
+        denials.append(
+            PermissionDenialView(
+                tool=str(raw.get("tool_name") or "unknown"),
+                tool_use_id=tool_use_id if isinstance(tool_use_id, str) else None,
+                tool_input=tool_input if isinstance(tool_input, dict) else {},
+            )
+        )
+    return denials
 
 
 def _result_error(prefix: str, result: ResultMessage) -> ClaudeAgentError:

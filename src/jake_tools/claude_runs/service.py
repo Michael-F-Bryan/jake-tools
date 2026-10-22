@@ -50,6 +50,7 @@ from .models import (
     DeliveryState,
     Handoff,
     InputRequest,
+    PermissionDenial,
     RunSpec,
     RunState,
     RunStatus,
@@ -107,6 +108,10 @@ class Limits(BaseModel):
     when the request gave none). Calls the runtime needs no approval for,
     such as reads inside the working directory and read-only Bash commands,
     run without a rule; everything else is denied."""
+    permission_mode: Literal["dontAsk"] = "dontAsk"
+    """How the runtime treats a call no rule approves and that needs
+    approval: it is denied (reported in ``permission_denials``), never
+    prompted."""
     max_turns: int
     timeout_seconds: float
     max_budget_usd: float
@@ -208,6 +213,11 @@ class TaskView(BaseModel):
     """Model turns this invocation has taken, as the worker counts them to
     enforce ``limits.max_turns``; ``None`` for runs that predate it."""
     limits: Limits
+    permission_denials: list[PermissionDenial] = Field(default_factory=list)
+    """The latest calls the runtime refused, oldest first: the requested
+    operation and the runtime's own message where it gave one. Compare
+    with ``limits`` for the effective policy; no reason is inferred."""
+    permission_denials_total: int = 0
     pending_inputs: list[InputRequest] = Field(default_factory=list)
     messages: list[SteerStatus] = Field(default_factory=list)
     messages_total: int = 0
@@ -508,6 +518,8 @@ def build_view(run_dir: Path, state: RunState) -> TaskView:
         invocation_cost_exact=spec.cost_baseline_exact,
         session_cost_usd=state.session_cost_usd,
         turns_used=state.turns_used,
+        permission_denials=state.permission_denials,
+        permission_denials_total=state.permission_denials_total,
         limits=Limits(
             model=spec.model,
             effort=spec.effort,

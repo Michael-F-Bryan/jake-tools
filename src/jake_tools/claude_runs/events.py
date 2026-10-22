@@ -36,6 +36,7 @@ EventKind = Literal[
     "tool_use",
     "tool_result",
     "turn_result",
+    "permission_denied",
     "notice",
     "message_queued",
     "message_delivered",
@@ -386,6 +387,21 @@ def events_from_view(view: MessageView) -> list[tuple[EventKind, dict[str, Any]]
                 },
             )
         )
+        for denial in result.permission_denials:
+            summary = tool_input_summary(denial.tool_input)
+            found.append(
+                (
+                    "permission_denied",
+                    {
+                        "tool": denial.tool,
+                        "tool_use_id": denial.tool_use_id,
+                        "is_error": True,
+                        "text": summary[:STORED_TOOL_INPUT_CHARS],
+                        "text_chars": len(summary),
+                        "text_truncated": len(summary) > STORED_TOOL_INPUT_CHARS,
+                    },
+                )
+            )
     elif view.kind == "notice" and view.notice:
         found.append(("notice", {"text": view.notice, "text_chars": len(view.notice)}))
     return found

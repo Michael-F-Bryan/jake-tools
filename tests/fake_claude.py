@@ -265,7 +265,13 @@ class Session:
             }
         )
 
-    def result(self, text: str | None, *, subtype: str = "success") -> None:
+    def result(
+        self,
+        text: str | None,
+        *,
+        subtype: str = "success",
+        denials: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.data["cost"] = round(self.data["cost"] + 0.01, 6)
         self.save()
         emit(
@@ -283,6 +289,7 @@ class Session:
                 "result": text,
                 "stop_reason": "end_turn",
                 "errors": [] if subtype == "success" else [f"fake {subtype}"],
+                "permission_denials": denials or [],
                 "uuid": str(uuid.uuid4()),
             }
         )
@@ -460,6 +467,27 @@ class Session:
         )
         while True:
             time.sleep(3600)
+
+    def turn_deny(self, text: str) -> None:
+        """Three calls the 'runtime' refuses, reported as the real CLI does:
+        an error tool result each, then the result's ``permission_denials``.
+        Which calls a real CLI refuses is its decision, not this fake's."""
+        calls = [
+            ("Write", {"file_path": "outside/b.txt", "content": "b"}),
+            ("Bash", {"command": "cd sub && touch approved-2"}),
+            ("Bash", {"command": "python3 -c \"open('py.txt', 'w')\""}),
+        ]
+        denials = []
+        for name, tool_input in calls:
+            tool_id = self.tool(name, tool_input)
+            self.tool_result(
+                tool_id, f"Permission to use {name} has been denied.", is_error=True
+            )
+            denials.append(
+                {"tool_name": name, "tool_use_id": tool_id, "tool_input": tool_input}
+            )
+        self.say({"type": "text", "text": "Some calls were denied."})
+        self.result("Some calls were denied.", denials=denials)
 
     def turn_stall(self, text: str) -> None:
         self.say({"type": "text", "text": "Thinking about it."})

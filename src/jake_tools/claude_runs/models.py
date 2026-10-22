@@ -108,6 +108,8 @@ TerminationReason = Literal[
 
 HandoffStatus = Literal["written", "failed", "skipped"]
 
+MAX_DENIALS_KEPT = 20
+
 SCHEMA_VERSION = 2
 """The run-directory schema new tasks are written with (see the module doc)."""
 
@@ -196,7 +198,10 @@ class RunState(BaseModel):
     invocation has taken, counted as the worker enforces ``max_turns``
     (distinct assistant messages across every prompt); ``None`` for runs
     written before it was recorded. ``handoff`` is set only after a
-    ``max_turns`` stop (see :class:`Handoff`).
+    ``max_turns`` stop (see :class:`Handoff`). ``permission_denials`` are
+    the latest refused calls (at most ``MAX_DENIALS_KEPT``), and
+    ``permission_denials_total`` counts all of them; the CLI reports them
+    with each result, so a turn still running has not reported its own.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -224,10 +229,31 @@ class RunState(BaseModel):
     session_cost_usd: float | None = None
     turns_used: int | None = None
     handoff: Handoff | None = None
+    permission_denials: list[PermissionDenial] = Field(default_factory=list)
+    permission_denials_total: int = 0
 
     @property
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATUSES
+
+
+class PermissionDenial(BaseModel):
+    """A tool call the Claude runtime refused, as the worker recorded it.
+
+    ``requested`` is the call's input summary (the command, the path).
+    ``runtime_message`` is what the CLI told the model in that call's error
+    result, when the stream carried one; the CLI gives no other reason, and
+    none is inferred. The effective policy is the task's ``limits``
+    (``tools``, ``allowed_tools``, ``permission_mode``).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    at: datetime
+    tool: str
+    tool_use_id: str | None = None
+    requested: str | None = None
+    runtime_message: str | None = None
 
 
 class Handoff(BaseModel):

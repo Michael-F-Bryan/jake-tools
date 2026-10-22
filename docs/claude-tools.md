@@ -56,6 +56,34 @@ against the real CLI. With `tools=["Bash"]` and
   does not exist.
 - `ls` ran with no rule.
 
+### Scoped writes, compound commands and denial reports
+
+`test_live_scoped_write_and_compound_bash_denials_are_reported` (CLI
+2.1.293, haiku, `dontAsk`, no settings files), with
+`tools=["Bash", "Write", "Edit"]` and
+`allowed_tools=["Edit(./allowed/**)", "Bash(touch approved-*)"]`:
+
+- A `Write` to `allowed/a.txt` ran: path rules are written as `Edit(...)`
+  and cover every file-editing tool, as the permissions docs say. An
+  earlier run with `Write(./allowed/**)` (and `tools=["Bash", "Write"]`)
+  approved nothing: the same write was denied. This server validates rule
+  shape only; it does not rewrite rules.
+- A `Write` to `outside/b.txt` was denied.
+- `cd sub && touch approved-2` was denied: `Bash(touch approved-*)` does
+  not approve a compound command that merely contains a matching part.
+- `python3 -c "open('py.txt', 'w')..."` was denied.
+
+Each refused call is in the result message's `permission_denials`
+(`tool_name`, `tool_use_id`, `tool_input`), which gives no reason. The
+CLI's error result for the same call does: "Permission to use Write has
+been denied because Claude Code is running in don't ask mode. ...". The
+worker joins the two by `tool_use_id` into `permission_denials` on the
+task view (`requested`, `runtime_message`), with `limits` as the
+effective policy. Nothing else is inferred: a denial is reported only once
+its turn's result arrives, so a turn still running may have unreported
+ones. `tests/fake_claude.py`'s `deny` scenario replays that shape for the
+deterministic tests; it proves the plumbing, not the runtime's decisions.
+
 ## Artifact publishing: blocked, no tool shipped
 
 The requested tool would publish a local HTML file as a claude.ai artifact,

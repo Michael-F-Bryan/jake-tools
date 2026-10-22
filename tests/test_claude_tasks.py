@@ -460,6 +460,59 @@ async def test_a_tool_call_during_a_handoff_fails_the_handoff(
     assert "tool call" in handoff["error"]
 
 
+async def test_permission_denials_are_structured_and_resume_uses_its_own_rules(
+    mcp_server: ServerFactory,
+    fake_env: dict[str, str],
+    fake_claude_state: Path,
+    workdir: Path,
+) -> None:
+    """Plumbing only: the fake reports denials the way the CLI does; whether
+    the real runtime refuses these forms is
+    ``test_live_scoped_write_and_compound_bash_denials_are_reported``."""
+    rules = ["Write(./allowed/**)", "Bash(touch approved-*)"]
+    async with mcp_server(fake_env) as session:
+        started = await start(
+            session,
+            workdir,
+            "[[scenario:deny]] go",
+            tools=["Bash", "Write"],
+            allowed_tools=rules,
+        )
+        final, events, _ = await poll_until(session, started["task_id"], terminal)
+        resumed = await start(
+            session,
+            workdir,
+            "carry on",
+            resume_task_id=started["task_id"],
+            tools=["Bash"],
+            allowed_tools=["Bash(touch approved-*)"],
+        )
+        await poll_until(session, resumed["task_id"], terminal)
+
+    assert final["status"] == "completed"
+    assert final["permission_denials_total"] == 3
+    denials = final["permission_denials"]
+    assert [(d["tool"], d["requested"]) for d in denials] == [
+        ("Write", "outside/b.txt"),
+        ("Bash", "cd sub && touch approved-2"),
+        ("Bash", "python3 -c \"open('py.txt', 'w')\""),
+    ]
+    assert all(
+        d["runtime_message"] == f"Permission to use {d['tool']} has been denied."
+        for d in denials
+    )
+    assert final["limits"]["allowed_tools"] == rules
+    assert final["limits"]["permission_mode"] == "dontAsk"
+    denied = [e for e in events if e["kind"] == "permission_denied"]
+    assert [e["tool_use_id"] for e in denied] == [d["tool_use_id"] for d in denials]
+
+    # A resume runs under the rules its own request gave, not the parent's.
+    first, second = argv_files(fake_claude_state)
+    assert flag(first, "--allowedTools") == ",".join(rules)
+    assert flag(second, "--resume") == started["session_id"]
+    assert flag(second, "--allowedTools") == "Bash(touch approved-*)"
+
+
 # --- steering ---------------------------------------------------------------------
 
 
