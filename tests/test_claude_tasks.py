@@ -356,6 +356,109 @@ async def test_a_turn_limit_keeps_partial_output_and_says_why(
     assert "error_max_turns" in result["error"]
 
 
+async def test_a_turn_limit_hands_off_in_the_same_session_without_tools(
+    mcp_server: ServerFactory,
+    fake_env: dict[str, str],
+    fake_claude_state: Path,
+    workdir: Path,
+) -> None:
+    """Mechanics only: the fake is not a model. The real-model acceptance is
+    ``test_live_max_turns_handoff_remembers_and_cannot_use_tools``."""
+    async with mcp_server(fake_env) as session:
+        started = await start(
+            session, workdir, "[[scenario:max_turns]] go", tools=["Bash"]
+        )
+        final, events, _ = await poll_until(session, started["task_id"], terminal)
+
+    # The outcome is still the turn limit; the handoff is extra evidence.
+    assert final["status"] == "failed"
+    assert final["termination_reason"] == "max_turns"
+    result = final["result"]
+    assert result["final_text"] == "partial answer"
+    assert result["last_narration"] == "Partial progress before the limit."
+    handoff = result["handoff"]
+    assert handoff["status"] == "written", handoff
+    assert handoff["source"] == "worker_reported"
+    assert handoff["text"] == "REMEMBERED: [[scenario:max_turns]] go"
+    assert Path(handoff["text_path"]).read_text() == handoff["text"]
+    assert handoff["cost_usd"] == pytest.approx(0.01)
+    assert result["invocation_cost_usd"] == pytest.approx(0.02)  # both calls
+    order = kinds(events)
+    assert order[-3:] == ["handoff_started", "handoff_finished", "finished"]
+    assert events[-2]["detail"]["status"] == "written"
+
+    # The handoff resumed the same session, tool-free, for one bounded turn.
+    first, second = argv_files(fake_claude_state)
+    assert flag(second, "--resume") == started["session_id"]
+    assert flag(second, "--tools") == ""
+    assert flag(second, "--max-turns") == "1"
+    assert flag(second, "--allowedTools") in (None, "")
+    assert "--mcp-config" not in second or "jake" not in (
+        flag(second, "--mcp-config") or ""
+    )
+    assert flag(first, "--tools") == "Bash"
+    env = json.loads((fake_claude_state / "env-2.json").read_text())
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "4096"
+
+
+async def test_a_handoff_is_skipped_when_too_little_time_is_left(
+    mcp_server: ServerFactory,
+    fake_env: dict[str, str],
+    fake_claude_state: Path,
+    workdir: Path,
+) -> None:
+    async with mcp_server(fake_env) as session:
+        started = await start(
+            session, workdir, "[[scenario:max_turns]] go", timeout_seconds=5
+        )
+        final, _, _ = await poll_until(session, started["task_id"], terminal)
+
+    assert final["termination_reason"] == "max_turns"
+    handoff = final["result"]["handoff"]
+    assert handoff["status"] == "skipped"
+    assert "timeout" in handoff["error"]
+    assert final["result"]["final_text"] == "partial answer"
+    assert len(argv_files(fake_claude_state)) == 1  # no model call
+
+
+async def test_cancel_during_a_handoff_keeps_max_turns_and_fails_the_handoff(
+    mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
+) -> None:
+    env = {**fake_env, "FAKE_CLAUDE_RESUME": "stall"}
+    async with mcp_server(env) as session:
+        started = await start(session, workdir, "[[scenario:max_turns]] go")
+        task_id = started["task_id"]
+        await poll_until(
+            session, task_id, lambda _, evs: "handoff_started" in kinds(evs)
+        )
+        await call(session, "claude_cancel", task_id=task_id)
+        final, events, _ = await poll_until(session, task_id, terminal)
+
+    assert final["status"] == "failed"
+    assert final["termination_reason"] == "max_turns"
+    handoff = final["result"]["handoff"]
+    assert handoff["status"] == "failed"
+    assert "cancelled" in handoff["error"]
+    assert final["result"]["final_text"] == "partial answer"
+    assert final["result"]["resumable"] is True
+
+
+async def test_a_tool_call_during_a_handoff_fails_the_handoff(
+    mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
+) -> None:
+    """A guard only: the handoff session exposes no tools, so a real model
+    has nothing to call. A fake that calls one anyway must not get a pass."""
+    env = {**fake_env, "FAKE_CLAUDE_RESUME": "tool"}
+    async with mcp_server(env) as session:
+        started = await start(session, workdir, "[[scenario:max_turns]] go")
+        final, _, _ = await poll_until(session, started["task_id"], terminal)
+
+    assert final["termination_reason"] == "max_turns"
+    handoff = final["result"]["handoff"]
+    assert handoff["status"] == "failed"
+    assert "tool call" in handoff["error"]
+
+
 # --- steering ---------------------------------------------------------------------
 
 
@@ -720,6 +823,10 @@ async def test_max_turns_bounds_the_whole_task_across_steered_prompts(
     assert "max_turns=3" in final["result"]["error"]
     assert final["result"]["final_text"] == "ECHO: [[scenario:slow_echo:2]] first"
     assert final["messages"][0]["state"] == "in_conversation"
+    assert final["turns_used"] == 4  # the one past the limit stopped it
+    near = [e for e in events if e["kind"] == "notice"]
+    assert near and near[0]["detail"] == {"turns_used": 2, "max_turns": 3}
+    assert final["result"]["handoff"]["status"] == "written"
 
 
 # --- idempotent start --------------------------------------------------------------

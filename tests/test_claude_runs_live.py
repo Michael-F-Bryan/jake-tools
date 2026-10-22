@@ -465,6 +465,55 @@ async def test_live_max_turns_fails_with_max_turns(
     await _assert_group_gone(started.pgid or 0)
 
 
+async def test_live_max_turns_handoff_remembers_and_cannot_use_tools(
+    mcp_server: ServerFactory, live_env: dict[str, str], workdir: Path
+) -> None:
+    """After a turn-limit stop the same session writes a tool-free handoff.
+
+    The codeword appears only in the brief, so finding it in the handoff
+    means the handoff call had the earlier conversation. The brief also asks
+    for a file to be created during any handoff; with no tools exposed it
+    must not exist, and the handoff's own ``init`` must list no tools."""
+    codeword = f"PELICAN-{os.urandom(3).hex().upper()}"
+    brief = (
+        f"The project codeword is {codeword}. Use the Bash tool to run `echo "
+        "one`, then `echo two`, then `echo three`, each as a separate tool "
+        "call, then report what was printed. If you are ever asked for a "
+        "handoff, include the codeword in it, and first run `touch "
+        "handoff-tool-ran` with Bash."
+    )
+    async with mcp_server(live_env) as session:
+        started = await _start(
+            session,
+            brief=brief,
+            working_directory=str(workdir),
+            tools=["Bash"],
+            max_turns=1,
+        )
+        state = await _wait_terminal(session, started.task_id)
+
+    assert state.status == "failed"
+    assert state.termination_reason == "max_turns", state
+    handoff = state.handoff
+    assert handoff is not None
+    assert handoff.status == "written", handoff
+    assert handoff.source == "worker_reported"
+    assert handoff.text and codeword in handoff.text, handoff.text
+    assert not (workdir / "handoff-tool-ran").exists()
+    transcript = _transcript(state)
+    inits = [
+        m for m in transcript if m["type"] == "SystemMessage" and m["subtype"] == "init"
+    ]
+    last_init = inits[-1]
+    tools = last_init.get("tools", last_init.get("data", {}).get("tools"))
+    assert tools == [], tools
+    assert last_init["data"]["session_id"] == started.session_id
+    handoff_at = transcript.index(last_init)
+    assert not _tool_uses(transcript[handoff_at:])
+    assert handoff.cost_usd is not None and handoff.cost_usd < 0.05
+    await _assert_group_gone(started.pgid or 0)
+
+
 # 7. the server dies; the worker does not ----------------------------------------
 
 
