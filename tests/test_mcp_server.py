@@ -19,7 +19,12 @@ from pathlib import Path
 import pytest
 from mcp import ClientSession
 from mcp.server.mcpserver import MCPServer
-from mcp.types import CallToolResult, TextContent
+from mcp.types import (
+    CallToolResult,
+    InputRequiredResult,
+    TextContent,
+    TextResourceContents,
+)
 from pydantic import BaseModel
 
 from jake_tools.config import load_config
@@ -79,9 +84,60 @@ async def test_stdio_starts_without_any_credentials_and_lists_skill_resources(
     async with mcp_server(mcp_env) as session:
         resources = (await session.list_resources()).resources
 
-    assert sorted(str(resource.uri) for resource in resources) == [
-        f"skill://{skill.name}" for skill in packaged_skills()
-    ]
+    expected = {f"skill://{skill.name}" for skill in packaged_skills()}
+    expected.update(
+        f"skill://{skill.name}/{path.relative_to(skill).as_posix()}"
+        for skill in packaged_skills()
+        for path in (skill / "references").rglob("*.md")
+    )
+    assert {str(resource.uri) for resource in resources} == expected
+
+
+async def test_stdio_reads_optional_clockify_reference_without_inlining_it(
+    mcp_server: ServerFactory, mcp_env: dict[str, str]
+) -> None:
+    uri = "skill://clockify-time/references/direct-api-workflows.md"
+    async with mcp_server(mcp_env) as session:
+        resources = (await session.list_resources()).resources
+        assert uri in {str(resource.uri) for resource in resources}
+        reference = await session.read_resource(uri)
+        skill = await session.read_resource("skill://clockify-time")
+
+    assert isinstance(reference.contents[0], TextResourceContents)
+    assert isinstance(skill.contents[0], TextResourceContents)
+    source = next(p for p in packaged_skills() if p.name == "clockify-time")
+    assert (
+        reference.contents[0].text
+        == (source / "references/direct-api-workflows.md").read_text()
+    )
+    assert skill.contents[0].text == (source / "SKILL.md").read_text()
+    assert "## Merging duplicate Jira-backed projects" not in skill.contents[0].text
+
+
+async def test_nested_markdown_references_are_individually_readable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jake_tools.mcp import server
+
+    root = tmp_path / "skills"
+    skill = root / "example"
+    nested = skill / "references" / "cleanup"
+    nested.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "Read references/cleanup/exact-ids.md only when needed."
+    )
+    (nested / "exact-ids.md").write_text("Exact-ID cleanup procedure")
+    (nested / "openapi.json").write_text('{"not": "a default resource"}')
+    monkeypatch.setattr(server, "SKILLS_DIR", root)
+    app = build_server(load_config({"HOME": str(tmp_path)}))
+
+    assert {str(r.uri) for r in await app.list_resources()} == {
+        "skill://example",
+        "skill://example/references/cleanup/exact-ids.md",
+    }
+    result = await app.read_resource("skill://example/references/cleanup/exact-ids.md")
+    assert not isinstance(result, InputRequiredResult)
+    assert [part.content for part in result] == ["Exact-ID cleanup procedure"]
 
 
 async def test_stdio_server_resolves_config_from_the_isolated_home(

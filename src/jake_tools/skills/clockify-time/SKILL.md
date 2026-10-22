@@ -13,6 +13,29 @@ Use the `jake-tools` MCP server to read time history, select existing projects/t
 and create completed time entries. No Jira credentials or CLI commands are needed.
 Hermes exposes the tools with its `mcp_<server>_` prefix; names below are bare names.
 
+## Discover the current interface
+
+Use the host's tool search/list and schema-description facility to find these
+bare tool names (prefixes depend on the host). Inspect the live input schema
+before calling; do not assume CLI flags are MCP arguments. Read
+`skill://clockify-time` for guidance matching the running server when a local
+copy may be stale. Tools use the server's configured credentials, not the agent's
+shell environment; report missing credentials/allowlisting rather than probing
+local secret stores or switching accounts.
+
+| Tool | Effect |
+| --- | --- |
+| `clockify_time_entries` | Read-only authenticated-user overlap history; page to completion. |
+| `clockify_workspace_catalogue` | Read-only clients, projects and tasks; no Jira access needed. |
+| `clockify_create_time_entry` | Real write: one completed entry, no preview/apply parameter. |
+
+Unsupported entry edits/deletes, timer changes, project/client cleanup and
+exact-ID bulk migration are not MCP tools. Only when explicitly requested, read
+[direct API workflows](references/direct-api-workflows.md), also available as
+`skill://clockify-time/references/direct-api-workflows.md`. That supporting
+reference requires separate authorised credential access and stops if absent;
+it is not a separate skill or a routine fallback for a tool error.
+
 ## When to use
 
 - Review logged work over an interval, including running entries.

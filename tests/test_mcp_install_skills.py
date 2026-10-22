@@ -230,6 +230,46 @@ def test_missing_target_is_an_error(
     assert "HERMES_HOME" in result.stderr
 
 
+@pytest.mark.parametrize("link", [False, True])
+def test_real_cli_installs_packaged_skills_with_all_supporting_files(
+    tmp_path: Path,
+    mcp_env_factory: Callable[..., dict[str, str]],
+    link: bool,
+) -> None:
+    target = tmp_path / "installed"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "jake_tools.mcp",
+            "install-skills",
+            "--into",
+            str(target),
+            *(["--link"] if link else []),
+        ],
+        env=mcp_env_factory(tmp_path / "home"),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert {p.name for p in target.iterdir()} == {
+        p.name for p in server.packaged_skills()
+    }
+    for source in server.packaged_skills():
+        destination = target / source.name
+        assert destination.is_symlink() is link
+        files = [p for p in source.rglob("*") if p.is_file()]
+        assert files
+        for path in files:
+            assert (
+                destination / path.relative_to(source)
+            ).read_bytes() == path.read_bytes()
+    reference = target / "clockify-time/references/direct-api-workflows.md"
+    assert reference.is_file()
+
+
 def test_zero_packaged_skills_exits_zero(
     tmp_path: Path, mcp_env_factory: Callable[..., dict[str, str]]
 ) -> None:

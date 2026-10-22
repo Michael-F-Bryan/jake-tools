@@ -54,6 +54,17 @@ def build_server(config: Config) -> MCPServer:
                 path=skill_dir / "SKILL.md",
             )
         )
+        for reference in sorted((skill_dir / "references").rglob("*.md")):
+            relative = reference.relative_to(skill_dir).as_posix()
+            app.add_resource(
+                FileResource(
+                    uri=f"skill://{skill_dir.name}/{relative}",
+                    name=f"{skill_dir.name}/{relative}",
+                    description=f"Supporting reference for {skill_dir.name}; read only when needed.",
+                    mime_type="text/markdown",
+                    path=reference,
+                )
+            )
     return app
 
 

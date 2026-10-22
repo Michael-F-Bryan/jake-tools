@@ -26,6 +26,35 @@ status category Done (including Done and Won’t Do) completes them. The report
 retains the `assigned-active` scope and `active_issues` count for planned or
 underway work.
 
+## Discovery, configuration and scope
+
+Find `clockify_jira_sync` through the host's tool search/list, then inspect its
+live schema: `issues?: list[str]`, `apply: bool = false`,
+`plan_digest?: str`. Read `skill://clockify-jira-sync` for the running server's
+version. Do not pass CLI flags or assume a local checkout is needed. Credentials
+are resolved by the server (`CLOCKIFY_API_KEY`, `JIRA_BASE_URL`, `JIRA_EMAIL`,
+`JIRA_API_TOKEN`, including configured secret-file variants); do not retrieve
+local vault credentials to make an MCP call. Missing configuration is a blocker.
+
+Unlike the history/catalogue/create tools, this tool has no `workspace_id`
+argument and does not use their workspace allowlist. It resolves the Clockify
+user's active workspace (and fails if none), then the exact configured client
+(default `Sunfish Robotics`) and Jira project (default `SF`). Confirm that server
+scope matches the request; never promise an arbitrary workspace selection.
+The configured client selects the owner of **new** projects; it is not an
+inventory filter. The sync inventories all active projects in that workspace
+and their active/done tasks. Default selection also checks Jira keys already
+referenced by those projects/tasks for drift and completion; it is not limited
+to creating the authenticated user's currently assigned work.
+
+Naming is deterministic: project = phase summary only, task = Jira key plus
+summary, project note = `Jira: KEY`. The installed CLI's read-only
+`jake-tools clockify jira-name --help` describes the formatter; it is not an MCP
+tool. Sync does not repair client associations, merge duplicates, migrate time
+entries, or edit timers. Those unsupported workflows are documented separately
+in `clockify-time`'s `references/direct-api-workflows.md`, with separate approval
+and credential requirements.
+
 ## The loop: preview, read, apply with the digest
 
 1. **Preview.** Call with no arguments to cover planned or underway Jira work
@@ -110,8 +139,12 @@ failure:
 1. Tell the person what was applied and what failed.
 2. Preview again. The new plan shows what is still outstanding, including
    whether the failed action actually landed.
-3. Apply the new plan with its new digest only if the failure looks
-   transient and the person wants it finished.
+   The fresh plan is evidence, not permission to repeat an uncertain POST: inspect
+   the exact changed records (and known IDs) first. If a create may have landed
+   but identity cannot be established, stop and report uncertainty; do not create
+   a duplicate. A transport failure during apply can also leave writes behind.
+3. Apply a new plan only after resolving uncertainty, if the failure looks
+   transient and the person wants it finished. Never blindly retry an apply.
 
 ## Don't
 

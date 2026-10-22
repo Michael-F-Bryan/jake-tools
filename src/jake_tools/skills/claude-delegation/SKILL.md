@@ -25,6 +25,23 @@ work → optionally `claude_start(resume_task_id=...)`.
 Every task runs in its own process and survives MCP server restarts; task
 IDs, cursors and message IDs stay valid across them.
 
+## Discovery and side effects
+
+Use the host's tool search/list and schema-description facility to discover
+`claude_*` tools and inspect current arguments; prefixes are host-dependent. Read
+`skill://claude-delegation` for this server's packaged guidance if the installed
+copy may be stale. No local checkout or agent-side credential lookup is needed;
+the worker uses the server's configured Claude installation/authentication.
+Report unavailable tools or authentication rather than guessing credentials.
+
+`claude_status`, `claude_poll` and `claude_transcript` observe tasks without
+instructing the worker to change its work. `claude_start` runs a real task;
+`claude_steer` and `claude_update` change its instructions/input, and
+`claude_cancel` stops it without rollback. There is no preview/apply parameter:
+a read-only review requires a read-only brief and minimal grants. Authorisation
+for delegation does not imply permission to commit, push or perform business
+writes. Put the approved scope in the brief and verify resulting state yourself.
+
 ## 1. Write a self-contained brief
 
 The worker sees the `brief` and the files in `working_directory`. It sees no

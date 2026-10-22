@@ -2,6 +2,11 @@
 
 Internal tools used by Jake.
 
+Tool-owned operational guidance ships with this package: see
+[packaged skills, migration and resource delivery](src/jake_tools/skills/README.md).
+Use the focused `claude-delegation`, `clockify-time` and `clockify-jira-sync`
+skills instead of the retired shared `jake-tools` and `clockify-api` skills.
+
 ## Installation
 
 ```bash
