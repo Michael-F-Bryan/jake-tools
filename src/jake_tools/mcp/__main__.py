@@ -1,4 +1,4 @@
-"""``python -m jake_tools.mcp``: serve (default) | doctor | install-skills | worker.
+"""``python -m jake_tools.mcp``: serve (default) | doctor | worker.
 
 Stdout is the MCP transport, so every sub-command logs to stderr only.
 Configuration comes from :func:`jake_tools.config.load_config` over the
@@ -15,7 +15,6 @@ import click
 
 from ..config import ConfigError, load_config
 from .doctor import doctor
-from .install_skills import install_skills
 from .worker import worker
 
 
@@ -53,7 +52,6 @@ def configure_logging() -> None:
 
 
 main.add_command(doctor)
-main.add_command(install_skills)
 main.add_command(worker)
 
 if __name__ == "__main__":

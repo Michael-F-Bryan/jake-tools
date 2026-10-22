@@ -17,6 +17,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+import yaml
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.resources import FileResource
 from mcp.types import CallToolResult
@@ -49,7 +50,7 @@ def build_server(config: Config) -> MCPServer:
             FileResource(
                 uri=f"skill://{skill_dir.name}",
                 name=skill_dir.name,
-                description=f"The packaged {skill_dir.name} skill, as installed by install-skills.",
+                description=skill_description(skill_dir / "SKILL.md"),
                 mime_type="text/markdown",
                 path=skill_dir / "SKILL.md",
             )
@@ -66,6 +67,22 @@ def build_server(config: Config) -> MCPServer:
                 )
             )
     return app
+
+
+def skill_description(path: Path) -> str:
+    """Read the resource's description from its packaged YAML frontmatter."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0] != "---":
+        raise ValueError(f"{path}: missing YAML frontmatter")
+    try:
+        end = lines.index("---", 1)
+    except ValueError as exc:
+        raise ValueError(f"{path}: unterminated YAML frontmatter") from exc
+    metadata = yaml.safe_load("\n".join(lines[1:end]) + "\n")
+    description = metadata.get("description") if isinstance(metadata, dict) else None
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError(f"{path}: frontmatter needs a non-empty description string")
+    return description
 
 
 def package_version() -> str:

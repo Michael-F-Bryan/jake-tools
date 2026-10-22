@@ -29,7 +29,12 @@ from pydantic import BaseModel
 
 from jake_tools.config import load_config
 from jake_tools.mcp.errors import ToolError, ToolErrorPayload, error_result
-from jake_tools.mcp.server import build_server, packaged_skills, structured_tool
+from jake_tools.mcp.server import (
+    build_server,
+    packaged_skills,
+    skill_description,
+    structured_tool,
+)
 
 ServerFactory = Callable[..., AbstractAsyncContextManager[ClientSession]]
 
@@ -91,6 +96,14 @@ async def test_stdio_starts_without_any_credentials_and_lists_skill_resources(
         for path in (skill / "references").rglob("*.md")
     )
     assert {str(resource.uri) for resource in resources} == expected
+    by_uri = {str(resource.uri): resource for resource in resources}
+    for skill in packaged_skills():
+        description = next(
+            line.removeprefix("description: ")
+            for line in (skill / "SKILL.md").read_text().splitlines()
+            if line.startswith("description: ")
+        )
+        assert by_uri[f"skill://{skill.name}"].description == description
 
 
 async def test_stdio_reads_optional_clockify_reference_without_inlining_it(
@@ -124,6 +137,7 @@ async def test_nested_markdown_references_are_individually_readable(
     nested = skill / "references" / "cleanup"
     nested.mkdir(parents=True)
     (skill / "SKILL.md").write_text(
+        "---\nname: example\ndescription: Exact-ID cleanup guidance\n---\n"
         "Read references/cleanup/exact-ids.md only when needed."
     )
     (nested / "exact-ids.md").write_text("Exact-ID cleanup procedure")
@@ -138,6 +152,43 @@ async def test_nested_markdown_references_are_individually_readable(
     result = await app.read_resource("skill://example/references/cleanup/exact-ids.md")
     assert not isinstance(result, InputRequiredResult)
     assert [part.content for part in result] == ["Exact-ID cleanup procedure"]
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        ("Read Clockify history.", "Read Clockify history."),
+        ('"Read: Clockify # history"', "Read: Clockify # history"),
+        (">-\n  Read Clockify\n  history safely.", "Read Clockify history safely."),
+        ("|\n  Read Clockify.\n  Verify entries.", "Read Clockify.\nVerify entries.\n"),
+    ],
+)
+def test_skill_description_reads_yaml_strings(
+    tmp_path: Path, field: str, expected: str
+) -> None:
+    path = tmp_path / "SKILL.md"
+    path.write_text(f"---\nname: example\ndescription: {field}\n---\n# Body\n")
+    assert skill_description(path) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "# No frontmatter",
+        "---\nname: example\n",
+        "---\nname: example\n---\n",
+        "---\ndescription: 123\n---\n",
+        "---\ndescription: ''\n---\n",
+        "---\n- not a mapping\n---\n",
+    ],
+)
+def test_skill_description_rejects_invalid_packaged_metadata(
+    tmp_path: Path, text: str
+) -> None:
+    path = tmp_path / "SKILL.md"
+    path.write_text(text)
+    with pytest.raises(ValueError, match="frontmatter"):
+        skill_description(path)
 
 
 async def test_stdio_server_resolves_config_from_the_isolated_home(
@@ -195,9 +246,11 @@ def test_module_help_lists_public_subcommands_and_hides_worker() -> None:
         text=True,
         check=True,
     )
+    from jake_tools.mcp.__main__ import main
+
+    assert set(main.commands) == {"serve", "doctor", "worker"}
     assert "serve" in completed.stdout
     assert "doctor" in completed.stdout
-    assert "install-skills" in completed.stdout
     assert "worker" not in completed.stdout
 
 

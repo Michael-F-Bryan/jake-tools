@@ -16,14 +16,14 @@ judgement belongs here.
 ## Migration from broad shared skills
 
 The shared `jake-tools` and `clockify-api` skills are retired rather than replaced
-by a hub or another general-purpose skill. Install these focused, tool-owned
-skills for supported MCP workflows. The useful unsupported Clockify procedures
-from the former `clockify-api/references/workflows.md` are retained as a supporting
-reference under `clockify-time`, with host-specific checkout/vault assumptions
-removed. It is progressive disclosure within an existing skill, **not** an
-optional skill tier. No OpenAPI dump or credential-handling script is needed for
-this guidance; consult current endpoint documentation only for the requested
-unsupported operation.
+by a hub or another general-purpose skill. Consume these focused, tool-owned
+skills as MCP resources for supported workflows. The useful unsupported Clockify
+procedures from the former `clockify-api/references/workflows.md` are retained as
+a supporting reference under `clockify-time`, with host-specific checkout/vault
+assumptions removed. It is progressive disclosure within an existing skill,
+**not** an optional skill tier. No OpenAPI dump or credential-handling script is
+needed for this guidance; consult current endpoint documentation only for the
+requested unsupported operation.
 
 Old CLI-only routing is not a reason to bypass an available MCP tool. Other CLI
 commands remain discoverable through `jake-tools --help` and subcommand help;
@@ -31,34 +31,37 @@ this migration does not create new tools or duplicate unrelated specialist
 skills. Direct API fallback requires separate authorised credential access; MCP
 server credentials are not available to callers merely because a tool works.
 
-## Delivery and updates
+Retired shared/profile copies can still shadow current guidance. Remove stale
+`jake-tools`/`clockify-api` copies only in the intended skills directory, with
+authorisation. Do not modify another profile or runtime configuration as part
+of a documentation migration.
+
+## Resource-only delivery
 
 Each `src/jake_tools/skills/<name>/` contains a `SKILL.md` and, when needed,
-`references/`. The package build includes these data files.
+`references/`. Package builds include these data files; no profile installer or
+installer replacement is provided. Consume them through the connected MCP server:
 
-```bash
-jake-tools-mcp install-skills --into /absolute/path/to/target/skills
-# Equivalent: python -m jake_tools.mcp install-skills --into ...
-```
+1. Use `resources/list` to discover `skill://<name>`. Each main resource's
+   description is the skill's YAML frontmatter `description`, not generic
+   packaging text. Resource listing provides metadata, not skill/reference bodies.
+2. Use `resources/read` with the chosen URI to get the complete `SKILL.md` matching
+   the running server. Inspect live tool schemas before calls; do not assume CLI
+   flags are MCP arguments.
+3. Read a linked supporting reference only when the task needs it. Nested
+   Markdown files are independently listed and readable at
+   `skill://<name>/references/<path>.md`. A main skill read does not inline them;
+   no large OpenAPI default load is required.
 
-Choose the target explicitly, or omit `--into` only when `HERMES_HOME` already
-identifies the intended profile. Installation copies the **whole** skill
-directory, including nested references. `--link` links the whole directory.
-Existing destinations are refused/skipped unless `--force` is supplied; review
-local edits before replacing them. Installing does not remove retired broad
-skills: remove stale `jake-tools`/`clockify-api` copies from the intended shared or
-profile skills directory separately, with authorisation. Do not modify another
-profile or runtime configuration as part of a documentation migration.
+For example, read `skill://clockify-time` for routine history/logging and
+`skill://clockify-time/references/direct-api-workflows.md` only for explicitly
+requested unsupported cleanup. These are fixed packaged resources, not an
+arbitrary filesystem reader. Descriptions are parsed with `yaml.safe_load`,
+including quoted and multiline YAML strings; a packaged skill without a valid
+non-empty description fails registration rather than advertising misleading
+metadata.
 
-The running MCP server lists each main skill as `skill://<name>` and each
-Markdown supporting reference, recursively, as
-`skill://<name>/references/<path>.md`. Resource listing provides metadata, not
-reference bodies. `resources/read` of a main skill does not inline its references;
-read the linked reference URI only when its task needs it. These are fixed
-packaged resources, not an arbitrary filesystem reader. The installer already
-handles full trees; only resource delivery needed extending for references.
-
-When a local installed copy and a running server differ, inspect live schemas
-and read that server's skill resources. Updating source or installing skills
-does not update an already-running server. Coordinate deployment separately;
-this migration does not restart services or change their configuration.
+If a cached/local copy and a running server differ, use live schemas and that
+server's resources. Updating source does not update an already-running server.
+Coordinate deployment separately; this migration does not restart services or
+change their configuration.

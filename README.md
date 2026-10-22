@@ -4,8 +4,11 @@ Internal tools used by Jake.
 
 Tool-owned operational guidance ships with this package: see
 [packaged skills, migration and resource delivery](src/jake_tools/skills/README.md).
-Use the focused `claude-delegation`, `clockify-time` and `clockify-jira-sync`
-skills instead of the retired shared `jake-tools` and `clockify-api` skills.
+List MCP resources to discover the focused `claude-delegation`, `clockify-time`
+and `clockify-jira-sync` guidance by description, then read `skill://<name>`.
+These resources replace the retired shared `jake-tools` and `clockify-api`
+skills; no profile skill installation is needed. Supporting references are
+separate resources and are not inlined into routine skill reads.
 
 ## Installation
 
