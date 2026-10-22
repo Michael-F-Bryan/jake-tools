@@ -143,6 +143,7 @@ async def test_stdio_lists_the_delegation_tools_with_their_arguments(
         "claude_steer": {"task_id", "message", "message_id"},
         "claude_update": {"task_id", "responses"},
         "claude_cancel": {"task_id"},
+        "claude_list": set(),
     }
     for name, required in expected.items():
         assert set(tools[name].input_schema.get("required", [])) == required, name
@@ -511,6 +512,51 @@ async def test_permission_denials_are_structured_and_resume_uses_its_own_rules(
     assert flag(first, "--allowedTools") == ",".join(rules)
     assert flag(second, "--resume") == started["session_id"]
     assert flag(second, "--allowedTools") == "Bash(touch approved-*)"
+
+
+async def test_claude_list_pages_newest_first_and_reports_bad_records(
+    mcp_server: ServerFactory, fake_env: dict[str, str], mcp_home: Path, workdir: Path
+) -> None:
+    async with mcp_server(fake_env) as session:
+        ids = []
+        for brief in ("first task", "\n  second task\nmore detail", "x" * 300):
+            started = await start(session, workdir, brief)
+            await poll_until(session, started["task_id"], terminal)
+            ids.append(started["task_id"])
+        runs = runs_dir(mcp_home)
+        bad = "20000101T000000Z-" + "0" * 32  # sorts oldest
+        (runs / bad).mkdir()
+        (runs / bad / "spec.json").write_text("{not json")
+        spec_path = runs / ids[0] / "spec.json"
+        legacy = json.loads(spec_path.read_text())
+        legacy["schema_version"] = 1
+        spec_path.write_text(json.dumps(legacy))
+
+        page1 = await call(session, "claude_list", limit=2)
+        page2 = await call(session, "claude_list", limit=2, before=page1["next_before"])
+        failed = await call(session, "claude_list", status="failed")
+        bad_cursor = await call_error(session, "claude_list", before="../etc")
+        bad_limit = await call_error(session, "claude_list", limit=0)
+
+    # Newest first to the second; IDs from the same second sort by ID.
+    order = sorted(ids, reverse=True)
+    listed = page1["tasks"] + page2["tasks"]
+    assert [t["task_id"] for t in listed] == order
+    assert page1["next_before"] == order[1]
+    labels = {t["task_id"]: t["label"] for t in listed}
+    assert labels == {
+        ids[0]: "first task",
+        ids[1]: "second task",
+        ids[2]: "x" * 119 + "…",
+    }
+    first = next(t for t in listed if t["task_id"] == ids[0])
+    assert first["status"] == "completed" and first["resumable"] is True
+    assert first["legacy_run"] is True
+    assert [u["task_id"] for u in page2["unreadable"]] == [bad]
+    assert page2["next_before"] is None
+    assert failed["tasks"] == [] and failed["next_before"] is None
+    assert bad_cursor["code"] == "invalid_argument"
+    assert bad_limit["code"] == "invalid_argument"
 
 
 # --- steering ---------------------------------------------------------------------
