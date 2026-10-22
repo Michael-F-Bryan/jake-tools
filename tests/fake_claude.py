@@ -195,17 +195,29 @@ class Session:
         return [renamed.get(t, t) for t in requested if t not in unavailable]
 
     def init(self) -> None:
-        emit(
-            {
-                "type": "system",
-                "subtype": "init",
-                "session_id": self.reported_id,
-                "cwd": os.getcwd(),
-                "model": self.args.get("model"),
-                "tools": self.exposed_tools(),
-                "uuid": str(uuid.uuid4()),
-            }
+        # FAKE_CLAUDE_RESUME_INIT bends a resume's init: omit / no_tools /
+        # no_session; wrong_result reports another session on the result.
+        bend = (
+            os.environ.get("FAKE_CLAUDE_RESUME_INIT")
+            if self.args.get("resume")
+            else None
         )
+        if bend == "omit":
+            return
+        message = {
+            "type": "system",
+            "subtype": "init",
+            "session_id": self.reported_id,
+            "cwd": os.getcwd(),
+            "model": self.args.get("model"),
+            "tools": self.exposed_tools(),
+            "uuid": str(uuid.uuid4()),
+        }
+        if bend == "no_tools":
+            del message["tools"]
+        if bend == "no_session":
+            del message["session_id"]
+        emit(message)
 
     def echo(self, message: dict[str, Any]) -> str:
         text = message["message"]["content"]
@@ -282,7 +294,10 @@ class Session:
                 "duration_api_ms": 4,
                 "is_error": subtype != "success",
                 "num_turns": self.turns,
-                "session_id": self.reported_id,
+                "session_id": str(uuid.uuid4())
+                if self.args.get("resume")
+                and os.environ.get("FAKE_CLAUDE_RESUME_INIT") == "wrong_result"
+                else self.reported_id,
                 "total_cost_usd": self.data["cost"],
                 # Like the real CLI: tokens per prompt, cost as a session total.
                 "usage": {"input_tokens": 10, "output_tokens": 5},
@@ -481,7 +496,9 @@ class Session:
         for name, tool_input in calls:
             tool_id = self.tool(name, tool_input)
             self.tool_result(
-                tool_id, f"Permission to use {name} has been denied.", is_error=True
+                tool_id,
+                f"Permission to use {name} has been denied." + " pad" * 200,
+                is_error=True,
             )
             denials.append(
                 {"tool_name": name, "tool_use_id": tool_id, "tool_input": tool_input}

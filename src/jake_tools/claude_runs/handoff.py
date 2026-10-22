@@ -121,16 +121,29 @@ async def write_handoff(
                 spec, cost_baseline_usd=session_cost_usd
             ) as conversation:
                 await conversation.send(HANDOFF_PROMPT, uuid=str(uuid.uuid4()))
+                identified = False
                 async for message in conversation.messages():
                     view = describe(message)
+                    if view.session_id is not None and view.session_id != session_id:
+                        error = (
+                            f"the handoff stream reported session {view.session_id}, "
+                            f"not {session_id}"
+                        )
+                        break
                     if view.kind == "init":
-                        if view.session_id and view.session_id != session_id:
-                            error = f"Claude resumed session {view.session_id}, not {session_id}"
+                        if view.session_id is None or view.tools is None:
+                            error = (
+                                "the handoff init did not report its session and tools"
+                            )
                             break
                         if view.tools:
                             error = f"the handoff session exposed tools: {', '.join(view.tools)}"
                             break
+                        identified = True
                         continue
+                    if not identified and view.kind in ("assistant", "result"):
+                        error = "the handoff stream did not start with a matching init"
+                        break
                     if view.tool_uses:
                         error = "the agent attempted a tool call during the handoff"
                         break

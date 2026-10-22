@@ -141,6 +141,7 @@ PUMP_INTERVAL_SECONDS = 0.25
 ANSWER_POLL_SECONDS = 0.25
 PROGRESS_FLUSH_SECONDS = 1.0
 MAX_CHOICE_CHARS = 200
+RUNTIME_MESSAGE_CHARS = 500
 
 ASK_TOOL = "ask_parent"
 ASK_DESCRIPTION = (
@@ -407,12 +408,9 @@ class Driver:
 
     def settled(self, outcome: Outcome) -> Outcome:
         """``outcome`` with the turn count, any handoff and its usage attached."""
-        usage = outcome.usage
-        if self.handoff_usage is not None:
-            usage = self.handoff_usage if usage is None else usage + self.handoff_usage
         return replace(
             outcome,
-            usage=usage,
+            usage=add_usage(outcome.usage, self.handoff_usage),
             turns_used=len(self.model_turns),
             handoff=self.handoff,
             session_cost_usd=self.handoff_session_cost,
@@ -503,13 +501,23 @@ class Driver:
                 continue
             for result in view.tool_results:
                 if result.is_error:
-                    self.tool_errors[result.tool_use_id] = result.text[:500]
+                    self.tool_errors[result.tool_use_id] = result.text
                     while len(self.tool_errors) > 200:
                         del self.tool_errors[next(iter(self.tool_errors))]
             for kind, fields in events_from_view(view):
                 if kind == "permission_denied":
                     message = self.tool_errors.get(fields.get("tool_use_id") or "")
-                    fields = {**fields, "detail": {"runtime_message": message}}
+                    fields = {
+                        **fields,
+                        "detail": {
+                            "runtime_message": message[:RUNTIME_MESSAGE_CHARS]
+                            if message is not None
+                            else None,
+                            "runtime_message_chars": len(message)
+                            if message is not None
+                            else None,
+                        },
+                    }
                 event = self.events.append(kind, **fields)
                 if kind == "permission_denied":
                     self.progress.deny(event)
@@ -574,6 +582,17 @@ class Driver:
                 detail={"turns_used": used, "max_turns": limit},
             )
         )
+
+
+def add_usage(earlier: Usage | None, later: Usage | None) -> Usage | None:
+    """``earlier`` then ``later``: tokens and cost add up; ``model_usage``
+    is the CLI's own per-model breakdown, which may be a running total, so
+    the latest one stands (as :meth:`Conversation.messages` keeps it)."""
+    if earlier is None or later is None:
+        return later if earlier is None else earlier
+    return (earlier + later).model_copy(
+        update={"model_usage": later.model_usage or earlier.model_usage}
+    )
 
 
 def _unavailable_error(missing: list[str], exposed: list[str]) -> str:
@@ -693,7 +712,9 @@ class Progress:
 
     def deny(self, event: Event) -> None:
         """Record a refused call; written with the result that reported it."""
-        message = (event.detail or {}).get("runtime_message")
+        detail = event.detail or {}
+        message = detail.get("runtime_message")
+        chars = detail.get("runtime_message_chars")
         self.denials = [
             *self.denials,
             PermissionDenial(
@@ -702,6 +723,11 @@ class Progress:
                 tool_use_id=event.tool_use_id,
                 requested=event.text,
                 runtime_message=message if isinstance(message, str) else None,
+                runtime_message_chars=chars if isinstance(chars, int) else None,
+                runtime_message_truncated=isinstance(chars, int)
+                and isinstance(message, str)
+                and chars > len(message),
+                event_seq=event.seq,
             ),
         ][-MAX_DENIALS_KEPT:]
         self.denials_total += 1
