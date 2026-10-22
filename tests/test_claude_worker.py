@@ -66,7 +66,13 @@ def _driver(tmp_path: Path, *, timeout: float, close_seconds: float) -> Driver:
     )
     events = EventLog(run_dir)
     return Driver(
-        agent, spec, "brief", Inbox(run_dir, events), events, Progress(run_dir)
+        agent,
+        spec,
+        "brief",
+        Inbox(run_dir, events),
+        events,
+        Progress(run_dir),
+        run_dir,
     )
 
 

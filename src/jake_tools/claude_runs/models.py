@@ -16,6 +16,9 @@ renamed):
 ``final.md``
     The final answer (the last result message's text), in full, when there
     was one. ``result.json`` and ``status.json`` point at it.
+``handoff.md``
+    The full text of the worker-reported handoff written after a
+    ``max_turns`` stop (see :class:`Handoff`), when there was one.
 ``transcript.jsonl``
     One :func:`jake_tools.claude.message_to_json` object per SDK message:
     the raw evidence, a diagnostic escape hatch, not a contract.
@@ -103,6 +106,8 @@ TerminationReason = Literal[
     "tools_unavailable",
 ]
 
+HandoffStatus = Literal["written", "failed", "skipped"]
+
 SCHEMA_VERSION = 2
 """The run-directory schema new tasks are written with (see the module doc)."""
 
@@ -187,7 +192,11 @@ class RunState(BaseModel):
     the CLI reports them; cost as the session total's growth since the
     invocation began), and ``invocation_cost_usd`` is its cost.
     ``session_cost_usd`` is the Claude session's running total, which the
-    CLI carries across resumes.
+    CLI carries across resumes. ``turns_used`` is the model turns this
+    invocation has taken, counted as the worker enforces ``max_turns``
+    (distinct assistant messages across every prompt); ``None`` for runs
+    written before it was recorded. ``handoff`` is set only after a
+    ``max_turns`` stop (see :class:`Handoff`).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -213,10 +222,44 @@ class RunState(BaseModel):
     final_text_path: Path | None = None
     invocation_cost_usd: float | None = None
     session_cost_usd: float | None = None
+    turns_used: int | None = None
+    handoff: Handoff | None = None
 
     @property
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATUSES
+
+
+class Handoff(BaseModel):
+    """The worker's own account of a task its ``max_turns`` limit stopped.
+
+    Once execution has stopped (``termination_reason`` stays ``max_turns``
+    and ``status`` stays ``failed``), the worker resumes the same Claude
+    session once more, tool-free and limited to a single reply, and asks for
+    a handoff: completed work, durable paths and commits, checks run and
+    outstanding, blockers, uncertain state, the smallest remaining delta.
+    It is the worker's claim (``source="worker_reported"``), not verified
+    fact, and no task work happens in that call.
+
+    ``written``: the reply came back (``text``, cut to
+    ``HANDOFF_TEXT_CHARS``; ``text_path`` in full). ``failed``: the call
+    errored, timed out or was cancelled (``error`` says which; ``text`` may
+    hold what arrived). ``skipped``: too little time or budget was left to
+    try. ``cost_usd`` is what the call added; it is included in the task's
+    ``usage`` and ``invocation_cost_usd``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    status: HandoffStatus
+    source: Literal["worker_reported"] = "worker_reported"
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    text: str | None = None
+    text_chars: int | None = None
+    text_path: Path | None = None
+    error: str | None = None
+    cost_usd: float | None = None
 
 
 class RunResult(BaseModel):
@@ -234,6 +277,8 @@ class RunResult(BaseModel):
     session_id: str | None = None
     final_text_path: Path | None = None
     invocation_cost_usd: float | None = None
+    turns_used: int | None = None
+    handoff: Handoff | None = None
 
 
 class ClaudeStartResult(BaseModel):

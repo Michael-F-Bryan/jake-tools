@@ -46,6 +46,8 @@ EventKind = Literal[
     "input_declined",
     "input_expired",
     "cancel_requested",
+    "handoff_started",
+    "handoff_finished",
     "finished",
 ]
 
@@ -416,6 +418,8 @@ def progress_line(event: Event) -> str | None:
             line = event.text or ""
         case "input_requested":
             line = f"Waiting for an answer: {_first_line(event.text or '')}"
+        case "handoff_started":
+            line = event.text or "Writing a handoff"
         case _:
             return None
     if len(line) > STATUS_MESSAGE_CHARS:

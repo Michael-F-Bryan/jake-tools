@@ -48,6 +48,7 @@ from .models import (
     SCHEMA_VERSION,
     ClaudeStartResult,
     DeliveryState,
+    Handoff,
     InputRequest,
     RunSpec,
     RunState,
@@ -149,6 +150,12 @@ class TaskResult(BaseModel):
     only the session's latest task is accepted there (an older one gets
     ``resume_unavailable`` naming the latest), and Claude Code may still
     have deleted the session (its own retention applies).
+
+    ``handoff`` is set only after a ``max_turns`` stop: the worker's own
+    tool-free account of what is done and what is left (see
+    :class:`~.models.Handoff`). It does not change ``outcome`` or
+    ``termination_reason``, and ``final_text``/``last_narration`` are kept
+    whatever became of it.
     """
 
     outcome: RunStatus
@@ -163,6 +170,7 @@ class TaskResult(BaseModel):
     resumable: bool = False
     usage: Usage | None = None
     invocation_cost_usd: float | None = None
+    handoff: Handoff | None = None
     transcript_path: Path
     events_path: Path | None = None
 
@@ -196,6 +204,9 @@ class TaskView(BaseModel):
     spent more than its last result reported, so this invocation's cost
     (measured from that report) may be overstated."""
     session_cost_usd: float | None = None
+    turns_used: int | None = None
+    """Model turns this invocation has taken, as the worker counts them to
+    enforce ``limits.max_turns``; ``None`` for runs that predate it."""
     limits: Limits
     pending_inputs: list[InputRequest] = Field(default_factory=list)
     messages: list[SteerStatus] = Field(default_factory=list)
@@ -496,6 +507,7 @@ def build_view(run_dir: Path, state: RunState) -> TaskView:
         invocation_cost_usd=state.invocation_cost_usd,
         invocation_cost_exact=spec.cost_baseline_exact,
         session_cost_usd=state.session_cost_usd,
+        turns_used=state.turns_used,
         limits=Limits(
             model=spec.model,
             effort=spec.effort,
@@ -537,6 +549,7 @@ def _result(run_dir: Path, spec: RunSpec, state: RunState) -> TaskResult:
         and state.termination_reason != "resume_failed",
         usage=state.usage,
         invocation_cost_usd=state.invocation_cost_usd,
+        handoff=state.handoff,
         transcript_path=run_dir / TRANSCRIPT_FILE,
         events_path=events_path if events_path.exists() else None,
     )

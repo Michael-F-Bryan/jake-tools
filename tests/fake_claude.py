@@ -24,7 +24,10 @@ The scenario comes from a marker in the first user message:
 ``[[scenario:NAME]]`` or ``[[scenario:NAME:ARG]]``. Sessions persist as
 ``$FAKE_CLAUDE_STATE/<session>.json`` so ``--resume`` works across
 processes and fails, like the real CLI, for an unknown session. Every
-invocation's argv is saved to ``$FAKE_CLAUDE_STATE/argv-<n>.json``.
+invocation's argv is saved to ``$FAKE_CLAUDE_STATE/argv-<n>.json`` and its
+``CLAUDE_CODE_*`` environment to ``env-<n>.json``. A resume replies
+``REMEMBERED: <first user message>``; with ``FAKE_CLAUDE_RESUME=stall`` it
+narrates and hangs, with ``=tool`` it calls a tool and hangs.
 
 ``init`` lists the session's tools as the real CLI does (observed on
 2.1.293): the ``--tools`` names, minus any it does not provide, silently,
@@ -458,6 +461,11 @@ class Session:
         while True:
             time.sleep(3600)
 
+    def turn_stall(self, text: str) -> None:
+        self.say({"type": "text", "text": "Thinking about it."})
+        while True:
+            time.sleep(3600)
+
     def turn_max_turns(self, text: str) -> None:
         self.say({"type": "text", "text": "Partial progress before the limit."})
         self.result("partial answer", subtype="error_max_turns")
@@ -496,10 +504,18 @@ def main() -> None:
     STATE.mkdir(parents=True, exist_ok=True)
     count = len(list(STATE.glob("argv-*.json")))
     (STATE / f"argv-{count + 1}.json").write_text(json.dumps(argv))
+    (STATE / f"env-{count + 1}.json").write_text(
+        json.dumps(
+            {k: v for k, v in os.environ.items() if k.startswith("CLAUDE_CODE_")}
+        )
+    )
     args = parse_args(argv)
     session = Session(args)
     if args.get("resume") and not args.get("fork-session"):
         session.scenario = "remember"
+        session.scenario = {"stall": "stall", "tool": "hang"}.get(
+            os.environ.get("FAKE_CLAUDE_RESUME", ""), "remember"
+        )
     threading.Thread(target=reader, daemon=True).start()
     session.run()
 

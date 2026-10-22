@@ -77,7 +77,7 @@ import signal
 import sys
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -98,8 +98,10 @@ from ..claude import (
     unexposed_tools,
 )
 from .events import Event, EventLog, events_from_view, progress_line
+from .handoff import write_handoff
 from .inbox import MAX_CHOICES, MAX_QUESTION_CHARS, Inbox
 from .models import (
+    Handoff,
     InputRequest,
     RunResult,
     RunSpec,
@@ -175,6 +177,8 @@ class Outcome:
     final_text: str | None = None
     usage: Usage | None = None
     error: str | None = None
+    turns_used: int | None = None
+    handoff: Handoff | None = None
 
 
 def main(run_dir: Path) -> int:
@@ -238,7 +242,7 @@ async def run_worker(run_dir: Path) -> Outcome:
         .with_message_observer(transcript.write)
         .for_stage(STAGE)
     )
-    driver = Driver(agent, spec, brief, inbox, events, progress)
+    driver = Driver(agent, spec, brief, inbox, events, progress, run_dir)
 
     outcome: Outcome | None = None
     try:
@@ -247,6 +251,8 @@ async def run_worker(run_dir: Path) -> Outcome:
                 tg.start_soon(_cancel_on_signal, run_scope)
                 tg.start_soon(track_descendant_groups, run_dir)
                 outcome = await driver.run()
+                if outcome.reason == "max_turns" and not run_scope.cancel_called:
+                    await driver.hand_off()
                 tg.cancel_scope.cancel()
         # An outcome the conversation already reached stands even if a
         # SIGTERM or the deadline lands during the CLI's shutdown: the work
@@ -259,9 +265,11 @@ async def run_worker(run_dir: Path) -> Outcome:
             outcome = driver.partial(
                 "failed", "sdk_error", error="worker ended without an outcome"
             )
+        outcome = driver.settled(outcome)
     except BaseException as exc:
-        outcome = driver.resolved or driver.partial(
-            "failed", "sdk_error", error=_describe(exc)
+        outcome = driver.settled(
+            driver.resolved
+            or driver.partial("failed", "sdk_error", error=_describe(exc))
         )
         _finish(run_dir, spec, outcome, transcript, inbox, events)
         raise
@@ -301,7 +309,9 @@ class Driver:
         inbox: Inbox,
         events: EventLog,
         progress: Progress,
+        run_dir: Path,
     ) -> None:
+        self.run_dir = run_dir
         self.agent = agent
         self.spec = spec
         self.brief = brief
@@ -317,10 +327,15 @@ class Driver:
         user message (observed, CLI 2.1.293), so a steered task enforces
         ``max_turns`` for the whole invocation here."""
         self.saw_init = False
+        self.handoff: Handoff | None = None
+        self.handoff_usage: Usage | None = None
+        self._warned_turns = False
         self._send_lock = anyio.Lock()
+        self.deadline = time.monotonic() + spec.timeout_seconds
 
     async def run(self) -> Outcome:
         timeout = self.spec.timeout_seconds
+        self.deadline = time.monotonic() + timeout
         with anyio.move_on_after(timeout):
             try:
                 async with self.agent.converse(
@@ -334,6 +349,54 @@ class Driver:
             return self.resolved
         return self.partial(
             "failed", "timeout", error=f"the task exceeded its {timeout:g}s timeout"
+        )
+
+    async def hand_off(self) -> None:
+        """After a ``max_turns`` stop: stop everything, then ask for a handoff.
+
+        Execution is over before the call: the conversation is closed, the
+        inbox refuses messages and the task's processes are swept. See
+        :mod:`.handoff` for the bounds. A cancel landing during the call
+        leaves the handoff ``failed`` (recorded by :meth:`settled`).
+        """
+        self.inbox.close("the task reached its max_turns limit; execution stopped")
+        swept = sweep_own_group(self.run_dir)
+        if swept:
+            log.warning("killed %d leftover process(es) before the handoff", swept)
+        self.progress.note(
+            self.events.append(
+                "handoff_started",
+                text="Writing a handoff: max_turns reached, execution stopped",
+            )
+        )
+        self.progress.flush()
+        spent = (self.usage.estimated_cost_usd or 0.0) if self.usage else 0.0
+        self.handoff = Handoff(
+            status="failed",
+            started_at=utc_now(),
+            error="the task was cancelled before the handoff finished",
+        )
+        self.handoff, self.handoff_usage = await write_handoff(
+            self.agent,
+            self.run_dir,
+            session_id=self.spec.session_id or "",
+            session_cost_usd=self.progress.session_cost_usd
+            if self.progress.session_cost_usd is not None
+            else self.spec.cost_baseline_usd,
+            seconds_left=self.deadline - time.monotonic(),
+            budget_left_usd=self.spec.max_budget_usd - spent,
+        )
+
+    def settled(self, outcome: Outcome) -> Outcome:
+        """``outcome`` with the turn count, any handoff and its usage attached."""
+        usage = outcome.usage
+        if self.handoff_usage is not None:
+            usage = self.handoff_usage if usage is None else usage + self.handoff_usage
+        return replace(
+            outcome,
+            usage=usage,
+            turns_used=len(self.model_turns),
+            handoff=self.handoff,
         )
 
     def partial(
@@ -423,6 +486,7 @@ class Driver:
                 self.progress.note(self.events.append(kind, **fields))
             if view.kind == "assistant" and view.message_id:
                 self.model_turns.add(view.message_id)
+                self._note_turns()
                 if len(self.model_turns) > self.spec.max_turns:
                     return self.partial(
                         "failed",
@@ -459,6 +523,23 @@ class Driver:
             "failed",
             "sdk_error",
             error="the Claude stream ended without a final result",
+        )
+
+    def _note_turns(self) -> None:
+        """Record the turn count; say once when the limit is close."""
+        used, limit = len(self.model_turns), self.spec.max_turns
+        if self.progress.turns_used != used:
+            self.progress.turns_used = used
+            self.progress.dirty()
+        if self._warned_turns or limit - used > max(1, limit // 10):
+            return
+        self._warned_turns = True
+        self.progress.note(
+            self.events.append(
+                "notice",
+                text=f"Model turn {used} of max_turns={limit}: the turn limit is near",
+                detail={"turns_used": used, "max_turns": limit},
+            )
         )
 
 
@@ -571,8 +652,13 @@ class Progress:
         self.usage: Usage | None = None
         self.invocation_cost_usd: float | None = None
         self.session_cost_usd: float | None = None
+        self.turns_used: int | None = None
         self._last_flush = 0.0
         self._dirty = False
+
+    def dirty(self) -> None:
+        self._dirty = True
+        self.tick()
 
     def note(self, event: Event) -> None:
         if event.is_activity:
@@ -611,6 +697,7 @@ class Progress:
                 "usage": self.usage or state.usage,
                 "invocation_cost_usd": self.invocation_cost_usd,
                 "session_cost_usd": self.session_cost_usd,
+                "turns_used": self.turns_used,
             }
             newer = state.status_message_at is None or (
                 self.status_message_at is not None
@@ -679,6 +766,8 @@ def _record(run_dir: Path, spec: RunSpec, outcome: Outcome, events: EventLog) ->
             session_id=spec.session_id,
             final_text_path=final_path,
             invocation_cost_usd=cost,
+            turns_used=outcome.turns_used,
+            handoff=outcome.handoff,
         ),
     )
     summary = _summary(outcome)
@@ -695,10 +784,25 @@ def _record(run_dir: Path, spec: RunSpec, outcome: Outcome, events: EventLog) ->
                 "status_message": summary,
                 "final_text_path": final_path,
                 "invocation_cost_usd": cost,
+                "turns_used": outcome.turns_used,
+                "handoff": outcome.handoff,
             }
         )
 
     update_state(run_dir, transition)
+    if outcome.handoff is not None:
+        handoff = outcome.handoff
+        events.append(
+            "handoff_finished",
+            text=handoff.text,
+            is_error=handoff.status != "written",
+            detail={
+                "status": handoff.status,
+                "source": handoff.source,
+                "error": handoff.error,
+                "path": str(handoff.text_path) if handoff.text_path else None,
+            },
+        )
     events.append(
         "finished",
         text=summary,

@@ -35,6 +35,7 @@ SPEC_FILE = "spec.json"
 STATUS_FILE = "status.json"
 RESULT_FILE = "result.json"
 FINAL_FILE = "final.md"
+HANDOFF_FILE = "handoff.md"
 TRANSCRIPT_FILE = "transcript.jsonl"
 EVENTS_FILE = "events.jsonl"
 EVENTS_LOCK_FILE = ".events.lock"
@@ -224,6 +225,13 @@ def file_lock(path: Path) -> Iterator[None]:
 def write_final_text(run_dir: Path, text: str) -> Path:
     """``final.md``: the final answer in full; returns its path."""
     path = run_dir / FINAL_FILE
+    write_text(path, text)
+    return path
+
+
+def write_handoff_text(run_dir: Path, text: str) -> Path:
+    """``handoff.md``: the worker-reported handoff in full; returns its path."""
+    path = run_dir / HANDOFF_FILE
     write_text(path, text)
     return path
 
