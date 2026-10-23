@@ -26,6 +26,11 @@ def register(app: MCPServer, config: Config) -> None:
             "questions expired. Returns the same shape as claude_status. "
             "Cancellation never undoes filesystem or external changes the "
             "task already made; inspect before retrying."
+            "\n\nBefore using this tool, read `skill://claude-delegation` via this server's "
+            "`read_resource` capability, unless its contents are already loaded in the "
+            "current context. The guide defines task scope, permissions, supervision, "
+            "cancellation and recovery rules. Reuse the loaded guide for subsequent "
+            "calls."
         ),
     )
     async def claude_cancel(task_id: str) -> RunState:

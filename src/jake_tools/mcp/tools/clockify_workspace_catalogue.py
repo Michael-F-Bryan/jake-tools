@@ -16,7 +16,14 @@ def register(app: MCPServer, config: Config) -> None:
     @structured_tool(
         app,
         name="clockify_workspace_catalogue",
-        description="Read all clients, archived/active projects, and ACTIVE/DONE tasks in an allowlisted workspace (default first). Explicit archived/status flags and coverage; bounded upstream pagination errors rather than silent truncation. No Jira credentials required.",
+        description=(
+            "Read all clients, archived/active projects, and ACTIVE/DONE tasks in an allowlisted workspace (default first). Explicit archived/status flags and coverage; bounded upstream pagination errors rather than silent truncation. No Jira credentials required."
+            "\n\nBefore using this tool, read `skill://clockify-time` via this server's "
+            "`read_resource` capability, unless its contents are already loaded in the "
+            "current context. The guide defines workspace scope, pagination, write "
+            "verification and uncertain-write recovery rules. Reuse the loaded guide for "
+            "subsequent calls."
+        ),
     )
     async def clockify_workspace_catalogue(
         workspace_id: str | None = None,

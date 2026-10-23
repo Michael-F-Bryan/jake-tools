@@ -33,6 +33,11 @@ def register(app: MCPServer, config: Config) -> None:
             "on it: check its later events and output. Limits and tools never "
             "change. Track progress with claude_poll. An ended task returns "
             "task_not_running."
+            "\n\nBefore using this tool, read `skill://claude-delegation` via this server's "
+            "`read_resource` capability, unless its contents are already loaded in the "
+            "current context. The guide defines task scope, permissions, supervision, "
+            "cancellation and recovery rules. Reuse the loaded guide for subsequent "
+            "calls."
         ),
     )
     async def claude_steer(task_id: str, message: str, message_id: str) -> SteerResult:

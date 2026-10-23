@@ -24,7 +24,12 @@ def register(app: MCPServer, config: Config) -> None:
             "Pages by `before` (pass the previous page's next_before; null "
             "means nothing older); `limit` 1-100 (default 20); optional "
             "`status` filter. Unreadable run directories are listed in "
-            "`unreadable`, not fatal. See skill://claude-delegation."
+            "`unreadable`, not fatal."
+            "\n\nBefore using this tool, read `skill://claude-delegation` via this server's "
+            "`read_resource` capability, unless its contents are already loaded in the "
+            "current context. The guide defines task scope, permissions, supervision, "
+            "cancellation and recovery rules. Reuse the loaded guide for subsequent "
+            "calls."
         ),
     )
     async def claude_list(

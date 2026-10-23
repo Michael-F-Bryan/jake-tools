@@ -16,7 +16,14 @@ def register(app: MCPServer, config: Config) -> None:
     @structured_tool(
         app,
         name="clockify_create_time_entry",
-        description="Create one COMPLETED entry for the authenticated user. start/end must be aware, end>start. description and billable required; task requires and must belong to project. Allowlisted workspace only (default first). POST once, then GET and verify all fields. Error outcome distinguishes post_uncertain, verification_unavailable, verification_failed and includes known created_entry_id. NEVER automatically retry an uncertain write; inspect history first.",
+        description=(
+            "Create one COMPLETED entry for the authenticated user. start/end must be aware, end>start. description and billable required; task requires and must belong to project. Allowlisted workspace only (default first). POST once, then GET and verify all fields. Error outcome distinguishes post_uncertain, verification_unavailable, verification_failed and includes known created_entry_id. NEVER automatically retry an uncertain write; inspect history first."
+            "\n\nBefore using this tool, read `skill://clockify-time` via this server's "
+            "`read_resource` capability, unless its contents are already loaded in the "
+            "current context. The guide defines workspace scope, pagination, write "
+            "verification and uncertain-write recovery rules. Reuse the loaded guide for "
+            "subsequent calls."
+        ),
     )
     async def clockify_create_time_entry(
         start: str,

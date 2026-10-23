@@ -53,6 +53,11 @@ TRIAGE, and Investigate are not automatically created. Existing deferred tasks
 are kept and renamed as needed; only Jira status category Done completes them.
 
 Never deletes anything in Clockify or Jira, and never writes to Jira.
+
+Before using this tool, read `skill://clockify-jira-sync` via this server's
+`read_resource` capability, unless its contents are already loaded in the current
+context. The guide defines scope, conflict handling, partial-write semantics and
+recovery rules. Reuse the loaded guide for subsequent calls.
 """
 
 

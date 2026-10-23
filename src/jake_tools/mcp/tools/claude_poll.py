@@ -47,7 +47,7 @@ def register(app: MCPServer, config: Config) -> None:
             "error, last_narration, handoff). Pass next_cursor back to get only newer "
             "events; omit cursor to start from the first. A cursor from "
             "another task, malformed or past the end is invalid_argument. "
-            "Guide: skill://claude-delegation. Alternatively supply `tasks` "
+            "Alternatively supply `tasks` "
             "(1-16 distinct {task_id, cursor?} objects), not task_id/cursor: "
             "wait under one shared deadline and return {ready: [poll results], "
             "wake_reason: ready|deadline, waited_seconds}. All ready tasks are "
@@ -56,6 +56,11 @@ def register(app: MCPServer, config: Config) -> None:
             "to attention (events, input or terminal); terminal ignores "
             "progress/questions and waits for any completed, failed or "
             "cancelled task. Remove terminal tasks after collecting them."
+            "\n\nBefore using this tool, read `skill://claude-delegation` via this server's "
+            "`read_resource` capability, unless its contents are already loaded in the "
+            "current context. The guide defines task scope, permissions, supervision, "
+            "cancellation and recovery rules. Reuse the loaded guide for subsequent "
+            "calls."
         ),
     )
     async def claude_poll(

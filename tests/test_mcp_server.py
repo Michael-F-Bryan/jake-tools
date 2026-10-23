@@ -106,6 +106,40 @@ async def test_stdio_starts_without_any_credentials_and_lists_skill_resources(
         assert by_uri[f"skill://{skill.name}"].description == description
 
 
+async def test_stdio_tool_descriptions_point_to_readable_relevant_skills(
+    mcp_server: ServerFactory, mcp_env: dict[str, str]
+) -> None:
+    expected = {
+        "clockify_jira_sync": "clockify-jira-sync",
+        "clockify_time_entries": "clockify-time",
+        "clockify_workspace_catalogue": "clockify-time",
+        "clockify_create_time_entry": "clockify-time",
+        "claude_start": "claude-delegation",
+        "claude_status": "claude-delegation",
+        "claude_poll": "claude-delegation",
+        "claude_list": "claude-delegation",
+        "claude_transcript": "claude-delegation",
+        "claude_steer": "claude-delegation",
+        "claude_update": "claude-delegation",
+        "claude_cancel": "claude-delegation",
+    }
+    async with mcp_server(mcp_env) as session:
+        tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+        for name, skill in expected.items():
+            description = " ".join((tools[name].description or "").split())
+            assert f"Before using this tool, read `skill://{skill}`" in description
+            assert "this server's `read_resource`" in description
+            assert "already loaded in the current context" in description
+            assert "Reuse the loaded guide for subsequent calls." in description
+        assert "skill://" not in (tools["ping"].description or "")
+        for skill in sorted(set(expected.values())):
+            resource = await session.read_resource(f"skill://{skill}")
+            content = resource.contents[0]
+            assert isinstance(content, TextResourceContents)
+            source = next(p for p in packaged_skills() if p.name == skill)
+            assert content.text == (source / "SKILL.md").read_text()
+
+
 async def test_stdio_reads_optional_clockify_reference_without_inlining_it(
     mcp_server: ServerFactory, mcp_env: dict[str, str]
 ) -> None:

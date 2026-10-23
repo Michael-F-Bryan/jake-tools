@@ -37,6 +37,11 @@ def register(app: MCPServer, config: Config) -> None:
             "are stored up to 8000 chars; raw_transcript_path is the full raw "
             "SDK stream, a diagnostic escape hatch. Runs created before event "
             "logs existed report legacy_run=true and no events."
+            "\n\nBefore using this tool, read `skill://claude-delegation` via this server's "
+            "`read_resource` capability, unless its contents are already loaded in the "
+            "current context. The guide defines task scope, permissions, supervision, "
+            "cancellation and recovery rules. Reuse the loaded guide for subsequent "
+            "calls."
         ),
     )
     async def claude_transcript(

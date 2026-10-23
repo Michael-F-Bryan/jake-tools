@@ -62,8 +62,12 @@ def register(app: MCPServer, config: Config) -> None:
             f"{MAX_LIVE_TASKS} tasks run at once (capacity_exceeded otherwise). "
             "Observe with claude_poll, steer with claude_steer, stop with "
             "claude_cancel, find tasks with claude_list. A max_turns stop "
-            "adds a tool-free, worker-reported result.handoff. Guide: "
-            "skill://claude-delegation."
+            "adds a tool-free, worker-reported result.handoff."
+            "\n\nBefore using this tool, read `skill://claude-delegation` via this server's "
+            "`read_resource` capability, unless its contents are already loaded in the "
+            "current context. The guide defines task scope, permissions, supervision, "
+            "cancellation and recovery rules. Reuse the loaded guide for subsequent "
+            "calls."
         ),
     )
     async def claude_start(

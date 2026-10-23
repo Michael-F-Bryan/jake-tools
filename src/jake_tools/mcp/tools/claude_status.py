@@ -29,6 +29,11 @@ def register(app: MCPServer, config: Config) -> None:
             "normally; it is not verification of the worker's claims. Works "
             "across server restarts; unknown or malformed IDs return "
             "unknown_task."
+            "\n\nBefore using this tool, read `skill://claude-delegation` via this server's "
+            "`read_resource` capability, unless its contents are already loaded in the "
+            "current context. The guide defines task scope, permissions, supervision, "
+            "cancellation and recovery rules. Reuse the loaded guide for subsequent "
+            "calls."
         ),
     )
     async def claude_status(task_id: str) -> RunState:
