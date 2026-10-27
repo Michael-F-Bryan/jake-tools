@@ -48,8 +48,17 @@ default FluidAudio's cache `~/Library/Application Support/FluidAudio/Models`),
 `--tls-private-key` (PEM; enables HTTPS, TLS 1.2+), `--log-level info`.
 
 Memory: decoded audio is held in memory as 16 kHz float32, about 230 MB per
-hour, plus the models (roughly 1.5 GB resident). Size `--max-duration-seconds`
-to the host.
+hour, plus the models and the diarizer's working set. Measured on an M4 Max
+(macOS 27, debug build, 2026-10-27): about 200 MB physical footprint idle
+with warm models, peaking at about 1.3 GB during a 30 minute recording. Size
+`--max-duration-seconds` to the host.
+
+Measured on the same machine with synthesised two-voice speech (not real
+meetings): launch to ready 12.5 s (11.5 s of it loading Parakeet), a 41 s
+two-file recording in 1.0 s, a 30 minute recording in 36 s (ASR 5 s,
+diarisation 29 s, about 50x real time), and a mid-inference disconnect freed
+the slot within a second. HTTPS via `--tls-*` was checked with a self-signed
+certificate.
 
 ## HTTP contract
 
