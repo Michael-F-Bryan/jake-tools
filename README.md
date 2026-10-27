@@ -159,6 +159,27 @@ answers questions with `tasks/update` and cancels with `tasks/cancel`. Every
 other client, including Hermes on its `initialize` connection, gets the
 ordinary tools unchanged. Both are views of the same task.
 
+## Transcription MCP tool
+
+When `transcription.api_base_url` (or `TRANSCRIPTION_API_BASE_URL`) is set, the
+stdio server also exposes `transcribe(files)`: it uploads audio files the MCP
+server can read, in recording order, to the native transcription service in
+[`transcription-service/`](transcription-service/README.md) and returns one
+structured transcript (speaker segments with word timings in seconds from the
+start of the concatenated recording, per-file spans, anonymous request-wide
+speakers, limitations and processing times). Without an endpoint the tool is
+absent. `TRANSCRIPTION_API_TOKEN` is the bearer token the service expects;
+`transcription.timeout_seconds` (default 1800) bounds one call. The service
+runs one job at a time with a bounded queue; a timeout is reported with
+`retry_safe=false` and never retried, because the service may still be working
+on the request. `jake-tools-mcp doctor` checks reachability, readiness and the
+token. Guidance for agents is the `skill://transcription` resource.
+
+The service itself is a Swift package built with Apple's toolchain
+(`swift build`, then `transcription-service provision` once online, then
+`transcription-service serve --token-file …`). `nix develop` provides the
+remaining development tools (`uv`, `swift-format`, `sox`).
+
 ## Codex usage alerts
 
 ```bash

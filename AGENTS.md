@@ -15,8 +15,14 @@ src/jake_tools/
   claude_runs/    # delegated tasks: run dirs, worker, events, inbox, service
   prompting.py    # typed Jinja prompts bound to a response model
   newsletters.py  # SharePoint Graph client
+  transcription.py # HTTP client + transcript contract for transcription-service
 tests/            # mirrors packages above
+transcription-service/  # native Swift HTTP service (FluidAudio); see its README
 ```
+
+`nix develop` (flake.nix, loaded by direnv via `.envrc`) provides `uv`, a Nix
+Python 3.14, `swift-format`, `sox` and `nixfmt`. The Swift toolchain comes from
+Xcode or the Command Line Tools, never nixpkgs.
 
 ## Developing
 
@@ -210,6 +216,34 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   as `skill://<name>` resources, and are installed by `install-skills`. They
   describe what the tools actually return.
 
+## Transcription service (`transcription-service/`)
+
+A long-running native macOS HTTP service (Swift, Hummingbird, FluidAudio
+0.17.7 pinned) that keeps Parakeet TDT v3 and the offline pyannote diarizer
+warm and turns an ordered multipart upload into one structured transcript.
+`jake_tools.transcription` is its only client and `mcp/tools/transcribe.py`
+the only tool; both are plain HTTP and import no native dependency. Contract,
+limits, concurrency and cancellation semantics: `transcription-service/README.md`.
+
+- The tool is registered only when `transcription.api_base_url` is set.
+  `TRANSCRIPTION_API_TOKEN` is a secret (environment-only, scrubbed from
+  worker environments). Doctor's `transcription` check is required once an
+  endpoint is configured.
+- No alternate backends, no direct inference in Python, no job store, no
+  polling API. One job at a time, bounded queue, client disconnect cancels at
+  the engine's next check. Timeouts are reported with `retry_safe=false` and
+  never retried.
+- Build and test with Apple's toolchain: `swift build`, and `swift test`
+  (under Command Line Tools pass
+  `-Xswiftc -plugin-path -Xswiftc /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing`,
+  which `transcription-service/test.sh` does). Swift tests run the real
+  server with a stub engine: mechanics only. The real engine is exercised by
+  `tests/test_transcription_live.py` (`--slow`, macOS, built binary and
+  provisioned models required); it is the only evidence about transcription
+  quality or latency, and a fake transcript is never that evidence.
+- Fixtures for the live test are synthesised with macOS `say`
+  (`tests/transcription_fixtures.py`); nothing binary is committed.
+
 ## External dependencies
 
 | Tool               | Used by                                               |
@@ -217,6 +251,8 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
 | `uv`                | dependency management and script runner                |
 | `claude-agent-sdk`  | LLM calls; drives the local `claude` CLI               |
 | `az` (Azure CLI)    | `newsletter` commands (Microsoft Graph token)          |
+| `swift` (Xcode/CLT) | building and testing `transcription-service/`          |
+| `nix`               | optional: `nix develop` for the dev tools above        |
 If a required external tool is missing, report the blocker. Do not mock
 preflight checks or skip them silently.
 

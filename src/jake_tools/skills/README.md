@@ -11,6 +11,7 @@ judgement belongs here.
 | `claude-delegation` | Discover, start, observe, steer, answer, cancel and resume bounded Claude tasks; grants, limits and result verification. |
 | `clockify-time` | Read authenticated-user history/catalogue and create one verified completed entry; uncertain-write recovery. |
 | `clockify-jira-sync` | Jira placement/naming, selection scope, read-only preview, digest-bound apply, conflicts and partial failure. |
+| `transcription` | Transcribe/diarise server-local audio with `transcribe`; what timestamps, file spans, anonymous speakers and `overlap` promise, and how to handle each error. |
 | `clockify-time/references/direct-api-workflows.md` | Separately authorised manual fallback for unsupported cleanup, duplicate migration and exact-ID entry edits. Not implemented MCP tools. |
 
 ## Migration from broad shared skills

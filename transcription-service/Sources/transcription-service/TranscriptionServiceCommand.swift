@@ -152,10 +152,18 @@ struct Serve: AsyncParsableCommand {
                     throw ExitCode.failure
                 }
             }
-            // The first task to finish is either the server stopping (signal)
-            // or the load failing; either way the process is done.
+            // The first task to finish is either the loader (ready, or failed
+            // and throwing) or the server (signalled). A load failure must
+            // take the server down with it, explicitly: the process exits
+            // non-zero so a supervisor can act, instead of serving `failed`
+            // forever.
+            do {
+                try await group.next()
+            } catch {
+                group.cancelAll()
+                throw error
+            }
             try await group.next()
-            group.cancelAll()
         }
     }
 
