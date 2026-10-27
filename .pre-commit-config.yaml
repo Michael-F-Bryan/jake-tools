@@ -48,3 +48,13 @@ repos:
         language: system
         files: ^(pyproject\.toml|uv\.lock)$
         pass_filenames: false
+
+      # The Swift service. Runs only when its files change; needs Apple's
+      # toolchain, so on a host without `swift` it says so and skips rather
+      # than failing an unrelated Python commit.
+      - id: swift-test
+        name: swift test (transcription-service)
+        entry: sh -c 'if command -v swift >/dev/null 2>&1; then exec transcription-service/test.sh; else echo "swift toolchain not found; transcription-service tests skipped" >&2; fi'
+        language: system
+        files: ^transcription-service/
+        pass_filenames: false
