@@ -117,6 +117,7 @@ def test_defaults_pass_and_secrets_are_skipped(
     assert check_line(result.stdout, "clockify").startswith("SKIP")
     assert check_line(result.stdout, "jira").startswith("SKIP")
     assert check_line(result.stdout, "session_store").startswith("SKIP")
+    assert check_line(result.stdout, "transcription").startswith("SKIP")
     # The runs dir was created for real, owner-only.
     runs = home / ".local" / "state" / "jake-tools" / "runs"
     assert runs.is_dir()
@@ -480,3 +481,68 @@ def test_live_real_claude_cli_under_isolated_home_is_not_authenticated(
     line = check_line(result.stdout, "claude_cli")
     assert line.startswith("FAIL")
     assert "not authenticated" in line
+
+
+def test_transcription_check_fails_without_a_token_and_passes_against_a_ready_service(
+    run_doctor: RunDoctor, home: Path, claude_bin: Path
+) -> None:
+    from fake_transcription import TOKEN, FakeTranscriptionService
+
+    without_token = run_doctor(
+        home, claude_bin, TRANSCRIPTION_API_BASE_URL="http://127.0.0.1:9"
+    )
+    assert without_token.returncode == 1
+    assert check_line(without_token.stdout, "transcription").startswith("FAIL")
+    assert "TRANSCRIPTION_API_TOKEN is unset" in without_token.stdout
+
+    unreachable = run_doctor(
+        home,
+        claude_bin,
+        TRANSCRIPTION_API_BASE_URL="http://127.0.0.1:9",
+        TRANSCRIPTION_API_TOKEN=SENTINEL,
+    )
+    assert unreachable.returncode == 1
+    assert check_line(unreachable.stdout, "transcription").startswith("FAIL")
+    assert "unreachable" in unreachable.stdout
+    assert SENTINEL not in unreachable.stdout
+
+    service = FakeTranscriptionService().start()
+    try:
+        wrong_token = run_doctor(
+            home,
+            claude_bin,
+            TRANSCRIPTION_API_BASE_URL=service.base_url,
+            TRANSCRIPTION_API_TOKEN=SENTINEL,
+        )
+        assert check_line(wrong_token.stdout, "transcription").startswith("FAIL")
+        assert "rejected" in wrong_token.stdout
+        assert SENTINEL not in wrong_token.stdout
+
+        ok = run_doctor(
+            home,
+            claude_bin,
+            TRANSCRIPTION_API_BASE_URL=service.base_url,
+            TRANSCRIPTION_API_TOKEN=TOKEN,
+        )
+        assert ok.returncode == 0, ok.stdout + ok.stderr
+        line = check_line(ok.stdout, "transcription")
+        assert line.startswith("OK")
+        assert "ready; fake 0; queue 0/4 waiting" in line
+        assert "transcription.api_base_url = " + service.base_url in ok.stdout
+        assert (
+            "TRANSCRIPTION_API_TOKEN = set  [env (TRANSCRIPTION_API_TOKEN)]"
+            in ok.stdout
+        )
+
+        service.script.ready = False
+        service.script.health_status = "starting"
+        starting = run_doctor(
+            home,
+            claude_bin,
+            TRANSCRIPTION_API_BASE_URL=service.base_url,
+            TRANSCRIPTION_API_TOKEN=TOKEN,
+        )
+        assert check_line(starting.stdout, "transcription").startswith("WARN")
+        assert "starting" in starting.stdout
+    finally:
+        service.stop()

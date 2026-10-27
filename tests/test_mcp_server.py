@@ -109,6 +109,7 @@ async def test_stdio_starts_without_any_credentials_and_lists_skill_resources(
 async def test_stdio_tool_descriptions_point_to_readable_relevant_skills(
     mcp_server: ServerFactory, mcp_env: dict[str, str]
 ) -> None:
+    mcp_env = {**mcp_env, "TRANSCRIPTION_API_BASE_URL": "http://127.0.0.1:9"}
     expected = {
         "clockify_jira_sync": "clockify-jira-sync",
         "clockify_time_entries": "clockify-time",
@@ -122,6 +123,7 @@ async def test_stdio_tool_descriptions_point_to_readable_relevant_skills(
         "claude_steer": "claude-delegation",
         "claude_update": "claude-delegation",
         "claude_cancel": "claude-delegation",
+        "transcribe": "transcription",
     }
     async with mcp_server(mcp_env) as session:
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
@@ -252,15 +254,18 @@ def test_entrypoint_never_loads_dotenv_or_the_cli_entrypoint(tmp_path: Path) -> 
     ``dotenv`` the module may be imported by a dependency (pydantic-settings
     does); what matters is that nothing on this path *calls* it, so a ``.env``
     in the working directory never reaches the environment, and that the
-    ``jake-tools`` CLI entrypoint (which does load it) stays out.
+    ``jake-tools`` CLI entrypoint (which does load it) stays out. Nor may any
+    native inference dependency: transcription is a remote service and its
+    client is plain HTTP.
     """
     (tmp_path / ".env").write_text("JAKE_TOOLS_JIRA_PROJECT=FROM_DOTENV\n")
     script = (
         "import os, sys\n"
         "import jake_tools.mcp.__main__ as entry, jake_tools.mcp.server\n"
         "entry.main(['--help'], standalone_mode=False)\n"
+        "native = {'torch', 'coremltools', 'mlx', 'numpy', 'onnxruntime', 'objc'}\n"
         "bad = sorted(m for m in sys.modules if m == 'jake_tools.__main__' "
-        "or m.startswith('jake_tools.transcription') or m == 'torch')\n"
+        "or m.split('.')[0] in native)\n"
         "print(bad, os.environ.get('JAKE_TOOLS_JIRA_PROJECT'))\n"
     )
     completed = subprocess.run(

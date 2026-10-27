@@ -49,6 +49,7 @@ SECRET_VARIABLES: tuple[str, ...] = (
     "JIRA_BASE_URL",
     "JIRA_EMAIL",
     "JIRA_API_TOKEN",
+    "TRANSCRIPTION_API_TOKEN",
 )
 """Every environment-only secret, by variable name.
 
@@ -62,6 +63,13 @@ DEFAULT_CLOCKIFY_CLIENT = "Sunfish Robotics"
 DEFAULT_CLAUDE_MAX_TURNS = 20
 DEFAULT_CLAUDE_TIMEOUT_SECONDS = 900.0
 DEFAULT_CLAUDE_MAX_BUDGET_USD = 5.0
+DEFAULT_TRANSCRIPTION_TIMEOUT_SECONDS = 1800.0
+"""How long one transcription call may take, including inference.
+
+The service runs one job at a time with a bounded queue, so a long recording
+behind other work can legitimately take many minutes. A timeout is reported,
+never retried: the service may still be processing the original request.
+"""
 
 
 class ConfigError(RuntimeError):
@@ -186,6 +194,10 @@ class Config(BaseModel):
     claude_timeout_seconds: Resolved[float]
     claude_max_budget_usd: Resolved[float]
 
+    transcription_api_base_url: Resolved[str | None]
+    transcription_api_token: Resolved[str | None]
+    transcription_timeout_seconds: Resolved[float]
+
     def settings(self) -> tuple[Resolved[Any], ...]:
         """Every setting, in a stable order, for ``doctor`` to print."""
         return (
@@ -204,11 +216,24 @@ class Config(BaseModel):
             self.claude_max_turns,
             self.claude_timeout_seconds,
             self.claude_max_budget_usd,
+            self.transcription_api_base_url,
+            self.transcription_api_token,
+            self.transcription_timeout_seconds,
         )
 
     @property
     def has_clockify_credentials(self) -> bool:
         return self.clockify_api_key.value is not None
+
+    @property
+    def has_transcription_endpoint(self) -> bool:
+        """Whether the ``transcribe`` tool is exposed at all.
+
+        The endpoint is deliberate configuration; the token is a secret that
+        may be missing, in which case the tool is exposed and reports
+        ``missing_credentials`` when called.
+        """
+        return self.transcription_api_base_url.value is not None
 
     @property
     def missing_jira_variables(self) -> tuple[str, ...]:
@@ -351,6 +376,27 @@ def load_config(
         claude_max_budget_usd=resolve(
             _Spec("claude.max_budget_usd", None, "claude", "max_budget_usd", _FLOAT),
             DEFAULT_CLAUDE_MAX_BUDGET_USD,
+        ),
+        transcription_api_base_url=resolve(
+            _Spec(
+                "transcription.api_base_url",
+                "TRANSCRIPTION_API_BASE_URL",
+                "transcription",
+                "api_base_url",
+                _OPTIONAL_STR,
+            ),
+            None,
+        ),
+        transcription_api_token=secrets["TRANSCRIPTION_API_TOKEN"],
+        transcription_timeout_seconds=resolve(
+            _Spec(
+                "transcription.timeout_seconds",
+                "JAKE_TOOLS_TRANSCRIPTION_TIMEOUT_SECONDS",
+                "transcription",
+                "timeout_seconds",
+                _FLOAT,
+            ),
+            DEFAULT_TRANSCRIPTION_TIMEOUT_SECONDS,
         ),
     )
 

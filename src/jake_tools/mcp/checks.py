@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict
 from ..clockify import ClockifyClient, ClockifyError
 from ..config import Config, XdgPaths
 from ..jira import JiraClient, JiraError
+from ..transcription import TranscriptionClient, TranscriptionError
 
 CheckStatus = Literal["ok", "warn", "fail", "skip"]
 
@@ -317,6 +318,90 @@ def check_session_store(config: Config) -> Check:
     )
 
 
+def check_transcription(config: Config) -> Check:
+    """The native transcription service: reachable, ready, and the token works.
+
+    Skipped when no endpoint is configured (the tool is then not exposed).
+    With an endpoint, a missing token or an unreachable, unready or
+    token-rejecting service is a failure: the tool would be advertised but
+    every call would fail.
+    """
+    base_url = config.transcription_api_base_url.value
+    if base_url is None:
+        return Check(
+            name="transcription",
+            status="skip",
+            detail="transcription.api_base_url is unset; the transcribe tool is not exposed",
+        )
+    token = config.transcription_api_token.value
+    if not token:
+        return Check(
+            name="transcription",
+            status="fail",
+            detail="transcription.api_base_url is set but TRANSCRIPTION_API_TOKEN is unset; "
+            "transcribe is exposed and would fail with missing_credentials",
+            required=True,
+        )
+    secrets = _sensitive_values(config)
+    try:
+        client = TranscriptionClient(
+            base_url, token, timeout_seconds=config.transcription_timeout_seconds.value
+        )
+    except ValueError as exc:
+        return Check(
+            name="transcription",
+            status="fail",
+            detail=f"invalid transcription.api_base_url: {scrub(str(exc), secrets)}",
+            required=True,
+        )
+    try:
+        health = client.health()
+    except TranscriptionError as exc:
+        return Check(
+            name="transcription",
+            status="fail",
+            detail=f"service unreachable or unhealthy: {scrub(exc.safe_summary or exc.kind, secrets)}",
+            required=True,
+        )
+    try:
+        client.check_token()
+    except TranscriptionError as exc:
+        if exc.kind == "unauthorized":
+            return Check(
+                name="transcription",
+                status="fail",
+                detail="TRANSCRIPTION_API_TOKEN was rejected by the service",
+                required=True,
+            )
+        if exc.kind != "not_ready":
+            return Check(
+                name="transcription",
+                status="fail",
+                detail=f"token check failed: {scrub(exc.safe_summary or exc.kind, secrets)}",
+                required=True,
+            )
+    engine = (
+        f"{health.engine.name} {health.engine.version}"
+        if health.engine
+        else "engine unknown"
+    )
+    if not health.ready:
+        return Check(
+            name="transcription",
+            status="warn",
+            detail=f"service reachable but {health.status}"
+            + (f" ({scrub(health.detail, secrets)})" if health.detail else "")
+            + "; transcribe calls will fail with not_ready until it is",
+            required=True,
+        )
+    return Check(
+        name="transcription",
+        status="ok",
+        detail=f"ready; {engine}; queue {health.queue.queued}/{health.queue.max_queued} waiting",
+        required=True,
+    )
+
+
 def run_checks(
     config: Config, files: list[ConfigFileStatus], environ: Mapping[str, str]
 ) -> list[Check]:
@@ -327,4 +412,5 @@ def run_checks(
         check_clockify(config),
         check_jira(config),
         check_session_store(config),
+        check_transcription(config),
     ]

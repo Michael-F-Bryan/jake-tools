@@ -10,6 +10,7 @@ from jake_tools.config import (
     DEFAULT_CLAUDE_TIMEOUT_SECONDS,
     DEFAULT_CLOCKIFY_CLIENT,
     DEFAULT_JIRA_PROJECT,
+    DEFAULT_TRANSCRIPTION_TIMEOUT_SECONDS,
     ConfigError,
     XdgPaths,
     load_config,
@@ -62,6 +63,14 @@ def test_defaults_when_nothing_is_configured(tmp_path: Path) -> None:
     assert config.claude_timeout_seconds.value == DEFAULT_CLAUDE_TIMEOUT_SECONDS
     assert config.claude_max_budget_usd.value == DEFAULT_CLAUDE_MAX_BUDGET_USD
     assert config.claude_effort.value is None
+    assert config.transcription_api_base_url.value is None
+    assert config.transcription_api_token.value is None
+    assert config.transcription_api_token.secret
+    assert (
+        config.transcription_timeout_seconds.value
+        == DEFAULT_TRANSCRIPTION_TIMEOUT_SECONDS
+    )
+    assert not config.has_transcription_endpoint
     assert all(setting.source == "default" for setting in config.settings())
     assert not config.has_clockify_credentials
     assert config.missing_jira_variables == (
@@ -244,6 +253,9 @@ def test_settings_listing_is_complete_and_stable(tmp_path: Path) -> None:
         "claude.max_turns",
         "claude.timeout_seconds",
         "claude.max_budget_usd",
+        "transcription.api_base_url",
+        "TRANSCRIPTION_API_TOKEN",
+        "transcription.timeout_seconds",
     ]
     assert config.runs_dir.display_value().startswith(str(tmp_path))
 
@@ -257,3 +269,42 @@ def test_clockify_api_base_url_defaults_to_the_public_api(tmp_path: Path) -> Non
     )
     assert overridden.clockify_api_base_url.value == "http://127.0.0.1:9/api/v1"
     assert overridden.clockify_api_base_url.source == "env"
+
+
+def test_transcription_settings_follow_env_then_config_and_the_token_is_a_secret(
+    tmp_path: Path,
+) -> None:
+    config_home = tmp_path / ".config" / "jake-tools"
+    config_home.mkdir(parents=True)
+    (config_home / "config.toml").write_text(
+        '[transcription]\napi_base_url = "http://from-config:1"\ntimeout_seconds = 42\n'
+    )
+    token_file = tmp_path / "token"
+    token_file.write_text("s3cret\n")
+
+    from_config = load_config(_env(tmp_path))
+    assert from_config.transcription_api_base_url.value == "http://from-config:1"
+    assert from_config.transcription_api_base_url.source == "config"
+    assert from_config.transcription_timeout_seconds.value == 42.0
+    assert from_config.has_transcription_endpoint
+
+    from_env = load_config(
+        _env(
+            tmp_path,
+            TRANSCRIPTION_API_BASE_URL="http://from-env:2",
+            JAKE_TOOLS_TRANSCRIPTION_TIMEOUT_SECONDS="7.5",
+            TRANSCRIPTION_API_TOKEN_FILE=str(token_file),
+        )
+    )
+    assert from_env.transcription_api_base_url.value == "http://from-env:2"
+    assert from_env.transcription_api_base_url.origin == "TRANSCRIPTION_API_BASE_URL"
+    assert from_env.transcription_timeout_seconds.value == 7.5
+    assert from_env.transcription_api_token.value == "s3cret"
+    assert from_env.transcription_api_token.display_value() == "set"
+    assert "s3cret" not in repr(from_env.transcription_api_token.display_value())
+
+    # The token is environment-only: a config file cannot supply it.
+    (config_home / "config.toml").write_text(
+        '[transcription]\napi_token = "from-config"\n'
+    )
+    assert load_config(_env(tmp_path)).transcription_api_token.value is None

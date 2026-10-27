@@ -27,6 +27,7 @@ from . import (
     clockify_time_entries,
     clockify_workspace_catalogue,
     ping,
+    transcribe,
 )
 
 
@@ -44,3 +45,5 @@ def register_all(app: MCPServer, config: Config) -> None:
     claude_steer.register(app, config)
     claude_update.register(app, config)
     claude_cancel.register(app, config)
+    # Registers nothing unless transcription.api_base_url is configured.
+    transcribe.register(app, config)
