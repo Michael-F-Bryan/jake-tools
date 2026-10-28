@@ -240,6 +240,24 @@ def test_timeouts_and_unreachable_services_are_distinguished(
     assert excinfo.value.kind == "unavailable"
 
 
+def test_a_tls_failure_is_not_reported_as_an_unreachable_service(
+    service: FakeTranscriptionService, recordings: list[Path]
+) -> None:
+    # TLS against the plain-HTTP fake fails the handshake, as an untrusted
+    # certificate does: the service is up, the client cannot talk to it.
+    https = TranscriptionClient(
+        service.base_url.replace("http://", "https://"), TOKEN, timeout_seconds=5
+    )
+    with pytest.raises(TranscriptionError) as excinfo:
+        https.transcribe(recordings)
+    assert excinfo.value.kind == "tls_failed"
+    assert "REQUESTS_CA_BUNDLE" in str(excinfo.value)
+    assert "unreachable" not in str(excinfo.value)
+    with pytest.raises(TranscriptionError) as excinfo:
+        https.health()
+    assert excinfo.value.kind == "tls_failed"
+
+
 def test_health_and_token_check(
     client: TranscriptionClient, service: FakeTranscriptionService
 ) -> None:

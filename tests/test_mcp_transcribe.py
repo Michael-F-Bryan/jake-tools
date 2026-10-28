@@ -15,6 +15,7 @@ from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 from fake_transcription import TOKEN, FakeTranscriptionService
 from mcp import ClientSession
@@ -232,6 +233,44 @@ async def test_service_errors_map_to_stable_codes_with_actionable_detail(
         assert "wrong-token" not in payload.message
     else:
         assert payload.message == f"service message for {service_code}"
+
+
+async def test_a_source_deleted_after_upload_keeps_its_transcript_and_sent_size(
+    mcp_server: ServerFactory,
+    mcp_env_factory: Callable[..., dict[str, str]],
+    mcp_home: Path,
+    service: FakeTranscriptionService,
+    recordings: list[Path],
+) -> None:
+    service.script.delay_seconds = 1.0
+    env = mcp_env_factory(
+        mcp_home,
+        TRANSCRIPTION_API_BASE_URL=service.base_url,
+        TRANSCRIPTION_API_TOKEN=TOKEN,
+    )
+    results: list[Any] = []
+    async with mcp_server(env) as session:
+
+        async def call() -> None:
+            results.append(
+                await session.call_tool(
+                    "transcribe", {"files": [str(p) for p in recordings]}
+                )
+            )
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(call)
+            with anyio.fail_after(10):
+                while not service.posts():
+                    await anyio.sleep(0.02)
+            # The upload is complete and the service is "transcribing".
+            recordings[0].unlink()
+            recordings[1].write_bytes(b"x")
+
+    [result] = results
+    assert result.is_error is False, result.structured_content
+    parsed = TranscriptionResult.model_validate(result.structured_content)
+    assert [s.bytes for s in parsed.inputs] == [1000, 1400]
 
 
 async def test_unreachable_and_slow_services_are_upstream_errors_never_retried(

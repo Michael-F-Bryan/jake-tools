@@ -169,6 +169,7 @@ class TranscriptionResult(BaseModel):
 
 TranscriptionErrorKind = Literal[
     "unavailable",
+    "tls_failed",
     "timeout",
     "unauthorized",
     "not_ready",
@@ -298,6 +299,12 @@ class TranscriptionClient:
         (nothing is sent) and :class:`TranscriptionError` for everything the
         service or the network does.
         """
+        return self.transcribe_result(files).transcript
+
+    def transcribe_result(self, files: Sequence[Path]) -> TranscriptionResult:
+        """:meth:`transcribe`, with the files as they were uploaded: each
+        one's byte count is what was sent, not what is on disk afterwards
+        (the file may have changed or gone since)."""
         if not files:
             raise TranscriptionInputError(Path(""), "no files were given")
         body = MultipartUpload([Path(file) for file in files])
@@ -334,12 +341,21 @@ class TranscriptionClient:
                 f"the transcript covers {len(transcript.files)} files but {len(files)} were sent",
                 status=200,
             )
-        return transcript
+        return TranscriptionResult(inputs=tuple(body.sources), transcript=transcript)
 
 
 def _transport_error(
     exc: requests.RequestException, timeout_seconds: float
 ) -> TranscriptionError:
+    # Before ConnectionError, which it subclasses: a certificate the client
+    # does not trust is a configuration problem, not a service that is down.
+    if isinstance(exc, requests.exceptions.SSLError):
+        return TranscriptionError(
+            "tls_failed",
+            "TLS with the transcription service failed (certificate not trusted or "
+            "handshake refused); check the service certificate and the CA bundle the "
+            "MCP server trusts (REQUESTS_CA_BUNDLE)",
+        )
     if isinstance(exc, requests.ConnectTimeout | requests.ConnectionError):
         return TranscriptionError(
             "unavailable",

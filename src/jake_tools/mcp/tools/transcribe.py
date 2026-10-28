@@ -131,8 +131,8 @@ def register(app: MCPServer, config: Config) -> None:
         client = transcription_client(config)
         paths = [Path(item).expanduser() for item in files]
         try:
-            transcript = await anyio.to_thread.run_sync(
-                functools.partial(client.transcribe, paths)
+            return await anyio.to_thread.run_sync(
+                functools.partial(client.transcribe_result, paths)
             )
         except TranscriptionInputError as exc:
             raise ToolError(
@@ -142,10 +142,3 @@ def register(app: MCPServer, config: Config) -> None:
             ) from exc
         except TranscriptionError as exc:
             raise tool_error(exc) from exc
-        inputs = tuple(
-            {"index": index, "path": str(path), "bytes": path.stat().st_size}
-            for index, path in enumerate(paths)
-        )
-        return TranscriptionResult.model_validate(
-            {"inputs": inputs, "transcript": transcript}
-        )
