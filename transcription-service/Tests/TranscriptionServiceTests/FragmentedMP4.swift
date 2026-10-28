@@ -68,10 +68,15 @@ private func opusPackets(seconds: Double) async throws -> (packets: [Data], fram
     return (packets, frames)
 }
 
-/// Write the recorder-shaped file; its true duration is `seconds`.
-func makeRecorderFragmentedOpus(seconds: Double) async throws -> URL {
+/// Write the recorder-shaped file; its true duration is `seconds`. With
+/// `gapSeconds`, the middle packet's duration also spans that much time in
+/// which nothing was recorded, as when the recorder pauses or the machine
+/// sleeps: the timeline jumps, the audio does not.
+func makeRecorderFragmentedOpus(seconds: Double, gapSeconds: Double = 0) async throws -> URL {
     let (packets, frames) = try await opusPackets(seconds: seconds)
-    let milliseconds = UInt32(Double(packets.count) * Double(frames) / 48.0)
+    let gapIndex = packets.count / 2
+    let gapFrames = UInt32(gapSeconds * 48_000)
+    let milliseconds = UInt32((Double(packets.count) * Double(frames) + Double(gapFrames)) / 48.0)
 
     let ftyp = Box("ftyp") {
         $0.ascii("isom")
@@ -198,8 +203,8 @@ func makeRecorderFragmentedOpus(seconds: Double) async throws -> URL {
                             $0.full(0, 0x0301)
                             $0.u32(UInt32(packets.count))
                             $0.u32(dataOffset)
-                            for packet in packets {
-                                $0.u32(frames)
+                            for (index, packet) in packets.enumerated() {
+                                $0.u32(index == gapIndex ? frames + gapFrames : frames)
                                 $0.u32(UInt32(packet.count))
                             }
                         })

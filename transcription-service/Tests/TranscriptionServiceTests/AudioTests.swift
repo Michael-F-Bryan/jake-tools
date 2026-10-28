@@ -104,6 +104,15 @@ func writeTemporary(_ data: Data, name: String) throws -> URL {
         #expect(abs(recording.durationSeconds - 30) < 0.1)
     }
 
+    @Test func aTimestampGapInAFragmentedRecordingIsNotLostAudio() async throws {
+        // A recorder that paused leaves one packet spanning the pause. The
+        // decoders (AVFoundation's and ffmpeg's) emit only the recorded
+        // audio, which is all there is.
+        let url = try await makeRecorderFragmentedOpus(seconds: 20, gapSeconds: 600)
+        let recording = try await AudioDecoder.decode([upload(url)], maxDurationSeconds: 3600)
+        #expect(abs(recording.durationSeconds - 20) < 0.1)
+    }
+
     @Test(arguments: [(kAudioFormatMPEG4AAC, "m4a"), (kAudioFormatAppleLossless, "caf"), (kAudioFormatFLAC, "flac")])
     func compressedRecordingsDecodeToTheirFullLength(format: AudioFormatID, fileExtension: String) async throws {
         let url = try makeEncoded(seconds: 3, format: format, fileExtension: fileExtension)

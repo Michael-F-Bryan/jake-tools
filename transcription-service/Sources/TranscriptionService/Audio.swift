@@ -137,26 +137,37 @@ struct AudioSource {
             declaredSeconds: seconds.flatMap { $0.isFinite && $0 > 0 ? $0 : nil })
     }
 
-    /// The summed durations of the track's compressed packets, read without
-    /// decoding (about 0.3 s for 90 minutes of Opus). `nil` if the read
-    /// fails; decoding then reports the damage.
+    /// No codec's packet covers more audio than this (Opus: 120 ms; AAC:
+    /// 1024 frames, 128 ms at 8 kHz). A longer packet duration is a gap in
+    /// the timeline, such as a paused recorder, not audio.
+    static let longestPacketSeconds = 0.25
+
+    /// The summed durations of the track's compressed packets, each capped
+    /// at `longestPacketSeconds`, read without decoding (about 0.3 s for 90
+    /// minutes of Opus). `nil` if the read fails; decoding then reports the
+    /// damage.
     private static func packetSeconds(asset: AVURLAsset, track: AVAssetTrack) -> Double? {
         guard let reader = try? AVAssetReader(asset: asset) else { return nil }
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
-        var total = CMTime.zero
+        var total = 0.0
         do {
             try ObjCExceptionGuard.run {
                 guard reader.canAdd(output) else { return }
                 reader.add(output)
                 guard reader.startReading() else { return }
                 while let buffer = output.copyNextSampleBuffer() {
-                    total = CMTimeAdd(total, CMSampleBufferGetDuration(buffer))
+                    for index in 0..<CMSampleBufferGetNumSamples(buffer) {
+                        var timing = CMSampleTimingInfo()
+                        guard CMSampleBufferGetSampleTimingInfo(buffer, at: index, timingInfoOut: &timing) == noErr
+                        else { continue }
+                        total += min(max(timing.duration.seconds, 0), longestPacketSeconds)
+                    }
                 }
             }
         } catch {
             return nil
         }
-        return reader.status == .completed ? total.seconds : nil
+        return reader.status == .completed ? total : nil
     }
 
     /// Append this file's audio, as 16 kHz mono Float32, to `samples`.
