@@ -47,10 +47,22 @@ default FluidAudio's cache `~/Library/Application Support/FluidAudio/Models`),
 `$TMPDIR/jake-transcription-service`), `--tls-certificate` +
 `--tls-private-key` (PEM; enables HTTPS, TLS 1.2+), `--log-level info`.
 
+`--work-dir` must be new, empty, or one this service created: it marks the
+directory with `.jake-transcription-service`, and at startup removes only the
+UUID-named request directories a crash left behind. A non-empty directory
+without the marker is refused (exit 64), never cleaned. Staging holds at most
+`--max-queued` + 1 requests' uploads, so size it as that many times
+`--max-upload-bytes`.
+
+`provision` replaces a model directory whose `.fluidaudio-revision` marker
+does not match the pin (as after a pin bump); `serve` refuses such a
+directory with a message naming both revisions.
+
 Memory: decoded audio is held in memory as 16 kHz float32, about 230 MB per
 hour, plus the models and the diarizer's working set. Measured on an M4 Max
-(macOS 27, debug build, 2026-10-27): about 200 MB physical footprint idle
-with warm models, peaking at about 1.3 GB during a 30 minute recording. Size
+(macOS 27, release build, real meetings, 2026-10-28): 230–340 MB physical
+footprint idle with warm models, peaking at about 1.3 GB for 6 minutes,
+1.65 GB for 33 minutes and 3.4 GB for 98 minutes. Size
 `--max-duration-seconds` to the host.
 
 Measured on the same machine with synthesised two-voice speech (not real
@@ -82,9 +94,16 @@ says why). Intended for supervision and `jake-tools-mcp doctor`.
 - `Content-Type: multipart/form-data; boundary=…`. Every part is named `file`
   and carries a `filename`; **part order is recording order**. Parts are
   streamed to a per-request temporary directory (mode 0700) and deleted when
-  the request ends, however it ends. Anything AVFoundation decodes is accepted
-  (WAV, AIFF, CAF, M4A/AAC, MP3, FLAC); files are decoded to 16 kHz mono and
-  concatenated with no gap.
+  the request ends, however it ends. Anything `AVAssetReader` decodes is
+  accepted (WAV, AIFF, CAF, M4A/MP4 with AAC, ALAC or Opus, MP3, FLAC);
+  files are decoded to 16 kHz mono and concatenated with no gap. WebM and
+  Ogg are refused with a message saying so: AVFoundation cannot demux them.
+- A file must decode completely. A decode error part-way (damaged packets),
+  a decoded length more than 0.5 s short of the container's declared
+  duration, or a WAV/AIFF/CAF header declaring more audio than the file
+  holds is `invalid_input` naming the file, never a shorter transcript.
+  Declared durations are summed against `--max-duration-seconds` before
+  anything is decoded.
 - Response `200` with the complete transcript, or an error (below). There is
   no partial result, no job handle, no polling: the connection stays open for
   the duration. Expect minutes for long recordings.
@@ -146,10 +165,10 @@ uploaded name and limits by their value, never audio or transcript content.
 | Status | `code` | Meaning |
 | --- | --- | --- |
 | 401 | `unauthorized` | Missing or wrong bearer token. |
-| 400 | `invalid_input` | Not multipart, a part not named `file`, an empty part, no parts, or a file that is not decodable audio. |
+| 400 | `invalid_input` | Not multipart, a part not named `file`, an empty part, no parts, a file that is not decodable audio (including WebM/Ogg), or one that is damaged or truncated. |
 | 413 | `payload_too_large` | Over `--max-upload-bytes`, `--max-files` or `--max-duration-seconds` (also from `Content-Length` before reading the body). |
 | 503 | `not_ready` | Models still loading (`Retry-After: 15`) or failed to load. |
-| 429 | `overloaded` | `--max-queued` requests already waiting (`Retry-After: 30`). Nothing was started. |
+| 429 | `overloaded` | `--max-queued` + 1 requests already admitted (`Retry-After: 30`). Decided before the body is read; nothing was uploaded or started. |
 | 500 | `inference_failed` | The engine failed on an accepted recording; details are in the service log only. |
 | 500 | `internal_error` | Anything else. |
 
@@ -157,11 +176,21 @@ uploaded name and limits by their value, never audio or transcript content.
 
 - One inference job at a time (`JobGate`), first come first served, at most
   `--max-queued` waiting; concurrent connections never mean concurrent model
-  execution. Uploads are received before a request takes its turn.
+  execution. A request is admitted (or refused with `429`) before its body is
+  read, and counts against the bound from the start of its upload, so at most
+  `--max-queued` + 1 requests are uploading, waiting or running. Uploads are
+  received before a request takes its turn. A short request waits for the
+  whole of a long one ahead of it.
 - A client that disconnects cancels its request: a queued job leaves the queue
-  without running; a running job stops at the engine's next cancellation check
-  (per ASR chunk/decode step and in the diarizer's PLDA scoring), not
-  instantly. Its temporary directory is removed either way.
+  without running; a running job stops at its next cancellation check
+  (between decoded audio buffers, per ASR chunk/decode step, and in the
+  diarizer's PLDA scoring), not instantly. Its temporary directory is removed
+  either way.
+- `SIGTERM` drains: the listener closes at once (health checks and new
+  requests get connection refused, not `503`), the running job finishes, and
+  the process exits 0. A 98 minute recording runs about 70 s on an M4 Max, so
+  a supervisor's exit timeout (launchd's `ExitTimeOut`, default 20 s) shorter
+  than the longest job kills it part-way. Set it deliberately.
 - Nothing survives a restart. In-flight requests fail with the connection, and
   the service reloads and re-warms the models before reporting `ready`.
 - The service never retries inference on its own, and neither does the Python

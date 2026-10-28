@@ -137,6 +137,32 @@ func transcribeRequest(_ server: RunningServer, files: [MultipartFile], token: S
         body: multipartBody(boundary: boundary, files: files))
 }
 
+/// Send only a request head over a raw socket, promising a body that never
+/// comes, and return the status line of whatever the server answers within
+/// `timeout` (nil if it waits for the body).
+func statusLineWithoutSendingBody(to server: RunningServer, head: String, timeout: Int = 3) throws -> String? {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    precondition(fd >= 0)
+    defer { close(fd) }
+    var address = sockaddr_in()
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_port = in_port_t(UInt16(server.baseURL.port!).bigEndian)
+    address.sin_addr.s_addr = inet_addr("127.0.0.1")
+    let connected = withUnsafePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    precondition(connected == 0)
+    var limit = timeval(tv_sec: timeout, tv_usec: 0)
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &limit, socklen_t(MemoryLayout<timeval>.size))
+    _ = head.utf8CString.withUnsafeBufferPointer { send(fd, $0.baseAddress, $0.count - 1, 0) }
+    var buffer = [UInt8](repeating: 0, count: 512)
+    let received = recv(fd, &buffer, buffer.count, 0)
+    guard received > 0 else { return nil }
+    return String(decoding: buffer[0..<received], as: UTF8.self).components(separatedBy: "\r\n").first
+}
+
 @Suite(.serialized) struct ServerTests {
     @Test func healthReportsStartingThenReady() async throws {
         let server = try await startServer(engine: nil)
@@ -330,5 +356,35 @@ func transcribeRequest(_ server: RunningServer, files: [MultipartFile], token: S
         }
         #expect(await server.state.gate.report == HealthReport.Queue(running: 0, queued: 0, maxQueued: 2))
         await server.stop()
+    }
+
+    @Test func anOverloadedServiceRefusesBeforeReadingTheBody() async throws {
+        let engine = StubEngine(delay: .seconds(10))
+        let server = try await startServer(engine: engine, maxQueued: 0)
+        defer { Task { await server.stop() } }
+        let running = Task {
+            try await transcribeRequest(
+                server, files: [MultipartFile(name: "file", filename: "a.wav", data: makeWAV(seconds: 1))])
+        }
+        for _ in 0..<100 where engine.starts == 0 {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(engine.starts == 1)
+
+        let head =
+            "POST /v1/transcriptions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer \(testToken)\r\n"
+            + "Content-Type: multipart/form-data; boundary=x\r\nContent-Length: 4000000\r\n\r\n"
+        let status = try statusLineWithoutSendingBody(to: server, head: head)
+        #expect(status?.contains(" 429 ") == true)
+
+        running.cancel()
+        await server.stop()
+    }
+
+    @Test func aDisconnectAfterTheResponseIsNotACancellation() {
+        let job = CancellableJob()
+        job.finish()
+        #expect(job.cancel() == false)
+        #expect(CancellableJob().cancel() == true)
     }
 }

@@ -40,9 +40,12 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-ssl.git", exact: "2.37.5"),
     ],
     targets: [
+        // Turns AVFoundation's NSExceptions into Swift errors (see its header).
+        .target(name: "ObjCExceptionGuard"),
         .target(
             name: "TranscriptionService",
             dependencies: [
+                "ObjCExceptionGuard",
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "HummingbirdCore", package: "hummingbird"),

@@ -8,9 +8,9 @@
 // Client disconnect: Hummingbird does not cancel a handler when the socket
 // closes, so the upload is consumed through `consumeWithInboundCloseHandler`
 // and the request's work runs in a task that the close handler cancels. A
-// queued job then leaves the queue; a running job stops at the engine's next
-// cancellation check (ASR checks per chunk and decode step, the diarizer
-// during PLDA scoring), which is not immediate.
+// queued job then leaves the queue; a running job stops at its next
+// cancellation check (the decoder between buffers, ASR per chunk and decode
+// step, the diarizer during PLDA scoring), which is not immediate.
 
 import Foundation
 import HTTPTypes
@@ -172,21 +172,31 @@ func registerRoutes(_ router: Router<BasicRequestContext>, state: ServiceState) 
         }
 
         let requestID = context.id
-        let job = CancellableJob()
-        return try await request.body.consumeWithInboundCloseHandler { body in
-            let task = Task {
-                try await process(
-                    body: body, boundary: boundary, engine: engine, state: state, requestID: requestID)
+        let requestBody = request.body
+        // Admission first: an overloaded service refuses before reading a
+        // byte of the body.
+        return try await state.gate.withAdmission {
+            let job = CancellableJob()
+            return try await requestBody.consumeWithInboundCloseHandler { body in
+                let task = Task {
+                    try await process(
+                        body: body, boundary: boundary, engine: engine, state: state, requestID: requestID)
+                }
+                job.attach(task)
+                defer { job.finish() }
+                return try await withTaskCancellationHandler {
+                    try await task.value
+                } onCancel: {
+                    task.cancel()
+                }
+            } onInboundClosed: {
+                // Also fires when a client closes after its response; only
+                // unfinished work is worth a log line.
+                if job.cancel() {
+                    state.logger.info(
+                        "client disconnected; cancelling request", metadata: ["request": "\(requestID)"])
+                }
             }
-            job.attach(task)
-            return try await withTaskCancellationHandler {
-                try await task.value
-            } onCancel: {
-                task.cancel()
-            }
-        } onInboundClosed: {
-            state.logger.info("client disconnected; cancelling request", metadata: ["request": "\(requestID)"])
-            job.cancel()
         }
     }
 }
@@ -227,7 +237,7 @@ private func process(
     let logger = state.logger
     let configuration = state.configuration
 
-    let directory = configuration.workDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let directory = WorkDirectory.requestDirectory(in: configuration.workDirectory)
     try FileManager.default.createDirectory(
         at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -242,7 +252,8 @@ private func process(
 
     return try await state.gate.withSlot {
         let decodeStart = clock.now
-        let recording = try AudioDecoder.decode(uploads, maxDurationSeconds: configuration.maxDurationSeconds)
+        let recording = try await AudioDecoder.decode(
+            uploads, maxDurationSeconds: configuration.maxDurationSeconds)
         let decodeSeconds = elapsed(since: decodeStart, clock: clock)
         logger.info(
             "recording decoded",
@@ -297,6 +308,7 @@ final class CancellableJob: Sendable {
     private struct State {
         var task: Task<Response, any Error>?
         var cancelled = false
+        var finished = false
     }
 
     private let state = Mutex(State())
@@ -309,12 +321,22 @@ final class CancellableJob: Sendable {
         if cancelNow { task.cancel() }
     }
 
-    func cancel() {
-        let task = state.withLock { state in
+    /// The request has its response (or its error); a later cancel is moot.
+    func finish() {
+        state.withLock { $0.finished = true }
+    }
+
+    /// Cancel the work unless it already finished. Returns whether there was
+    /// unfinished work to cancel.
+    @discardableResult
+    func cancel() -> Bool {
+        let (task, unfinished) = state.withLock { state in
             state.cancelled = true
-            return state.task
+            return (state.task, !state.finished)
         }
+        guard unfinished else { return false }
         task?.cancel()
+        return true
     }
 }
 

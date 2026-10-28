@@ -67,10 +67,53 @@ public enum ModelPins {
     /// FluidAudio's own cache: `~/Library/Application Support/FluidAudio/Models`.
     public static var defaultModelsRoot: URL { OfflineDiarizerModels.defaultModelsDirectory() }
 
+    /// The file FluidAudio writes into a model directory naming the revision
+    /// it holds (`ModelCache.revisionMarkerName`, private in 0.17.7).
+    static let revisionMarkerName = ".fluidaudio-revision"
+
+    /// Every existing model directory under `modelsRoot` whose revision
+    /// marker is missing or names a revision other than the pin. A missing
+    /// directory is not listed; loading reports that itself.
+    public static func revisionMismatches(modelsRoot: URL) -> [RevisionMismatch] {
+        [
+            (asrDirectory(modelsRoot: modelsRoot), asrRevision),
+            (modelsRoot.appendingPathComponent(diarizerRepo.folderName, isDirectory: true), diarizerRevision),
+        ].compactMap { directory, pinned in
+            guard FileManager.default.fileExists(atPath: directory.path) else { return nil }
+            let marker = directory.appendingPathComponent(revisionMarkerName)
+            let found = (try? String(contentsOf: marker, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard found != pinned else { return nil }
+            return RevisionMismatch(directory: directory, found: found, pinned: pinned)
+        }
+    }
+
     static func applyRevisionPins() {
         var overrides = ModelRegistry.revisionOverrides
         overrides[asrRepo.remotePath] = asrRevision
         ModelRegistry.revisionOverrides = overrides
+    }
+}
+
+/// A provisioned model directory from a revision other than the pinned one.
+public struct RevisionMismatch: Error, Sendable, CustomStringConvertible {
+    public var directory: URL
+    /// The revision its marker names, or `nil` if it has no marker.
+    public var found: String?
+    public var pinned: String
+
+    public var description: String {
+        "\(directory.path) holds revision \(found ?? "(unmarked)") but this build pins \(pinned)"
+    }
+}
+
+/// Loading refused models that are present but from the wrong revision.
+public struct ModelRevisionError: Error, Sendable, CustomStringConvertible {
+    public var mismatches: [RevisionMismatch]
+
+    public var description: String {
+        "models are not the pinned revision; run `transcription-service provision` to replace them: "
+            + mismatches.map(\.description).joined(separator: "; ")
     }
 }
 
@@ -107,6 +150,14 @@ public final class FluidAudioEngine: TranscriptionEngine, @unchecked Sendable {
         ModelPins.applyRevisionPins()
         try FileManager.default.createDirectory(at: modelsRoot, withIntermediateDirectories: true)
 
+        // `AsrModels.download` skips any directory whose files exist, whatever
+        // revision they are, so a pin bump would never be fetched. Replace a
+        // mismatched directory wholesale.
+        for mismatch in ModelPins.revisionMismatches(modelsRoot: modelsRoot) {
+            logger.warning("replacing models from another revision", metadata: ["detail": "\(mismatch)"])
+            try FileManager.default.removeItem(at: mismatch.directory)
+        }
+
         logger.info("downloading ASR models", metadata: ["repo": "\(ModelPins.asrRepo.rawValue)"])
         _ = try await AsrModels.download(
             to: ModelPins.asrDirectory(modelsRoot: modelsRoot), version: ModelPins.asrVersion)
@@ -125,6 +176,10 @@ public final class FluidAudioEngine: TranscriptionEngine, @unchecked Sendable {
     public static func load(modelsRoot: URL, logger: Logger, warmUp: Bool = true) async throws -> FluidAudioEngine {
         ModelHub.offlineMode = true
         ModelPins.applyRevisionPins()
+        // FluidAudio reports a wrong revision as every model missing; say
+        // what is actually wrong.
+        let mismatches = ModelPins.revisionMismatches(modelsRoot: modelsRoot)
+        guard mismatches.isEmpty else { throw ModelRevisionError(mismatches: mismatches) }
         let clock = ContinuousClock()
 
         let asrStart = clock.now

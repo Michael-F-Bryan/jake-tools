@@ -2,9 +2,12 @@
 // wait behind it, first come first served. A waiter whose task is cancelled
 // (its client went away) leaves the queue without taking a turn.
 //
-// Concurrent HTTP connections therefore never mean concurrent model
-// execution, and a burst beyond the queue bound is refused immediately with
-// `overloaded` rather than accepted and starved.
+// Admission is decided before a request's body is read: `withAdmission`
+// counts every request from the start of its upload to its response, and
+// refuses one beyond `maxQueued + 1` immediately with `overloaded`. So a
+// rejected client never uploads its recording first, and staged uploads
+// never exceed `maxQueued + 1` requests' worth. Concurrent HTTP connections
+// never mean concurrent model execution.
 
 import Foundation
 
@@ -12,6 +15,7 @@ public actor JobGate {
     public let maxQueued: Int
 
     private var running = false
+    private var admitted = 0
     private var waiters: [(id: UUID, continuation: CheckedContinuation<Void, any Error>)] = []
 
     public init(maxQueued: Int) {
@@ -30,12 +34,7 @@ public actor JobGate {
             running = true
             return
         }
-        guard waiters.count < maxQueued else {
-            throw ServiceError(
-                .overloaded,
-                "the transcription queue is full (\(maxQueued) waiting); retry later",
-                retryAfterSeconds: 30)
-        }
+        guard waiters.count < maxQueued else { throw overloaded() }
         let id = UUID()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
@@ -65,11 +64,28 @@ public actor JobGate {
         }
     }
 
+    /// Run `body`, which uploads and then takes the slot with `withSlot`, as
+    /// one of at most `maxQueued + 1` admitted requests. Throws
+    /// `ServiceError(.overloaded)` without running `body` when that many are
+    /// already admitted.
+    public func withAdmission<T: Sendable>(_ body: @Sendable () async throws -> T) async throws -> T {
+        guard admitted <= maxQueued else { throw overloaded() }
+        admitted += 1
+        defer { admitted -= 1 }
+        return try await body()
+    }
+
     /// Run `body` holding the slot.
     public func withSlot<T: Sendable>(_ body: @Sendable () async throws -> T) async throws -> T {
         try await acquire()
         defer { release() }
         return try await body()
+    }
+
+    private func overloaded() -> ServiceError {
+        ServiceError(
+            .overloaded, "the transcription queue is full (\(maxQueued) waiting); retry later",
+            retryAfterSeconds: 30)
     }
 
     private func cancelWaiter(_ id: UUID) {

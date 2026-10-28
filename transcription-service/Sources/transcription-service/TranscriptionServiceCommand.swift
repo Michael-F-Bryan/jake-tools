@@ -112,7 +112,11 @@ struct Serve: AsyncParsableCommand {
             workDir.map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? FileManager.default.temporaryDirectory.appendingPathComponent(
                 "jake-transcription-service", isDirectory: true)
-        try prepareWorkDirectory(workDirectory, logger: logger)
+        do {
+            try WorkDirectory.prepare(workDirectory, logger: logger)
+        } catch let error as ServiceError {
+            throw ValidationError(error.message)
+        }
 
         let configuration = ServiceConfiguration(
             host: host,
@@ -185,22 +189,6 @@ struct Serve: AsyncParsableCommand {
             return token
         }
         throw ValidationError("a bearer token is required: pass --token-file or set TRANSCRIPTION_API_TOKEN")
-    }
-
-    /// Create the staging directory owner-only and clear anything a previous
-    /// run left behind: a request's directory only outlives it after a crash.
-    private func prepareWorkDirectory(_ directory: URL, logger: Logger) throws {
-        let fileManager = FileManager.default
-        try fileManager.createDirectory(
-            at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
-        let stale = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-        for item in stale {
-            try? fileManager.removeItem(at: item)
-        }
-        if !stale.isEmpty {
-            logger.warning("removed stale upload directories", metadata: ["count": "\(stale.count)"])
-        }
     }
 }
 
