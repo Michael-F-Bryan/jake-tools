@@ -359,14 +359,19 @@ def test_queue_bound_and_disconnect_against_the_real_service(
     is refused as overloaded; a client that drops mid-inference frees the slot."""
     import concurrent.futures
 
-    def post(timeout: float) -> int:
-        with open(conversation.wav_files[0], "rb") as handle:
+    def post(timeout: float, repeat: int = 1) -> int:
+        paths = [conversation.wav_files[0]] * repeat
+        handles = [open(path, "rb") for path in paths]  # noqa: SIM115
+        try:
             response = requests.post(
                 f"{live_service.base_url}/v1/transcriptions",
                 headers={"Authorization": f"Bearer {live_service.token}"},
-                files=[("file", ("a.wav", handle, "audio/wav"))],
+                files=[("file", ("a.wav", handle, "audio/wav")) for handle in handles],
                 timeout=timeout,
             )
+        finally:
+            for handle in handles:
+                handle.close()
         return response.status_code
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
@@ -375,8 +380,9 @@ def test_queue_bound_and_disconnect_against_the_real_service(
     assert statuses.count(200) == 3, statuses
     assert statuses.count(429) == 1, statuses
 
+    # About ten minutes of audio: still running when the client gives up.
     with pytest.raises(requests.ReadTimeout):
-        post(0.5)
+        post(0.5, repeat=24)
     deadline = time.monotonic() + 60
     queue: dict[str, int] = {}
     while time.monotonic() < deadline:
@@ -389,7 +395,7 @@ def test_queue_bound_and_disconnect_against_the_real_service(
     assert queue == {"running": 0, "queued": 0, "max_queued": 2}
     assert "client disconnected; cancelling request" in live_service.log()
     work = Path(live_service.log_path).parent / "work"
-    assert not any(work.iterdir())
+    assert [p.name for p in work.iterdir()] == [".jake-transcription-service"]
 
 
 @pytest.fixture
