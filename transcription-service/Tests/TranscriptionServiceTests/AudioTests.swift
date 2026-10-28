@@ -92,6 +92,18 @@ func writeTemporary(_ data: Data, name: String) throws -> URL {
         #expect(abs(recording.durationSeconds - 3) < 0.1)
     }
 
+    @Test func theRecordersFragmentedOpusIsNotRefusedForItsOverstatedDuration() async throws {
+        let url = try await makeRecorderFragmentedOpus(seconds: 30)
+        // The fixture reproduces the recorder's files: AVFoundation declares
+        // more audio than there is.
+        let declared = try await AVURLAsset(url: url).load(.duration).seconds
+        #expect(declared > 30.5, "declared \(declared)")
+        #expect(declared < 32, "declared \(declared)")
+
+        let recording = try await AudioDecoder.decode([upload(url)], maxDurationSeconds: 60)
+        #expect(abs(recording.durationSeconds - 30) < 0.1)
+    }
+
     @Test(arguments: [(kAudioFormatMPEG4AAC, "m4a"), (kAudioFormatAppleLossless, "caf"), (kAudioFormatFLAC, "flac")])
     func compressedRecordingsDecodeToTheirFullLength(format: AudioFormatID, fileExtension: String) async throws {
         let url = try makeEncoded(seconds: 3, format: format, fileExtension: fileExtension)

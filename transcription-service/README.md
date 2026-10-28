@@ -102,6 +102,10 @@ says why). Intended for supervision and `jake-tools-mcp doctor`.
   a decoded length more than 0.5 s short of the container's declared
   duration, or a WAV/AIFF/CAF header declaring more audio than the file
   holds is `invalid_input` naming the file, never a shorter transcript.
+  Fragmented MP4 (the vault recorder's format) is the exception to the
+  duration check: AVFoundation overstates its duration by about 2%, because
+  the recorder writes a bogus `mdhd` duration, so only decode errors count
+  there, and a recording cut off at a fragment boundary is not detectable.
   Declared durations are summed against `--max-duration-seconds` before
   anything is decoded.
 - Response `200` with the complete transcript, or an error (below). There is

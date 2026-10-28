@@ -12,7 +12,9 @@
 // audio than the file holds, or a declared total over the duration limit is
 // refused before the expensive work. A decode that stops early (damaged
 // packets) or ends well short of the container's declared duration is
-// refused too: the transcript is never silently partial.
+// refused too: the transcript is never silently partial. For fragmented
+// MP4, whose declared duration is not trustworthy (see `AudioSource.open`),
+// the comparison is against the summed durations of its packets.
 //
 // Decoding is not FluidAudio's `AudioConverter.resampleAudioFile`. That reads
 // through `AVAudioFile`, which raises an uncaught NSException on Opus in MP4
@@ -97,7 +99,7 @@ struct AudioSource {
     let upload: UploadedFile
     let asset: AVURLAsset
     let track: AVAssetTrack
-    /// The container's duration, when it states a usable one.
+    /// The container's duration, when it states a trustworthy one.
     let declaredSeconds: Double?
 
     var label: String { "file \(upload.index + 1) (\(upload.name))" }
@@ -113,19 +115,48 @@ struct AudioSource {
         let asset = AVURLAsset(url: upload.url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
         let tracks: [AVAssetTrack]
         let duration: CMTime
+        let fragmented: Bool
         do {
             tracks = try await asset.loadTracks(withMediaType: .audio)
             duration = try await asset.load(.duration)
+            fragmented = try await asset.load(.canContainFragments)
         } catch {
             throw ServiceError(.invalidInput, "\(label) could not be decoded as audio\(unsupportedHint(upload.url))")
         }
         guard let track = tracks.first else {
             throw ServiceError(.invalidInput, "\(label) has no audio track\(unsupportedHint(upload.url))")
         }
-        let seconds = duration.seconds
+        // A fragmented MP4's own duration is not trustworthy. Most of
+        // Michael's recordings are fragmented Opus whose `mdhd` duration is
+        // written in milliseconds against a 48 kHz timescale; AVFoundation
+        // adds that to the fragments' durations and declares about 2% more
+        // audio than the file holds. The packets' own durations are right.
+        let seconds = fragmented ? packetSeconds(asset: asset, track: track) : duration.seconds
         return AudioSource(
             upload: upload, asset: asset, track: track,
-            declaredSeconds: seconds.isFinite && seconds > 0 ? seconds : nil)
+            declaredSeconds: seconds.flatMap { $0.isFinite && $0 > 0 ? $0 : nil })
+    }
+
+    /// The summed durations of the track's compressed packets, read without
+    /// decoding (about 0.3 s for 90 minutes of Opus). `nil` if the read
+    /// fails; decoding then reports the damage.
+    private static func packetSeconds(asset: AVURLAsset, track: AVAssetTrack) -> Double? {
+        guard let reader = try? AVAssetReader(asset: asset) else { return nil }
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        var total = CMTime.zero
+        do {
+            try ObjCExceptionGuard.run {
+                guard reader.canAdd(output) else { return }
+                reader.add(output)
+                guard reader.startReading() else { return }
+                while let buffer = output.copyNextSampleBuffer() {
+                    total = CMTimeAdd(total, CMSampleBufferGetDuration(buffer))
+                }
+            }
+        } catch {
+            return nil
+        }
+        return reader.status == .completed ? total.seconds : nil
     }
 
     /// Append this file's audio, as 16 kHz mono Float32, to `samples`.
