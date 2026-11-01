@@ -14,7 +14,7 @@ from ..newsletters import (
 )
 
 
-class _NumericItemId(click.ParamType):
+class _NumericItemId(click.ParamType[str]):
     """A SharePoint list item id: digits only.
 
     item_id is interpolated directly into Graph/SharePoint URL templates

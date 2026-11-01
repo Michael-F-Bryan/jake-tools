@@ -53,7 +53,7 @@ from .models import (
     TerminationReason,
     ToolName,
 )
-from .procs import process_table
+from .procs import ProcessTable, process_table
 from .rundir import (
     DIR_MODE,
     REQUESTS_DIR,
@@ -600,7 +600,7 @@ def _live_tasks_locked(runs_dir: Path) -> list[RunState]:
     return live
 
 
-def _reconcile_locked(run_dir: Path, table: dict | None = None) -> RunState:
+def _reconcile_locked(run_dir: Path, table: ProcessTable | None = None) -> RunState:
     state = read_state(run_dir)
     if state.is_terminal:
         return state

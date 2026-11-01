@@ -50,6 +50,7 @@ They remain domain extensions on the ordinary tools.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 from pydantic import ValidationError
@@ -256,5 +257,5 @@ def _view(service: TaskService, task_id: str) -> TaskView:
         ) from exc
 
 
-def _iso(value: Any) -> str:
+def _iso(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")

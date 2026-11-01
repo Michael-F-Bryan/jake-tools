@@ -11,5 +11,6 @@
         "_working",
         "**/node_modules"
     ],
-    "typeCheckingMode": "standard"
+    "typeCheckingMode": "standard",
+    "reportMissingTypeArgument": "error"
 }

@@ -83,7 +83,7 @@ class DirenvLocalEnvironment(LocalEnvironment):  # pyright: ignore[reportUntyped
         # out of every script this environment runs, the snapshot included.
         return super()._run_bash(f"{UNSET_SECRETS}\n{cmd_string}", **kwargs)
 
-    def execute(self, command: str, cwd: str = "", **kwargs: Any) -> dict:
+    def execute(self, command: str, cwd: str = "", **kwargs: Any) -> dict[str, Any]:
         token = _LOAD_PROJECT_ENV.set(wants_project_env(command, kwargs))
         try:
             return super().execute(command, cwd, **kwargs)
@@ -127,7 +127,7 @@ class DirenvLocalProvider(TerminalEnvironmentProvider):  # pyright: ignore[repor
         return os.getcwd()
 
     @property
-    def strip_env_keys(self) -> frozenset:
+    def strip_env_keys(self) -> frozenset[str]:
         # Hermes strips these from the subprocesses it scrubs (background,
         # PTY and helper spawns), whichever backend is selected: Jake's
         # credentials are for its tools only.

@@ -34,8 +34,8 @@ class TtyStdin:
 
 class FakeNewsletterClient:
     def __init__(self) -> None:
-        self.created: list[dict] = []
-        self.updated: list[dict] = []
+        self.created: list[dict[str, object]] = []
+        self.updated: list[dict[str, object]] = []
         self.items = [
             NewsletterItem(
                 id="295",
