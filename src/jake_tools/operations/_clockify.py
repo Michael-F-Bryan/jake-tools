@@ -8,10 +8,10 @@ from collections.abc import Callable
 import anyio.to_thread
 from pydantic import BaseModel
 
-from ...clockify import ClockifyClient, ClockifyError, validate_clockify_id
-from ...clockify_time import CreateTimeEntryError
-from ...config import Config
-from ..errors import ToolError
+from ..clockify import ClockifyClient, ClockifyError, validate_clockify_id
+from ..clockify_time import CreateTimeEntryError
+from ..config import Config
+from .errors import ToolError
 
 
 def clockify_client(config: Config) -> ClockifyClient:
@@ -19,7 +19,7 @@ def clockify_client(config: Config) -> ClockifyClient:
     if not key:
         raise ToolError(
             "missing_credentials",
-            "Set CLOCKIFY_API_KEY in the server environment",
+            "Set CLOCKIFY_API_KEY where jake-tools runs (the MCP server's environment, or the Hermes profile's secrets)",
             detail={"variables": ["CLOCKIFY_API_KEY"]},
         )
     try:

@@ -7,7 +7,7 @@ from contextlib import contextmanager
 
 from pydantic import ValidationError
 
-from ...claude_runs.control import (
+from ..claude_runs.control import (
     ArgumentError,
     CapacityExceededError,
     RequestConflictError,
@@ -16,12 +16,12 @@ from ...claude_runs.control import (
     SessionBusyError,
     WorkerSpawnError,
 )
-from ...claude_runs.events import InvalidCursorError
-from ...claude_runs.inbox import ConflictError
-from ...claude_runs.rundir import UnknownTaskError
-from ...claude_runs.service import TaskNotRunningError, TaskService
-from ...config import Config
-from ..errors import ToolError
+from ..claude_runs.events import InvalidCursorError
+from ..claude_runs.inbox import ConflictError
+from ..claude_runs.rundir import UnknownTaskError
+from ..claude_runs.service import TaskNotRunningError, TaskService
+from ..config import Config
+from .errors import ToolError
 
 
 def task_service(config: Config) -> TaskService:

@@ -1,0 +1,50 @@
+"""``claude_steer``: send a running delegated task a message."""
+
+from __future__ import annotations
+
+from anyio import to_thread
+
+from ..claude_runs.inbox import MAX_MESSAGE_CHARS, SteerSubmission
+from ..claude_runs.service import SteerResult
+from ..config import Config
+from . import Handler, Operation
+from ._claude import task_errors, task_service
+
+DESCRIPTION = (
+    "Send a running delegated task an extra user message (a "
+    "correction or more context) in the same Claude conversation. "
+    "`message_id` (1-128 of [A-Za-z0-9._:-], your choice) makes it "
+    "idempotent: retrying the same id and message returns its current "
+    "state (replayed=true); the same id with another message is "
+    f"request_conflict. `message` up to {MAX_MESSAGE_CHARS} chars. "
+    "state is queued (stored, not yet sent), delivered (written to "
+    "Claude's input), in_conversation (Claude Code added it to the "
+    "conversation; mid-turn messages land after the running tool call "
+    "finishes, which is never interrupted) or not_delivered (the task "
+    "ended first; see reason). None of these proves the model acted "
+    "on it: check its later events and output. Limits and tools never "
+    "change. Track progress with claude_poll. An ended task returns "
+    "task_not_running."
+)
+
+
+def build(config: Config) -> Handler:
+    service = task_service(config)
+
+    async def claude_steer(task_id: str, message: str, message_id: str) -> SteerResult:
+        with task_errors():
+            submission = SteerSubmission.model_validate(
+                {"message": message, "message_id": message_id}
+            )
+            return await to_thread.run_sync(service.steer, task_id, submission)
+
+    return claude_steer
+
+
+OPERATION = Operation(
+    name="claude_steer",
+    capability="claude",
+    skill="claude-delegation",
+    description=DESCRIPTION,
+    build=build,
+)

@@ -13,6 +13,8 @@ src/jake_tools/
   cli/            # Click commands (keep thin)
   claude.py       # Claude Agent SDK wrapper — the only LLM seam
   claude_runs/    # delegated tasks: run dirs, worker, events, inbox, service
+  operations/     # agent-facing tool operations shared by every adapter
+  mcp/            # stdio MCP adapter (other clients)
   prompting.py    # typed Jinja prompts bound to a response model
   newsletters.py  # SharePoint Graph client
   transcription.py # HTTP client + transcript contract for transcription-service
@@ -138,10 +140,13 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
 - Missing credentials never stop startup. Clients are built per call inside
   the tool that needs them and raise `ToolError("missing_credentials", ...)`
   naming the variable, never the value.
-- `mcp/server.py` registers; `mcp/tools/<tool>.py` holds one thin handler
-  each, registered through `structured_tool`, which sends the handler's
+- `operations/<tool>.py` holds one thin handler each as an `Operation`
+  (name, capability, description, skill, `build(config)`), listed in
+  `operations/catalogue.py`; adapters never duplicate an operation's logic,
+  schema or description. `mcp/server.py` registers them (plus the MCP-only
+  `ping`) through `structured_tool`, which sends the handler's
   Pydantic result as structured content and turns a raised
-  `mcp.errors.ToolError` into an `isError` result with the stable
+  `operations.errors.ToolError` into an `isError` result with the stable
   `{code, message, detail?}` payload. Codes are the `ToolErrorCode` literal;
   do not invent new ones without adding them there. No `outputSchema` is
   advertised, by design, so error payloads never fail schema validation.
@@ -221,7 +226,7 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
 A long-running native macOS HTTP service (Swift, Hummingbird, FluidAudio
 0.17.7 pinned) that keeps Parakeet TDT v3 and the offline pyannote diarizer
 warm and turns an ordered multipart upload into one structured transcript.
-`jake_tools.transcription` is its only client and `mcp/tools/transcribe.py`
+`jake_tools.transcription` is its only client and `operations/transcribe.py`
 the only tool; both are plain HTTP and import no native dependency. Contract,
 limits, concurrency and cancellation semantics: `transcription-service/README.md`.
 

@@ -314,7 +314,7 @@ def test_the_client_path_imports_no_native_inference_dependency() -> None:
     """A proxy-only (Linux) install must not drag in Apple or ML frameworks."""
     script = (
         "import sys\n"
-        "import jake_tools.transcription, jake_tools.mcp.server, jake_tools.mcp.tools.transcribe\n"
+        "import jake_tools.transcription, jake_tools.mcp.server, jake_tools.operations.transcribe\n"
         "native = {'torch', 'coremltools', 'mlx', 'numpy', 'onnxruntime', 'ctranslate2',"
         " 'faster_whisper', 'whisper', 'mlx_whisper', 'objc', 'Foundation', 'AVFoundation'}\n"
         "print(sorted(m for m in sys.modules if m.split('.')[0] in native))\n"

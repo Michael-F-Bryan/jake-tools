@@ -12,10 +12,9 @@ import functools
 from urllib.parse import urlsplit
 
 import anyio.to_thread
-from mcp.server.mcpserver import MCPServer
 
-from ...clockify import ClockifyClient, ClockifyError
-from ...clockify_jira_sync import (
+from ..clockify import ClockifyClient, ClockifyError
+from ..clockify_jira_sync import (
     SyncApplyError,
     SyncConflictError,
     SyncPlanStaleError,
@@ -23,11 +22,11 @@ from ...clockify_jira_sync import (
     SyncReport,
     run_jira_sync,
 )
-from ...config import Config
-from ...http import UpstreamError
-from ...jira import JiraClient, JiraError, normalise_jira_key
-from ..errors import ToolError
-from ..server import structured_tool
+from ..config import Config
+from ..http import UpstreamError
+from ..jira import JiraClient, JiraError, normalise_jira_key
+from . import Handler, Operation
+from .errors import ToolError
 
 DESCRIPTION = """\
 Reconcile Jira work into Clockify projects and tasks.
@@ -53,16 +52,10 @@ TRIAGE, and Investigate are not automatically created. Existing deferred tasks
 are kept and renamed as needed; only Jira status category Done completes them.
 
 Never deletes anything in Clockify or Jira, and never writes to Jira.
-
-Before using this tool, read `skill://clockify-jira-sync` via this server's
-`read_resource` capability, unless its contents are already loaded in the current
-context. The guide defines scope, conflict handling, partial-write semantics and
-recovery rules. Reuse the loaded guide for subsequent calls.
 """
 
 
-def register(app: MCPServer, config: Config) -> None:
-    @structured_tool(app, name="clockify_jira_sync", description=DESCRIPTION)
+def build(config: Config) -> Handler:
     async def clockify_jira_sync(
         issues: list[str] | None = None,
         apply: bool = False,
@@ -112,6 +105,8 @@ def register(app: MCPServer, config: Config) -> None:
                 detail={"integration": _integration(exc).lower()},
             ) from exc
 
+    return clockify_jira_sync
+
 
 def _normalise_issue_keys(issues: list[str]) -> tuple[str, ...]:
     keys: list[str] = []
@@ -133,7 +128,7 @@ def _build_clients(config: Config) -> tuple[ClockifyClient, JiraClient]:
         raise ToolError(
             "missing_credentials",
             "Clockify credentials are not configured: set CLOCKIFY_API_KEY "
-            "in the server's environment.",
+            "where jake-tools runs (the MCP server's environment, or the Hermes profile's secrets).",
             detail={"variables": ["CLOCKIFY_API_KEY"]},
         )
     base_url = config.jira_base_url.value
@@ -152,7 +147,7 @@ def _build_clients(config: Config) -> tuple[ClockifyClient, JiraClient]:
         raise ToolError(
             "missing_credentials",
             f"Jira credentials are not configured: set {', '.join(missing)} "
-            "in the server's environment.",
+            "where jake-tools runs (the MCP server's environment, or the Hermes profile's secrets).",
             detail={"variables": missing},
         )
     # Constructor errors are configuration problems; their text may quote a
@@ -240,3 +235,12 @@ def _secret_forms(config: Config) -> set[tuple[str, str]]:
     return {
         (value, name) for value, name in forms if len(value) >= _MIN_REDACTED_LENGTH
     }
+
+
+OPERATION = Operation(
+    name="clockify_jira_sync",
+    capability="clockify",
+    skill="clockify-jira-sync",
+    description=DESCRIPTION,
+    build=build,
+)
