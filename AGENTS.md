@@ -233,6 +233,16 @@ the README's "Native Hermes plugin" section.
   APIs (`ctx.register_*`, `ctx.get_config`, `agent.secret_scope.get_secret`).
   The backend necessarily subclasses `LocalEnvironment` and relies on the
   wrapper shape probed by `probe_wrapper()`; recheck it on every Hermes pin.
+- `direnv_local` is degraded: pinned Hermes keys PTY, background stdin,
+  yield-to-background, background recovery, the `execute_code` kernel (and
+  more, `project_env.LOST_LOCAL_BEHAVIOURS`) on the literal backend `local`.
+  It stays gated: unless `settings.accept_degraded_direnv_local` is true,
+  `check_requirements` is False and `create_environment` raises. Never
+  enable it by default, weaken the gate, or "fix" it by patching Hermes
+  internals. The real fix is the upstream seam in
+  `project_env.REQUIRED_UPSTREAM_SEAM` (README "Terminal"); on every Hermes
+  pin, check whether it or provider-level local semantics have landed, and
+  update `LOST_LOCAL_BEHAVIOURS`.
 - Never read Jake's secrets from `os.environ` in the plugin: resolve them per
   call through `hermes.profile.profile_config` with Hermes' `get_secret`.
   Registration reads no secrets.
@@ -243,7 +253,9 @@ the README's "Native Hermes plugin" section.
   carried as `Config.worker_environ`; never Hermes' environment.
 - `tests/test_hermes_runtime.py` (`--slow`) is the acceptance test in a real
   installation (`JAKE_TOOLS_HERMES`, `JAKE_TOOLS_PROJECT_ENV_SCRIPT`,
-  `JAKE_TOOLS_TEST_NIXPKGS`). Without them it is blocked, not passed.
+  `JAKE_TOOLS_TEST_NIXPKGS`). Without them it is blocked, not passed. Its
+  PTY assertion under accepted `direnv_local` records a known loss; under
+  `local` it asserts PTY and stdin work.
 - `nix/hermes-plugin.nix` (flake `lib.mkHermesPlugin`) builds the package for
   an installer's interpreter, propagating only the uv.lock wheels the host
   lacks.

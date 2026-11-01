@@ -24,6 +24,7 @@ from jake_tools.claude_runs.spawn import worker_environment
 from jake_tools.config import Config, load_config
 from jake_tools.hermes.plugin import (
     SKILLS_DIR,
+    accepts_degraded_backend,
     configured_capabilities,
     register_operations,
 )
@@ -33,7 +34,10 @@ from jake_tools.hermes.profile import (
     worker_base_environ,
 )
 from jake_tools.hermes.project_env import (
+    ACCEPT_DEGRADED_SETTING,
+    LOST_LOCAL_BEHAVIOURS,
     WrapperChanged,
+    degraded_backend_message,
     insert_project_env,
     wants_project_env,
 )
@@ -267,6 +271,25 @@ def test_capability_settings_are_validated() -> None:
         configured_capabilities(["everything"])
     with pytest.raises(ValueError, match="list of names"):
         configured_capabilities("claude")
+
+
+def test_the_degraded_backend_must_be_accepted_explicitly() -> None:
+    assert accepts_degraded_backend(None) is False
+    assert accepts_degraded_backend(False) is False
+    assert accepts_degraded_backend(True) is True
+    for malformed in ("true", 1, ["yes"]):
+        with pytest.raises(ValueError, match="must be a boolean"):
+            accepts_degraded_backend(malformed)
+
+
+def test_the_degraded_backend_says_what_it_loses_and_how_to_choose() -> None:
+    message = degraded_backend_message()
+    for behaviour in LOST_LOCAL_BEHAVIOURS:
+        assert behaviour in message
+    for named in ("PTY", "stdin", "yield-to-background", "recovery", "execute_code"):
+        assert any(named in behaviour for behaviour in LOST_LOCAL_BEHAVIOURS)
+    assert "terminal.backend local" in message
+    assert f"settings.{ACCEPT_DEGRADED_SETTING}: true" in message
 
 
 # --- project environment insertion -----------------------------------------

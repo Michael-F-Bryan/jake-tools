@@ -2,13 +2,13 @@
 
 Local execution exactly as Hermes' ``local`` backend does it, plus the
 project environment of each terminal command's directory; see
-:mod:`.project_env`. Select it with ``terminal.backend: direnv_local``.
-
-What a plugin backend cannot have in the pinned Hermes: core decides PTY
-sessions, stdin to background processes, yield-to-background and the
-in-process ``execute_code`` kernel by the literal backend name ``local``.
-Background commands still run (through the process registry's sandbox path:
-output is polled from a log, and ``pty=true`` is not honoured).
+:mod:`.project_env`. Selected with ``terminal.backend: direnv_local``, it runs
+only when the profile also sets ``settings.accept_degraded_direnv_local``:
+pinned Hermes gives a plugin backend none of the behaviours it keys on the
+literal name ``local`` (:data:`~.project_env.LOST_LOCAL_BEHAVIOURS`).
+Otherwise its requirements are unmet and Hermes withholds the terminal tool
+with that reason. Registered either way: its ``strip_env_keys`` keep Jake's
+credentials out of the subprocesses Hermes scrubs, whichever backend runs.
 """
 
 from __future__ import annotations
@@ -28,15 +28,15 @@ from tools.environments.local import (  # pyright: ignore[reportMissingImports]
 
 from .profile import SECRET_NAMES
 from .project_env import (
+    BACKEND_NAME,
     PROJECT_ENV_SCRIPT_VARIABLE,
     WrapperChanged,
+    degraded_backend_message,
     insert_project_env,
     wants_project_env,
 )
 
 log = logging.getLogger(__name__)
-
-BACKEND_NAME = "direnv_local"
 
 UNSET_SECRETS = f"unset {' '.join(sorted(SECRET_NAMES))} 2>/dev/null"
 
@@ -98,16 +98,24 @@ class DirenvLocalEnvironment(LocalEnvironment):  # pyright: ignore[reportUntyped
 
 
 class DirenvLocalProvider(TerminalEnvironmentProvider):  # pyright: ignore[reportUntypedBaseClass]
+    """``direnv_local``, usable only when ``accept_degraded`` (see module doc)."""
+
     name = BACKEND_NAME
-    display_name = "Local with project environments"
+    display_name = "Local with project environments (degraded)"
     is_remote = False
     is_container = False
+
+    def __init__(self, *, accept_degraded: bool) -> None:
+        super().__init__()
+        self.accept_degraded = accept_degraded
 
     @property
     def description(self) -> str:
         return (
             "Run commands on this host, loading each directory's approved direnv "
-            "project environment before the command."
+            "project environment before the command. Degraded: no PTY, background "
+            "stdin, yield-to-background, background recovery or execute_code "
+            "kernel; prefer local."
         )
 
     @property
@@ -120,8 +128,9 @@ class DirenvLocalProvider(TerminalEnvironmentProvider):  # pyright: ignore[repor
 
     @property
     def strip_env_keys(self) -> frozenset:
-        # Hermes strips these from every subprocess it spawns, whichever
-        # backend is selected: Jake's credentials are for its tools only.
+        # Hermes strips these from the subprocesses it scrubs (background,
+        # PTY and helper spawns), whichever backend is selected: Jake's
+        # credentials are for its tools only.
         return SECRET_NAMES
 
     @property
@@ -129,9 +138,12 @@ class DirenvLocalProvider(TerminalEnvironmentProvider):  # pyright: ignore[repor
         return "this host, with the working directory's project environment loaded"
 
     def is_available(self) -> bool:
-        return project_env_script() is not None
+        return self.accept_degraded and project_env_script() is not None
 
     def check_requirements(self, config: dict[str, Any]) -> bool:
+        if not self.accept_degraded:
+            log.error("%s", degraded_backend_message())
+            return False
         script = project_env_script()
         if script is None:
             log.error(
@@ -157,10 +169,13 @@ class DirenvLocalProvider(TerminalEnvironmentProvider):  # pyright: ignore[repor
         container_config: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> DirenvLocalEnvironment:
+        if not self.accept_degraded:
+            raise RuntimeError(degraded_backend_message())
         script = project_env_script()
         if script is None:
             raise RuntimeError(
                 f"{PROJECT_ENV_SCRIPT_VARIABLE} does not name the project environment "
                 f"loader; the {BACKEND_NAME} backend cannot run commands"
             )
+        log.warning("%s (accepted by this profile)", degraded_backend_message())
         return DirenvLocalEnvironment(script, cwd=cwd, timeout=timeout)

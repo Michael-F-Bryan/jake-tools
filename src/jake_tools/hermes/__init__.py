@@ -10,9 +10,12 @@ group, so Hermes discovers it in whatever Python environment its installer
   unset), as native tools of the same names as the MCP server's;
 - registers the packaged skills those operations point to, from the same
   ``skills/`` sources the MCP server serves, as ``jake-tools:<skill>``;
-- registers the ``direnv_local`` terminal backend, which does nothing unless
-  ``terminal.backend`` selects it, and whose ``strip_env_keys`` keep Jake's
-  credentials out of every subprocess the agent spawns.
+- registers the ``direnv_local`` terminal backend, whose ``strip_env_keys``
+  keep Jake's credentials out of the subprocesses Hermes scrubs. Selecting it
+  is degraded in pinned Hermes (no PTY, background stdin, yield-to-background,
+  background recovery or ``execute_code`` kernel), so it refuses to run unless
+  ``settings.accept_degraded_direnv_local`` is true; see
+  :mod:`jake_tools.hermes.project_env`.
 
 Handlers run inside Hermes. Credentials come from the owning profile through
 ``agent.secret_scope.get_secret`` on every call, are consumed by the

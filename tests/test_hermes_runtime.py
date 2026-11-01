@@ -276,6 +276,103 @@ def test_native_tools_use_only_the_owning_profiles_credentials(
     assert "PYTHONPATH" in worker_env and "HOME" in worker_env
 
 
+def _wait(session: str) -> str:
+    return f'call("process", {{"action": "wait", "session_id": {session}["session_id"], "timeout": 60}})'
+
+
+@needs_hermes
+def test_the_degraded_backend_refuses_to_run_unless_accepted(
+    hermes: Hermes, tmp_path: Path
+) -> None:
+    loader = tmp_path / "loader.sh"
+    loader.write_text("true\n")
+    hermes.configure(
+        f"""
+        plugins:
+          enabled: [jake-tools]
+        terminal:
+          backend: direnv_local
+          cwd: {tmp_path}
+        """
+    )
+    out = hermes.run(
+        """
+        import logging
+        records = []
+        handler = logging.Handler()
+        handler.emit = records.append
+        logging.getLogger("jake_tools").addHandler(handler)
+        from tools.terminal_tool import check_terminal_requirements
+        from tools.terminal_tool_backends import terminal_backend_unavailable_reason
+        emit("available", check_terminal_requirements())
+        emit("reason", terminal_backend_unavailable_reason())
+        emit("logged", [r.getMessage() for r in records])
+        emit("terminal", call("terminal", {"command": "echo ran"}))
+        """,
+        JAKE_TOOLS_PROJECT_ENV_SCRIPT=str(loader),
+    )
+    assert out["available"] is False
+    assert "direnv_local" in str(out["reason"])
+    logged = " ".join(map(str, out["logged"]))  # type: ignore[arg-type]
+    for named in ("PTY", "stdin", "yield-to-background", "execute_code"):
+        assert named in logged
+    assert "settings.accept_degraded_direnv_local: true" in logged
+    terminal = out["terminal"]
+    assert isinstance(terminal, dict)
+    assert "ran" not in str(terminal.get("output", "")).splitlines()
+    assert "accept_degraded_direnv_local" in json.dumps(terminal)
+
+
+@needs_hermes
+def test_under_the_local_backend_the_plugin_keeps_local_behaviour(
+    hermes: Hermes, tmp_path: Path
+) -> None:
+    hermes.configure(
+        f"""
+        plugins:
+          enabled: [jake-tools]
+          entries:
+            jake-tools:
+              settings:
+                capabilities: [clockify]
+        terminal:
+          backend: local
+          cwd: {tmp_path}
+        """
+    )
+    out = hermes.run(
+        f"""
+        # Each PTY command outlives its output by a second: pinned Hermes' PTY
+        # reader can drop what a process writes just before it exits, with or
+        # without this plugin (measured; not what this test is about).
+        pty = call("terminal", {{"command": "tty; sleep 1", "background": True, "pty": True}})
+        emit("pty", {_wait("pty")})
+        reader = call("terminal", {{"command": "echo ready; read line; echo got:$line; sleep 1", "background": True, "pty": True}})
+        # Input that arrives before the program reads is discarded, as on any terminal.
+        for _ in range(300):
+            if "ready" in call("process", {{"action": "poll", "session_id": reader["session_id"]}}).get("output_preview", ""):
+                break
+            time.sleep(0.1)
+        emit("submit", call("process", {{"action": "submit", "session_id": reader["session_id"], "data": "hello"}}))
+        emit("stdin", {_wait("reader")})
+        bg = call("terminal", {{"command": "env | grep -c '^CLOCKIFY_API_KEY=' || true", "background": True}})
+        emit("background_env", {_wait("bg")})
+        """,
+        CLOCKIFY_API_KEY="launch-profile-secret",
+    )
+
+    def output(label: str) -> str:
+        value = out[label]
+        assert isinstance(value, dict), value
+        return str(value.get("output", ""))
+
+    assert "/dev/pts/" in output("pty")
+    assert "got:hello" in output("stdin")
+    # The provider's strip_env_keys reach Hermes' background spawns under any
+    # backend. (Pinned Hermes does not apply them to foreground local runs.)
+    assert output("background_env").strip() == "0"
+
+
 def _project(root: Path, name: str, shell: str, envrc: bool = True) -> Path:
     project = root / name
     project.mkdir(parents=True)
@@ -304,6 +401,10 @@ def test_terminal_commands_load_the_directorys_project_environment(
         f"""
         plugins:
           enabled: [jake-tools]
+          entries:
+            jake-tools:
+              settings:
+                accept_degraded_direnv_local: true
         terminal:
           backend: direnv_local
           cwd: {tmp_path}
@@ -402,8 +503,8 @@ def test_terminal_commands_load_the_directorys_project_environment(
     assert background["status"] == "exited" and background["exit_code"] == 0
     assert "bg:loaded" in str(background["output"])
     assert out["label"] == "sleep 1; echo bg:$PROJECT_PROBE"
-    # Pinned Hermes runs PTY sessions for the literal `local` backend only;
-    # a plugin backend's background commands get pipes.
+    # One of the losses the profile accepted: pinned Hermes runs PTY
+    # sessions for the literal `local` backend only.
     pty = out["pty"]
     assert isinstance(pty, dict) and "not a tty" in str(pty["output"])
     preview = str(out["preview"])

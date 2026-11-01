@@ -12,6 +12,7 @@ from ..config import Config
 from ..operations import Capability, Operation
 from ..operations.catalogue import OPERATIONS
 from .profile import profile_config
+from .project_env import ACCEPT_DEGRADED_SETTING
 from .tools import ConfigFactory, make_handler, signature_metadata, tool_schema
 
 log = logging.getLogger(__name__)
@@ -23,7 +24,13 @@ CAPABILITIES: tuple[str, ...] = get_args(Capability)
 def register_plugin(ctx: Any) -> None:
     from .terminal import DirenvLocalProvider
 
-    ctx.register_terminal_environment_provider(DirenvLocalProvider())
+    ctx.register_terminal_environment_provider(
+        DirenvLocalProvider(
+            accept_degraded=accepts_degraded_backend(
+                ctx.get_config(ACCEPT_DEGRADED_SETTING)
+            )
+        )
+    )
     # Registration needs only non-secret facts (signatures, which endpoints
     # are configured); the profile's secrets are read per call.
     register_operations(
@@ -79,6 +86,17 @@ def configured_capabilities(value: object) -> tuple[Capability, ...]:
             f"known: {', '.join(CAPABILITIES)}"
         )
     return tuple(c for c in CAPABILITIES if c in value)  # type: ignore[misc]
+
+
+def accepts_degraded_backend(value: object) -> bool:
+    """``settings.accept_degraded_direnv_local``, validated; unset is false."""
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"jake-tools settings.{ACCEPT_DEGRADED_SETTING} must be a boolean"
+        )
+    return value
 
 
 def enabled_operations(

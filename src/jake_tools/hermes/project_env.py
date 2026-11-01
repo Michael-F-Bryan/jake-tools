@@ -1,4 +1,5 @@
-"""Where and when the ``direnv_local`` backend loads a project environment.
+"""Where and when the ``direnv_local`` backend loads a project environment,
+and why it is gated.
 
 Hermes' local backend runs each command as a bash script that restores the
 session snapshot, enters the command's directory with
@@ -15,6 +16,15 @@ passes ``bounded_capture=True``) and background launches (wrapped by the
 process registry). Hermes' internal commands (output pollers, kills, file
 reads) run as plain local commands, so a broken or unapproved project
 cannot stop it watching a background process.
+
+The backend is degraded, and so gated. Pinned Hermes (5b32cfc) decides
+several behaviours by the literal backend name ``local``, which no plugin
+backend can have (built-in names are reserved), and offers no seam that loads
+a project environment under ``local`` without rewriting the command it
+previews and approves. :data:`LOST_LOCAL_BEHAVIOURS` lists what selecting this
+backend gives up; it refuses to run until the profile accepts that
+explicitly (:data:`ACCEPT_DEGRADED_SETTING`). :data:`REQUIRED_UPSTREAM_SEAM`
+is the Hermes change that would make it unnecessary.
 """
 
 from __future__ import annotations
@@ -23,6 +33,45 @@ import re
 import shlex
 from collections.abc import Mapping
 from typing import Any
+
+BACKEND_NAME = "direnv_local"
+
+ACCEPT_DEGRADED_SETTING = "accept_degraded_direnv_local"
+"""``plugins.entries.jake-tools.settings.<this>: true`` lets the profile run
+``direnv_local`` despite :data:`LOST_LOCAL_BEHAVIOURS`. Unset or false, the
+backend reports its requirements unmet, so Hermes withholds the terminal tool
+and says why, rather than running with less than ``local`` does."""
+
+LOST_LOCAL_BEHAVIOURS: tuple[str, ...] = (
+    "PTY sessions (pty=true runs on a pipe)",
+    "stdin to background processes (process write/submit/close need a PTY)",
+    "yield-to-background of a running foreground command",
+    "recovery of background processes after a Hermes restart",
+    "the persistent execute_code session kernel",
+    "the local browser's access to private-network URLs",
+    "vision reads of arbitrary host files",
+    "terminal.local_persistent",
+)
+"""What pinned Hermes keys on the literal backend name ``local``."""
+
+REQUIRED_UPSTREAM_SEAM = (
+    "a Hermes hook that sources a plugin-supplied prelude for the local "
+    "backend's agent-issued commands, after the snapshot is restored and the "
+    "directory entered and before the command runs, in both the foreground "
+    "wrapper and background/PTY spawns, without changing the command that is "
+    "previewed, approved or recorded"
+)
+
+
+def degraded_backend_message() -> str:
+    """Why ``direnv_local`` will not run, for Hermes' log and the user."""
+    return (
+        f"terminal.backend {BACKEND_NAME} is degraded in this Hermes: it loses "
+        f"{'; '.join(LOST_LOCAL_BEHAVIOURS)}. Use terminal.backend local, or set "
+        f"plugins.entries.jake-tools.settings.{ACCEPT_DEGRADED_SETTING}: true to "
+        f"accept that. A fix needs {REQUIRED_UPSTREAM_SEAM}."
+    )
+
 
 PROJECT_ENV_SCRIPT_VARIABLE = "JAKE_TOOLS_PROJECT_ENV_SCRIPT"
 """Names the shell file to source in the command's directory. The installer
