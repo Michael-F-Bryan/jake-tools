@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from .claude import DEFAULT_MODEL, EffortLevel
 from .clockify import CLOCKIFY_API_ROOT
@@ -198,6 +198,15 @@ class Config(BaseModel):
     transcription_api_token: Resolved[str | None]
     transcription_timeout_seconds: Resolved[float]
 
+    worker_environ: Mapping[str, str] | None = Field(
+        default=None, repr=False, exclude=True
+    )
+    """The base environment delegated-task workers are derived from, when it
+    must not be this process's own: an in-process host (Hermes) whose
+    environment holds unrelated credentials passes an allowlist. ``None``
+    (the MCP server and CLI) means the process environment. Not a setting:
+    ``doctor`` never prints it."""
+
     def settings(self) -> tuple[Resolved[Any], ...]:
         """Every setting, in a stable order, for ``doctor`` to print."""
         return (
@@ -273,13 +282,15 @@ def load_config(
     environ: Mapping[str, str] | None = None,
     *,
     overrides: Mapping[str, Any] | None = None,
+    worker_environ: Mapping[str, str] | None = None,
 ) -> Config:
     """Resolve every setting from ``environ`` (default: the process environment).
 
     ``overrides`` maps setting names (``"claude.runs_dir"``) to values a CLI
     flag supplied; they win over everything. Raises :class:`ConfigError` when
     a config file cannot be parsed or a value has the wrong type; a missing
-    file or variable is never an error.
+    file or variable is never an error. ``worker_environ`` is carried through
+    unchanged as :attr:`Config.worker_environ`.
     """
     env = dict(os.environ if environ is None else environ)
     flags = dict(overrides or {})
@@ -398,6 +409,7 @@ def load_config(
             ),
             DEFAULT_TRANSCRIPTION_TIMEOUT_SECONDS,
         ),
+        worker_environ=None if worker_environ is None else dict(worker_environ),
     )
 
 

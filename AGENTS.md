@@ -221,6 +221,33 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   as `skill://<name>` resources, and are installed by `install-skills`. They
   describe what the tools actually return.
 
+## Hermes plugin (`jake_tools.hermes`)
+
+The native Hermes adapter over the same operations; user-facing description in
+the README's "Native Hermes plugin" section.
+
+- Only `hermes/terminal.py` and the small accessors in `hermes/plugin.py`
+  import Hermes (`agent.*`, `tools.*`, `hermes_constants`), lazily or under
+  `# pyright: ignore[reportMissingImports]`; everything else is plain and
+  tested hermetically in `tests/test_hermes_plugin.py`. Use documented plugin
+  APIs (`ctx.register_*`, `ctx.get_config`, `agent.secret_scope.get_secret`).
+  The backend necessarily subclasses `LocalEnvironment` and relies on the
+  wrapper shape probed by `probe_wrapper()`; recheck it on every Hermes pin.
+- Never read Jake's secrets from `os.environ` in the plugin: resolve them per
+  call through `hermes.profile.profile_config` with Hermes' `get_secret`.
+  Registration reads no secrets.
+- Handlers are synchronous (Hermes' async bridge has a fixed wait) and return
+  JSON strings; errors are `{"error", "code", "message", "detail"}` from the
+  same `ToolError`s.
+- Delegated workers get `hermes.profile.worker_base_environ` (an allowlist),
+  carried as `Config.worker_environ`; never Hermes' environment.
+- `tests/test_hermes_runtime.py` (`--slow`) is the acceptance test in a real
+  installation (`JAKE_TOOLS_HERMES`, `JAKE_TOOLS_PROJECT_ENV_SCRIPT`,
+  `JAKE_TOOLS_TEST_NIXPKGS`). Without them it is blocked, not passed.
+- `nix/hermes-plugin.nix` (flake `lib.mkHermesPlugin`) builds the package for
+  an installer's interpreter, propagating only the uv.lock wheels the host
+  lacks.
+
 ## Transcription service (`transcription-service/`)
 
 A long-running native macOS HTTP service (Swift, Hummingbird, FluidAudio

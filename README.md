@@ -16,6 +16,71 @@ separate resources and are not inlined into routine skill reads.
 uv tool install -e .
 ```
 
+## Native Hermes plugin
+
+The same operations the MCP server serves are also a native Hermes plugin,
+`jake-tools` (entry point `jake_tools.hermes` in `hermes_agent.plugins`).
+Other clients keep using the CLI and MCP server unchanged. Installed into
+Hermes' own Python environment (nixfiles does this with the flake's
+`lib.mkHermesPlugin`), it loads where a profile lists `jake-tools` in
+`plugins.enabled`, and registers:
+
+- **Tools**, for the capabilities in
+  `plugins.entries.jake-tools.settings.capabilities` (`claude`, `clockify`,
+  `transcription`; unset means none). They have the MCP tools' names,
+  schemas, results and error codes; failures are
+  `{"error", "code", "message", "detail"}`. `transcribe` also needs
+  `transcription.api_base_url`. `ping` stays MCP-only.
+- **Skills**, `jake-tools:<skill>` (via `skill_view`), from the same packaged
+  sources, for the granted tools only.
+- **The `direnv_local` terminal backend**, inert unless
+  `terminal.backend: direnv_local` selects it.
+
+Credentials are read per call from the owning profile with Hermes'
+`agent.secret_scope.get_secret` (its `.env` and secret sources), consumed by
+the operation and never returned. The launching process's environment is not
+used for Jake's secrets, so one profile never gets another's. Delegated Claude
+workers remain separate processes, spawned on Hermes' interpreter with only
+`PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `TERM`, `SHELL`, `TMPDIR`, `XDG_*`,
+`NIX_LD`, `NIX_LD_LIBRARY_PATH` and `PYTHONPATH` from Hermes' environment (what
+the MCP server's worker saw), never Hermes' own credentials. Runs share
+`$XDG_STATE_HOME/jake-tools/runs` with the MCP server. Transcription stays a
+native host service reached over HTTP.
+
+### The `direnv_local` backend
+
+Hermes' local execution, plus each terminal command's project environment:
+after Hermes restores its shell snapshot and enters the command's directory,
+the backend sources the installer's loader (`JAKE_TOOLS_PROJECT_ENV_SCRIPT`,
+which runs direnv with nix-direnv) in the same shell, then runs the command.
+The tool arguments Hermes previews, approves and records are the command as
+written. Directory changes and exports persist; the next command outside the
+project unloads it. A present but unapproved or failing `.envrc` makes the
+command fail (exit 1) with direnv's reason and does not run it. Because the
+loader runs in the starting directory, leave a broken project with
+`workdir` set elsewhere (e.g. `cd /` with `workdir: /`). Only the agent's
+terminal commands (foreground and background) load projects; Hermes'
+internal polls, kills and file reads do not. Jake's credential variables are
+unset in every script the backend runs and listed in `strip_env_keys` for
+Hermes' other spawns. Approval guards behave as for `local`.
+
+Pinned Hermes (`5b32cfc`) decides some behaviour by the literal backend name
+`local`, so under any plugin backend: background commands run through the
+process registry's sandbox path (output polled from a log), `pty=true` is not
+honoured, background processes take no stdin and are not recovered after a
+gateway restart, a foreground command cannot yield to the background, and
+`execute_code` uses its remote path rather than the session kernel. Under
+`local` itself, Hermes does not strip plugin-declared credentials from
+foreground commands; keep Jake's credentials out of the process environment
+there.
+
+Tests: `tests/test_hermes_plugin.py` (hermetic) runs by default.
+`tests/test_hermes_runtime.py` is the acceptance test inside a real
+installation: run `uv run pytest --slow tests/test_hermes_runtime.py` with
+`JAKE_TOOLS_HERMES` (a built Hermes launcher including this package),
+`JAKE_TOOLS_PROJECT_ENV_SCRIPT` and `JAKE_TOOLS_TEST_NIXPKGS` (a nixpkgs flake
+reference); without them it reports itself blocked.
+
 ## Development
 
 Install dependencies and the git hooks once:
