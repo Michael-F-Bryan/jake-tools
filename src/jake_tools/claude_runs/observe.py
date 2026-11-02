@@ -565,9 +565,13 @@ def outcome_of(
         handoff_cut = handoff_cut or handoff.text_chars > len(handoff_shown or "")
     error, _, error_cut = clip(state.error, ERROR_CHARS)
     narration = clip(last_narration, NARRATION_CHARS)[0]
+    # One route: the final text first, then whatever else was cut (the
+    # other parts take the same call with their own ``part``).
     retrieve = None
-    if (full is not None and not inline) or error_cut:
+    if full is not None and not inline:
         retrieve = result_route(state.task_id, "final_text")
+    elif error_cut:
+        retrieve = result_route(state.task_id, "error")
     elif handoff_cut:
         retrieve = result_route(state.task_id, "handoff")
     return Outcome(

@@ -547,3 +547,34 @@ def test_the_worker_never_writes_an_older_line_over_a_newer_one(tmp_path: Path) 
     progress.flush()
 
     assert read_state(run_dir).status_message == "Answer received; continuing"
+
+
+async def test_a_cut_error_names_the_route_that_returns_it_whole(
+    tmp_path: Path,
+) -> None:
+    from jake_tools.claude_runs.rundir import update_state
+
+    service, run_dir = _service_run(tmp_path)
+    error = "E" * 5_000
+    update_state(
+        run_dir,
+        lambda s: s.model_copy(
+            update={
+                "status": "failed",
+                "termination_reason": "sdk_error",
+                "error": error,
+            }
+        ),
+    )
+
+    result = (await service.poll(run_dir.name, wait_seconds=0)).result
+    assert result is not None and result.final_text is None
+    assert result.error is not None and len(result.error) < len(error)
+    assert result.retrieve is not None
+    assert result.retrieve.arguments == {
+        "task_id": run_dir.name,
+        "view": "result",
+        "part": "error",
+    }
+    chunk = service.result_text(run_dir.name, part="error")
+    assert chunk.text == error and chunk.next_offset is None

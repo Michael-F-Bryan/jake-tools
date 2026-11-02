@@ -43,7 +43,7 @@ Mapping (domain -> protocol):
   ``pollIntervalMs`` is a suggestion.
 
 Not part of the standard, and not projected: ``claude_poll``'s bounded
-wait and cursor-paged events, and ``claude_steer``'s arbitrary messages.
+wait and compact observations, and ``claude_steer``'s arbitrary messages.
 They remain domain extensions on the ordinary tools.
 """
 

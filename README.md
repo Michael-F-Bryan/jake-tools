@@ -137,15 +137,19 @@ so they survive server restarts:
   and `resume_task_id` to continue a finished task's conversation as a new
   task. [docs/claude-tools.md](docs/claude-tools.md) records the evidence
   behind this, and why there is no artifact-publishing tool.
-- `claude_poll` waits at most 25 s for change and returns state plus
-  cursor-paged normalised events (no private thinking). `claude_transcript`
-  returns larger pages.
+- `claude_poll` waits (up to 120 s) until the task needs its caller (a
+  question, the end, a new denial or warning, undeliverable steering) and
+  returns a compact snapshot with an observation token: progress, pending
+  questions, the changes since the caller's token, and the bounded result.
+  It never pages history: `claude_transcript` does (no private thinking).
 - `claude_steer` adds an idempotent message to the running conversation and
   reports delivery honestly (`queued`, `delivered`, `in_conversation`,
   `not_delivered`).
 - `claude_update` answers the worker's questions.
-- `claude_status` returns a snapshot; `claude_cancel` stops the whole
-  process tree.
+- `claude_status` returns the detail (configuration as requested,
+  normalised and exposed; usage; denials; messages) or the full result text
+  in chunks; `claude_cancel` stops the whole process tree and says whether
+  termination was confirmed (never a rollback).
 
 At most two tasks run at once. The packaged
 [`claude-delegation` skill](src/jake_tools/skills/claude-delegation/SKILL.md)

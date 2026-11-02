@@ -25,8 +25,9 @@ renamed):
 ``events.jsonl``
     One :class:`~.events.Event` per line, append-only, numbered from 1: the
     normalised public record (narration, tool activity, steering,
-    clarification, results) that ``claude_poll`` and ``claude_transcript``
-    page through by cursor. Never holds thinking. ``.events.lock``
+    clarification, results) that ``claude_transcript`` pages through by
+    cursor and ``claude_poll`` observes by token (:mod:`.observe`). Never
+    holds thinking. ``.events.lock``
     serialises appends from the worker and the server.
 ``messages/<message_id>.json``
     :class:`SteerMessage`: one steering message and its delivery state.

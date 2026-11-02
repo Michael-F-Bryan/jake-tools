@@ -660,10 +660,11 @@ async def test_cli_dry_run_json_equals_the_tool_preview(
 
     assert cli.exit_code == 0, cli.output
     assert json.loads(cli.output) == _ok(tool_result)
-    # Same serialisation too: the tool's text content is the CLI's stdout.
+    # The same payload in the tool's text content (compact JSON for a model
+    # host) as on the CLI's stdout (indented for a person).
     text = tool_result.content[0]
     assert isinstance(text, TextContent)
-    assert cli.output == f"{text.text}\n"
+    assert json.loads(text.text) == json.loads(cli.output)
     assert upstream.writes == []
 
 

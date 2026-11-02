@@ -78,11 +78,39 @@ Each refused call is in the result message's `permission_denials`
 CLI's error result for the same call does: "Permission to use Write has
 been denied because Claude Code is running in don't ask mode. ...". The
 worker joins the two by `tool_use_id` into `permission_denials` on the
-task view (`requested`, `runtime_message`), with `limits` as the
-effective policy. Nothing else is inferred: a denial is reported only once
-its turn's result arrives, so a turn still running may have unreported
-ones. `tests/fake_claude.py`'s `deny` scenario replays that shape for the
+task view (`requested`, `runtime_message`, `source`). The request's rules
+are reported as requested (`limits.allowed_tools`, absent when omitted)
+and as passed (`limits.approval_rules`), with `limits.exposed_tools` from
+the session's `init`; whether a rule approved a call is only known from
+the runtime's own reports. On 2.1.293 a denial is known when its error
+result arrives (inferred from its text) and confirmed by its turn's
+result. `tests/fake_claude.py`'s `deny` scenario replays that shape for the
 deterministic tests; it proves the plumbing, not the runtime's decisions.
+
+### Re-checked on CLI 2.1.309 (2026-11-02)
+
+Haiku, `dontAsk`, no settings files, through the real server and worker
+(probe evidence kept outside the repository):
+
+- `tools=["Write"]`, `allowed_tools=["Write(./allowed/**)"]`: a `Write`
+  to `allowed/a.txt` and one to `outside.txt` were **both** denied, so a
+  `Write(...)` path rule still approves nothing; write path rules as
+  `Edit(...)`. The server passes the rule through as requested and reports
+  it so (`config.allowed_tools`); it does not rewrite or second-guess it.
+- 2.1.309 reports each refusal as it happens, as a `system` message with
+  subtype `permission_denied`: `tool_name`, `tool_use_id`,
+  `decision_reason_type` (`mode` here: nothing approved it under `dontAsk`)
+  and the same `message` the model gets. The worker records the denial
+  from it at once (`source: runtime`, `runtime_reason`) instead of waiting
+  for the turn's result, and the result's own record of the same call is
+  not counted again.
+- With `tools=["Bash"]` and `allowed_tools` omitted (Bash approved
+  outright), `touch` and `rm -rf` outside the working directory ran, and a
+  `cd` outside it was undone ("Shell cwd was reset"). A `sleep 40 && echo`
+  call was refused by the CLI's own guard with
+  `<tool_use_error>Blocked: sleep 40 followed by: …` and **no** denial
+  record or system message. The worker records such a call from those
+  exact error openings, labelled `source: inferred_from_tool_error`.
 
 ## Artifact publishing: blocked, no tool shipped
 

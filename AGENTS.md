@@ -155,9 +155,13 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   the worker is its own process group and outlives the server. No queue, no
   database. The worker holds one streaming conversation
   (`ClaudeAgent.converse`). It writes normalised `events.jsonl`, which
-  `claude_poll`/`claude_transcript` page by `<task_id>:<seq>:<offset>`
-  cursor. It pumps `messages/` (steering) into the conversation and serves
-  the opt-in `ask_parent` local tool from `inputs/`.
+  `claude_transcript` pages by `<task_id>:<seq>:<offset>` cursor.
+  `claude_poll` never pages: it returns a compact snapshot
+  (`claude_runs/observe.py`) and an opaque, non-consuming observation token
+  (a position in the same log) and reports only meaningful changes since
+  it; questions and ends always wake it, routine activity never does
+  (unless `until=progress`). It pumps `messages/` (steering) into the
+  conversation and serves the opt-in `ask_parent` local tool from `inputs/`.
   `claude_runs.service.TaskService` is the one service every `claude_*` tool
   calls. `claude_runs.tasks_protocol` projects it onto MCP Tasks 2026-07-28,
   and `mcp/tasks.py` serves that projection natively through `mcp`'s
@@ -171,7 +175,8 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   `completed` tasks with an `isError` result; protocol `failed` is never
   produced. Steering, bounded polls and transcripts stay ordinary tools.
   No `notifications/tasks` subscriptions.
-- Real CLI semantics this relies on (CLI 2.1.293, see the module docs):
+- Real CLI semantics this relies on (CLI 2.1.293, re-checked on 2.1.309;
+  see the module docs):
   - A user message sent mid-turn joins the turn after the running tool
     call. `--replay-user-messages` echoes it with its `uuid`.
   - `num_turns`/`--max-turns` restart per prompt, so the worker enforces
@@ -181,19 +186,32 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   - `--tools` drops unknown or unavailable names without an error, and
     reports `Agent` as `Task`. The worker fails a session that lacks a
     requested tool as `tools_unavailable`.
+  - (2.1.309) Resuming a session whose last run left a background task,
+    the CLI answers that task's end with a zero-turn `result` before it
+    takes the new prompt. The worker tags the brief with its UUID and
+    ignores a zero-turn result that comes before the brief's echo.
+  - (2.1.309) A refusal is reported as it happens (`system`
+    `permission_denied`, with `decision_reason_type`); some calls are
+    refused by the CLI's own guard with only `Blocked: …` error text.
 - After a `max_turns` stop the worker asks for one handoff
   (`claude_runs/handoff.py`): the same session resumed through
   `ClaudeAgent` with no tools, `max_turns=1`, capped output, inside the
   task's deadline, cancel scope and remaining budget (skipped when spend is
   unknown). It is a separate worker-reported record; the outcome stays
-  `failed`/`max_turns`. `permission_denials` on the task view join the
-  result's denials with the CLI's error result for that call; nothing is
-  inferred. `claude_list` pages run directories newest first. The server
-  sends no notifications; callers poll.
+  `failed`/`max_turns`. Each refused call is recorded once, with its
+  source: `runtime` (the real-time message or the result's record) or
+  `inferred_from_tool_error` (only the exact observed error openings in
+  `worker.INFERRED_REFUSAL`). `claude_list` pages run directories newest
+  first. The server sends no notifications; callers poll.
 - Contract models the tools return live with their domain, not in `mcp/`:
   `clockify_jira_sync.SyncReport` (also what `clockify jira-sync --json`
   prints), `claude_runs.RunState`/`ClaudeStartResult`, and the
-  `claude_runs.service` results (`PollResult`, `SteerResult`, …).
+  `claude_runs.service` results (`Observation`, `TaskView`, `SteerResult`,
+  …). `claude_*` tools send compact JSON and omit null fields
+  (`structured_tool(omit_none=True)`), so every nullable result field needs
+  a default (a test walks the models). A framework argument-validation
+  failure is converted to `invalid_argument` (`server.JakeMCPServer`), so
+  input-schema bounds and enums keep the error contract.
 - Tests: `tests/conftest.py` provides `mcp_server`/`mcp_env` fixtures that
   spawn the real server over stdio under an isolated `HOME` with no
   secrets. Protocol and result-shape tests go through them. Process
