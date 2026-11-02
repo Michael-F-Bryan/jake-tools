@@ -60,6 +60,7 @@ from .models import (
     TerminationReason,
 )
 from .observe import (
+    QUESTION_CHARS,
     QUESTIONS_SHOWN,
     InvalidTokenError,
     Observation,
@@ -782,6 +783,13 @@ class _Watch:
             cancel_requested_at=state.cancel_requested_at,
             pending_questions=[Question.of(r) for r in pending[:QUESTIONS_SHOWN]],
             pending_questions_total=len(pending),
+            pending_questions_retrieve=Retrieval(
+                tool="claude_status",
+                arguments={"task_id": self.task_id, "view": "detail"},
+            )
+            if len(pending) > QUESTIONS_SHOWN
+            or any(len(r.question) > QUESTION_CHARS for r in pending)
+            else None,
             permission_denials_total=state.permission_denials_total,
             changes=self.scanner.changes() if scanned else None,
             result=result,

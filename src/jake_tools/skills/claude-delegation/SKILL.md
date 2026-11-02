@@ -145,7 +145,9 @@ It waits up to `wait_seconds` (default 30, max 120; Hermes allows a call
 - `progress` (one line), `last_activity_at` (real activity, not a
   heartbeat), `running_tool` (the call it is waiting on, and since when),
   `turns_used`/`max_turns`;
-- `pending_questions` (every open one, until answered or expired);
+- `pending_questions` (up to five open questions, 2,000 characters each),
+  `pending_questions_total`, and `pending_questions_retrieve` (the exact
+  `claude_status(view=detail)` call for omitted questions or full text);
 - `changes` since your token: grouped `denials`, `warnings`, `steering`
   and `questions` changes, and counts of `events` and routine `activity`;
 - `result`, once the task has ended (section 7);

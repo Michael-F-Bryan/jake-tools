@@ -278,6 +278,7 @@ class Observation(BaseModel):
     cancel_requested_at: datetime | None = None
     pending_questions: list[Question] = Field(default_factory=list)
     pending_questions_total: int = 0
+    pending_questions_retrieve: Retrieval | None = None
     permission_denials_total: int = 0
     changes: Changes | None = None
     result: Outcome | None = None

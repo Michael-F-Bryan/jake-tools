@@ -549,6 +549,30 @@ def test_the_worker_never_writes_an_older_line_over_a_newer_one(tmp_path: Path) 
     assert read_state(run_dir).status_message == "Answer received; continuing"
 
 
+@pytest.mark.parametrize("count,question_chars", [(1, 2_001), (6, 20)])
+async def test_cut_questions_name_the_route_that_returns_them_whole(
+    tmp_path: Path, count: int, question_chars: int
+) -> None:
+    from jake_tools.claude_runs.observe import QUESTIONS_SHOWN
+
+    service, run_dir = _service_run(tmp_path)
+    inbox = Inbox(run_dir, EventLog(run_dir))
+    requests = [inbox.ask("Q" * question_chars, []) for _ in range(count)]
+
+    observation = await service.poll(run_dir.name, wait_seconds=0)
+    assert len(observation.pending_questions) == min(count, QUESTIONS_SHOWN)
+    assert observation.pending_questions_total == len(requests)
+    route = observation.model_dump().get("pending_questions_retrieve")
+    assert route == {
+        "tool": "claude_status",
+        "arguments": {"task_id": run_dir.name, "view": "detail"},
+    }
+    detail = service.detail(run_dir.name)
+    assert {q.request_id: q.question for q in detail.pending_inputs} == {
+        q.request_id: q.question for q in requests
+    }
+
+
 async def test_a_cut_error_names_the_route_that_returns_it_whole(
     tmp_path: Path,
 ) -> None:
