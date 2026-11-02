@@ -3,14 +3,13 @@
 from typing import Annotated, Literal
 
 from anyio import to_thread
-from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...claude_runs.inbox import MAX_ANSWER_CHARS, InputResponse
-from ...claude_runs.service import UpdateResult
-from ...config import Config
-from ..server import structured_tool
-from ._claude import GUIDE, task_errors, task_service
+from ..claude_runs.inbox import MAX_ANSWER_CHARS, InputResponse
+from ..claude_runs.service import UpdateResult
+from ..config import Config
+from . import Handler, Operation
+from ._claude import task_errors, task_service
 
 
 class Answer(BaseModel):
@@ -30,23 +29,12 @@ class Decline(BaseModel):
     action: Literal["decline"]
 
 
-def register(app: MCPServer, config: Config) -> None:
+DESCRIPTION = 'Respond to a delegated task\'s pending questions. `responses` maps each request_id to {"answer": "..."} or {"action": "decline"}; you may leave others pending. Each key reports accepted, duplicate (already applied identically), conflict (settled differently), not_pending (expired) or unknown. The worker continues the same turn with the answer. It answers questions only: it never grants tools or permissions.'
+
+
+def build(config: Config) -> Handler:
     service = task_service(config)
 
-    @structured_tool(
-        app,
-        name="claude_update",
-        omit_none=True,
-        description=(
-            "Respond to a delegated task's pending questions. `responses` maps "
-            'each request_id to {"answer": "..."} or {"action": "decline"}; you '
-            "may leave others pending. Each key reports accepted, duplicate "
-            "(already applied identically), conflict (settled differently), "
-            "not_pending (expired) or unknown. The worker continues the same turn "
-            "with the answer. It answers questions only: it never grants tools "
-            "or permissions." + GUIDE
-        ),
-    )
     async def claude_update(
         task_id: str,
         responses: Annotated[dict[str, Answer | Decline], Field(min_length=1)],
@@ -59,3 +47,15 @@ def register(app: MCPServer, config: Config) -> None:
                 for key, value in responses.items()
             }
             return await to_thread.run_sync(service.respond, task_id, parsed)
+
+    return claude_update
+
+
+OPERATION = Operation(
+    name="claude_update",
+    capability="claude",
+    skill="claude-delegation",
+    description=DESCRIPTION,
+    build=build,
+    omit_none=True,
+)

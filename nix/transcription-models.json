@@ -1,0 +1,204 @@
+[
+  {
+    "repo": "FluidInference/parakeet-tdt-0.6b-v3-coreml",
+    "revision": "7dd20fe6b1797d35f5e3307e8b1732d9a178edfe",
+    "folder": "parakeet-tdt-0.6b-v3",
+    "files": [
+      {
+        "path": "Decoder.mlmodelc/analytics/coremldata.bin",
+        "hash": "sha256-QjjE6B7NDclL19+7YPfizIJBB8H/4Dh7hge3KDPbo1A="
+      },
+      {
+        "path": "Decoder.mlmodelc/coremldata.bin",
+        "hash": "sha256-GGR68IXYe9jzEhyKm01FZMHt4Djatj0pW050XPLX+5k="
+      },
+      {
+        "path": "Decoder.mlmodelc/metadata.json",
+        "hash": "sha256-o56TzYNxuN7ZJjXHgE/NBZDw0d2UFcbRmgSEvgcwd9k="
+      },
+      {
+        "path": "Decoder.mlmodelc/model.mil",
+        "hash": "sha256-7yoKKBaVOYpi/ehqwmnGj3PVtXjX7Tsx8rqRotHqHzU="
+      },
+      {
+        "path": "Decoder.mlmodelc/weights/weight.bin",
+        "hash": "sha256-SK3w8NR8QGyCU9T3/vlnQ2o52hT1pl5m1aS0B741XUE="
+      },
+      {
+        "path": "Encoder.mlmodelc/analytics/coremldata.bin",
+        "hash": "sha256-QuY4hw1z8mszKRijSWzjZ5P7tBOoHL09FroBMoY3oQU="
+      },
+      {
+        "path": "Encoder.mlmodelc/coremldata.bin",
+        "hash": "sha256-1IA0oWeoLoj8PfZPYK+WOrOYNTgnEXW4MZ59VyCg+4Y="
+      },
+      {
+        "path": "Encoder.mlmodelc/metadata.json",
+        "hash": "sha256-2iTanMqUP7Kdf6jjdtV/ynyzqgjKUblWsLDlaBPwh+k="
+      },
+      {
+        "path": "Encoder.mlmodelc/model.mil",
+        "hash": "sha256-7XsZFWyin6ff1okd65/aSw6Ik/aFl8mF0TVzZUakOAg="
+      },
+      {
+        "path": "Encoder.mlmodelc/weights/weight.bin",
+        "hash": "sha256-4gIPMjcDR3pbIdfC0oLEA+Nxr7WWLnmHfjAz5zum9CE="
+      },
+      {
+        "path": "JointDecisionv3.mlmodelc/analytics/coremldata.bin",
+        "hash": "sha256-Jt70v3PdVtKd7iHI75fLiWnmL2Eg7RrckeRoKOJze2w="
+      },
+      {
+        "path": "JointDecisionv3.mlmodelc/coremldata.bin",
+        "hash": "sha256-9fwIt0FADwCISSyeg5QYseGFIvGcuijTYd0DDF85g0I="
+      },
+      {
+        "path": "JointDecisionv3.mlmodelc/metadata.json",
+        "hash": "sha256-2TByEbmjfg8KwmDHZgsVcaPeJYQQNc/fm1j9QEJfiQ8="
+      },
+      {
+        "path": "JointDecisionv3.mlmodelc/model.mil",
+        "hash": "sha256-vmBzKUM4mgRxdREag/iDnz6znUgDra+oKKCHGy85gY0="
+      },
+      {
+        "path": "JointDecisionv3.mlmodelc/weights/weight.bin",
+        "hash": "sha256-Tg5j2EADL38H3bHWREYFEWYoHlSRvyLaipRcQfbu2z4="
+      },
+      {
+        "path": "Preprocessor.mlmodelc/analytics/coremldata.bin",
+        "hash": "sha256-yb7rmJyNZvi+Ed9ZvG3yd+x2zuQE9oZbRiQ4Ne9WL20="
+      },
+      {
+        "path": "Preprocessor.mlmodelc/coremldata.bin",
+        "hash": "sha256-294/IwCELB/VHvP/lIoLz/5l/9LcoQcH8lCfMsHWWx0="
+      },
+      {
+        "path": "Preprocessor.mlmodelc/metadata.json",
+        "hash": "sha256-KphpniLSed03+h0jiuscbbHfDW+taHd1MkFXaJ2POs8="
+      },
+      {
+        "path": "Preprocessor.mlmodelc/model.mil",
+        "hash": "sha256-S4UYqVZFD+xX8GwqIb3/wmlz9/H6aEL7OP6Rf4lra5M="
+      },
+      {
+        "path": "Preprocessor.mlmodelc/weights/weight.bin",
+        "hash": "sha256-Ept2466vqK+j6nbZlblksUX+g3ANV59v9CxMOPoJaOo="
+      },
+      {
+        "path": "config.json",
+        "hash": "sha256-l/GezM0P3HMNdvuRgJD6i8ZLzo6krUNxXV6cLHNQ22Y="
+      },
+      {
+        "path": "parakeet_v3_vocab.json",
+        "hash": "sha256-fsYOBfGyRIBzbsDu1AkA9GJrzh+ppg/XAOx+KlkZhzU="
+      },
+      {
+        "path": "parakeet_vocab.json",
+        "hash": "sha256-fsYOBfGyRIBzbsDu1AkA9GJrzh+ppg/XAOx+KlkZhzU="
+      }
+    ]
+  },
+  {
+    "repo": "FluidInference/speaker-diarization-coreml",
+    "revision": "df2625ac79a7ac6b65ad868fee6d80f320da4232",
+    "folder": "speaker-diarization",
+    "files": [
+      {
+        "path": "Embedding.mlmodelc/analytics/coremldata.bin",
+        "hash": "sha256-jWcGQ2Y5tTgwtNvoqvnJqEP39YLWPhbzy4u3xszVhoI="
+      },
+      {
+        "path": "Embedding.mlmodelc/coremldata.bin",
+        "hash": "sha256-SnBbrCfRUdlkLzdgkpYEKhVgKkIlMDngkh3J512n4AQ="
+      },
+      {
+        "path": "Embedding.mlmodelc/metadata.json",
+        "hash": "sha256-GFQ3Hra0OPuK6slq+0XJma95AlgcBq/fzX/zyxzma+U="
+      },
+      {
+        "path": "Embedding.mlmodelc/model.mil",
+        "hash": "sha256-IvqViu9ypWHCH4dKB8vc0w/fQO6WHAvC+2fBGSc7RtM="
+      },
+      {
+        "path": "Embedding.mlmodelc/weights/weight.bin",
+        "hash": "sha256-mTVrKYW41DiAplcCTZQdRQs4ggRRzP+QP3btTlLRhos="
+      },
+      {
+        "path": "FBank.mlmodelc/analytics/coremldata.bin",
+        "hash": "sha256-DovTqLgqwSNYCYn0kOTZJFEnxTWFdjC1QzESaKzMPwo="
+      },
+      {
+        "path": "FBank.mlmodelc/coremldata.bin",
+        "hash": "sha256-V6xDa7BnHLtVJ6M5E01pX3Uut396GJZrk8aDUzVZV1k="
+      },
+      {
+        "path": "FBank.mlmodelc/metadata.json",
+        "hash": "sha256-JiN4X10YaJO4LQHoSqM6dwTvdjwzCeAgVfItydhxzpo="
+      },
+      {
+        "path": "FBank.mlmodelc/model.mil",
+        "hash": "sha256-J6rrIVaegb2+Lu+HeJ9Qo3z+qAADm9E0RIqUF94vMO0="
+      },
+      {
+        "path": "FBank.mlmodelc/weights/weight.bin",
+        "hash": "sha256-noP90+p4BksHgGnk2RQWA8YcR6J/0Z5+MUL/dHb42zY="
+      },
+      {
+        "path": "PldaRho.mlmodelc/analytics/coremldata.bin",
+        "hash": "sha256-iUDqYETby++iLajMQeC0heH7Xtia7K83xuDEg6l93Nc="
+      },
+      {
+        "path": "PldaRho.mlmodelc/coremldata.bin",
+        "hash": "sha256-TZdBR39yHHmwn83+RVEQxLfUJy4t40lr8XKdlm0+5Bg="
+      },
+      {
+        "path": "PldaRho.mlmodelc/metadata.json",
+        "hash": "sha256-sxTPJak+RrQHaIOm9aL4hItzw4Ub2dNgdNBn81oceUU="
+      },
+      {
+        "path": "PldaRho.mlmodelc/model.mil",
+        "hash": "sha256-g67i5TENGbXyAq6pfQeg4SECVW0bMu8+0Is29/lyUEE="
+      },
+      {
+        "path": "PldaRho.mlmodelc/weights/weight.bin",
+        "hash": "sha256-gPfSKSAmNtNyQoyQWW8RqRVF8H2nclnwcVOq8iWRSjY="
+      },
+      {
+        "path": "Segmentation.mlmodelc/analytics/coremldata.bin",
+        "hash": "sha256-ZCZfjnrUGl9o1jDBUojCSZzKWJKtSeIAloGc3qwATNs="
+      },
+      {
+        "path": "Segmentation.mlmodelc/coremldata.bin",
+        "hash": "sha256-6lFIG4vT5JatPPFvBm3ao38g6HcuqsdrM5PCjeIOBrw="
+      },
+      {
+        "path": "Segmentation.mlmodelc/metadata.json",
+        "hash": "sha256-iNvwsHII/hQuFynCtMl0rTWZ/LKuXV8Y/OeCsiU4QSQ="
+      },
+      {
+        "path": "Segmentation.mlmodelc/model.mil",
+        "hash": "sha256-035M4wtAams092X3abm67TF4zAwrLimcZB2qQ6BS3T8="
+      },
+      {
+        "path": "Segmentation.mlmodelc/weights/weight.bin",
+        "hash": "sha256-wxiaZJRsdbwk/LmK/omteMUr26399l6Ff7G4HizJ+7I="
+      },
+      {
+        "path": "config.json",
+        "hash": "sha256-RBNvo1WzZ4oRRq0W9+hknpT7T8If536DEMBg9hyq/4o="
+      },
+      {
+        "path": "plda-parameters.json",
+        "hash": "sha256-OO4o1CacB2zvJU7nYLvYEfBzipLg8B+Wma03KCjF3o8="
+      },
+      {
+        "path": "provenance.json",
+        "hash": "sha256-A1NDDbBicVxBG6MuZstDW5yu4mYrzNspj55dG652CHI="
+      },
+      {
+        "path": "xvector-transform.json",
+        "hash": "sha256-981cwW5j4tidsFKiMBjs/EejEZmO0enjmDj7rGUEhog="
+      }
+    ]
+  }
+]

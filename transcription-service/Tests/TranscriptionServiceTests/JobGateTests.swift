@@ -3,22 +3,28 @@ import Testing
 
 @testable import TranscriptionService
 
+/// Shared by the child tasks below. A class, because Swift 6.3 refuses to
+/// send a closure that captures a local `Mutex` into a task group.
+private final class Observations: Sendable {
+    let log = Mutex<[String]>([])
+    let running = Mutex(0)
+}
+
 @Suite struct JobGateTests {
     @Test func onlyOneJobRunsAtATimeAndWaitersRunInOrder() async throws {
         let gate = JobGate(maxQueued: 4)
-        let log = Mutex<[String]>([])
-        let running = Mutex(0)
+        let observations = Observations()
 
         try await withThrowingTaskGroup(of: Void.self) { group in
             for index in 0..<4 {
                 group.addTask {
                     try await gate.withSlot {
-                        let concurrent = running.withLock { $0 += 1; return $0 }
+                        let concurrent = observations.running.withLock { $0 += 1; return $0 }
                         #expect(concurrent == 1)
-                        log.withLock { $0.append("start \(index)") }
+                        observations.log.withLock { $0.append("start \(index)") }
                         try await Task.sleep(for: .milliseconds(20))
-                        running.withLock { $0 -= 1 }
-                        log.withLock { $0.append("end \(index)") }
+                        observations.running.withLock { $0 -= 1 }
+                        observations.log.withLock { $0.append("end \(index)") }
                     }
                 }
                 // Stagger admission so the order of arrival is defined.
@@ -27,7 +33,7 @@ import Testing
             try await group.waitForAll()
         }
 
-        let entries = log.withLock { $0 }
+        let entries = observations.log.withLock { $0 }
         #expect(entries.count == 8)
         for pair in stride(from: 0, to: 8, by: 2) {
             #expect(entries[pair].hasPrefix("start "))

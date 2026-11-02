@@ -192,6 +192,7 @@ async def test_file_problems_are_invalid_argument_without_contacting_the_service
         (400, "invalid_input", "invalid_argument", "invalid_input"),
         (413, "payload_too_large", "invalid_argument", "payload_too_large"),
         (500, "inference_failed", "upstream_error", "inference_failed"),
+        (504, "timeout", "upstream_error", "timeout"),
     ],
 )
 async def test_service_errors_map_to_stable_codes_with_actionable_detail(
@@ -314,7 +315,7 @@ def test_the_client_path_imports_no_native_inference_dependency() -> None:
     """A proxy-only (Linux) install must not drag in Apple or ML frameworks."""
     script = (
         "import sys\n"
-        "import jake_tools.transcription, jake_tools.mcp.server, jake_tools.mcp.tools.transcribe\n"
+        "import jake_tools.transcription, jake_tools.mcp.server, jake_tools.operations.transcribe\n"
         "native = {'torch', 'coremltools', 'mlx', 'numpy', 'onnxruntime', 'ctranslate2',"
         " 'faster_whisper', 'whisper', 'mlx_whisper', 'objc', 'Foundation', 'AVFoundation'}\n"
         "print(sorted(m for m in sys.modules if m.split('.')[0] in native))\n"

@@ -37,6 +37,11 @@ dev = [
 jake-tools = "jake_tools.__main__:main"
 jake-tools-mcp = "jake_tools.mcp.__main__:main"
 
+# The native Hermes plugin. Discovery needs only the installed metadata; the
+# plugin loads where a Hermes profile lists `jake-tools` in plugins.enabled.
+[project.entry-points."hermes_agent.plugins"]
+jake-tools = "jake_tools.hermes"
+
 [tool.ruff]
 target-version = "py314"
 src = ["src"]

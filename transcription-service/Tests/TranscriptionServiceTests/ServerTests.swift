@@ -67,7 +67,8 @@ func startServer(
     engine: (any TranscriptionEngine)?,
     maxQueued: Int = 2,
     maxUploadBytes: Int = 5_000_000,
-    maxDurationSeconds: Double = 30
+    maxDurationSeconds: Double = 30,
+    requestTimeoutSeconds: Double = 60
 ) async throws -> RunningServer {
     let workDirectory = try temporaryDirectory()
     let configuration = ServiceConfiguration(
@@ -77,7 +78,8 @@ func startServer(
         uploadLimits: UploadLimits(maxUploadBytes: maxUploadBytes, maxFiles: 4),
         maxDurationSeconds: maxDurationSeconds,
         maxQueued: maxQueued,
-        workDirectory: workDirectory)
+        workDirectory: workDirectory,
+        requestTimeoutSeconds: requestTimeoutSeconds)
     var logger = Logger(label: "test-server")
     logger.logLevel = .warning
     let state = ServiceState(configuration: configuration, logger: logger)
@@ -378,6 +380,34 @@ func statusLineWithoutSendingBody(to server: RunningServer, head: String, timeou
         #expect(status?.contains(" 429 ") == true)
 
         running.cancel()
+        await server.stop()
+    }
+
+    @Test func aRequestPastItsDeadlineIsCancelledAndAnswered504() async throws {
+        let engine = StubEngine(delay: .seconds(10))
+        let server = try await startServer(engine: engine, requestTimeoutSeconds: 1)
+        defer { Task { await server.stop() } }
+
+        let reply = try await transcribeRequest(
+            server, files: [MultipartFile(name: "file", filename: "a.wav", data: makeWAV(seconds: 1))])
+        #expect(reply.status == 504)
+        #expect(try reply.json(ErrorEnvelope.self).error.code == "timeout")
+        #expect(engine.cancellations == 1)
+        #expect(await server.state.gate.report == HealthReport.Queue(running: 0, queued: 0, maxQueued: 2))
+        await server.stop()
+    }
+
+    @Test func aStalledUploadTimesOut() async throws {
+        let engine = StubEngine()
+        let server = try await startServer(engine: engine, requestTimeoutSeconds: 1)
+        defer { Task { await server.stop() } }
+
+        let head =
+            "POST /v1/transcriptions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer \(testToken)\r\n"
+            + "Content-Type: multipart/form-data; boundary=x\r\nContent-Length: 4000\r\n\r\n"
+        let status = try statusLineWithoutSendingBody(to: server, head: head, timeout: 5)
+        #expect(status?.contains(" 504 ") == true)
+        #expect(engine.starts == 0)
         await server.stop()
     }
 

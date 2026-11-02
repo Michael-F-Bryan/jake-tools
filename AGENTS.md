@@ -13,6 +13,8 @@ src/jake_tools/
   cli/            # Click commands (keep thin)
   claude.py       # Claude Agent SDK wrapper — the only LLM seam
   claude_runs/    # delegated tasks: run dirs, worker, events, inbox, service
+  operations/     # agent-facing tool operations shared by every adapter
+  mcp/            # stdio MCP adapter (other clients)
   prompting.py    # typed Jinja prompts bound to a response model
   newsletters.py  # SharePoint Graph client
   transcription.py # HTTP client + transcript contract for transcription-service
@@ -21,8 +23,9 @@ transcription-service/  # native Swift HTTP service (FluidAudio); see its README
 ```
 
 `nix develop` (flake.nix, loaded by direnv via `.envrc`) provides `uv`, a Nix
-Python 3.14, `swift-format`, `sox` and `nixfmt`. The Swift toolchain comes from
-Xcode or the Command Line Tools, never nixpkgs.
+Python 3.14, `swift-format`, `sox` and `nixfmt`. The Swift service builds with
+nixpkgs' Swift and Apple SDK (`nix/transcription-service.nix`), never Xcode or
+the Command Line Tools.
 
 ## Developing
 
@@ -138,10 +141,13 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
 - Missing credentials never stop startup. Clients are built per call inside
   the tool that needs them and raise `ToolError("missing_credentials", ...)`
   naming the variable, never the value.
-- `mcp/server.py` registers; `mcp/tools/<tool>.py` holds one thin handler
-  each, registered through `structured_tool`, which sends the handler's
+- `operations/<tool>.py` holds one thin handler each as an `Operation`
+  (name, capability, description, skill, `build(config)`), listed in
+  `operations/catalogue.py`; adapters never duplicate an operation's logic,
+  schema or description. `mcp/server.py` registers them (plus the MCP-only
+  `ping`) through `structured_tool`, which sends the handler's
   Pydantic result as structured content and turns a raised
-  `mcp.errors.ToolError` into an `isError` result with the stable
+  `operations.errors.ToolError` into an `isError` result with the stable
   `{code, message, detail?}` payload. Codes are the `ToolErrorCode` literal;
   do not invent new ones without adding them there. No `outputSchema` is
   advertised, by design, so error payloads never fail schema validation.
@@ -234,12 +240,44 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   as `skill://<name>` resources, and are installed by `install-skills`. They
   describe what the tools actually return.
 
+## Hermes plugin (`jake_tools.hermes`)
+
+The native Hermes adapter over the same operations; user-facing description in
+the README's "Native Hermes plugin" section.
+
+- Only the small accessors in `hermes/plugin.py` import Hermes
+  (`agent.*`, `hermes_constants`, and `hermes_cli.plugins.PluginContext`
+  for typing), lazily or under `# pyright: ignore[reportMissingImports]`;
+  everything else is plain and tested hermetically in
+  `tests/test_hermes_plugin.py`. Use documented plugin APIs
+  (`ctx.register_tool`, `ctx.register_skill`, `ctx.get_config`,
+  `agent.secret_scope.get_secret`).
+- The plugin registers no terminal backend and must not depend on one:
+  native tools and skills work under the installer's own backend (`local`).
+  Jake's credential names are therefore not on Hermes' subprocess scrub
+  list (README "Credentials and terminal commands"). Do not add a terminal
+  provider just for `strip_env_keys` or patch Hermes internals; the
+  follow-up is jake-tools#4.
+- Never read Jake's secrets from `os.environ` in the plugin: resolve them per
+  call through `hermes.profile.profile_config` with Hermes' `get_secret`.
+  Registration reads no secrets.
+- Handlers are synchronous (Hermes' async bridge has a fixed wait) and return
+  JSON strings; errors are `{"error", "code", "message", "detail"}` from the
+  same `ToolError`s.
+- Delegated workers get `hermes.profile.worker_base_environ` (an allowlist),
+  carried as `Config.worker_environ`; never Hermes' environment.
+- `tests/test_hermes_runtime.py` (`--slow`) is the acceptance test in a real
+  installation (`JAKE_TOOLS_HERMES`). Without it it is blocked, not passed.
+- `nix/hermes-plugin.nix` (flake `lib.mkHermesPlugin`) builds the package for
+  an installer's interpreter, propagating only the uv.lock wheels the host
+  lacks.
+
 ## Transcription service (`transcription-service/`)
 
 A long-running native macOS HTTP service (Swift, Hummingbird, FluidAudio
 0.17.7 pinned) that keeps Parakeet TDT v3 and the offline pyannote diarizer
 warm and turns an ordered multipart upload into one structured transcript.
-`jake_tools.transcription` is its only client and `mcp/tools/transcribe.py`
+`jake_tools.transcription` is its only client and `operations/transcribe.py`
 the only tool; both are plain HTTP and import no native dependency. Contract,
 limits, concurrency and cancellation semantics: `transcription-service/README.md`.
 
@@ -249,16 +287,29 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
   endpoint is configured.
 - No alternate backends, no direct inference in Python, no job store, no
   polling API. One job at a time, bounded queue, client disconnect cancels at
-  the engine's next check. Timeouts are reported with `retry_safe=false` and
-  never retried.
-- Build and test with Apple's toolchain: `swift build`, and `swift test`
-  (under Command Line Tools pass
-  `-Xswiftc -plugin-path -Xswiftc /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing`,
-  which `transcription-service/test.sh` does). Swift tests run the real
-  server with a stub engine: mechanics only. The real engine is exercised by
-  `tests/test_transcription_live.py` (`--slow`, macOS, built binary and
-  provisioned models required); it is the only evidence about transcription
-  quality or latency, and a fake transcript is never that evidence.
+  the engine's next check, and so does the service's own
+  `--request-timeout-seconds` (answered `504 timeout`). Timeouts are reported
+  with `retry_safe=false` and never retried.
+- Build with Nix only: `nix build .#transcription-service` (nixpkgs' Swift
+  and Apple SDK; SwiftPM dependencies vendored from `Package.resolved` by
+  `fetchSwiftPMDeps`), and test with
+  `nix build .#checks.aarch64-darwin.transcription-service` (the `swift-test`
+  pre-commit hook). No Xcode or Command Line Tools fallback. SwiftPM fetches
+  every binary target even when only a disabled trait links it, so
+  `nix/fluidaudio-drop-nemo-binary-target.patch` removes FluidAudio's NeMo
+  xcframework; refresh it with a FluidAudio bump. After changing
+  `Package.resolved`, update the `fetchSwiftPMDeps` hash.
+- Models are a Nix output too: `nix build .#transcription-models` fetches the
+  files `provision` writes, pinned by revision and SHA-256 in
+  `nix/transcription-models.json`, and is passed read-only as `--models-dir`.
+  Regenerate the manifest whenever `ModelPins` or FluidAudio changes. Core ML
+  still keeps a per-user, per-device cache under the running user's
+  `~/Library/Caches` (and `/var/folders`); that is Core ML's, not ours.
+- Swift tests run the real server with a stub engine: mechanics only. The
+  real engine is exercised by `tests/test_transcription_live.py` (`--slow`,
+  macOS; point `JAKE_TRANSCRIPTION_SERVICE_BIN` and `TRANSCRIPTION_MODELS_DIR`
+  at the Nix outputs); it is the only evidence about transcription quality or
+  latency, and a fake transcript is never that evidence.
 - Fixtures for the live test are synthesised with macOS `say`
   (`tests/transcription_fixtures.py`); nothing binary is committed.
 
@@ -269,8 +320,7 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
 | `uv`                | dependency management and script runner                |
 | `claude-agent-sdk`  | LLM calls; drives the local `claude` CLI               |
 | `az` (Azure CLI)    | `newsletter` commands (Microsoft Graph token)          |
-| `swift` (Xcode/CLT) | building and testing `transcription-service/`          |
-| `nix`               | optional: `nix develop` for the dev tools above        |
+| `nix`               | building and testing `transcription-service/` (Swift and SDK from nixpkgs); `nix develop` for the dev tools above |
 If a required external tool is missing, report the blocker. Do not mock
 preflight checks or skip them silently.
 

@@ -9,17 +9,18 @@ platforms: [linux, macos, windows]
 
 # Clockify time
 
-Use the `jake-tools` MCP server to read time history, select existing projects/tasks,
-and create completed time entries. No Jira credentials or CLI commands are needed.
-Hermes exposes the tools with its `mcp_<server>_` prefix; names below are bare names.
+Use jake-tools to read time history, select existing projects/tasks, and create
+completed time entries. No Jira credentials or CLI commands are needed. The tools
+are native Hermes tools from the `jake-tools` plugin, or the `jake-tools` MCP
+server's (Hermes prefixes those with `mcp_<server>_`); names below are bare names.
 
 ## Discover the current interface
 
 Use the host's tool search/list and schema-description facility to find these
 bare tool names (prefixes depend on the host). Inspect the live input schema
-before calling; do not assume CLI flags are MCP arguments. Read
-`skill://clockify-time` for guidance matching the running server when a local
-copy may be stale. Tools use the server's configured credentials, not the agent's
+before calling; do not assume CLI flags are tool arguments. Load this skill from the running
+installation (`jake-tools:clockify-time` in Hermes, `skill://clockify-time` over
+MCP) when a local copy may be stale. Tools use jake-tools' configured credentials, not the agent's
 shell environment; report missing credentials/allowlisting rather than probing
 local secret stores or switching accounts.
 
@@ -30,9 +31,10 @@ local secret stores or switching accounts.
 | `clockify_create_time_entry` | Real write: one completed entry, no preview/apply parameter. |
 
 Unsupported entry edits/deletes, timer changes, project/client cleanup and
-exact-ID bulk migration are not MCP tools. Only when explicitly requested, read
+exact-ID bulk migration are not jake-tools tools. Only when explicitly requested, read
 [direct API workflows](references/direct-api-workflows.md), also available as
-`skill://clockify-time/references/direct-api-workflows.md`. That supporting
+`skill://clockify-time/references/direct-api-workflows.md` over MCP and as this
+skill's `references/direct-api-workflows.md` file in Hermes. That supporting
 reference requires separate authorised credential access and stops if absent;
 it is not a separate skill or a routine fallback for a tool error.
 
@@ -45,7 +47,8 @@ it is not a separate skill or a routine fallback for a tool error.
 
 ## Prerequisites
 
-The server environment needs `CLOCKIFY_API_KEY`. Configure `clockify.workspaces`
+jake-tools needs `CLOCKIFY_API_KEY` (the MCP server's environment, or the Hermes
+profile's secrets). Configure `clockify.workspaces`
 in its config.toml or comma-separated `JAKE_TOOLS_CLOCKIFY_WORKSPACES`. The
 allowlist is mandatory; an omitted workspace means its first ID, not the user's
 active workspace. IDs must contain only letters, digits, `_` and `-`.

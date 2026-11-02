@@ -1,7 +1,8 @@
 """The MCPServer app: tool, resource and extension registration only.
 
-Tool logic lives in :mod:`jake_tools.mcp.tools`; each module there exposes a
-``register(app, config)`` that calls :func:`structured_tool`. Packaged skills
+Tool logic lives in :mod:`jake_tools.operations`, shared with the native
+Hermes adapter; :mod:`jake_tools.mcp.tools` registers each operation through
+:func:`structured_tool`. Packaged skills
 are served as ``skill://<name>`` resources so an agent can fetch the text
 matching the running server even if its local copy is stale. The native
 MCP Tasks extension (:mod:`jake_tools.mcp.tasks`) is the one extension.
@@ -37,9 +38,9 @@ log = logging.getLogger(__name__)
 
 def build_server(config: Config) -> MCPServer:
     """Assemble the server for one process. Tools read ``config`` by closure."""
+    from ..operations._claude import task_service
     from .tasks import TasksExtension
     from .tools import register_all
-    from .tools._claude import task_service
 
     app = JakeMCPServer(
         SERVER_NAME,

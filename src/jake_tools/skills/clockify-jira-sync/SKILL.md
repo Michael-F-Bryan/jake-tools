@@ -1,14 +1,16 @@
 ---
 name: clockify-jira-sync
-description: Reconcile Jira work items into Clockify projects and tasks with the jake-tools `clockify_jira_sync` MCP tool. Use when asked to sync, tidy, or check Clockify against Jira, or when Clockify tasks are missing, misnamed, closed too early, or still open after the Jira issue is done.
+description: Reconcile Jira work items into Clockify projects and tasks with the jake-tools `clockify_jira_sync` tool. Use when asked to sync, tidy, or check Clockify against Jira, or when Clockify tasks are missing, misnamed, closed too early, or still open after the Jira issue is done.
 ---
 
 # Jira → Clockify sync
 
-One tool, `clockify_jira_sync`, from the `jake-tools` MCP server. Hermes
-registers it as `mcp_<server>_clockify_jira_sync`; this skill uses the bare
-name. It needs Clockify and Jira credentials in the server's environment, so
-it only works where Jira is configured.
+One tool, `clockify_jira_sync`, from jake-tools: a native Hermes tool from the
+`jake-tools` plugin, or the `jake-tools` MCP server's (Hermes registers that as
+`mcp_<server>_clockify_jira_sync`). This skill uses the bare name. It needs
+Clockify and Jira credentials where jake-tools runs (the MCP server's
+environment, or the Hermes profile's secrets), so it only works where Jira is
+configured.
 
 It creates projects and tasks, renames them, reactivates tasks, and marks
 tasks done. It never deletes anything, and it has no other Clockify or Jira
@@ -30,11 +32,12 @@ underway work.
 
 Find `clockify_jira_sync` through the host's tool search/list, then inspect its
 live schema: `issues?: list[str]`, `apply: bool = false`,
-`plan_digest?: str`. Read `skill://clockify-jira-sync` for the running server's
-version. Do not pass CLI flags or assume a local checkout is needed. Credentials
-are resolved by the server (`CLOCKIFY_API_KEY`, `JIRA_BASE_URL`, `JIRA_EMAIL`,
+`plan_digest?: str`. Load this skill from the running installation
+(`jake-tools:clockify-jira-sync` in Hermes, `skill://clockify-jira-sync` over
+MCP) for its version. Do not pass CLI flags or assume a local checkout is needed. Credentials
+are resolved by jake-tools (`CLOCKIFY_API_KEY`, `JIRA_BASE_URL`, `JIRA_EMAIL`,
 `JIRA_API_TOKEN`, including configured secret-file variants); do not retrieve
-local vault credentials to make an MCP call. Missing configuration is a blocker.
+local vault credentials to make the call. Missing configuration is a blocker.
 
 Unlike the history/catalogue/create tools, this tool has no `workspace_id`
 argument and does not use their workspace allowlist. It resolves the Clockify

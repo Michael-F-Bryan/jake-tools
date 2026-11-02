@@ -1,4 +1,4 @@
-"""The Apple-only hook must not mistake Linux Swift for Apple's toolchain."""
+"""The Swift hook runs the Nix check on macOS and skips everywhere else."""
 
 import os
 import shlex
@@ -11,11 +11,11 @@ import yaml
 
 
 @pytest.mark.parametrize(
-    ("platform", "has_swift", "expected_code"),
+    ("platform", "has_nix", "expected_code"),
     [("Linux", True, 0), ("Darwin", False, 0), ("Darwin", True, 42)],
 )
-def test_swift_hook_requires_apple_toolchain(
-    tmp_path: Path, platform: str, has_swift: bool, expected_code: int
+def test_swift_hook_runs_the_nix_check_on_macos(
+    tmp_path: Path, platform: str, has_nix: bool, expected_code: int
 ) -> None:
     config = yaml.safe_load(
         (Path(__file__).parents[1] / ".pre-commit-config.yaml").read_text()
@@ -32,18 +32,12 @@ def test_swift_hook_requires_apple_toolchain(
     assert shell is not None
     (bin_dir / "sh").symlink_to(shell)
     scripts = {"uname": f"echo {platform}"}
-    if has_swift:
-        scripts["swift"] = "exit 0"
+    if has_nix:
+        scripts["nix"] = 'echo "NIX_INVOKED $*"\nexit 42'
     for name, body in scripts.items():
         executable = bin_dir / name
         executable.write_text(f"#!{shell}\n{body}\n")
         executable.chmod(0o755)
-    service = tmp_path / "transcription-service"
-    service.mkdir()
-    suite = service / "test.sh"
-    suite.write_text(f"#!{shell}\necho APPLE_TEST_INVOKED\nexit 42\n")
-    suite.chmod(0o755)
-
     result = subprocess.run(
         shlex.split(hook["entry"]),
         cwd=tmp_path,
@@ -53,6 +47,9 @@ def test_swift_hook_requires_apple_toolchain(
     )
 
     assert result.returncode == expected_code, result.stderr
-    assert ("APPLE_TEST_INVOKED" in result.stdout) == (expected_code == 42)
+    invoked = (
+        "NIX_INVOKED build --no-link .#checks.aarch64-darwin.transcription-service"
+    )
+    assert (invoked in result.stdout) == (expected_code == 42)
     if expected_code == 0:
         assert "tests skipped" in result.stderr

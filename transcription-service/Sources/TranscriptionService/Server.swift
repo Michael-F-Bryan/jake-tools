@@ -33,6 +33,10 @@ public struct ServiceConfiguration: Sendable {
     /// Per-request upload directories are created under here and removed
     /// when the request finishes, however it finishes.
     public var workDirectory: URL
+    /// The most a request may take from admission to its response, upload
+    /// and queueing included. On expiry its work is cancelled, as for a
+    /// client disconnect, and the client gets `504 timeout`.
+    public var requestTimeoutSeconds: Double
     public var tls: TLS?
 
     public struct TLS: Sendable {
@@ -53,6 +57,7 @@ public struct ServiceConfiguration: Sendable {
         maxDurationSeconds: Double,
         maxQueued: Int,
         workDirectory: URL,
+        requestTimeoutSeconds: Double = 30 * 60,
         tls: TLS? = nil
     ) {
         self.host = host
@@ -62,6 +67,7 @@ public struct ServiceConfiguration: Sendable {
         self.maxDurationSeconds = maxDurationSeconds
         self.maxQueued = maxQueued
         self.workDirectory = workDirectory
+        self.requestTimeoutSeconds = requestTimeoutSeconds
         self.tls = tls
     }
 }
@@ -177,6 +183,16 @@ func registerRoutes(_ router: Router<BasicRequestContext>, state: ServiceState) 
         // byte of the body.
         return try await state.gate.withAdmission {
             let job = CancellableJob()
+            let timeout = state.configuration.requestTimeoutSeconds
+            let deadline = Task {
+                try await Task.sleep(for: .seconds(timeout))
+                if job.expire() {
+                    state.logger.warning(
+                        "request timed out; cancelling it",
+                        metadata: ["request": "\(requestID)", "timeout_seconds": "\(timeout)"])
+                }
+            }
+            defer { deadline.cancel() }
             return try await requestBody.consumeWithInboundCloseHandler { body in
                 let task = Task {
                     try await process(
@@ -184,10 +200,17 @@ func registerRoutes(_ router: Router<BasicRequestContext>, state: ServiceState) 
                 }
                 job.attach(task)
                 defer { job.finish() }
-                return try await withTaskCancellationHandler {
-                    try await task.value
-                } onCancel: {
-                    task.cancel()
+                do {
+                    return try await withTaskCancellationHandler {
+                        try await task.value
+                    } onCancel: {
+                        task.cancel()
+                    }
+                } catch where job.expired {
+                    // However the cancelled work surfaced (cancellation, a
+                    // decoder error), the cause was the deadline.
+                    throw ServiceError(
+                        .timeout, "the request did not finish within the service's limit of \(timeout) seconds")
                 }
             } onInboundClosed: {
                 // Also fires when a client closes after its response; only
@@ -308,6 +331,7 @@ final class CancellableJob: Sendable {
     private struct State {
         var task: Task<Response, any Error>?
         var cancelled = false
+        var expired = false
         var finished = false
     }
 
@@ -325,6 +349,17 @@ final class CancellableJob: Sendable {
     func finish() {
         state.withLock { $0.finished = true }
     }
+
+    /// The request's deadline passed: cancel it, and remember why. Returns
+    /// whether there was unfinished work to cancel.
+    @discardableResult
+    func expire() -> Bool {
+        state.withLock { $0.expired = !$0.finished }
+        return cancel()
+    }
+
+    /// Whether `expire` cancelled this request.
+    var expired: Bool { state.withLock { $0.expired } }
 
     /// Cancel the work unless it already finished. Returns whether there was
     /// unfinished work to cancel.

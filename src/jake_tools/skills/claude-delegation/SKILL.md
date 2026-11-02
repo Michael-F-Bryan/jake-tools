@@ -1,12 +1,13 @@
 ---
 name: claude-delegation
-description: Delegate a bounded task to a separate Claude Code agent with the jake-tools `claude_*` MCP tools, watch it, steer it, answer its questions, collect and check the result, and resume the conversation later. Use for self-contained coding, file or research jobs in a known directory.
+description: Delegate a bounded task to a separate Claude Code agent with the jake-tools `claude_*` tools, watch it, steer it, answer its questions, collect and check the result, and resume the conversation later. Use for self-contained coding, file or research jobs in a known directory.
 ---
 
 # Delegating to Claude
 
-Tools from the `jake-tools` MCP server (Hermes registers them as
-`mcp_<server>_<tool>`; this skill uses the bare names):
+Tools from jake-tools: native Hermes tools from the `jake-tools` plugin, or the
+`jake-tools` MCP server's (Hermes registers those as `mcp_<server>_<tool>`).
+This skill uses the bare names:
 
 | Tool | Use |
 | --- | --- |
@@ -25,16 +26,16 @@ poll says so) → `claude_poll` again with the new token → read `result` →
 check the work → optionally `claude_start(resume_task_id=...)`. Read
 `claude_status` or `claude_transcript` only when you need the detail.
 
-Every task runs in its own process and survives MCP server restarts; task
-IDs, tokens, cursors and message IDs stay valid across them. `claude_*`
-results leave out fields that are null: an absent field is null.
+Every task runs in its own process and survives restarts of the MCP server
+or Hermes; task IDs, tokens, cursors and message IDs stay valid across them.
+`claude_*` results leave out fields that are null: an absent field is null.
 
 ## Discovery and side effects
 
 Use the host's tool search/list and schema-description facility to discover
-`claude_*` tools and inspect current arguments; prefixes are host-dependent. Read
-`skill://claude-delegation` for this server's packaged guidance if the installed
-copy may be stale. No local checkout or agent-side credential lookup is needed;
+`claude_*` tools and inspect current arguments; prefixes are host-dependent. Load
+this skill from the running installation (`jake-tools:claude-delegation` in
+Hermes, `skill://claude-delegation` over MCP) if a local copy may be stale. No local checkout or agent-side credential lookup is needed;
 the worker uses the server's configured Claude installation/authentication.
 Report unavailable tools or authentication rather than guessing credentials.
 

@@ -16,6 +16,89 @@ separate resources and are not inlined into routine skill reads.
 uv tool install -e .
 ```
 
+## Native Hermes plugin
+
+The same operations the MCP server serves are also a native Hermes plugin,
+`jake-tools` (entry point `jake_tools.hermes` in `hermes_agent.plugins`).
+Other clients keep using the CLI and MCP server unchanged. Installed into
+Hermes' own Python environment (nixfiles does this with the flake's
+`lib.mkHermesPlugin`), it loads where a profile lists `jake-tools` in
+`plugins.enabled`, and registers:
+
+- **Tools**, for the capabilities in
+  `plugins.entries.jake-tools.settings.capabilities` (`claude`, `clockify`,
+  `transcription`; unset means none). They have the MCP tools' names,
+  schemas, results and error codes; failures are
+  `{"error", "code", "message", "detail"}`. `transcribe` also needs
+  `transcription.api_base_url`. `ping` stays MCP-only.
+- **Skills**, `jake-tools:<skill>` (via `skill_view`), from the same packaged
+  sources, for the granted tools only.
+
+The plugin registers no terminal backend and leaves Hermes' terminal alone:
+keep the installer's backend (`local`) and its project-environment hook.
+
+Credentials are read per call from the owning profile with Hermes'
+`agent.secret_scope.get_secret` (its `.env` and secret sources), consumed by
+the operation and never returned. The launching process's environment is not
+used for Jake's secrets, so one profile never gets another's. Delegated Claude
+workers remain separate processes, spawned on Hermes' interpreter with only
+`PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `TERM`, `SHELL`, `TMPDIR`, `XDG_*`,
+`NIX_LD`, `NIX_LD_LIBRARY_PATH` and `PYTHONPATH` from Hermes' environment (what
+the MCP server's worker saw), never Hermes' own credentials. Runs share
+`$XDG_STATE_HOME/jake-tools/runs` with the MCP server. Transcription stays a
+native host service reached over HTTP.
+
+### Credentials and terminal commands
+
+Pinned Hermes (`5b32cfc`) scrubs its own provider and platform credentials
+from terminal commands, but a plugin can add names to that scrub only as a
+terminal backend's `strip_env_keys`, and even then not for foreground `local`
+commands. Jake's variables (`CLOCKIFY_API_KEY`, `JIRA_*`,
+`TRANSCRIPTION_API_TOKEN` and their `_FILE` forms) are on neither list. So a
+Jake secret that sits in Hermes' process environment (the launch profile's
+`.env` and secret sources are published there) is visible to the agent's
+terminal commands, foreground and background, exactly as it would be without
+the plugin. The plugin itself never puts a secret into any environment.
+Provide Jake's secrets as `NAME_FILE` paths, so only a path is exposed. This
+is defence in depth, not a boundary: commands run as the same user. A
+supported Hermes seam for both this and project environments is tracked in
+[#4](https://github.com/Michael-F-Bryan/jake-tools/issues/4).
+
+### Installing into Hermes (nixfiles)
+
+`jake-tools.lib.mkHermesPlugin { pkgs; python; lockedDependencies; }`
+builds this package for `python` (Hermes' own interpreter). It propagates no
+dependencies except `lockedDependencies`, the names Hermes' environment lacks,
+which come from the exact `uv.lock` wheels for that interpreter and platform.
+Against pinned Hermes that list is `[ "claude-agent-sdk" "pyyaml" ]`; the rest
+(`mcp` 2.3, `pydantic`, `anyio`, `click`, `jinja2`, `requests`,
+`python-dotenv`) come from Hermes itself. Runtime dependencies are not
+checked at build time, so after every Hermes or Jake bump the installer must
+check the assembled runtime imports `jake_tools.hermes` and meets
+`jake-tools`' requirements. The rest of the installer's side:
+
+- a locked `jake-tools` flake input (`nix flake update jake-tools` updates
+  it), with the package added to Hermes' `extraPythonPackages`;
+- `plugins.enabled: [jake-tools]` and
+  `plugins.entries.jake-tools.settings.capabilities` per agent, with
+  `plugins.isolation: in_process` (the default). Plugin toolsets
+  (`jake_tools_<capability>`) are on by default, except on a platform whose
+  saved toolsets list already "knows" them;
+- its existing terminal backend and project-environment hook, unchanged;
+- Jake's secrets in the profile's `.env` or secret sources, preferably as
+  `NAME_FILE`;
+- removal of the `jake-tools` MCP server entry once the native tools are
+  verified, so tools are not exposed twice.
+
+Tests: `tests/test_hermes_plugin.py` (hermetic) runs by default.
+`tests/test_hermes_runtime.py` is the acceptance test inside a real
+installation. It covers discovery, capability-scoped tools and skills,
+profile-scoped credentials, the worker environment, and that `local`'s PTY,
+stdin and environment are what they are without the plugin. Run
+`uv run pytest --slow tests/test_hermes_runtime.py` with `JAKE_TOOLS_HERMES`
+(a built Hermes launcher including this package); without it it reports
+itself blocked.
+
 ## Development
 
 Install dependencies and the git hooks once:
@@ -179,10 +262,11 @@ runs one job at a time with a bounded queue; a timeout is reported with
 on the request. `jake-tools-mcp doctor` checks reachability, readiness and the
 token. Guidance for agents is the `skill://transcription` resource.
 
-The service itself is a Swift package built with Apple's toolchain
-(`swift build`, then `transcription-service provision` once online, then
-`transcription-service serve --token-file …`). `nix develop` provides the
-remaining development tools (`uv`, `swift-format`, `sox`).
+The service itself is a Swift package built with nixpkgs' Swift and Apple SDK
+(`nix build .#transcription-service`); its pinned models are another output
+(`nix build .#transcription-models`), passed read-only as `serve --models-dir`.
+`nix develop` provides the remaining development tools (`uv`, `swift-format`,
+`sox`).
 
 ## Codex usage alerts
 

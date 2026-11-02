@@ -149,6 +149,7 @@ def test_transcribe_uploads_in_order_and_returns_the_validated_transcript(
         (429, "overloaded", "overloaded"),
         (500, "inference_failed", "inference_failed"),
         (503, "not_ready", "not_ready"),
+        (504, "timeout", "timeout"),
         (418, "teapot", "bad_response"),
     ],
 )

@@ -26,7 +26,7 @@ import os
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, BinaryIO, Literal
 from urllib.parse import urlsplit
 
 import requests
@@ -188,6 +188,8 @@ _STATUS_KINDS: dict[int, TranscriptionErrorKind] = {
     429: "overloaded",
     500: "inference_failed",
     503: "not_ready",
+    # The service cancelled the request at its --request-timeout-seconds.
+    504: "timeout",
 }
 
 
@@ -437,7 +439,7 @@ class MultipartUpload:
         )
         self._index = 0
         self._offset = 0
-        self._handle: Any = None
+        self._handle: BinaryIO | None = None
 
     def __len__(self) -> int:
         return self._length

@@ -11,7 +11,7 @@ judgement belongs here.
 | `claude-delegation` | Discover, start, observe, steer, answer, cancel and resume bounded Claude tasks; grants, limits and result verification. |
 | `clockify-time` | Read authenticated-user history/catalogue and create one verified completed entry; uncertain-write recovery. |
 | `clockify-jira-sync` | Jira placement/naming, selection scope, read-only preview, digest-bound apply, conflicts and partial failure. |
-| `transcription` | Transcribe/diarise server-local audio with `transcribe`; what timestamps, file spans, anonymous speakers and `overlap` promise, and how to handle each error. |
+| `transcription` | Transcribe/diarise audio local to jake-tools with `transcribe`; what timestamps, file spans, anonymous speakers and `overlap` promise, and how to handle each error. |
 | `clockify-time/references/direct-api-workflows.md` | Separately authorised manual fallback for unsupported cleanup, duplicate migration and exact-ID entry edits. Not implemented MCP tools. |
 
 ## Migration from broad shared skills
@@ -37,11 +37,19 @@ Retired shared/profile copies can still shadow current guidance. Remove stale
 authorisation. Do not modify another profile or runtime configuration as part
 of a documentation migration.
 
-## Resource-only delivery
+## Delivery: MCP resources or Hermes plugin skills
 
 Each `src/jake_tools/skills/<name>/` contains a `SKILL.md` and, when needed,
 `references/`. Package builds include these data files; no profile installer or
-installer replacement is provided. Consume them through the connected MCP server:
+installer replacement is provided. The same files reach agents two ways.
+
+The native Hermes plugin registers each skill whose tools a profile is granted
+as the read-only plugin skill `jake-tools:<name>`, served from the installed
+package: load it with `skill_view("jake-tools:<name>")`, and a supporting
+reference with `skill_view("jake-tools:<name>", file_path="references/<path>.md")`.
+Nothing is copied into the profile's skills directory.
+
+Over MCP, consume them through the connected server:
 
 1. Use `resources/list` to discover `skill://<name>`. Each main resource's
    description is the skill's YAML frontmatter `description`, not generic
