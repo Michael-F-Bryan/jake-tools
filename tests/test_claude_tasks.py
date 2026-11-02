@@ -218,6 +218,15 @@ async def test_poll_returns_a_compact_snapshot_and_a_complete_result(
             until="terminal",
             wait_seconds=30,
         )
+        # Terminal state is published before the final history event. Wait
+        # for that event only to make the retry assertions use a settled log;
+        # the initial snapshot may legitimately precede it.
+        with anyio.fail_after(5):
+            while True:
+                history, _ = await read_transcript(session, task_id)
+                if history and history[-1]["kind"] == "finished":
+                    break
+                await anyio.sleep(0.01)
         retry = await call(
             session,
             "claude_poll",
@@ -241,7 +250,8 @@ async def test_poll_returns_a_compact_snapshot_and_a_complete_result(
         assert key not in final, key
     assert final["status"] == "completed" and final["wake_reason"] == "terminal"
     assert final["token_status"] == "current"
-    assert final["changes"]["events"] == 4 and final["changes"]["activity"] == 2
+    observed_events = final["changes"]["events"]
+    assert observed_events in (3, 4) and final["changes"]["activity"] == 2
     result = final["result"]
     assert result["outcome"] == "completed"
     assert result["termination_reason"] == "finished"
@@ -250,10 +260,13 @@ async def test_poll_returns_a_compact_snapshot_and_a_complete_result(
     assert result["session_id"] == started["session_id"]
     assert result["resumable"] is True
     assert result.get("diagnostics", []) == []
-    # Reading consumes nothing: a retry with the same token sees the same changes.
-    assert retry["changes"] == final["changes"]
-    assert retry["observation_token"] == final["observation_token"]
-    assert again["changes"]["events"] == 0 and again["wake_reason"] == "terminal"
+    # Reading consumes nothing: the original token sees the full settled log,
+    # and advancing from the initial snapshot never loses a late final event.
+    assert retry["changes"]["events"] == 4
+    assert retry["changes"]["activity"] == final["changes"]["activity"]
+    assert again["changes"]["events"] == 4 - observed_events
+    assert again["wake_reason"] == "terminal"
+    assert again["observation_token"] == retry["observation_token"]
     # No token: the current state and result, not the history.
     assert "changes" not in tokenless and tokenless["token_status"] == "none"
     assert tokenless["result"]["final_text"] == result["final_text"]
