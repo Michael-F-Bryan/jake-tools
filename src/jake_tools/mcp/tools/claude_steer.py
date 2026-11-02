@@ -9,7 +9,7 @@ from ...claude_runs.inbox import MAX_MESSAGE_CHARS, SteerSubmission
 from ...claude_runs.service import SteerResult
 from ...config import Config
 from ..server import structured_tool
-from ._claude import task_errors, task_service
+from ._claude import GUIDE, task_errors, task_service
 
 
 def register(app: MCPServer, config: Config) -> None:
@@ -18,26 +18,16 @@ def register(app: MCPServer, config: Config) -> None:
     @structured_tool(
         app,
         name="claude_steer",
+        omit_none=True,
         description=(
-            "Send a running delegated task an extra user message (a "
-            "correction or more context) in the same Claude conversation. "
-            "`message_id` (1-128 of [A-Za-z0-9._:-], your choice) makes it "
-            "idempotent: retrying the same id and message returns its current "
-            "state (replayed=true); the same id with another message is "
-            f"request_conflict. `message` up to {MAX_MESSAGE_CHARS} chars. "
-            "state is queued (stored, not yet sent), delivered (written to "
-            "Claude's input), in_conversation (Claude Code added it to the "
-            "conversation; mid-turn messages land after the running tool call "
-            "finishes, which is never interrupted) or not_delivered (the task "
-            "ended first; see reason). None of these proves the model acted "
-            "on it: check its later events and output. Limits and tools never "
-            "change. Track progress with claude_poll. An ended task returns "
-            "task_not_running."
-            "\n\nBefore using this tool, read `skill://claude-delegation` via this server's "
-            "`read_resource` capability, unless its contents are already loaded in the "
-            "current context. The guide defines task scope, permissions, supervision, "
-            "cancellation and recovery rules. Reuse the loaded guide for subsequent "
-            "calls."
+            "Send a running delegated task an extra user message in the same "
+            "conversation. `message_id` (1-128 of [A-Za-z0-9._:-]) makes it "
+            "idempotent (replayed=true; another message under the same id is "
+            f"request_conflict). `message` up to {MAX_MESSAGE_CHARS} chars. state: "
+            "queued, delivered (written to Claude), in_conversation (added after "
+            "the running tool call), or not_delivered (reason says why). None "
+            "proves the model acted on it. Limits and tools never change; an "
+            "ended task is task_not_running." + GUIDE
         ),
     )
     async def claude_steer(task_id: str, message: str, message_id: str) -> SteerResult:

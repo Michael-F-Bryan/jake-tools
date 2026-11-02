@@ -14,7 +14,7 @@ import json
 from typing import Any, Literal
 
 from mcp.types import CallToolResult, TextContent
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 ToolErrorCode = Literal[
     "missing_credentials",
@@ -80,21 +80,46 @@ class ToolError(Exception):
         )
 
 
+def invalid_argument(exc: ValidationError) -> ToolError:
+    """The ``invalid_argument`` error for a Pydantic validation failure."""
+    first = exc.errors()[0]
+    location = first.get("loc") or ()
+    argument = str(location[0]) if location else None
+    message = first.get("msg", "invalid argument")
+    message = message.removeprefix("Value error, ")
+    prefix = f"{argument}: " if argument else ""
+    detail = {"argument": argument} if argument else None
+    return ToolError("invalid_argument", f"{prefix}{message}", detail=detail)
+
+
+def compact_json(payload: Any) -> str:
+    """JSON with no insignificant whitespace.
+
+    A host that shows the model the text copy (Hermes drops the identical
+    structured copy and embeds this text as a JSON string, escaping it) pays
+    for every space and newline twice; compact text keeps that minimal.
+    """
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+
 def error_result(error: ToolError) -> CallToolResult:
     """The wire form of a :class:`ToolError`."""
     payload = error.payload.model_dump(mode="json", exclude_none=True)
     return CallToolResult(
-        content=[TextContent(type="text", text=json.dumps(payload, indent=2))],
+        content=[TextContent(type="text", text=compact_json(payload))],
         structured_content=payload,
         is_error=True,
     )
 
 
-def success_result(model: BaseModel) -> CallToolResult:
-    """The wire form of a tool's typed result: JSON in both content slots."""
-    payload = model.model_dump(mode="json")
+def success_result(model: BaseModel, *, omit_none: bool = False) -> CallToolResult:
+    """The wire form of a tool's typed result: the same compact JSON in both
+    content slots (the MCP backwards-compatible dual emit). ``omit_none``
+    drops ``None`` fields, for tools whose contract says an absent field is
+    null (every such field is optional in the result model)."""
+    payload = model.model_dump(mode="json", exclude_none=omit_none)
     return CallToolResult(
-        content=[TextContent(type="text", text=json.dumps(payload, indent=2))],
+        content=[TextContent(type="text", text=compact_json(payload))],
         structured_content=payload,
         is_error=False,
     )

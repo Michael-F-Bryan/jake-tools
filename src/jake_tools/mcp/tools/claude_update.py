@@ -1,21 +1,33 @@
 """``claude_update``: answer a delegated task's clarification requests."""
 
-from __future__ import annotations
-
-from typing import Any
+from typing import Annotated, Literal
 
 from anyio import to_thread
 from mcp.server.mcpserver import MCPServer
-from pydantic import TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field
 
 from ...claude_runs.inbox import MAX_ANSWER_CHARS, InputResponse
 from ...claude_runs.service import UpdateResult
 from ...config import Config
-from ..errors import ToolError
 from ..server import structured_tool
-from ._claude import task_errors, task_service
+from ._claude import GUIDE, task_errors, task_service
 
-_RESPONSES = TypeAdapter(dict[str, InputResponse])
+
+class Answer(BaseModel):
+    """Answer the question."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    answer: str = Field(min_length=1, max_length=MAX_ANSWER_CHARS, pattern=r"\S")
+    action: Literal["accept"] = "accept"
+
+
+class Decline(BaseModel):
+    """Tell the worker no answer is coming."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["decline"]
 
 
 def register(app: MCPServer, config: Config) -> None:
@@ -24,33 +36,26 @@ def register(app: MCPServer, config: Config) -> None:
     @structured_tool(
         app,
         name="claude_update",
+        omit_none=True,
         description=(
-            "Respond to a delegated task's clarification requests (its "
-            "pending_inputs, status input_required). `responses` maps each "
-            'request_id to {"answer": "..."} or {"action": "decline"}; '
-            f"answers up to {MAX_ANSWER_CHARS} chars. You may answer some and "
-            "leave others pending. Each key reports accepted, duplicate (the "
-            "same response was already applied), conflict (it was settled "
-            "differently), not_pending (it expired when the task ended) or "
-            "unknown. The worker resumes the same turn with the answer as its "
-            "tool result; poll to see it continue. This answers questions "
-            "only: it never grants tools or permissions."
-            "\n\nBefore using this tool, read `skill://claude-delegation` via this server's "
-            "`read_resource` capability, unless its contents are already loaded in the "
-            "current context. The guide defines task scope, permissions, supervision, "
-            "cancellation and recovery rules. Reuse the loaded guide for subsequent "
-            "calls."
+            "Respond to a delegated task's pending questions. `responses` maps "
+            'each request_id to {"answer": "..."} or {"action": "decline"}; you '
+            "may leave others pending. Each key reports accepted, duplicate "
+            "(already applied identically), conflict (settled differently), "
+            "not_pending (expired) or unknown. The worker continues the same turn "
+            "with the answer. It answers questions only: it never grants tools "
+            "or permissions." + GUIDE
         ),
     )
     async def claude_update(
-        task_id: str, responses: dict[str, dict[str, Any]]
+        task_id: str,
+        responses: Annotated[dict[str, Answer | Decline], Field(min_length=1)],
     ) -> UpdateResult:
-        if not responses:
-            raise ToolError(
-                "invalid_argument",
-                "responses: at least one response is required",
-                detail={"argument": "responses"},
-            )
         with task_errors():
-            parsed = _RESPONSES.validate_python(responses)
+            parsed = {
+                key: InputResponse(action="decline")
+                if isinstance(value, Decline)
+                else InputResponse(action="accept", answer=value.answer)
+                for key, value in responses.items()
+            }
             return await to_thread.run_sync(service.respond, task_id, parsed)

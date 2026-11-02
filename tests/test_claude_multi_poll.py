@@ -39,29 +39,13 @@ async def test_multi_poll_validates_all_entries_before_waiting(
             ({"tasks": [task] * 17}, "invalid_argument"),
             ({"tasks": [task, task]}, "invalid_argument"),
             ({"tasks": [task], "task_id": task_id}, "invalid_argument"),
-            ({"tasks": [task], "cursor": "garbage"}, "invalid_argument"),
-            ({"tasks": [task], "limit": 0}, "invalid_argument"),
-            ({"tasks": [task], "wait_seconds": 26}, "invalid_argument"),
+            ({"tasks": [task], "token": "obs1.x"}, "invalid_argument"),
+            ({"tasks": [task], "wait_seconds": 121}, "invalid_argument"),
+            ({"tasks": [{"task_id": 7}]}, "invalid_argument"),
             ({"tasks": [task, {"task_id": "missing"}]}, "unknown_task"),
             (
-                {
-                    "tasks": [
-                        task,
-                        {
-                            "task_id": "20261008T031500Z-1a2b3c4d",
-                            "cursor": f"{task_id}:1:0",
-                        },
-                    ]
-                },
+                {"tasks": [task, {"task_id": "20261008T031500Z-1a2b3c4d"}]},
                 "unknown_task",
-            ),
-            (
-                {"tasks": [{"task_id": task_id, "cursor": "garbage"}]},
-                "invalid_argument",
-            ),
-            (
-                {"tasks": [{"task_id": task_id, "cursor": f"{task_id}:99:999999"}]},
-                "invalid_argument",
             ),
         ):
             began = time.monotonic()
@@ -82,16 +66,23 @@ async def test_multi_poll_has_one_deadline_and_cancelled_wait_leaves_workers_alo
         watched = []
         for _ in range(2):
             started = await start(session, workdir, "[[scenario:slow_tool:8]] go")
-            _, _, cursor = await poll_until(
+            await poll_until(
                 session,
                 started["task_id"],
                 lambda _, events: "tool_use" in kinds(events),
             )
-            watched.append({"task_id": started["task_id"], "cursor": cursor})
+            watched.append({"task_id": started["task_id"]})
         began = time.monotonic()
         quiet = await call(session, "claude_poll", tasks=watched, wait_seconds=0.6)
         assert quiet["ready"] == [] and quiet["wake_reason"] == "deadline"
         assert 0.5 <= time.monotonic() - began < 1.1
+        # Every watched task is still reported, so a deadline is assessable.
+        assert [t["status"] for t in quiet["tasks"]] == ["working", "working"]
+        assert all(t["running_tool"]["tool"] == "Bash" for t in quiet["tasks"])
+        tokens = [
+            {"task_id": t["task_id"], "token": t["observation_token"]}
+            for t in quiet["tasks"]
+        ]
         service = TaskService(
             mcp_home / ".local/state/jake-tools/runs",
             RunDefaults(
@@ -100,7 +91,7 @@ async def test_multi_poll_has_one_deadline_and_cancelled_wait_leaves_workers_alo
         )
         with anyio.move_on_after(0.3) as scope:
             await service.poll_many(
-                [PollTask(**item) for item in watched], wait_seconds=20
+                [PollTask(**item) for item in tokens], wait_seconds=20
             )
         assert scope.cancelled_caught
         for item in watched:
@@ -110,44 +101,46 @@ async def test_multi_poll_has_one_deadline_and_cancelled_wait_leaves_workers_alo
             await call(session, "claude_cancel", task_id=item["task_id"])
         # Cancellation is a ready terminal outcome too, not just normal success.
         ready = await call(
-            session, "claude_poll", tasks=watched, until="terminal", wait_seconds=0
+            session, "claude_poll", tasks=tokens, until="terminal", wait_seconds=0
         )
         assert len(ready["ready"]) == 2
-        assert all(page["status"] == "cancelled" for page in ready["ready"])
+        assert all(task["status"] == "cancelled" for task in ready["tasks"])
+        assert all(
+            [w["category"] for w in task["changes"]["warnings"]] == ["cancel_requested"]
+            for task in ready["tasks"]
+        )
 
 
-async def test_multi_poll_preserves_cursor_error_mapping_if_log_changes_during_wait(
+async def test_multi_poll_resynchronises_a_token_whose_log_changed_during_the_wait(
     mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
 ) -> None:
     async with mcp_server(fake_env) as session:
         started = await start(session, workdir, "[[scenario:slow_tool:8]] go")
-        page, _, cursor = await poll_until(
+        page, _, _ = await poll_until(
             session, started["task_id"], lambda _, events: "tool_use" in kinds(events)
         )
-        log = Path(page["run_dir"]) / "events.jsonl"
+        info = await call(session, "claude_status", task_id=started["task_id"])
+        log = Path(info["run_dir"]) / "events.jsonl"
         original = log.read_bytes()
-
-        async def truncate_log() -> None:
-            await anyio.sleep(0.2)
-            log.write_text("")
-
-        error = None
+        log.write_text("")
         try:
-            async with anyio.create_task_group() as group:
-                group.start_soon(truncate_log)
-                error = await call_error(
-                    session,
-                    "claude_poll",
-                    tasks=[{"task_id": started["task_id"], "cursor": cursor}],
-                    wait_seconds=5,
-                )
-            assert error is not None and error["code"] == "invalid_argument"
+            result = await call(
+                session,
+                "claude_poll",
+                tasks=[
+                    {"task_id": started["task_id"], "token": page["observation_token"]}
+                ],
+                wait_seconds=5,
+            )
+            (task,) = result["tasks"]
+            assert task["token_status"] == "resynchronised"
+            assert result["ready"] == [started["task_id"]]
         finally:
             log.write_bytes(original)
             await call(session, "claude_cancel", task_id=started["task_id"])
 
 
-async def test_multi_poll_attention_includes_questions_and_does_not_consume_hidden_events(
+async def test_multi_poll_questions_interrupt_every_wait_mode(
     mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
 ) -> None:
     async with mcp_server(fake_env) as session:
@@ -155,30 +148,23 @@ async def test_multi_poll_attention_includes_questions_and_does_not_consume_hidd
             session, workdir, "[[scenario:ask:Which colour?]] go", allow_questions=True
         )
         task_id = started["task_id"]
-        waiting, _, cursor = await poll_until(
+        await poll_until(
             session, task_id, lambda page, _: page["status"] == "input_required"
         )
-        quiet = await call(
-            session,
-            "claude_poll",
-            tasks=[{"task_id": task_id}],
-            until="terminal",
-            wait_seconds=0,
-        )
-        assert quiet["ready"] == []  # progress is not terminal; no cursor is advanced
-        attention = await call(
-            session, "claude_poll", tasks=[{"task_id": task_id}], wait_seconds=0
-        )
-        assert attention["ready"][0]["events"][0]["seq"] == 1
-        input_only = await call(
-            session,
-            "claude_poll",
-            tasks=[{"task_id": task_id, "cursor": cursor}],
-            wait_seconds=20,
-        )
-        assert input_only["ready"][0]["wake_reason"] == "input_required"
-        assert input_only["ready"][0]["events"] == []
-        request = waiting["pending_inputs"][0]["request_id"]
+        for until in ("terminal", "attention", "progress"):
+            began = time.monotonic()
+            woke = await call(
+                session,
+                "claude_poll",
+                tasks=[{"task_id": task_id, "token": started["observation_token"]}],
+                until=until,
+                wait_seconds=20,
+            )
+            assert time.monotonic() - began < 2, until
+            (task,) = woke["tasks"]
+            assert task["wake_reason"] == "question", until
+            assert task["pending_questions"][0]["question"] == "Which colour?"
+        request = task["pending_questions"][0]["request_id"]
         await call(
             session,
             "claude_update",
@@ -188,9 +174,13 @@ async def test_multi_poll_attention_includes_questions_and_does_not_consume_hidd
         final = await call(
             session,
             "claude_poll",
-            tasks=[{"task_id": task_id, "cursor": cursor}],
+            tasks=[{"task_id": task_id, "token": task["observation_token"]}],
             until="terminal",
             wait_seconds=20,
         )
-        assert final["ready"][0]["status"] == "completed"
-        assert "green" in final["ready"][0]["result"]["final_text"]
+        (done,) = final["tasks"]
+        assert done["status"] == "completed"
+        assert "green" in done["result"]["final_text"]
+        assert [
+            (q["request_id"], q["state"]) for q in done["changes"]["questions"]
+        ] == [(request, "answered")]

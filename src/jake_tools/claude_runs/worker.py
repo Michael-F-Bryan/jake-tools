@@ -77,6 +77,7 @@ import signal
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -341,6 +342,7 @@ class Driver:
         self.unreported = False
         """True while a prompt is in progress: its cost is not reported yet."""
         self._warned_turns = False
+        self._recorded_exposure = False
         self._send_lock = anyio.Lock()
         self.deadline = time.monotonic() + spec.timeout_seconds
 
@@ -483,6 +485,9 @@ class Driver:
                             f"expected {expected}; the conversation was stopped"
                         ),
                     )
+                if view.tools is not None and not self._recorded_exposure:
+                    self._recorded_exposure = True
+                    update_state(self.run_dir, _with_exposed(list(view.tools)))
                 missing = (
                     unexposed_tools(self.spec.tools, view.tools)
                     if view.tools is not None
@@ -582,6 +587,11 @@ class Driver:
                 detail={"turns_used": used, "max_turns": limit},
             )
         )
+
+
+def _with_exposed(tools: list[str]) -> Callable[[RunState], RunState]:
+    """Record the tools the session's ``init`` listed (runtime evidence)."""
+    return lambda state: state.model_copy(update={"exposed_tools": tools})
 
 
 def add_usage(earlier: Usage | None, later: Usage | None) -> Usage | None:
