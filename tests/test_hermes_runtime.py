@@ -21,6 +21,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -99,7 +100,7 @@ class Hermes:
     def configure(self, yaml: str) -> None:
         (self.home / "config.yaml").write_text(textwrap.dedent(yaml))
 
-    def run(self, body: str, **env: str) -> dict[str, object]:
+    def run(self, body: str, **env: str) -> dict[str, Any]:
         script = self.home.parent / "probe.py"
         script.write_text(PRELUDE + textwrap.dedent(body))
         completed = subprocess.run(

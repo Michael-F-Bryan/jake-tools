@@ -171,7 +171,9 @@ def test_non_claude_results_keep_nullable_fields() -> None:
     assert json.loads(success_json(Result())) == {"optional": None}
     wire = success_result(Result())
     assert wire.structured_content == {"optional": None}
-    assert json.loads(wire.content[0].text) == {"optional": None}
+    content = wire.content[0]
+    assert content.type == "text"
+    assert json.loads(content.text) == {"optional": None}
 
 
 def test_handler_errors_carry_the_stable_code_and_message(tmp_path: Path) -> None:
