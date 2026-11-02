@@ -73,6 +73,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -98,7 +99,14 @@ from ..claude import (
     message_to_json,
     unexposed_tools,
 )
-from .events import Event, EventLog, events_from_view, progress_line
+from .events import (
+    STORED_TOOL_INPUT_CHARS,
+    Event,
+    EventLog,
+    events_from_view,
+    progress_line,
+    tool_input_summary,
+)
 from .handoff import write_handoff
 from .inbox import MAX_CHOICES, MAX_QUESTION_CHARS, Inbox
 from .models import (
@@ -143,6 +151,15 @@ ANSWER_POLL_SECONDS = 0.25
 PROGRESS_FLUSH_SECONDS = 1.0
 MAX_CHOICE_CHARS = 200
 RUNTIME_MESSAGE_CHARS = 500
+TRACKED_TOOL_CALLS = 200
+
+INFERRED_REFUSAL = re.compile(
+    r"^(?:<tool_use_error>)?\s*(?:Permission to use \S+ has been denied|Blocked: )"
+)
+"""Error results the runtime gives a refused call, as observed (CLI 2.1.293
+and 2.1.309): a permission refusal, and a call its own guard blocked (for
+example a long ``sleep`` chain). Only these exact openings are matched; a
+denial found this way is labelled ``inferred_from_tool_error``."""
 
 ASK_TOOL = "ask_parent"
 ASK_DESCRIPTION = (
@@ -185,6 +202,8 @@ class Outcome:
     handoff: Handoff | None = None
     session_cost_usd: float | None = None
     """Set only when a handoff call moved the session's running cost."""
+    cost_complete: bool | None = None
+    diagnostics: tuple[str, ...] = ()
 
 
 def main(run_dir: Path) -> int:
@@ -343,6 +362,17 @@ class Driver:
         """True while a prompt is in progress: its cost is not reported yet."""
         self._warned_turns = False
         self._recorded_exposure = False
+        self.brief_uuid = str(uuid.uuid4())
+        self.brief_seen = False
+        """Whether the CLI echoed the brief into the conversation. A result
+        before that, with no model turn, is not the brief's result."""
+        self.tool_calls: dict[str, tuple[str, str]] = {}
+        """Recent tool calls by ID: ``(tool, input summary)``."""
+        self.denied: dict[str, str] = {}
+        """Tool-use IDs already recorded as denied, with their source."""
+        self.background: list[str] = []
+        """The runtime's latest report of background tasks still running."""
+        self.diagnostics: list[str] = []
         self._send_lock = anyio.Lock()
         self.deadline = time.monotonic() + spec.timeout_seconds
 
@@ -416,6 +446,8 @@ class Driver:
             turns_used=len(self.model_turns),
             handoff=self.handoff,
             session_cost_usd=self.handoff_session_cost,
+            cost_complete=not self.unreported,
+            diagnostics=tuple(dict.fromkeys(self.diagnostics)),
         )
 
     def partial(
@@ -444,7 +476,7 @@ class Driver:
         return self.partial("failed", "sdk_error", error=_describe(exc))
 
     async def _drive(self, conversation: Conversation) -> Outcome:
-        await conversation.send(self.brief, uuid=str(uuid.uuid4()))
+        await conversation.send(self.brief, uuid=self.brief_uuid)
         # A pump failure (the CLI's stdin gone) surfaces from the task group
         # as an exception group, which ``run`` turns into an outcome.
         outcome: Outcome | None = None
@@ -501,32 +533,54 @@ class Driver:
                     )
                 continue
             if view.kind == "user_input":
-                if view.uuid:
+                if view.uuid == self.brief_uuid:
+                    self.brief_seen = True
+                elif view.uuid:
                     self.inbox.mark_in_conversation(view.uuid)
                 continue
+            if view.kind == "background_tasks":
+                self.background = list(view.background_tasks or [])
+                continue
+            if view.kind == "permission_denied" and view.denial is not None:
+                denial = view.denial
+                self._deny(
+                    denial.tool,
+                    denial.tool_use_id,
+                    "runtime",
+                    message=denial.message,
+                    reason=denial.reason,
+                )
+                continue
+            for use in view.tool_uses:
+                self.tool_calls[use.id] = (use.name, tool_input_summary(use.input))
+                while len(self.tool_calls) > TRACKED_TOOL_CALLS:
+                    del self.tool_calls[next(iter(self.tool_calls))]
             for result in view.tool_results:
                 if result.is_error:
                     self.tool_errors[result.tool_use_id] = result.text
-                    while len(self.tool_errors) > 200:
+                    while len(self.tool_errors) > TRACKED_TOOL_CALLS:
                         del self.tool_errors[next(iter(self.tool_errors))]
             for kind, fields in events_from_view(view):
                 if kind == "permission_denied":
-                    message = self.tool_errors.get(fields.get("tool_use_id") or "")
-                    fields = {
-                        **fields,
-                        "detail": {
-                            "runtime_message": message[:RUNTIME_MESSAGE_CHARS]
-                            if message is not None
-                            else None,
-                            "runtime_message_chars": len(message)
-                            if message is not None
-                            else None,
-                        },
-                    }
+                    # The turn's own record of a refusal, at its end.
+                    self._deny(
+                        fields.get("tool") or "unknown",
+                        fields.get("tool_use_id"),
+                        "runtime",
+                        message=self.tool_errors.get(fields.get("tool_use_id") or ""),
+                    )
+                    continue
                 event = self.events.append(kind, **fields)
-                if kind == "permission_denied":
-                    self.progress.deny(event)
                 self.progress.note(event)
+            for result in view.tool_results:
+                if result.is_error and INFERRED_REFUSAL.match(result.text):
+                    tool, _ = self.tool_calls.get(result.tool_use_id, ("unknown", ""))
+                    self._deny(
+                        tool,
+                        result.tool_use_id,
+                        "inferred_from_tool_error",
+                        message=result.text,
+                    )
             if view.kind in ("assistant", "tool_results") and view.result is None:
                 self.unreported = True
             if view.kind == "assistant" and view.message_id:
@@ -544,6 +598,24 @@ class Driver:
             if view.result is None:
                 continue
             result = view.result
+            if not result.is_error and not self.brief_seen and result.num_turns == 0:
+                # Observed (CLI 2.1.309): resuming a session whose previous
+                # run left a background task, the CLI first reports that
+                # task's end and answers it with a zero-turn result, before
+                # it takes the brief. Ending here would record "completed"
+                # with nothing done; the brief's own turn is still to come.
+                self.diagnostics.append("result_before_brief_ignored")
+                self.progress.note(
+                    self.events.append(
+                        "notice",
+                        text=(
+                            "The runtime reported a result with no model turn before "
+                            "it took the brief; waiting for the brief's own turn"
+                        ),
+                        detail={"category": "notice", "num_turns": result.num_turns},
+                    )
+                )
+                continue
             self.last_result = result
             self.unreported = False
             self.usage = conversation.usage
@@ -559,6 +631,7 @@ class Driver:
                 )
             async with self._send_lock:
                 if self.inbox.close_if_idle():
+                    self._note_background()
                     return Outcome(
                         status="completed",
                         reason="finished",
@@ -569,6 +642,65 @@ class Driver:
             "failed",
             "sdk_error",
             error="the Claude stream ended without a final result",
+        )
+
+    def _deny(
+        self,
+        tool: str,
+        tool_use_id: str | None,
+        source: str,
+        *,
+        message: str | None,
+        reason: str | None = None,
+    ) -> None:
+        """Record one refused call once, however many ways it was reported.
+
+        The runtime may report a refusal as it happens, in the turn's result,
+        or only through the call's error text; the first report records it,
+        and a later runtime report of an inferred one confirms it.
+        """
+        known = self.denied.get(tool_use_id or "")
+        if known is not None and (known == "runtime" or source != "runtime"):
+            return
+        _, requested = self.tool_calls.get(tool_use_id or "", (tool, ""))
+        detail: dict[str, str | int | bool | None] = {
+            "source": source,
+            "runtime_reason": reason,
+            "runtime_message": message[:RUNTIME_MESSAGE_CHARS] if message else None,
+            "runtime_message_chars": len(message) if message else None,
+        }
+        if known is not None:
+            detail["confirms_inferred"] = True
+        if tool_use_id:
+            self.denied[tool_use_id] = source
+        event = self.events.append(
+            "permission_denied",
+            tool=tool,
+            tool_use_id=tool_use_id,
+            is_error=True,
+            text=requested[:STORED_TOOL_INPUT_CHARS] or None,
+            text_chars=len(requested) if requested else None,
+            text_truncated=len(requested) > STORED_TOOL_INPUT_CHARS,
+            detail=detail,
+        )
+        self.progress.deny(event)
+        self.progress.note(event)
+
+    def _note_background(self) -> None:
+        """Say so when the agent finished with background tasks still running."""
+        if not self.background:
+            return
+        self.diagnostics.append("background_tasks_running_at_end")
+        listed = "; ".join(self.background[:5])
+        self.progress.note(
+            self.events.append(
+                "notice",
+                text=(
+                    f"The agent ended with {len(self.background)} background task(s) "
+                    f"still running ({listed}); they are stopped when the task ends"
+                ),
+                detail={"category": "notice", "background_tasks": len(self.background)},
+            )
         )
 
     def _note_turns(self) -> None:
@@ -721,12 +853,20 @@ class Progress:
         self._dirty = False
 
     def deny(self, event: Event) -> None:
-        """Record a refused call; written with the result that reported it."""
+        """Record a refused call (a confirmation replaces its inferred record)."""
         detail = event.detail or {}
         message = detail.get("runtime_message")
         chars = detail.get("runtime_message_chars")
+        source = detail.get("source")
+        reason = detail.get("runtime_reason")
+        confirms = bool(detail.get("confirms_inferred"))
+        kept = [
+            d
+            for d in self.denials
+            if not (confirms and d.tool_use_id == event.tool_use_id)
+        ]
         self.denials = [
-            *self.denials,
+            *kept,
             PermissionDenial(
                 at=event.at,
                 tool=event.tool or "unknown",
@@ -738,9 +878,14 @@ class Progress:
                 and isinstance(message, str)
                 and chars > len(message),
                 event_seq=event.seq,
+                source="inferred_from_tool_error"
+                if source == "inferred_from_tool_error"
+                else "runtime",
+                runtime_reason=reason if isinstance(reason, str) else None,
             ),
         ][-MAX_DENIALS_KEPT:]
-        self.denials_total += 1
+        if not confirms:
+            self.denials_total += 1
         self._dirty = True
 
     def dirty(self) -> None:
@@ -875,6 +1020,8 @@ def _record(run_dir: Path, spec: RunSpec, outcome: Outcome, events: EventLog) ->
                 "invocation_cost_usd": cost,
                 "turns_used": outcome.turns_used,
                 "handoff": outcome.handoff,
+                "cost_complete": outcome.cost_complete,
+                "diagnostics": list(outcome.diagnostics),
                 **(
                     {"session_cost_usd": outcome.session_cost_usd}
                     if outcome.session_cost_usd is not None

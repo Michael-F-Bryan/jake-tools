@@ -250,6 +250,10 @@ class PermissionDenial(BaseModel):
     """A tool call the Claude runtime refused, as the worker recorded it.
 
     ``requested`` is the call's input summary (the command, the path).
+    ``source`` is ``runtime`` when the CLI itself reported the refusal (as it
+    happened, with ``runtime_reason``, its ``decision_reason_type``, or in
+    the turn's result), and ``inferred_from_tool_error`` when only the call's
+    error text said so (see ``worker.INFERRED_REFUSAL``).
     ``runtime_message`` is what the CLI told the model in that call's error
     result, when the stream carried one, cut to ``RUNTIME_MESSAGE_CHARS``
     (``runtime_message_chars`` is its full length, and the call's
@@ -269,6 +273,8 @@ class PermissionDenial(BaseModel):
     runtime_message_chars: int | None = None
     runtime_message_truncated: bool = False
     event_seq: int | None = None
+    source: Literal["runtime", "inferred_from_tool_error"] = "runtime"
+    runtime_reason: str | None = None
 
 
 class Handoff(BaseModel):

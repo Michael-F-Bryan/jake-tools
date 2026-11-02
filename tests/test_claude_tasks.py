@@ -607,6 +607,7 @@ async def test_a_handoff_is_skipped_when_too_little_time_is_left(
     assert final["termination_reason"] == "max_turns"
     handoff = info["result"]["handoff"]
     assert handoff["status"] == "skipped"
+    assert info["result"]["cost_complete"] is True  # the turn reported its cost
     assert "timeout" in handoff["error"]
     assert final["result"]["final_text"] == "partial answer"
     assert len(argv_files(fake_claude_state)) == 1  # no model call
@@ -701,6 +702,13 @@ async def test_permission_denials_are_structured_and_resume_uses_its_own_rules(
         )
         final, events, _ = await poll_until(session, started["task_id"], terminal)
         info = await detail(session, started["task_id"])
+        observed = await call(
+            session,
+            "claude_poll",
+            task_id=started["task_id"],
+            token=started["observation_token"],
+            wait_seconds=0,
+        )
         resumed = await start(
             session,
             workdir,
@@ -729,8 +737,24 @@ async def test_permission_denials_are_structured_and_resume_uses_its_own_rules(
     assert all(by_seq[d["event_seq"]]["kind"] == "permission_denied" for d in denials)
     assert info["limits"]["allowed_tools"] == rules
     assert info["limits"]["permission_mode"] == "dontAsk"
+    # Each call was first known from its error text, then confirmed by the
+    # result's own record: one denial per call, labelled by source.
     denied = [e for e in events if e["kind"] == "permission_denied"]
-    assert [e["tool_use_id"] for e in denied] == [d["tool_use_id"] for d in denials]
+    inferred = [
+        e for e in denied if e["detail"]["source"] == "inferred_from_tool_error"
+    ]
+    confirmed = [e for e in denied if e["detail"].get("confirms_inferred")]
+    ids = [d["tool_use_id"] for d in denials]
+    assert [e["tool_use_id"] for e in inferred] == ids
+    assert [e["tool_use_id"] for e in confirmed] == ids
+    assert all(d["source"] == "runtime" for d in denials)
+    groups = observed["changes"]["denials"]
+    assert sorted((g["tool"], g["count"], g["source"]) for g in groups) == [
+        ("Bash", 1, "runtime"),
+        ("Bash", 1, "runtime"),
+        ("Write", 1, "runtime"),
+    ]
+    assert observed["permission_denials_total"] == 3
 
     # A resume runs under the rules its own request gave, not the parent's.
     first, second = argv_files(fake_claude_state)
@@ -1158,6 +1182,7 @@ async def test_max_turns_bounds_the_whole_task_across_steered_prompts(
     # budget left is unknown and no handoff call is made.
     handoff = info["result"]["handoff"]
     assert handoff["status"] == "skipped"
+    assert info["result"]["cost_complete"] is False  # said, not hidden
     assert "budget is unknown" in handoff["error"]
 
 
@@ -1733,3 +1758,101 @@ async def test_cancelling_a_poll_leaves_the_task_running(
         assert time.monotonic() < deadline + 30
         await anyio.sleep(0.2)
     assert service.status(started.task_id).status == "completed"
+
+
+# --- runtime repairs: each reproduces a fault observed with the real CLI --------
+
+
+async def test_a_resume_that_answers_an_old_background_task_first_still_runs_its_brief(
+    mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
+) -> None:
+    """Observed with CLI 2.1.309: resuming a session whose previous run left a
+    background task, the CLI reported that task stopped and answered it with a
+    zero-turn result before taking the brief. The worker took that as the
+    brief's result: ``completed``, no turn, no text, nothing done."""
+    async with mcp_server(fake_env) as session:
+        parent = await start(session, workdir, "[[scenario:echo]] remember me")
+        await poll_until(session, parent["task_id"], terminal)
+    env = {**fake_env, "FAKE_CLAUDE_RESUME_PREMATURE": "1"}
+    async with mcp_server(env) as session:
+        child = await call(
+            session,
+            "claude_start",
+            brief="carry on",
+            resume_task_id=parent["task_id"],
+            **FAST,
+        )
+        final, events, _ = await poll_until(session, child["task_id"], terminal)
+        info = await detail(session, child["task_id"])
+
+    assert final["status"] == "completed"
+    assert final["result"]["final_text"] == "REMEMBERED: [[scenario:echo]] remember me"
+    assert final["turns_used"] == 1
+    assert final["result"]["diagnostics"] == ["result_before_brief_ignored"]
+    results = [e for e in events if e["kind"] == "turn_result"]
+    # Both results stay in the record; only the brief's decides the outcome.
+    assert [r["detail"]["num_turns"] for r in results] == [0, 1]
+    assert any("before it took the brief" in e.get("text", "") for e in events)
+    assert info["result"]["cost_complete"] is True
+
+
+async def test_ending_with_a_background_task_still_running_is_diagnosed(
+    mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
+) -> None:
+    async with mcp_server(fake_env) as session:
+        started = await start(session, workdir, "[[scenario:background]] go")
+        final, events, _ = await poll_until(session, started["task_id"], terminal)
+
+    # Completion is the process's, not proof of the work: the claimed command
+    # was still running, and the end of the task stops it.
+    assert final["status"] == "completed" and final["result"]["final_text"] == "DONE"
+    assert final["result"]["diagnostics"] == ["background_tasks_running_at_end"]
+    notice = next(e for e in events if e["kind"] == "notice")
+    assert "1 background task(s) still running (sleep 40)" in notice["text"]
+
+
+async def test_live_reported_and_text_only_refusals_are_recorded_once_by_source(
+    mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
+) -> None:
+    """The shapes CLI 2.1.309 produced: a ``permission_denied`` system message
+    as the call is refused (and the result's record of it later), and a call
+    its own guard blocked with no record at all, only ``Blocked:`` text."""
+    async with mcp_server(fake_env) as session:
+        started = await start(
+            session,
+            workdir,
+            "[[scenario:deny_live]] go",
+            tools=["Bash", "Write"],
+            allowed_tools=["Write(./allowed/**)"],
+        )
+        await poll_until(session, started["task_id"], terminal)
+        observed = await call(
+            session,
+            "claude_poll",
+            task_id=started["task_id"],
+            token=started["observation_token"],
+            wait_seconds=0,
+        )
+        info = await detail(session, started["task_id"])
+
+    groups = {g["tool"]: g for g in observed["changes"]["denials"]}
+    assert set(groups) == {"Write", "Bash"}
+    write, bash = groups["Write"], groups["Bash"]
+    assert (write["count"], write["source"], write["runtime_reason"]) == (
+        1,
+        "runtime",
+        "mode",
+    )
+    assert write["requested"] == "allowed/a.txt"
+    assert (bash["count"], bash["source"]) == (1, "inferred_from_tool_error")
+    assert bash["requested"] == "sleep 40 && echo SLEPT"
+    assert bash["runtime_message"].startswith("<tool_use_error>Blocked: sleep 40")
+    assert info["permission_denials_total"] == 2
+    assert [(d["tool"], d["source"]) for d in info["permission_denials"]] == [
+        ("Write", "runtime"),
+        ("Bash", "inferred_from_tool_error"),
+    ]
+    # The request is reported as requested; whether a rule approves a call is
+    # the runtime's decision, and this one did not.
+    assert info["limits"]["allowed_tools"] == ["Write(./allowed/**)"]
+    assert info["limits"]["exposed_tools"] == ["Bash", "Write"]

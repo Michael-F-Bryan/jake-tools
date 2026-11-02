@@ -326,7 +326,7 @@ class Scanner:
         self.events = 0
         self.activity = 0
         self._denials: dict[tuple[str, str | None], _DenialAcc] = {}
-        self._denied_ids: set[str] = set()
+        self._denied_ids: dict[str, tuple[str, str | None]] = {}
         self._steering: dict[str, SteeringChange] = {}
         self._questions: dict[str, QuestionChange] = {}
         self._warnings: dict[tuple[str, str | None], Warning] = {}
@@ -393,11 +393,19 @@ class Scanner:
                 pass
 
     def _deny(self, event: Event) -> None:
-        if event.tool_use_id:
-            if event.tool_use_id in self._denied_ids:
-                return  # the runtime confirming an inferred denial: one call
-            self._denied_ids.add(event.tool_use_id)
         key = (event.tool or "unknown", event.text)
+        if event.tool_use_id:
+            seen = self._denied_ids.get(event.tool_use_id)
+            if seen is not None:
+                # One call reported twice: the runtime confirming a denial
+                # first inferred from its error text.
+                group = self._denials[seen].group
+                if (event.detail or {}).get("source") != "inferred_from_tool_error":
+                    group.source = "runtime"
+                return
+            if (event.detail or {}).get("confirms_inferred"):
+                return  # confirms a call reported before the token
+            self._denied_ids[event.tool_use_id] = key
         found = self._denials.get(key)
         if found is None:
             new = key not in self.known_denials

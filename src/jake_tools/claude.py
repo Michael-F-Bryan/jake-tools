@@ -747,6 +747,10 @@ class PermissionDenialView(BaseModel):
     tool: str
     tool_use_id: str | None = None
     tool_input: dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
+    """The runtime's ``decision_reason_type`` (``mode``: no rule approved it
+    under ``dontAsk``), when it reported the denial as it happened."""
+    message: str | None = None
 
 
 class ResultView(BaseModel):
@@ -774,7 +778,15 @@ class MessageView(BaseModel):
     """
 
     kind: Literal[
-        "init", "assistant", "user_input", "tool_results", "result", "notice", "other"
+        "init",
+        "assistant",
+        "user_input",
+        "tool_results",
+        "result",
+        "notice",
+        "permission_denied",
+        "background_tasks",
+        "other",
     ]
     session_id: str | None = None
     uuid: str | None = None
@@ -786,6 +798,8 @@ class MessageView(BaseModel):
     result: ResultView | None = None
     notice: str | None = None
     tools: list[str] | None = None
+    denial: PermissionDenialView | None = None
+    background_tasks: list[str] | None = None
 
 
 def describe(message: Message) -> MessageView:
@@ -860,6 +874,39 @@ def describe(message: Message) -> MessageView:
                 kind="init",
                 session_id=session,
                 tools=[str(t) for t in tools] if isinstance(tools, list) else None,
+            )
+        if message.subtype == "permission_denied":
+            # CLI 2.1.309 reports each refusal as it happens (observed), not
+            # only in the turn's result.
+            tool_use_id, reason, text = (
+                data.get("tool_use_id"),
+                data.get("decision_reason_type"),
+                data.get("message"),
+            )
+            return MessageView(
+                kind="permission_denied",
+                session_id=session,
+                denial=PermissionDenialView(
+                    tool=str(data.get("tool_name") or "unknown"),
+                    tool_use_id=tool_use_id if isinstance(tool_use_id, str) else None,
+                    reason=reason if isinstance(reason, str) else None,
+                    message=text if isinstance(text, str) else None,
+                ),
+            )
+        if message.subtype == "background_tasks_changed":
+            # The runtime's current set of background tasks (observed, CLI
+            # 2.1.309): what is still running when a turn ends.
+            tasks = data.get("tasks")
+            return MessageView(
+                kind="background_tasks",
+                session_id=session,
+                background_tasks=[
+                    str(t.get("description") or t.get("task_id") or "?")
+                    for t in tasks
+                    if isinstance(t, dict)
+                ]
+                if isinstance(tasks, list)
+                else [],
             )
         if message.subtype == "api_retry":
             attempt = data.get("attempt")

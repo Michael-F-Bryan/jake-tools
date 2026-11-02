@@ -27,7 +27,10 @@ processes and fails, like the real CLI, for an unknown session. Every
 invocation's argv is saved to ``$FAKE_CLAUDE_STATE/argv-<n>.json`` and its
 ``CLAUDE_CODE_*`` environment to ``env-<n>.json``. A resume replies
 ``REMEMBERED: <first user message>``; with ``FAKE_CLAUDE_RESUME=stall`` it
-narrates and hangs, with ``=tool`` it calls a tool and hangs.
+narrates and hangs, with ``=tool`` it calls a tool and hangs. With
+``FAKE_CLAUDE_RESUME_PREMATURE=1`` a resume first reports a background task
+of the previous run as stopped and answers it with a zero-turn ``result``
+before it takes the brief, as CLI 2.1.309 did (observed).
 
 ``init`` lists the session's tools as the real CLI does (observed on
 2.1.293): the ``--tools`` names, minus any it does not provide, silently,
@@ -283,8 +286,10 @@ class Session:
         *,
         subtype: str = "success",
         denials: list[dict[str, Any]] | None = None,
+        turns: int | None = None,
+        cost: float = 0.01,
     ) -> None:
-        self.data["cost"] = round(self.data["cost"] + 0.01, 6)
+        self.data["cost"] = round(self.data["cost"] + cost, 6)
         self.save()
         emit(
             {
@@ -293,7 +298,7 @@ class Session:
                 "duration_ms": 5,
                 "duration_api_ms": 4,
                 "is_error": subtype != "success",
-                "num_turns": self.turns,
+                "num_turns": self.turns if turns is None else turns,
                 "session_id": str(uuid.uuid4())
                 if self.args.get("resume")
                 and os.environ.get("FAKE_CLAUDE_RESUME_INIT") == "wrong_result"
@@ -354,11 +359,40 @@ class Session:
 
     # --- the conversation --------------------------------------------------------
 
+    def system(self, subtype: str, **data: Any) -> None:
+        emit(
+            {
+                "type": "system",
+                "subtype": subtype,
+                "session_id": self.reported_id,
+                "uuid": str(uuid.uuid4()),
+                **data,
+            }
+        )
+
+    def premature_result(self) -> None:
+        """The previous run's background task reported, answered with nothing."""
+        self.system(
+            "task_notification",
+            task_id="bg1",
+            status="stopped",
+            output_file="",
+            summary="Background shell command didn't finish before the previous session ended",
+        )
+        self.init()
+        self.result("", turns=0, cost=0.0)
+
     def run(self) -> None:
         while True:
             message = _inbox.get()
             if message is None:
                 return
+            if (
+                self.turns == 0
+                and self.args.get("resume")
+                and os.environ.get("FAKE_CLAUDE_RESUME_PREMATURE")
+            ):
+                self.premature_result()
             self.turns += 1
             self.init()
             text = self.echo(message)
@@ -505,6 +539,51 @@ class Session:
             )
         self.say({"type": "text", "text": "Some calls were denied."})
         self.result("Some calls were denied.", denials=denials)
+
+    def turn_deny_live(self, text: str) -> None:
+        """Refusals as CLI 2.1.309 reports them: a ``permission_denied`` system
+        message as it happens, the error result, the result's record; and a
+        call the runtime's own guard blocks, reported only as error text."""
+        tool_id = self.tool("Write", {"file_path": "allowed/a.txt", "content": "a"})
+        message = "Permission to use Write has been denied because Claude Code is running in don't ask mode."
+        self.system(
+            "permission_denied",
+            tool_name="Write",
+            tool_use_id=tool_id,
+            decision_reason_type="mode",
+            message=message,
+        )
+        self.tool_result(tool_id, message, is_error=True)
+        blocked = self.tool("Bash", {"command": "sleep 40 && echo SLEPT"})
+        self.tool_result(
+            blocked,
+            "<tool_use_error>Blocked: sleep 40 followed by: echo SLEPT.</tool_use_error>",
+            is_error=True,
+        )
+        self.say({"type": "text", "text": "Both refused."})
+        self.result(
+            "Both refused.",
+            denials=[
+                {
+                    "tool_name": "Write",
+                    "tool_use_id": tool_id,
+                    "tool_input": {"file_path": "allowed/a.txt", "content": "a"},
+                }
+            ],
+        )
+
+    def turn_background(self, text: str) -> None:
+        """End the turn with a background task still running (observed)."""
+        tool_id = self.tool("Bash", {"command": "sleep 40", "run_in_background": True})
+        self.system(
+            "background_tasks_changed",
+            tasks=[
+                {"task_id": "bg1", "task_type": "local_bash", "description": "sleep 40"}
+            ],
+        )
+        self.tool_result(tool_id, "Command running in background with ID: bg1.")
+        self.say({"type": "text", "text": "DONE"})
+        self.result("DONE")
 
     def turn_stall(self, text: str) -> None:
         self.say({"type": "text", "text": "Thinking about it."})
