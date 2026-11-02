@@ -20,7 +20,10 @@ def register_all(app: MCPServer, config: Config) -> None:
     for operation in OPERATIONS:
         if operation.available(config):
             structured_tool(
-                app, name=operation.name, description=mcp_description(operation)
+                app,
+                name=operation.name,
+                description=mcp_description(operation),
+                omit_none=operation.omit_none,
             )(operation.build(config))
 
 

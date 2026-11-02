@@ -14,47 +14,23 @@ from . import Handler, Operation
 from ._claude import task_errors, task_service
 
 DESCRIPTION = (
-    "Start a delegated Claude task and return once it is durably "
-    "created, with its task_id and Claude session_id. `brief` is the "
-    "full task text, context and acceptance criteria (the worker sees "
-    "nothing else). `working_directory` must be an absolute path to an "
-    "existing directory. `tools` lists the Claude Code built-in tools "
-    "the session exposes, by name (e.g. Read, Grep, Edit, Bash, "
-    "WebFetch, NotebookEdit); the default is none. Any well-formed name "
-    "is accepted and passed to the runtime, which decides what exists: "
-    "if the session does not provide one (unknown name, or unavailable "
-    "to this account or surface) the task fails with "
-    "termination_reason tools_unavailable, naming it. "
-    "`allowed_tools` is the permission rules that auto-approve calls, "
-    "each for a tool in `tools`: 'Read', 'Bash(git status)', "
-    "'Bash(uv run pytest *)', 'Edit(/src/**)', "
-    "'WebFetch(domain:example.com)'. A scoped rule approves only "
-    "matching calls; other calls that need approval are denied (calls "
-    "Claude Code never asks about, such as reads inside the working "
-    "directory and read-only Bash commands like ls or git status, run "
-    "regardless). Omitted, every tool in `tools` is approved outright. "
-    "Bash is a broad capability, not a sandbox. "
-    "`allow_questions=true` lets the "
-    "worker ask you questions (status input_required; answer with "
-    "claude_update); leave it off unless you will watch with "
-    "claude_poll, or an unanswered question stalls the task until its "
-    "timeout. "
-    f"`model`, `effort` ({'|'.join(get_args(EffortLevel))}), `max_turns`, "
-    "`timeout_seconds` (wall clock, including time waiting for your "
-    "answers) and `max_budget_usd` default to the server's "
-    "configuration and are hard limits. `resume_task_id` continues a "
-    "finished task's Claude conversation as a NEW task: tools, "
-    "allowed_tools and limits (and allow_questions) are this call's own (nothing is "
-    "inherited), and "
-    "working_directory must be the parent's (omit it to use it). "
-    "`request_id` (1-128 of [A-Za-z0-9._:-]) makes the call safe to "
-    "retry: the same id and request return the original task "
-    "(replayed=true); the same id with a different request fails "
-    "with request_conflict. At most "
-    f"{MAX_LIVE_TASKS} tasks run at once (capacity_exceeded otherwise). "
-    "Observe with claude_poll, steer with claude_steer, stop with "
-    "claude_cancel, find tasks with claude_list. A max_turns stop "
-    "adds a tool-free, worker-reported result.handoff."
+    "Start a delegated Claude task (or, with resume_task_id, continue a "
+    "finished task's conversation as a new task) and return once it is durable:"
+    " task_id, session_id, observation_token for claude_poll, and config as "
+    "normalised. `brief` is everything the worker sees besides "
+    "working_directory (absolute, existing). `tools` exposes Claude Code built-"
+    "ins by name (default none; a name the session lacks fails the task as "
+    "tools_unavailable); `allowed_tools` is permission rules that auto-approve "
+    "calls, each for a tool in `tools` ('Read', 'Bash(git status)', "
+    "'Edit(/src/**)'); omitted approves every exposed tool, [] approves none. "
+    "Other calls needing approval are denied. allow_questions lets the worker "
+    "ask you (answer with claude_update). model, effort ("
+    f"{'|'.join(get_args(EffortLevel))}"
+    "), max_turns, timeout_seconds (wall clock) and max_budget_usd default to "
+    "the server's configuration and are hard limits; nothing is inherited on "
+    "resume. request_id makes retries safe (replayed=true). At most "
+    f"{MAX_LIVE_TASKS}"
+    " tasks run at once (capacity_exceeded)."
 )
 
 
@@ -81,9 +57,9 @@ def build(config: Config) -> Handler:
                     "brief": brief,
                     "working_directory": working_directory,
                     "tools": tuple(tools or ()),
-                    "allowed_tools": (
-                        None if allowed_tools is None else tuple(allowed_tools)
-                    ),
+                    "allowed_tools": None
+                    if allowed_tools is None
+                    else tuple(allowed_tools),
                     "model": model,
                     "effort": effort,
                     "max_turns": max_turns,
@@ -105,4 +81,5 @@ OPERATION = Operation(
     skill="claude-delegation",
     description=DESCRIPTION,
     build=build,
+    omit_none=True,
 )

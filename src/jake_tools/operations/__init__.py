@@ -69,6 +69,8 @@ class Operation:
     skill: str
     description: str
     build: Callable[[Config], Handler]
+    omit_none: bool = False
+    """Omit null result fields and use compact JSON in both adapters."""
     available: Callable[[Config], bool] = _always
     """Whether ``config`` exposes the operation at all (``transcribe`` needs
     an endpoint). An unavailable operation is not registered."""

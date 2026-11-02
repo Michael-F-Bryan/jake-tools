@@ -37,6 +37,7 @@ from jake_tools.claude_runs.rundir import (
     read_groups,
     read_state,
 )
+from jake_tools.claude_runs.service import CancelResult
 from jake_tools.claude_runs.spawn import group_alive, group_pids
 
 pytestmark = pytest.mark.slow
@@ -91,16 +92,25 @@ async def _start(session: ClientSession, **arguments: Any) -> RunState:
         "claude_status", {"task_id": result.structured_content["task_id"]}
     )
     assert status.is_error is False, status.structured_content
-    state = RunState.model_validate(status.structured_content)
+    state = _on_disk(status.structured_content)
     assert state.status == "working"
     assert state.pgid is not None and state.pgid > 1
     return state
 
 
+def _on_disk(view: dict[str, Any] | None) -> RunState:
+    """The ``status.json`` behind a ``claude_status`` detail view (which
+    reconciles it first); it holds the process record the view leaves out."""
+    assert view is not None
+    return RunState.model_validate_json(
+        (Path(view["run_dir"]) / STATUS_FILE).read_bytes()
+    )
+
+
 async def _status(session: ClientSession, task_id: str) -> RunState:
     result = await session.call_tool("claude_status", {"task_id": task_id})
     assert result.is_error is False, result.structured_content
-    return RunState.model_validate(result.structured_content)
+    return _on_disk(result.structured_content)
 
 
 async def _wait_terminal(
@@ -403,14 +413,17 @@ async def test_live_cancel_stops_the_task_and_empties_its_group(
         result = await session.call_tool("claude_cancel", {"task_id": started.task_id})
         elapsed = time.monotonic() - before
         assert result.is_error is False, result.structured_content
-        state = RunState.model_validate(result.structured_content)
+        cancel = CancelResult.model_validate(result.structured_content)
+        state = await _status(session, started.task_id)
         again = await session.call_tool("claude_cancel", {"task_id": started.task_id})
 
+    assert cancel.termination == "confirmed" and cancel.rollback == "none"
     assert state.status == "cancelled"
     assert state.termination_reason == "cancelled"
     assert state.finished_at is not None
     assert elapsed < 20
-    assert RunState.model_validate(again.structured_content) == state  # idempotent
+    repeat = CancelResult.model_validate(again.structured_content)  # idempotent
+    assert repeat.termination == "already_ended" and repeat.status == "cancelled"
     await _assert_group_gone(pgid)
 
 
@@ -556,9 +569,9 @@ async def test_live_worker_survives_server_sigkill_and_a_new_server_cancels_it(
         assert state.pgid == pgid
         result = await session.call_tool("claude_cancel", {"task_id": started.task_id})
         assert result.is_error is False, result.structured_content
-        cancelled = RunState.model_validate(result.structured_content)
+        cancelled = CancelResult.model_validate(result.structured_content)
 
-    assert cancelled.status == "cancelled"
+    assert cancelled.status == "cancelled" and cancelled.termination == "confirmed"
     assert cancelled.termination_reason == "cancelled"
     await _assert_group_gone(pgid)
 
@@ -628,8 +641,11 @@ async def test_live_sigkill_of_the_worker_group_then_cancel_clears_the_tool_shel
         assert _loop_shells(), "the shell should have survived the group kill"
         result = await session.call_tool("claude_cancel", {"task_id": started.task_id})
         assert result.is_error is False, result.structured_content
-        state = RunState.model_validate(result.structured_content)
+        cancel = CancelResult.model_validate(result.structured_content)
+        state = await _status(session, started.task_id)
 
+    # The dead worker was settled before the cancel did anything.
+    assert cancel.termination == "already_ended", cancel
     assert state.status == "failed"
     assert state.termination_reason == "worker_died", state
     on_disk = RunState.model_validate_json((state.run_dir / STATUS_FILE).read_bytes())
@@ -723,7 +739,7 @@ async def test_live_scoped_write_and_compound_bash_denials_are_reported(
             max_turns=8,
         )
         state = await _wait_terminal(session, started.task_id)
-        view = await session.call_tool("claude_poll", {"task_id": started.task_id})
+        view = await session.call_tool("claude_status", {"task_id": started.task_id})
 
     assert state.status == "completed", state
     denials = {d.tool_use_id: d for d in state.permission_denials}
@@ -752,7 +768,11 @@ async def test_live_scoped_write_and_compound_bash_denials_are_reported(
     # The compound command: either it ran or it was reported as denied.
     assert report["approved-2"] != ("approved-2" in denied), (report, denied)
     assert view.structured_content is not None
-    assert view.structured_content["limits"]["permission_mode"] == "dontAsk"
+    detail = view.structured_content
+    assert detail["limits"]["permission_mode"] == "dontAsk"
+    assert set(detail["limits"]["exposed_tools"]) == {"Bash", "Write", "Edit"}
+    sources = {d["source"] for d in detail["permission_denials"]}
+    assert sources <= {"runtime", "inferred_from_tool_error"}
 
 
 async def test_live_tools_outside_the_old_list_are_exposed(

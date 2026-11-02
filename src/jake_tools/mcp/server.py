@@ -13,19 +13,22 @@ from __future__ import annotations
 import functools
 import inspect
 import logging
+import typing
 from collections.abc import Awaitable, Callable
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
 import yaml
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError as FrameworkToolError
+from mcp.server.mcpserver.exceptions import UnexpectedToolError
 from mcp.server.mcpserver.resources import FileResource
-from mcp.types import CallToolResult
-from pydantic import BaseModel
+from mcp.types import CallToolResult, InputRequiredResult
+from pydantic import BaseModel, ValidationError
 
 from ..config import Config
-from .errors import ToolError, error_result, success_result
+from .errors import ToolError, error_result, invalid_argument, success_result
 
 SERVER_NAME = "jake-tools"
 SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
@@ -39,7 +42,7 @@ def build_server(config: Config) -> MCPServer:
     from .tasks import TasksExtension
     from .tools import register_all
 
-    app = MCPServer(
+    app = JakeMCPServer(
         SERVER_NAME,
         instructions=_INSTRUCTIONS,
         version=package_version(),
@@ -68,6 +71,31 @@ def build_server(config: Config) -> MCPServer:
                 )
             )
     return app
+
+
+class JakeMCPServer(MCPServer):
+    """``MCPServer`` whose argument-validation failures keep the error contract.
+
+    The framework validates a call's arguments against the handler's
+    signature before the handler runs, and reports a failure as plain text
+    (``Error executing tool <name>: 1 validation error for ...``) with no
+    structured payload. Here that failure becomes the same structured
+    ``invalid_argument`` result a handler would return, naming the argument.
+    """
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Context | None = None
+    ) -> CallToolResult | InputRequiredResult:
+        try:
+            return await super().call_tool(name, arguments, context)
+        except FrameworkToolError as exc:
+            cause = exc.__cause__
+            if isinstance(exc, UnexpectedToolError) or not isinstance(
+                cause, ValidationError
+            ):
+                raise
+            log.info("%s rejected its arguments", name)
+            return error_result(invalid_argument(cause))
 
 
 def skill_description(path: Path) -> str:
@@ -103,14 +131,15 @@ def packaged_skills() -> tuple[Path, ...]:
 
 
 def structured_tool(
-    app: MCPServer, *, name: str, description: str
+    app: MCPServer, *, name: str, description: str, omit_none: bool = False
 ) -> Callable[
     [Callable[..., Awaitable[BaseModel]]], Callable[..., Awaitable[BaseModel]]
 ]:
     """Register an async handler that returns a Pydantic model.
 
     The handler's parameters become the tool's input schema. Its result is
-    sent as structured content (and as JSON text); a :class:`ToolError` it
+    sent as structured content (and as the same compact JSON text; with
+    ``omit_none``, ``None`` fields are left out); a :class:`ToolError` it
     raises becomes an ``isError`` result carrying the error payload; any
     other exception is logged with its traceback and reported as
     ``internal_error`` without the exception's text, which could carry a
@@ -138,11 +167,19 @@ def structured_tool(
                         f"{name} failed unexpectedly; see the server's stderr log",
                     )
                 )
-            return success_result(result)
+            return success_result(result, omit_none=omit_none)
 
-        signature = inspect.signature(fn).replace(return_annotation=CallToolResult)
+        # Resolved against the handler's own module, so a handler may use
+        # ``from __future__ import annotations`` and module-level constants
+        # in ``Annotated`` bounds.
+        signature = inspect.signature(fn, eval_str=True).replace(
+            return_annotation=CallToolResult
+        )
         wrapper.__signature__ = signature  # type: ignore[attr-defined]
-        wrapper.__annotations__ = {**fn.__annotations__, "return": CallToolResult}
+        wrapper.__annotations__ = {
+            **typing.get_type_hints(fn, include_extras=True),
+            "return": CallToolResult,
+        }
         app.tool(name=name, description=description)(wrapper)
         return fn
 

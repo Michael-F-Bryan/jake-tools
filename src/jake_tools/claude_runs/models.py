@@ -25,8 +25,9 @@ renamed):
 ``events.jsonl``
     One :class:`~.events.Event` per line, append-only, numbered from 1: the
     normalised public record (narration, tool activity, steering,
-    clarification, results) that ``claude_poll`` and ``claude_transcript``
-    page through by cursor. Never holds thinking. ``.events.lock``
+    clarification, results) that ``claude_transcript`` pages through by
+    cursor and ``claude_poll`` observes by token (:mod:`.observe`). Never
+    holds thinking. ``.events.lock``
     serialises appends from the worker and the server.
 ``messages/<message_id>.json``
     :class:`SteerMessage`: one steering message and its delivery state.
@@ -231,6 +232,15 @@ class RunState(BaseModel):
     handoff: Handoff | None = None
     permission_denials: list[PermissionDenial] = Field(default_factory=list)
     permission_denials_total: int = 0
+    exposed_tools: list[str] | None = None
+    """The tools the session's ``init`` message listed: runtime evidence of
+    what was exposed (``None`` until the session started, and for runs
+    written before it was recorded)."""
+    cost_complete: bool | None = None
+    """False when the task ended while a prompt was still running, so its
+    cost was never reported and ``usage`` understates it."""
+    diagnostics: list[str] = Field(default_factory=list)
+    """Inconsistencies the worker detected mechanically (stable codes)."""
 
     @property
     def is_terminal(self) -> bool:
@@ -241,6 +251,10 @@ class PermissionDenial(BaseModel):
     """A tool call the Claude runtime refused, as the worker recorded it.
 
     ``requested`` is the call's input summary (the command, the path).
+    ``source`` is ``runtime`` when the CLI itself reported the refusal (as it
+    happened, with ``runtime_reason``, its ``decision_reason_type``, or in
+    the turn's result), and ``inferred_from_tool_error`` when only the call's
+    error text said so (see ``worker.INFERRED_REFUSAL``).
     ``runtime_message`` is what the CLI told the model in that call's error
     result, when the stream carried one, cut to ``RUNTIME_MESSAGE_CHARS``
     (``runtime_message_chars`` is its full length, and the call's
@@ -260,6 +274,8 @@ class PermissionDenial(BaseModel):
     runtime_message_chars: int | None = None
     runtime_message_truncated: bool = False
     event_seq: int | None = None
+    source: Literal["runtime", "inferred_from_tool_error"] = "runtime"
+    runtime_reason: str | None = None
 
 
 class Handoff(BaseModel):
@@ -332,6 +348,48 @@ class ClaudeStartResult(BaseModel):
     resumed_from: str | None = None
     request_id: str | None = None
     replayed: bool = False
+    observation_token: str | None = None
+    """Pass to ``claude_poll``: changes are reported from the task's start."""
+    config: RunConfig | None = None
+
+
+class RunConfig(BaseModel):
+    """An invocation's configuration: as requested, and as normalised.
+
+    ``allowed_tools`` is the request's own list: ``None`` when it was
+    omitted, ``[]`` when explicitly empty. ``approval_rules`` is what was
+    passed to the runtime (every exposed tool when ``allowed_tools`` was
+    omitted). Whether a rule approves a given call is the runtime's
+    decision; it reports refusals as denials. Every nullable field has a
+    default: results omit ``None`` fields, and must still read back.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    model: str
+    effort: EffortLevel | None = None
+    tools: tuple[str, ...]
+    allowed_tools: tuple[str, ...] | None = None
+    approval_rules: tuple[str, ...]
+    permission_mode: Literal["dontAsk"] = "dontAsk"
+    max_turns: int
+    timeout_seconds: float
+    max_budget_usd: float
+    allow_questions: bool
+
+    @classmethod
+    def of(cls, spec: RunSpec) -> RunConfig:
+        return cls(
+            model=spec.model,
+            effort=spec.effort,
+            tools=spec.tools,
+            allowed_tools=spec.allowed_tools,
+            approval_rules=spec.approval_rules,
+            max_turns=spec.max_turns,
+            timeout_seconds=spec.timeout_seconds,
+            max_budget_usd=spec.max_budget_usd,
+            allow_questions=spec.allow_questions,
+        )
 
 
 DeliveryState = Literal["queued", "delivered", "in_conversation", "not_delivered"]

@@ -11,20 +11,15 @@ from . import Handler, Operation
 from ._claude import task_errors, task_service
 
 DESCRIPTION = (
-    "Send a running delegated task an extra user message (a "
-    "correction or more context) in the same Claude conversation. "
-    "`message_id` (1-128 of [A-Za-z0-9._:-], your choice) makes it "
-    "idempotent: retrying the same id and message returns its current "
-    "state (replayed=true); the same id with another message is "
-    f"request_conflict. `message` up to {MAX_MESSAGE_CHARS} chars. "
-    "state is queued (stored, not yet sent), delivered (written to "
-    "Claude's input), in_conversation (Claude Code added it to the "
-    "conversation; mid-turn messages land after the running tool call "
-    "finishes, which is never interrupted) or not_delivered (the task "
-    "ended first; see reason). None of these proves the model acted "
-    "on it: check its later events and output. Limits and tools never "
-    "change. Track progress with claude_poll. An ended task returns "
-    "task_not_running."
+    "Send a running delegated task an extra user message in the same "
+    "conversation. `message_id` (1-128 of [A-Za-z0-9._:-]) makes it idempotent "
+    "(replayed=true; another message under the same id is request_conflict). "
+    "`message` up to "
+    f"{MAX_MESSAGE_CHARS}"
+    " chars. state: queued, delivered (written to Claude), in_conversation "
+    "(added after the running tool call), or not_delivered (reason says why). "
+    "None proves the model acted on it. Limits and tools never change; an ended"
+    " task is task_not_running."
 )
 
 
@@ -47,4 +42,5 @@ OPERATION = Operation(
     skill="claude-delegation",
     description=DESCRIPTION,
     build=build,
+    omit_none=True,
 )

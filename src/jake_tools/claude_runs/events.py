@@ -182,6 +182,37 @@ class EventLog:
     def latest(self) -> Event | None:
         return _last_event(self.path)
 
+    def end(self) -> Cursor:
+        """The position just past the last complete event: where the next goes.
+
+        The offset and the sequence number come from the same line, so the
+        pair is consistent even while the worker appends.
+        """
+        offset = self._complete_size()
+        if offset == 0:
+            return Cursor.start(self.task_id)
+        last = _event_before(self.path, offset)
+        if last is None:  # pragma: no cover - a corrupt final line
+            raise InvalidCursorError("the task's event log ends in an unreadable line")
+        return Cursor(task_id=self.task_id, seq=last.seq + 1, offset=offset)
+
+    def validate(self, cursor: Cursor) -> None:
+        """Raise :class:`InvalidCursorError` unless ``cursor`` is at an event."""
+        if cursor.task_id != self.task_id:
+            raise InvalidCursorError("cursor belongs to a different task")
+        self._validate(cursor, self.size())
+
+    def read(self, cursor: Cursor, end: int) -> Iterator[tuple[Cursor, Event]]:
+        """``(position after, event)`` for each complete event from ``cursor``
+        up to byte ``end``; the cursor must already be valid."""
+        for line_end, event in _read_from(self.path, cursor.offset):
+            if line_end > end:
+                return
+            yield (
+                Cursor(task_id=self.task_id, seq=event.seq + 1, offset=line_end),
+                event,
+            )
+
     def tail(self, max_bytes: int) -> list[Event]:
         """The complete events in (about) the last ``max_bytes`` of the log."""
         size = self.size()
@@ -403,7 +434,23 @@ def events_from_view(view: MessageView) -> list[tuple[EventKind, dict[str, Any]]
                 )
             )
     elif view.kind == "notice" and view.notice:
-        found.append(("notice", {"text": view.notice, "text_chars": len(view.notice)}))
+        category = (
+            "api_retry"
+            if view.notice.startswith("API retry")
+            else "rate_limit"
+            if view.notice.startswith("rate limit")
+            else "notice"
+        )
+        found.append(
+            (
+                "notice",
+                {
+                    "text": view.notice,
+                    "text_chars": len(view.notice),
+                    "detail": {"category": category},
+                },
+            )
+        )
     return found
 
 

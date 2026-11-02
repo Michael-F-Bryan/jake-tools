@@ -98,7 +98,7 @@ def make_handler(
                     f"{operation.name} failed unexpectedly; see the Hermes log",
                 )
             )
-        return success_json(result)
+        return success_json(result, omit_none=operation.omit_none)
 
     handler.__name__ = operation.name
     return handler
@@ -125,8 +125,12 @@ def run_coroutine(make: Callable[[], Awaitable[BaseModel]]) -> BaseModel:
         return pool.submit(context.run, anyio.run, main).result()
 
 
-def success_json(result: BaseModel) -> str:
-    return json.dumps(result.model_dump(mode="json"), ensure_ascii=False)
+def success_json(result: BaseModel, *, omit_none: bool = False) -> str:
+    return json.dumps(
+        result.model_dump(mode="json", exclude_none=omit_none),
+        ensure_ascii=False,
+        separators=(",", ":") if omit_none else None,
+    )
 
 
 def error_json(error: ToolError) -> str:

@@ -110,28 +110,45 @@ async def poll_until(
     session: ClientSession,
     evidence: Evidence,
     task_id: str,
-    predicate: Callable[[dict[str, Any], list[dict[str, Any]]], bool],
+    predicate: Callable[[dict[str, Any]], bool],
     *,
-    cursor: str | None = None,
+    token: str | None = None,
+    until: str = "attention",
     timeout: float = 360,
-) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
+) -> dict[str, Any]:
+    """Supervise as a parent would: poll with the latest token until
+    ``predicate(snapshot)``. The poll wakes on what needs the caller."""
     deadline = time.monotonic() + timeout
-    events: list[dict[str, Any]] = []
     while True:
-        args: dict[str, Any] = {"task_id": task_id, "wait_seconds": 20}
+        args: dict[str, Any] = {"task_id": task_id, "wait_seconds": 60, "until": until}
+        if token:
+            args["token"] = token
+        result = await call(session, evidence, "claude_poll", **args)
+        token = result["observation_token"]
+        if predicate(result):
+            return result
+        assert result["status"] in ("working", "input_required"), result
+        assert time.monotonic() < deadline, result
+
+
+async def history(
+    session: ClientSession, evidence: Evidence, task_id: str
+) -> list[dict[str, Any]]:
+    """The task's whole event log, read with ``claude_transcript``."""
+    events: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while True:
+        args: dict[str, Any] = {"task_id": task_id, "limit": 200}
         if cursor:
             args["cursor"] = cursor
-        result = await call(session, evidence, "claude_poll", **args)
-        events.extend(result["events"])
-        cursor = result["next_cursor"]
-        if predicate(result, events):
-            assert cursor is not None
-            return result, events, cursor
-        assert result["status"] in ("working", "input_required"), result
-        assert time.monotonic() < deadline, [e["kind"] for e in events]
+        page = await call(session, evidence, "claude_transcript", **args)
+        events.extend(page["events"])
+        cursor = page["next_cursor"]
+        if not page["has_more"]:
+            return events
 
 
-def ended(result: dict[str, Any], _: list[dict[str, Any]]) -> bool:
+def ended(result: dict[str, Any]) -> bool:
     return result["status"] in ("completed", "failed", "cancelled")
 
 
@@ -172,16 +189,18 @@ async def test_live_observe_steer_clarify_collect_then_resume_to_edit(
         task_id = started["task_id"]
         assert started["session_id"]
 
-        # Observe: the Bash step shows up as tool activity, with progress.
-        observed, events, cursor = await poll_until(
+        # Observe: wait for checkpoints (until=progress) only to time the
+        # steer: the Bash step shows up as the running tool, with progress.
+        observed = await poll_until(
             session,
             evidence,
             task_id,
-            lambda _, evs: any(
-                e["kind"] == "tool_use" and e["tool"] == "Bash" for e in evs
-            ),
+            lambda r: (r.get("running_tool") or {}).get("tool") == "Bash" or ended(r),
+            token=started["observation_token"],
+            until="progress",
         )
-        assert observed["status_message"]
+        assert observed["running_tool"]["tool"] == "Bash", observed
+        assert observed["progress"]
         assert observed["last_activity_at"]
 
         # Steer while the 20 s command runs: a requirement only this message has.
@@ -198,17 +217,18 @@ async def test_live_observe_steer_clarify_collect_then_resume_to_edit(
         )
         assert steer["state"] in ("queued", "delivered")
 
-        # Clarify: the model asks; the answer carries the widget format.
-        waiting, more, cursor = await poll_until(
+        # Clarify: a default poll sleeps through routine work and wakes for
+        # the question; the answer carries the widget format.
+        waiting = await poll_until(
             session,
             evidence,
             task_id,
-            lambda r, _: r["status"] == "input_required" or ended(r, _),
-            cursor=cursor,
+            lambda r: bool(r.get("pending_questions")) or ended(r),
+            token=observed["observation_token"],
         )
-        events += more
         assert waiting["status"] == "input_required", waiting
-        request = waiting["pending_inputs"][0]
+        assert waiting["wake_reason"] == "question"
+        request = waiting["pending_questions"][0]
         assert request["question"].strip()
         update = await call(
             session,
@@ -223,10 +243,11 @@ async def test_live_observe_steer_clarify_collect_then_resume_to_edit(
         )
         assert update["results"][0]["outcome"] == "accepted"
 
-        final, more, _ = await poll_until(
-            session, evidence, task_id, ended, cursor=cursor
+        final = await poll_until(
+            session, evidence, task_id, ended, token=waiting["observation_token"]
         )
-        events += more
+        info = await call(session, evidence, "claude_status", task_id=task_id)
+        events = await history(session, evidence, task_id)
 
         # Resume the finished conversation as a new task with new grants.
         resumed = await call(
@@ -242,19 +263,27 @@ async def test_live_observe_steer_clarify_collect_then_resume_to_edit(
             tools=["Write"],
             **CHEAP,
         )
-        resumed_final, resumed_events, _ = await poll_until(
-            session, evidence, resumed["task_id"], ended
+        resumed_final = await poll_until(
+            session,
+            evidence,
+            resumed["task_id"],
+            ended,
+            token=resumed["observation_token"],
         )
+        resumed_info = await call(
+            session, evidence, "claude_status", task_id=resumed["task_id"]
+        )
+        resumed_events = await history(session, evidence, resumed["task_id"])
 
     # The first task: steering reached the conversation and the model used it.
     assert final["status"] == "completed", final
-    message = final["messages"][0]
+    message = info["messages"][0]
     assert message["message_id"] == "correction-1"
     assert message["state"] == "in_conversation"
     text = final["result"]["final_text"]
     assert f"WIDGETS={WIDGETS}" in text.replace(" ", ""), text
     assert f"GADGETS={GADGETS}" in text.replace(" ", ""), text
-    assert Path(final["result"]["final_text_path"]).read_text() == text
+    assert Path(info["result"]["final_text_path"]).read_text() == text
     assert final["result"]["session_id"] == started["session_id"]
     assert {"tool_use", "tool_result", "input_requested", "input_answered"} <= set(
         kinds(events)
@@ -268,18 +297,20 @@ async def test_live_observe_steer_clarify_collect_then_resume_to_edit(
     assert resumed["task_id"] != task_id
     assert resumed["session_id"] == started["session_id"]
     assert resumed_final["status"] == "completed", resumed_final
-    assert resumed_final["resumed_from"] == task_id
+    assert resumed_info["resumed_from"] == task_id
     used = {e["tool"] for e in resumed_events if e["kind"] == "tool_use"}
     assert used <= {"Write"}, used  # no Bash, no Read, no ask_parent inherited
     summary = (workdir / "summary.txt").read_text().strip()
     assert summary.replace(" ", "") == f"WIDGETS={WIDGETS}GADGETS={GADGETS}", summary
-    assert resumed_final["limits"]["tools"] == ["Write"]
-    assert resumed_final["limits"]["allow_questions"] is False
-    assert resumed_final["invocation_cost_usd"] is not None
+    assert resumed_info["limits"]["tools"] == ["Write"]
+    assert resumed_info["limits"]["exposed_tools"] == ["Write"]
+    assert resumed_info["limits"]["allow_questions"] is False
+    assert resumed_info["invocation_cost_usd"] is not None
     assert (
-        resumed_final["invocation_cost_usd"]
-        <= resumed_final["usage"]["estimated_cost_usd"]
+        resumed_info["invocation_cost_usd"]
+        <= resumed_info["usage"]["estimated_cost_usd"]
     )
+    assert resumed_final["result"].get("diagnostics", []) == []
     evidence.note("final", {"first": final, "resumed": resumed_final})
 
 
@@ -297,7 +328,7 @@ async def test_live_cancel_after_a_server_restart_stops_the_real_tree(
     )
     server_pid: int | None = None
     task_id: str | None = None
-    cursor: str | None = None
+    token: str | None = None
     try:
         async with mcp_server(live_env) as session:
             server_pid = int((await call(session, evidence, "ping"))["pid"])
@@ -311,19 +342,22 @@ async def test_live_cancel_after_a_server_restart_stops_the_real_tree(
                 **CHEAP,
             )
             task_id = str(started["task_id"])
-            _, _, cursor = await poll_until(
+            running = await poll_until(
                 session,
                 evidence,
                 task_id,
-                lambda _, evs: any(e["kind"] == "tool_use" for e in evs),
+                lambda r: r.get("running_tool") is not None or ended(r),
+                token=started["observation_token"],
+                until="progress",
             )
+            token = running["observation_token"]
             await anyio.sleep(2)
             os.kill(server_pid, signal.SIGKILL)
             await anyio.sleep(1)
     except Exception:
         if server_pid is None or task_id is None:
             raise
-    assert task_id is not None and cursor is not None
+    assert task_id is not None and token is not None
     assert _loop_shells(), "the tool shell should outlive the server"
 
     async with mcp_server(live_env) as session:
@@ -332,7 +366,7 @@ async def test_live_cancel_after_a_server_restart_stops_the_real_tree(
             evidence,
             "claude_poll",
             task_id=task_id,
-            cursor=cursor,
+            token=token,
             wait_seconds=1,
         )
         cancelled = await call(session, evidence, "claude_cancel", task_id=task_id)
@@ -340,8 +374,10 @@ async def test_live_cancel_after_a_server_restart_stops_the_real_tree(
             session, evidence, "claude_poll", task_id=task_id, wait_seconds=0
         )
 
-    assert still["status"] == "working"
+    assert still["status"] == "working" and still["token_status"] == "current"
+    assert still["running_tool"]["tool"] == "Bash"  # still visible from a new server
     assert cancelled["status"] == "cancelled"
+    assert cancelled["termination"] == "confirmed" and cancelled["rollback"] == "none"
     assert cancelled["cancel_requested_at"] is not None
     assert after["result"]["outcome"] == "cancelled"
     assert after["result"]["session_id"]
@@ -418,15 +454,14 @@ async def test_live_native_task_observe_steer_clarify_and_complete(
         task_id = created.task_id
         assert created.status == "working"
 
-        # Observe with the domain tool (tasks/get has no event stream), then
-        # steer while the 20 s command runs: steering stays a domain tool.
-        _, events, cursor = await poll_until(
+        # Observe with the domain tool (tasks/get has no activity detail),
+        # then steer while the 20 s command runs: steering stays a domain tool.
+        await poll_until(
             session,
             evidence,
             task_id,
-            lambda _, evs: any(
-                e["kind"] == "tool_use" and e["tool"] == "Bash" for e in evs
-            ),
+            lambda r: (r.get("running_tool") or {}).get("tool") == "Bash" or ended(r),
+            until="progress",
         )
         steer = await call(
             session,
@@ -476,7 +511,7 @@ async def test_live_native_task_observe_steer_clarify_and_complete(
     assert f"WIDGETS={WIDGETS}" in text.replace(" ", ""), text
     assert f"GADGETS={GADGETS}" in text.replace(" ", ""), text
     assert result["structuredContent"]["termination_reason"] == "finished"
-    assert result["structuredContent"]["final_text"] == status["final_text"]
+    assert result["structuredContent"]["final_text"] == status["result"]["final_text"]
     assert status["status"] == "completed"
     assert "error" not in final and "inputRequests" not in final
     assert (workdir / "inventory.txt").read_text() == INVENTORY
