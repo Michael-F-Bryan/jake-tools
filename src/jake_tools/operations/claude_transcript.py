@@ -19,7 +19,15 @@ from ..config import Config
 from . import Handler, Operation
 from ._claude import task_errors, task_service
 
-DESCRIPTION = "Page a delegated task's history: its normalised events (narration, tool calls and results, denials, steering, questions, per-turn results, the end; never private thinking) from `cursor` (omit for the first). Pass next_cursor while has_more. Transcript cursors are not observation tokens. Text is cut to max_chars per event (text_truncated, text_chars). Read it when a poll's changes point here or you need the detail; supervision does not need it."
+DESCRIPTION = (
+    "Page a delegated task's history: its normalised events (narration, tool "
+    "calls and results, denials, steering, questions, per-turn results, the "
+    "end; never private thinking) from `cursor` (omit for the first). Pass "
+    "next_cursor while has_more. Transcript cursors are not observation tokens."
+    " Text is cut to max_chars per event (text_truncated, text_chars). Read it "
+    "when a poll's changes point here or you need the detail; supervision does "
+    "not need it."
+)
 
 
 def build(config: Config) -> Handler:

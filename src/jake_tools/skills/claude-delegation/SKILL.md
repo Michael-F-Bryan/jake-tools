@@ -325,7 +325,9 @@ kept. `rollback` is always `none`: before retrying, look at
 
 ## Errors
 
-Errors come back with `isError: true` and `{code, message, detail}`:
+MCP errors come back with `isError: true` and `{code, message, detail?}`.
+Native Hermes errors carry `{error, code, message, detail?}`, where `error`
+repeats the message for the host. The codes and argument details are shared:
 
 | `code` | Cause |
 | --- | --- |

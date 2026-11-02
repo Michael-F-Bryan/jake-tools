@@ -7,7 +7,15 @@ from ..config import Config
 from . import Handler, Operation
 from ._claude import task_errors, task_service
 
-DESCRIPTION = "Cancel a delegated task: SIGTERM to every process group it used, up to 10 s, then SIGKILL and up to 5 s more. termination says what was established: confirmed (every process seen gone), unconfirmed (status failed; error says what survived), already_ended, or ended_before_cancel (its own outcome stands). Queued steering becomes not_delivered and pending questions expire. rollback is always none: inspect what the task changed before retrying."
+DESCRIPTION = (
+    "Cancel a delegated task: SIGTERM to every process group it used, up to 10 "
+    "s, then SIGKILL and up to 5 s more. termination says what was established:"
+    " confirmed (every process seen gone), unconfirmed (status failed; error "
+    "says what survived), already_ended, or ended_before_cancel (its own "
+    "outcome stands). Queued steering becomes not_delivered and pending "
+    "questions expire. rollback is always none: inspect what the task changed "
+    "before retrying."
+)
 
 
 def build(config: Config) -> Handler:

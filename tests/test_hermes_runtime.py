@@ -317,3 +317,109 @@ def test_under_the_local_backend_the_plugin_keeps_local_behaviour(
     # commands, as without the plugin; pinned Hermes gives a plugin no
     # supported way to add it to the scrub (jake-tools#4).
     assert output("background_env").strip() == "1"
+
+
+@needs_hermes
+def test_native_compact_supervision_contract(hermes: Hermes, tmp_path: Path) -> None:
+    """Real Hermes dispatch, worker and SDK; fake CLI proves mechanics only."""
+    from conftest import install_fake_claude
+
+    fake_bin, _ = install_fake_claude(tmp_path / "fake")
+    work = tmp_path / "work"
+    work.mkdir()
+    hermes.configure(
+        """
+        plugins:
+          enabled: [jake-tools]
+          entries:
+            jake-tools:
+              settings:
+                capabilities: [claude]
+        """
+    )
+    out = hermes.run(
+        f"""
+        import jake_tools
+        emit("source", jake_tools.__file__)
+        from tools.registry import registry
+        schema = registry.get_schema("claude_poll")
+        emit("schema", schema)
+        os.environ["PATH"] = "{fake_bin}:" + os.environ["PATH"]
+
+        def start(brief, **extra):
+            value = call("claude_start", {{"brief": brief, "working_directory": "{work}",
+                "model": "fake-model", "max_turns": 5, "max_budget_usd": 1,
+                "timeout_seconds": 60, **extra}})
+            assert "task_id" in value, value
+            return value
+
+        def poll(started, **extra):
+            return call("claude_poll", {{"task_id": started["task_id"],
+                "token": started["observation_token"], "wait_seconds": 30,
+                "until": "terminal", **extra}})
+
+        emit("invalid", call("claude_poll", {{"wait_seconds": 121}}))
+        empty_raw = handle_function_call("claude_list", {{}}, task_id="acceptance")
+        emit("empty_raw", empty_raw)
+        question = start("[[scenario:ask:Which colour?]] go", allow_questions=True)
+        try:
+            pending = poll(question)
+            emit("pending", pending)
+            qid = pending["pending_questions"][0]["request_id"]
+            emit("resync", poll(question, token="invalid", wait_seconds=0))
+            steer = {{"task_id": question["task_id"], "message": "Keep the answer concise",
+                "message_id": "native-steer"}}
+            emit("steer", call("claude_steer", steer))
+            emit("steer_retry", call("claude_steer", steer))
+            emit("answer", call("claude_update", {{"task_id": question["task_id"],
+                "responses": {{qid: {{"answer": "green"}}}}}}))
+            emit("answered", poll(question))
+        finally:
+            call("claude_cancel", {{"task_id": question["task_id"]}})
+
+        large = start("[[scenario:big:30000]] go")
+        try:
+            final = poll(large)
+            emit("large", final)
+            chunks = []
+            offset = 0
+            while True:
+                chunk = call("claude_status", {{"task_id": large["task_id"], "view": "result",
+                    "offset": offset, "max_chars": 7000}})
+                assert chunk["available"], chunk
+                chunks.append(chunk["text"])
+                if "next_offset" not in chunk:
+                    break
+                offset = chunk["next_offset"]
+            emit("retrieved", {{"text": "".join(chunks), "chunks": len(chunks)}})
+            emit("ended_cancel", call("claude_cancel", {{"task_id": large["task_id"]}}))
+        finally:
+            call("claude_cancel", {{"task_id": large["task_id"]}})
+
+        running = start("[[scenario:slow_tool:30]] go")
+        emit("cancel", call("claude_cancel", {{"task_id": running["task_id"]}}))
+        """
+    )
+    schema = json.dumps(out["schema"])
+    assert '"token"' in schema and '"cursor"' not in schema
+    assert '"maximum": 120' in schema
+    assert out["invalid"]["code"] == "invalid_argument"
+    raw = out["empty_raw"]
+    assert isinstance(raw, str)
+    assert "next_before" not in json.loads(raw)
+    assert raw == json.dumps(json.loads(raw), separators=(",", ":"), ensure_ascii=False)
+    assert out["pending"]["wake_reason"] == "question"
+    assert "events" not in out["pending"] and "limits" not in out["pending"]
+    assert out["resync"]["pending_questions"] == out["pending"]["pending_questions"]
+    assert out["resync"]["token_status"] == "resynchronised"
+    assert out["steer_retry"]["replayed"] is True
+    assert out["steer"]["message_id"] == out["steer_retry"]["message_id"]
+    assert out["answer"]["results"][0]["outcome"] == "accepted"
+    assert out["answered"]["status"] == "completed"
+    assert out["large"]["result"]["final_text_truncated"] is True
+    assert out["retrieved"]["chunks"] > 1
+    assert out["retrieved"]["text"] == "z" * 30000
+    assert len(out["retrieved"]["text"]) == out["large"]["result"]["final_text_chars"]
+    assert out["ended_cancel"]["termination"] == "already_ended"
+    assert out["cancel"]["termination"] == "confirmed"
+    assert out["cancel"]["rollback"] == "none"

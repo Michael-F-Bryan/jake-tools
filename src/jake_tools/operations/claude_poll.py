@@ -17,7 +17,19 @@ from ..config import Config
 from . import Handler, Operation
 from ._claude import task_errors, task_service
 
-DESCRIPTION = "Wait up to wait_seconds for a delegated task to need you, then return a compact snapshot: status, progress, last_activity_at, running_tool, pending_questions, changes since your observation_token (grouped denials, warnings, steering and question changes), and result once it ended. Returns at once for a pending question or an ended task; until=attention (default) also for a new denial, a warning or undeliverable steering; until=progress also for routine activity; until=terminal only for questions and ends. Pass back observation_token; reads never consume anything and a bad token resynchronises. Never pages history: use claude_transcript. `tasks` (1-16 {task_id, token?}) watches several under one deadline."
+DESCRIPTION = (
+    "Wait up to wait_seconds for a delegated task to need you, then return a "
+    "compact snapshot: status, progress, last_activity_at, running_tool, "
+    "pending_questions, changes since your observation_token (grouped denials, "
+    "warnings, steering and question changes), and result once it ended. "
+    "Returns at once for a pending question or an ended task; until=attention "
+    "(default) also for a new denial, a warning or undeliverable steering; "
+    "until=progress also for routine activity; until=terminal only for "
+    "questions and ends. Pass back observation_token; reads never consume "
+    "anything and a bad token resynchronises. Never pages history: use "
+    "claude_transcript. `tasks` (1-16 {task_id, token?}) watches several under "
+    "one deadline."
+)
 
 
 def build(config: Config) -> Handler:

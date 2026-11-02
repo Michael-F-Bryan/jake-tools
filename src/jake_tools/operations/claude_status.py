@@ -17,7 +17,15 @@ from ..config import Config
 from . import Handler, Operation
 from ._claude import task_errors, task_service
 
-DESCRIPTION = "A delegated task's detail now, without waiting: configuration and limits (requested, normalised, and exposed_tools as the runtime reported them), usage and cost, permission denials, steering messages, pending questions and the result (final text excerpt, diagnostics). view=result returns only result text, in chunks: part final_text|handoff|error from `offset`, up to max_chars; follow next_offset until it is absent. `completed` means the run ended normally, not that its claims are verified."
+DESCRIPTION = (
+    "A delegated task's detail now, without waiting: configuration and limits "
+    "(requested, normalised, and exposed_tools as the runtime reported them), "
+    "usage and cost, permission denials, steering messages, pending questions "
+    "and the result (final text excerpt, diagnostics). view=result returns only"
+    " result text, in chunks: part final_text|handoff|error from `offset`, up "
+    "to max_chars; follow next_offset until it is absent. `completed` means the"
+    " run ended normally, not that its claims are verified."
+)
 
 
 def build(config: Config) -> Handler:

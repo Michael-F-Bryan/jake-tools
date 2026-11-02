@@ -29,7 +29,14 @@ class Decline(BaseModel):
     action: Literal["decline"]
 
 
-DESCRIPTION = 'Respond to a delegated task\'s pending questions. `responses` maps each request_id to {"answer": "..."} or {"action": "decline"}; you may leave others pending. Each key reports accepted, duplicate (already applied identically), conflict (settled differently), not_pending (expired) or unknown. The worker continues the same turn with the answer. It answers questions only: it never grants tools or permissions.'
+DESCRIPTION = (
+    "Respond to a delegated task's pending questions. `responses` maps each "
+    'request_id to {"answer": "..."} or {"action": "decline"}; you may leave '
+    "others pending. Each key reports accepted, duplicate (already applied "
+    "identically), conflict (settled differently), not_pending (expired) or "
+    "unknown. The worker continues the same turn with the answer. It answers "
+    "questions only: it never grants tools or permissions."
+)
 
 
 def build(config: Config) -> Handler:

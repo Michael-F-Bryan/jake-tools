@@ -11,7 +11,13 @@ from ..config import Config
 from . import Handler, Operation
 from ._claude import task_errors, task_service
 
-DESCRIPTION = "List delegated tasks, newest first: task_id, a one-line label from the brief, status, termination_reason, status_message, times, session_id, resumable and handoff_status. Use it to recover task IDs after a restart. Page with `before` (the previous next_before); `limit` 1-100; optional `status` filter. Unreadable run directories are listed in `unreadable`."
+DESCRIPTION = (
+    "List delegated tasks, newest first: task_id, a one-line label from the "
+    "brief, status, termination_reason, status_message, times, session_id, "
+    "resumable and handoff_status. Use it to recover task IDs after a restart. "
+    "Page with `before` (the previous next_before); `limit` 1-100; optional "
+    "`status` filter. Unreadable run directories are listed in `unreadable`."
+)
 
 
 def build(config: Config) -> Handler:

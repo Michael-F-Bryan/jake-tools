@@ -158,6 +158,22 @@ def test_claude_results_are_compact_and_omit_nulls(tmp_path: Path) -> None:
     assert raw == json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 
+def test_non_claude_results_keep_nullable_fields() -> None:
+    from pydantic import BaseModel
+
+    from jake_tools.hermes.tools import success_json
+    from jake_tools.mcp.errors import success_result
+
+    class Result(BaseModel):
+        optional: str | None = None
+
+    assert all(not op.omit_none for op in OPERATIONS if op.capability != "claude")
+    assert json.loads(success_json(Result())) == {"optional": None}
+    wire = success_result(Result())
+    assert wire.structured_content == {"optional": None}
+    assert json.loads(wire.content[0].text) == {"optional": None}
+
+
 def test_handler_errors_carry_the_stable_code_and_message(tmp_path: Path) -> None:
     config = config_for(tmp_path, {})
     unknown = json.loads(_handler("claude_status", config)({"task_id": "nope"}))
