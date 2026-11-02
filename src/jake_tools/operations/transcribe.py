@@ -13,17 +13,16 @@ import functools
 from pathlib import Path
 
 import anyio.to_thread
-from mcp.server.mcpserver import MCPServer
 
-from ...config import Config
-from ...transcription import (
+from ..config import Config
+from ..transcription import (
     TranscriptionClient,
     TranscriptionError,
     TranscriptionInputError,
     TranscriptionResult,
 )
-from ..errors import ToolError
-from ..server import structured_tool
+from . import Handler, Operation
+from .errors import ToolError
 
 MAX_FILES_PER_CALL = 64
 
@@ -39,7 +38,7 @@ def transcription_client(config: Config) -> TranscriptionClient:
     if not token:
         raise ToolError(
             "missing_credentials",
-            "Set TRANSCRIPTION_API_TOKEN in the server environment",
+            "Set TRANSCRIPTION_API_TOKEN where jake-tools runs (the MCP server's environment, or the Hermes profile's secrets)",
             detail={"variables": ["TRANSCRIPTION_API_TOKEN"]},
         )
     try:
@@ -83,32 +82,23 @@ def tool_error(exc: TranscriptionError) -> ToolError:
             return ToolError("upstream_error", message, detail=detail)
 
 
-def register(app: MCPServer, config: Config) -> None:
-    if not config.has_transcription_endpoint:
-        return
+DESCRIPTION = (
+    "Transcribe and diarise audio files that exist on the filesystem of the "
+    "process running this tool (the jake-tools MCP server, or Hermes itself for "
+    "the native tool; not another machine's or container's view unless they "
+    "share it). Pass files in recording order; they are uploaded "
+    "and treated as ONE continuous recording with request-wide anonymous speaker "
+    "labels (speaker_1, speaker_2, …). Returns the complete structured transcript: "
+    "speaker segments with word timings in seconds from the start of the "
+    "concatenated recording, per-file time spans, speaker summaries, the engine's "
+    "full text, limitations, and processing times. Fully local inference on the "
+    "native host service; one job at a time with a bounded queue, so a long "
+    "recording can take minutes. A timeout or disconnect is reported, never "
+    "retried automatically: the service may still be busy with the request."
+)
 
-    @structured_tool(
-        app,
-        name="transcribe",
-        description=(
-            "Transcribe and diarise audio files that exist on THIS server's filesystem "
-            "(paths the MCP server can open; not the agent's or a container's view "
-            "unless they share it). Pass files in recording order; they are uploaded "
-            "and treated as ONE continuous recording with request-wide anonymous speaker "
-            "labels (speaker_1, speaker_2, …). Returns the complete structured transcript: "
-            "speaker segments with word timings in seconds from the start of the "
-            "concatenated recording, per-file time spans, speaker summaries, the engine's "
-            "full text, limitations, and processing times. Fully local inference on the "
-            "native host service; one job at a time with a bounded queue, so a long "
-            "recording can take minutes. A timeout or disconnect is reported, never "
-            "retried automatically: the service may still be busy with the request."
-            "\n\nBefore using this tool, read `skill://transcription` via this server's "
-            "`read_resource` capability, unless its contents are already loaded in the "
-            "current context. The guide explains the transcript schema, what speaker "
-            "and overlap fields do and do not promise, and how to handle each error. "
-            "Reuse the loaded guide for subsequent calls."
-        ),
-    )
+
+def build(config: Config) -> Handler:
     async def transcribe(files: list[str]) -> TranscriptionResult:
         if not files:
             raise ToolError(
@@ -142,3 +132,15 @@ def register(app: MCPServer, config: Config) -> None:
             ) from exc
         except TranscriptionError as exc:
             raise tool_error(exc) from exc
+
+    return transcribe
+
+
+OPERATION = Operation(
+    name="transcribe",
+    capability="transcription",
+    skill="transcription",
+    description=DESCRIPTION,
+    build=build,
+    available=lambda config: config.has_transcription_endpoint,
+)

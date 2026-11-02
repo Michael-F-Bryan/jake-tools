@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -364,14 +365,25 @@ class TaskList(BaseModel):
 class TaskService:
     """Delegated tasks under one runs directory."""
 
-    def __init__(self, runs_dir: Path, defaults: RunDefaults) -> None:
+    def __init__(
+        self,
+        runs_dir: Path,
+        defaults: RunDefaults,
+        worker_environ: Mapping[str, str] | None = None,
+    ) -> None:
+        """``worker_environ`` replaces this process's environment as the base
+        a worker's environment is derived from. An in-process host whose own
+        environment holds unrelated credentials (Hermes) passes an allowlist;
+        the MCP server, launched with a filtered environment, passes nothing.
+        """
         self.runs_dir = runs_dir
         self.defaults = defaults
+        self.worker_environ = worker_environ
 
     # --- lifecycle --------------------------------------------------------------
 
     def start(self, request: StartRequest) -> ClaudeStartResult:
-        return start_task(self.runs_dir, request, self.defaults)
+        return start_task(self.runs_dir, request, self.defaults, self.worker_environ)
 
     def status(self, task_id: str) -> RunState:
         return reconcile(task_dir(self.runs_dir, task_id))

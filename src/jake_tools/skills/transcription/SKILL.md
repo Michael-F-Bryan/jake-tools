@@ -5,15 +5,16 @@ description: Transcribe and diarise local audio files with the `transcribe` tool
 
 # Transcription
 
-`transcribe(files)` uploads audio files the MCP server can read to the native
+`transcribe(files)` uploads audio files that jake-tools can read (the MCP server's, or for the
+native Hermes tool Hermes' own, filesystem) to the native
 transcription service and returns one complete, structured transcript. All
 inference is local to that host; nothing goes to a cloud provider. The tool is
-only present when the server has `transcription.api_base_url` configured; if
-you cannot see it, there is no transcription capability on this server.
+only present when jake-tools has `transcription.api_base_url` configured; if
+you cannot see it, there is no transcription capability here.
 
 ## Calling it
 
-- `files`: a non-empty list of paths, **as the MCP server sees them**, in
+- `files`: a non-empty list of paths, **as jake-tools sees them**, in
   recording order. The server opens and uploads them; it never asks the host
   to resolve your paths, and you never need to copy or encode audio.
 - Several files are treated as **one continuous recording**: file 2 starts

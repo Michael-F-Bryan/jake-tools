@@ -14,6 +14,14 @@
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
+      # Build the package and native Hermes plugin into an installer-chosen
+      # interpreter's environment (nixfiles installs it into Hermes):
+      #   jake-tools.lib.mkHermesPlugin {
+      #     inherit pkgs python;
+      #     lockedDependencies = [ ... ];  # what that environment lacks
+      #   }
+      lib.mkHermesPlugin = import ./nix/hermes-plugin.nix;
+
       devShells = forAllSystems (
         pkgs:
         let

@@ -26,7 +26,7 @@ import os
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, BinaryIO, Literal
 from urllib.parse import urlsplit
 
 import requests
@@ -437,7 +437,7 @@ class MultipartUpload:
         )
         self._index = 0
         self._offset = 0
-        self._handle: Any = None
+        self._handle: BinaryIO | None = None
 
     def __len__(self) -> int:
         return self._length
