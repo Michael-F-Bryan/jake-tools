@@ -226,23 +226,19 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
 The native Hermes adapter over the same operations; user-facing description in
 the README's "Native Hermes plugin" section.
 
-- Only `hermes/terminal.py` and the small accessors in `hermes/plugin.py`
-  import Hermes (`agent.*`, `tools.*`, `hermes_constants`), lazily or under
-  `# pyright: ignore[reportMissingImports]`; everything else is plain and
-  tested hermetically in `tests/test_hermes_plugin.py`. Use documented plugin
-  APIs (`ctx.register_*`, `ctx.get_config`, `agent.secret_scope.get_secret`).
-  The backend necessarily subclasses `LocalEnvironment` and relies on the
-  wrapper shape probed by `probe_wrapper()`; recheck it on every Hermes pin.
-- `direnv_local` is degraded: pinned Hermes keys PTY, background stdin,
-  yield-to-background, background recovery, the `execute_code` kernel (and
-  more, `project_env.LOST_LOCAL_BEHAVIOURS`) on the literal backend `local`.
-  It stays gated: unless `settings.accept_degraded_direnv_local` is true,
-  `check_requirements` is False and `create_environment` raises. Never
-  enable it by default, weaken the gate, or "fix" it by patching Hermes
-  internals. The real fix is the upstream seam in
-  `project_env.REQUIRED_UPSTREAM_SEAM` (README "Terminal"); on every Hermes
-  pin, check whether it or provider-level local semantics have landed, and
-  update `LOST_LOCAL_BEHAVIOURS`.
+- Only the small accessors in `hermes/plugin.py` import Hermes
+  (`agent.*`, `hermes_constants`, and `hermes_cli.plugins.PluginContext`
+  for typing), lazily or under `# pyright: ignore[reportMissingImports]`;
+  everything else is plain and tested hermetically in
+  `tests/test_hermes_plugin.py`. Use documented plugin APIs
+  (`ctx.register_tool`, `ctx.register_skill`, `ctx.get_config`,
+  `agent.secret_scope.get_secret`).
+- The plugin registers no terminal backend and must not depend on one:
+  native tools and skills work under the installer's own backend (`local`).
+  Jake's credential names are therefore not on Hermes' subprocess scrub
+  list (README "Credentials and terminal commands"). Do not add a terminal
+  provider just for `strip_env_keys` or patch Hermes internals; the
+  follow-up is jake-tools#4.
 - Never read Jake's secrets from `os.environ` in the plugin: resolve them per
   call through `hermes.profile.profile_config` with Hermes' `get_secret`.
   Registration reads no secrets.
@@ -252,10 +248,7 @@ the README's "Native Hermes plugin" section.
 - Delegated workers get `hermes.profile.worker_base_environ` (an allowlist),
   carried as `Config.worker_environ`; never Hermes' environment.
 - `tests/test_hermes_runtime.py` (`--slow`) is the acceptance test in a real
-  installation (`JAKE_TOOLS_HERMES`, `JAKE_TOOLS_PROJECT_ENV_SCRIPT`,
-  `JAKE_TOOLS_TEST_NIXPKGS`). Without them it is blocked, not passed. Its
-  PTY assertion under accepted `direnv_local` records a known loss; under
-  `local` it asserts PTY and stdin work.
+  installation (`JAKE_TOOLS_HERMES`). Without it it is blocked, not passed.
 - `nix/hermes-plugin.nix` (flake `lib.mkHermesPlugin`) builds the package for
   an installer's interpreter, propagating only the uv.lock wheels the host
   lacks.

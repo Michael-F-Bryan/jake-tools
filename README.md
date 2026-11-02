@@ -33,10 +33,9 @@ Hermes' own Python environment (nixfiles does this with the flake's
   `transcription.api_base_url`. `ping` stays MCP-only.
 - **Skills**, `jake-tools:<skill>` (via `skill_view`), from the same packaged
   sources, for the granted tools only.
-- **The `direnv_local` terminal backend**, degraded and gated (below). It is
-  registered regardless, because its `strip_env_keys` keep Jake's credential
-  variables out of the subprocesses Hermes scrubs (background, PTY and helper
-  spawns) under any backend.
+
+The plugin registers no terminal backend and leaves Hermes' terminal alone:
+keep the installer's backend (`local`) and its project-environment hook.
 
 Credentials are read per call from the owning profile with Hermes'
 `agent.secret_scope.get_secret` (its `.env` and secret sources), consumed by
@@ -49,67 +48,21 @@ the MCP server's worker saw), never Hermes' own credentials. Runs share
 `$XDG_STATE_HOME/jake-tools/runs` with the MCP server. Transcription stays a
 native host service reached over HTTP.
 
-### Terminal: use `local`; `direnv_local` is gated
+### Credentials and terminal commands
 
-Use `terminal.backend: local`. The plugin changes nothing about it: PTY
-sessions, background stdin, yield-to-background, background recovery and the
-`execute_code` kernel behave as without it. Pinned Hermes (`5b32cfc`) has no
-supported seam to load a project environment under `local` without rewriting
-the command, and every rewriting seam (a `pre_tool_call` hook, `tool_request`
-or `tool_execution` middleware) feeds the rewritten command to the progress
-preview, approval prompt and process labels. Until Hermes has one, the
-installer's existing command-rewriting hook stays the way `local` loads
-project environments, previews included.
-
-`direnv_local` is Hermes' local execution plus each terminal command's
-project environment. After Hermes restores its shell snapshot and enters the
-command's directory, it sources the installer's loader
-(`JAKE_TOOLS_PROJECT_ENV_SCRIPT`, which runs direnv with nix-direnv) in the
-same shell, then runs the command as written. The command Hermes previews,
-approves and records is unchanged. Directory changes and exports persist, and
-the next command outside the project unloads it. A present but unapproved or
-failing `.envrc` fails the command (exit 1) with direnv's reason, without
-running it. Only the agent's terminal commands load projects, foreground and
-background; Hermes' internal polls, kills and file reads do not. Approval
-guards behave as for `local`.
-
-It is also a plugin backend, and pinned Hermes keys these on the literal name
-`local`, so under it they are lost:
-
-- PTY sessions (`pty=true` gets a pipe), and with them stdin to background
-  processes;
-- yield-to-background of a running foreground command;
-- recovery of background processes after a restart;
-- the persistent `execute_code` session kernel;
-- the local browser's private-network access;
-- vision reads of arbitrary host files;
-- `terminal.local_persistent`.
-
-Selecting it therefore fails closed. Its requirements report unmet, so
-Hermes withholds the terminal tool and logs the list above. That holds until
-the profile sets `plugins.entries.jake-tools.settings.accept_degraded_direnv_local: true`.
-Leave a broken project with `workdir` set elsewhere, because the loader runs
-in the starting directory.
-
-The fix needs a Hermes seam: a hook that sources a plugin-supplied prelude
-for the `local` backend's agent-issued commands. The prelude must run after
-the snapshot is restored and the directory entered, before the command, in
-both the foreground wrapper (`_wrap_command_script`, between `builtin cd` and
-`eval`) and background/PTY spawns (`ProcessRegistry.spawn_local`, which runs
-`bash -lc <command>` without that wrapper). The previewed, approved and
-recorded command must not change. With that seam, Jake would supply its
-loader through it under `local` and `direnv_local` would be removed. The
-alternative, a provider flag that gives plugin backends every `local`-keyed
-decision, touches more than ten call sites and still needs a background-spawn
-hook.
-
-Credentials under `local`: Hermes applies `strip_env_keys` to background, PTY
-and helper spawns but not to foreground commands. A Jake secret that sits in
-the process environment (the launch profile's `.env` and secret sources are
-published there) is therefore visible to foreground terminal commands.
+Pinned Hermes (`5b32cfc`) scrubs its own provider and platform credentials
+from terminal commands, but a plugin can add names to that scrub only as a
+terminal backend's `strip_env_keys`, and even then not for foreground `local`
+commands. Jake's variables (`CLOCKIFY_API_KEY`, `JIRA_*`,
+`TRANSCRIPTION_API_TOKEN` and their `_FILE` forms) are on neither list. So a
+Jake secret that sits in Hermes' process environment (the launch profile's
+`.env` and secret sources are published there) is visible to the agent's
+terminal commands, foreground and background, exactly as it would be without
+the plugin. The plugin itself never puts a secret into any environment.
 Provide Jake's secrets as `NAME_FILE` paths, so only a path is exposed. This
-is defence in depth, not a boundary: commands run as the same user.
-`direnv_local` unsets Jake's variables in every script it runs.
+is defence in depth, not a boundary: commands run as the same user. A
+supported Hermes seam for both this and project environments is tracked in
+[#4](https://github.com/Michael-F-Bryan/jake-tools/issues/4).
 
 ### Installing into Hermes (nixfiles)
 
@@ -131,7 +84,7 @@ check the assembled runtime imports `jake_tools.hermes` and meets
   `plugins.isolation: in_process` (the default). Plugin toolsets
   (`jake_tools_<capability>`) are on by default, except on a platform whose
   saved toolsets list already "knows" them;
-- `terminal.backend: local`, keeping the existing project-environment hook;
+- its existing terminal backend and project-environment hook, unchanged;
 - Jake's secrets in the profile's `.env` or secret sources, preferably as
   `NAME_FILE`;
 - removal of the `jake-tools` MCP server entry once the native tools are
@@ -140,13 +93,11 @@ check the assembled runtime imports `jake_tools.hermes` and meets
 Tests: `tests/test_hermes_plugin.py` (hermetic) runs by default.
 `tests/test_hermes_runtime.py` is the acceptance test inside a real
 installation. It covers discovery, capability-scoped tools and skills,
-profile-scoped credentials, the worker environment, `local`'s PTY and stdin
-with the plugin installed, the `direnv_local` gate, and, with the gate
-accepted, its project-environment behaviour. Run
-`uv run pytest --slow tests/test_hermes_runtime.py` with
-`JAKE_TOOLS_HERMES` (a built Hermes launcher including this package),
-`JAKE_TOOLS_PROJECT_ENV_SCRIPT` and `JAKE_TOOLS_TEST_NIXPKGS` (a nixpkgs flake
-reference); without them it reports itself blocked.
+profile-scoped credentials, the worker environment, and that `local`'s PTY,
+stdin and environment are what they are without the plugin. Run
+`uv run pytest --slow tests/test_hermes_runtime.py` with `JAKE_TOOLS_HERMES`
+(a built Hermes launcher including this package); without it it reports
+itself blocked.
 
 ## Development
 

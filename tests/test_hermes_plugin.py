@@ -2,8 +2,8 @@
 
 Hermes is the external boundary here: ``get_secret`` is a dict lookup and
 ``ctx`` records registrations. Everything of ours is real: operations run
-against the real task service and Clockify client, project-env scripts run
-in real bash, and schemas are compared with the real MCP server's. The same
+against the real task service and Clockify client, and schemas are compared
+with the real MCP server's. The same
 seams are exercised inside the pinned Hermes runtime by
 ``test_hermes_runtime.py``.
 """
@@ -13,8 +13,6 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +22,6 @@ from jake_tools.claude_runs.spawn import worker_environment
 from jake_tools.config import Config, load_config
 from jake_tools.hermes.plugin import (
     SKILLS_DIR,
-    accepts_degraded_backend,
     configured_capabilities,
     register_operations,
 )
@@ -32,14 +29,6 @@ from jake_tools.hermes.profile import (
     SECRET_NAMES,
     profile_config,
     worker_base_environ,
-)
-from jake_tools.hermes.project_env import (
-    ACCEPT_DEGRADED_SETTING,
-    LOST_LOCAL_BEHAVIOURS,
-    WrapperChanged,
-    degraded_backend_message,
-    insert_project_env,
-    wants_project_env,
 )
 from jake_tools.hermes.tools import (
     hermes_description,
@@ -271,101 +260,3 @@ def test_capability_settings_are_validated() -> None:
         configured_capabilities(["everything"])
     with pytest.raises(ValueError, match="list of names"):
         configured_capabilities("claude")
-
-
-def test_the_degraded_backend_must_be_accepted_explicitly() -> None:
-    assert accepts_degraded_backend(None) is False
-    assert accepts_degraded_backend(False) is False
-    assert accepts_degraded_backend(True) is True
-    for malformed in ("true", 1, ["yes"]):
-        with pytest.raises(ValueError, match="must be a boolean"):
-            accepts_degraded_backend(malformed)
-
-
-def test_the_degraded_backend_says_what_it_loses_and_how_to_choose() -> None:
-    message = degraded_backend_message()
-    for behaviour in LOST_LOCAL_BEHAVIOURS:
-        assert behaviour in message
-    for named in ("PTY", "stdin", "yield-to-background", "recovery", "execute_code"):
-        assert any(named in behaviour for behaviour in LOST_LOCAL_BEHAVIOURS)
-    assert "terminal.backend local" in message
-    assert f"settings.{ACCEPT_DEGRADED_SETTING}: true" in message
-
-
-# --- project environment insertion -----------------------------------------
-
-BASH = shutil.which("bash")
-
-
-def wrapper(directory: Path, command: str) -> str:
-    """The shape of Hermes' per-command script around the cd and eval."""
-    escaped = command.replace("'", "'\\''")
-    return "\n".join(
-        [
-            "export HERMES_AGENT=true",
-            f"builtin cd -- {directory} || exit 126",
-            f"eval '{escaped}'",
-            "__hermes_ec=$?",
-            "echo after:$PWD:${PROJECT-unset}",
-            "exit $__hermes_ec",
-        ]
-    )
-
-
-@pytest.mark.skipif(BASH is None, reason="bash is required")
-def test_the_loader_runs_in_the_commands_directory_and_shell(tmp_path: Path) -> None:
-    project, other = tmp_path / "project", tmp_path / "other"
-    project.mkdir()
-    other.mkdir()
-    loader = tmp_path / "loader.sh"
-    loader.write_text('export PROJECT="loaded:$PWD"\n')
-    command = f"echo cmd:$PROJECT; cd {other}; echo 'quoted \"text\" kept'"
-    script = insert_project_env(wrapper(project, command), str(loader))
-    out = subprocess.run(
-        [str(BASH), "-c", script], capture_output=True, text=True, check=True
-    )
-    assert out.stdout.splitlines() == [
-        f"cmd:loaded:{project}",
-        'quoted "text" kept',
-        f"after:{other}:loaded:{project}",
-    ]
-
-
-@pytest.mark.skipif(BASH is None, reason="bash is required")
-def test_a_failing_loader_stops_the_command(tmp_path: Path) -> None:
-    loader = tmp_path / "loader.sh"
-    loader.write_text("echo 'project flake failed to load' >&2; return 1\n")
-    script = insert_project_env(wrapper(tmp_path, "echo ran"), str(loader))
-    out = subprocess.run([str(BASH), "-c", script], capture_output=True, text=True)
-    assert out.returncode == 1
-    assert "ran" not in out.stdout
-    assert "project flake failed to load" in out.stderr
-
-
-def test_commands_containing_wrapper_lines_are_not_mistaken_for_it(
-    tmp_path: Path,
-) -> None:
-    command = "builtin cd -- /elsewhere || exit 126\neval 'true'"
-    script = insert_project_env(wrapper(tmp_path, command), "/loader.sh")
-    lines = script.split("\n")
-    assert lines[1] == f"builtin cd -- {tmp_path} || exit 126"
-    assert lines[2] == ". /loader.sh || exit 1"
-
-
-def test_an_unrecognised_wrapper_is_refused() -> None:
-    with pytest.raises(WrapperChanged):
-        insert_project_env("cd /x\neval 'true'", "/loader.sh")
-    with pytest.raises(WrapperChanged):
-        insert_project_env("builtin cd -- /x || exit 126\necho\neval 'x'", "/l.sh")
-
-
-def test_only_the_agents_terminal_commands_load_the_project() -> None:
-    assert wants_project_env("make", {"bounded_capture": True})
-    launch = "mkdir -p /tmp && ( nohup bash -lc 'make' > /tmp/x.log 2>&1; rc=$?; ) &"
-    assert wants_project_env(launch, {"rewrite_compound_background": False})
-    # Internal commands: pollers, kills, file reads.
-    assert not wants_project_env("tail -c +1 /tmp/x.log", {})
-    assert not wants_project_env("kill 123", {"timeout": 5})
-    assert not wants_project_env(
-        "readlink -f /x", {"rewrite_compound_background": False}
-    )

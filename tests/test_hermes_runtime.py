@@ -4,10 +4,6 @@ Opt-in (``--slow``) and blocked unless an installation is supplied:
 
 - ``JAKE_TOOLS_HERMES``: a Hermes launcher (``.../bin/hermes``) whose runtime
   includes this jake-tools as an entry-point plugin, e.g. the nixfiles build.
-- ``JAKE_TOOLS_PROJECT_ENV_SCRIPT``: the installer's project-env loader
-  (direnv + nix-direnv), for the terminal backend tests.
-- ``JAKE_TOOLS_TEST_NIXPKGS``: a nixpkgs flake reference the test projects'
-  dev shells use (a local ``path:`` keeps them offline).
 
 Each test runs a script on Hermes' own interpreter, with the launcher's
 environment, an isolated ``HERMES_HOME``/``HOME`` and no inherited secrets,
@@ -21,7 +17,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import textwrap
@@ -32,18 +27,10 @@ import pytest
 pytestmark = pytest.mark.slow
 
 HERMES = os.environ.get("JAKE_TOOLS_HERMES")
-LOADER = os.environ.get("JAKE_TOOLS_PROJECT_ENV_SCRIPT")
-NIXPKGS = os.environ.get("JAKE_TOOLS_TEST_NIXPKGS")
 
 needs_hermes = pytest.mark.skipif(
     not HERMES, reason="blocked: set JAKE_TOOLS_HERMES to an installed Hermes launcher"
 )
-needs_project_env = pytest.mark.skipif(
-    not (HERMES and LOADER and NIXPKGS and shutil.which("nix")),
-    reason="blocked: needs JAKE_TOOLS_HERMES, JAKE_TOOLS_PROJECT_ENV_SCRIPT, "
-    "JAKE_TOOLS_TEST_NIXPKGS and nix",
-)
-
 REAPER = """
 import ctypes, os, subprocess, sys
 assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
@@ -108,8 +95,6 @@ class Hermes:
             },
         }
         (root / "tmp").mkdir()
-        if LOADER:
-            self.env["JAKE_TOOLS_PROJECT_ENV_SCRIPT"] = LOADER
 
     def configure(self, yaml: str) -> None:
         (self.home / "config.yaml").write_text(textwrap.dedent(yaml))
@@ -173,7 +158,7 @@ def test_the_plugin_registers_what_the_profile_grants(hermes: Hermes) -> None:
         "claude_update",
     ]
     assert out["skills"] == ["jake-tools:claude-delegation"]
-    assert out["backends"] == ["direnv_local"]
+    assert out["backends"] == []  # the plugin leaves the terminal alone
     assert "# Delegating to Claude" in str(out["skill"])
 
 
@@ -281,49 +266,6 @@ def _wait(session: str) -> str:
 
 
 @needs_hermes
-def test_the_degraded_backend_refuses_to_run_unless_accepted(
-    hermes: Hermes, tmp_path: Path
-) -> None:
-    loader = tmp_path / "loader.sh"
-    loader.write_text("true\n")
-    hermes.configure(
-        f"""
-        plugins:
-          enabled: [jake-tools]
-        terminal:
-          backend: direnv_local
-          cwd: {tmp_path}
-        """
-    )
-    out = hermes.run(
-        """
-        import logging
-        records = []
-        handler = logging.Handler()
-        handler.emit = records.append
-        logging.getLogger("jake_tools").addHandler(handler)
-        from tools.terminal_tool import check_terminal_requirements
-        from tools.terminal_tool_backends import terminal_backend_unavailable_reason
-        emit("available", check_terminal_requirements())
-        emit("reason", terminal_backend_unavailable_reason())
-        emit("logged", [r.getMessage() for r in records])
-        emit("terminal", call("terminal", {"command": "echo ran"}))
-        """,
-        JAKE_TOOLS_PROJECT_ENV_SCRIPT=str(loader),
-    )
-    assert out["available"] is False
-    assert "direnv_local" in str(out["reason"])
-    logged = " ".join(map(str, out["logged"]))  # type: ignore[arg-type]
-    for named in ("PTY", "stdin", "yield-to-background", "execute_code"):
-        assert named in logged
-    assert "settings.accept_degraded_direnv_local: true" in logged
-    terminal = out["terminal"]
-    assert isinstance(terminal, dict)
-    assert "ran" not in str(terminal.get("output", "")).splitlines()
-    assert "accept_degraded_direnv_local" in json.dumps(terminal)
-
-
-@needs_hermes
 def test_under_the_local_backend_the_plugin_keeps_local_behaviour(
     hermes: Hermes, tmp_path: Path
 ) -> None:
@@ -355,6 +297,7 @@ def test_under_the_local_backend_the_plugin_keeps_local_behaviour(
             time.sleep(0.1)
         emit("submit", call("process", {{"action": "submit", "session_id": reader["session_id"], "data": "hello"}}))
         emit("stdin", {_wait("reader")})
+        emit("foreground", call("terminal", {{"command": "pwd; env | grep -c '^CLOCKIFY_API_KEY=' || true"}}))
         bg = call("terminal", {{"command": "env | grep -c '^CLOCKIFY_API_KEY=' || true", "background": True}})
         emit("background_env", {_wait("bg")})
         """,
@@ -368,145 +311,9 @@ def test_under_the_local_backend_the_plugin_keeps_local_behaviour(
 
     assert "/dev/pts/" in output("pty")
     assert "got:hello" in output("stdin")
-    # The provider's strip_env_keys reach Hermes' background spawns under any
-    # backend. (Pinned Hermes does not apply them to foreground local runs.)
-    assert output("background_env").strip() == "0"
-
-
-def _project(root: Path, name: str, shell: str, envrc: bool = True) -> Path:
-    project = root / name
-    project.mkdir(parents=True)
-    (project / "flake.nix").write_text(
-        textwrap.dedent(
-            f"""
-            {{
-              inputs.nixpkgs.url = "{NIXPKGS}";
-              outputs = {{ nixpkgs, ... }}: {{
-                devShells = builtins.mapAttrs (system: pkgs: {{ default = {shell}; }}) nixpkgs.legacyPackages;
-              }};
-            }}
-            """
-        )
-    )
-    if envrc:
-        (project / ".envrc").write_text("use flake\n")
-    return project
-
-
-@needs_project_env
-def test_terminal_commands_load_the_directorys_project_environment(
-    hermes: Hermes, tmp_path: Path
-) -> None:
-    hermes.configure(
-        f"""
-        plugins:
-          enabled: [jake-tools]
-          entries:
-            jake-tools:
-              settings:
-                accept_degraded_direnv_local: true
-        terminal:
-          backend: direnv_local
-          cwd: {tmp_path}
-        """
-    )
-    projects = tmp_path / "projects"
-    shell = 'pkgs.mkShellNoCC { packages = [ pkgs.hello ]; PROJECT_PROBE = "loaded"; }'
-    ok = _project(projects, "ok", shell)
-    blocked = _project(projects, "blocked", shell)
-    broken = _project(projects, "broken", 'throw "deliberately broken dev shell"')
-    plain = projects / "plain"
-    plain.mkdir()
-    direnv_config = next(
-        line.split("=", 1)[1]
-        for line in Path(str(LOADER)).read_text().splitlines()
-        if line.startswith("export DIRENV_CONFIG=")
-    )
-    for approved in (ok, broken):
-        subprocess.run(
-            ["direnv", "allow", str(approved)],
-            env={**hermes.env, "DIRENV_CONFIG": direnv_config},
-            check=True,
-            capture_output=True,
-        )
-    steps = [
-        ("enter", {"command": f"cd {ok}"}),
-        (
-            "in_project",
-            {
-                "command": "echo probe:$PROJECT_PROBE; command -v hello; "
-                "hello -g 'it'\\''s \"quoted\"'"
-            },
-        ),
-        ("export", {"command": "export KEPT=yes"}),
-        ("persisted", {"command": "echo kept:${KEPT-no} pwd:$PWD"}),
-        ("leave", {"command": f"cd {plain}"}),
-        (
-            "left",
-            {
-                "command": "echo probe:${PROJECT_PROBE-unset}; command -v hello || echo no-hello"
-            },
-        ),
-        ("workdir", {"command": "echo probe:$PROJECT_PROBE", "workdir": str(ok)}),
-        ("after_workdir", {"command": "echo pwd:$PWD probe:${PROJECT_PROBE-unset}"}),
-        ("unapproved", {"command": "echo ran", "workdir": str(blocked)}),
-        ("broken", {"command": "echo ran", "workdir": str(broken)}),
-        # Hermes' foreground local runs ignore providers' strip_env_keys; the
-        # backend itself keeps Jake's credentials from commands.
-        ("credentials", {"command": "env | grep -c '^CLOCKIFY_API_KEY=' || true"}),
-    ]
-    preview_command = 'git log --format="%h %s" -n 3 && printf "%s\\n" "it\'s quoted"'
-    out = hermes.run(
-        f"""
-        from agent.display import build_tool_preview
-        for label, args in json.loads({json.dumps(json.dumps(steps))}):
-            result = call("terminal", args)
-            emit(label, {{"output": result.get("output", ""), "exit_code": result.get("exit_code")}})
-        bg = call("terminal", {{"command": "sleep 1; echo bg:$PROJECT_PROBE", "background": True, "workdir": "{ok}"}})
-        call("terminal", {{"command": "cd {blocked}"}})
-        emit("background", call("process", {{"action": "wait", "session_id": bg["session_id"], "timeout": 60}}))
-        from tools.process_registry import process_registry
-        emit("label", getattr(process_registry.get(bg["session_id"]), "command", None))
-        call("terminal", {{"command": "cd {plain}", "workdir": "{plain}"}})
-        pty = call("terminal", {{"command": "tty", "background": True, "pty": True, "workdir": "{plain}"}})
-        emit("pty", call("process", {{"action": "wait", "session_id": pty["session_id"], "timeout": 60}}))
-        emit("preview", build_tool_preview("terminal", {{"command": {json.dumps(preview_command)}}}, max_len=400))
-        """,
-        CLOCKIFY_API_KEY="launch-profile-secret",
-    )
-
-    def output(label: str) -> str:
-        value = out[label]
-        assert isinstance(value, dict)
-        return str(value["output"])
-
-    def exit_code(label: str) -> object:
-        value = out[label]
-        assert isinstance(value, dict)
-        return value["exit_code"]
-
-    assert "probe:loaded" in output("in_project")
-    assert "/bin/hello" in output("in_project")
-    assert 'it\'s "quoted"' in output("in_project")
-    assert f"kept:yes pwd:{ok}" in output("persisted")
-    assert "probe:unset" in output("left") and "no-hello" in output("left")
-    assert "probe:loaded" in output("workdir")
-    assert f"pwd:{plain} probe:unset" in output("after_workdir")
-    assert exit_code("unapproved") == 1 and "is blocked" in output("unapproved")
-    assert "ran" not in output("unapproved").splitlines()
-    assert exit_code("broken") == 1
-    assert "deliberately broken dev shell" in output("broken")
-    assert "ran" not in output("broken").splitlines()
-    assert output("credentials").strip() == "0"
-    background = out["background"]
-    assert isinstance(background, dict)
-    assert background["status"] == "exited" and background["exit_code"] == 0
-    assert "bg:loaded" in str(background["output"])
-    assert out["label"] == "sleep 1; echo bg:$PROJECT_PROBE"
-    # One of the losses the profile accepted: pinned Hermes runs PTY
-    # sessions for the literal `local` backend only.
-    pty = out["pty"]
-    assert isinstance(pty, dict) and "not a tty" in str(pty["output"])
-    preview = str(out["preview"])
-    assert preview.startswith('git log --format="%h %s" -n 3')
-    assert "nix/store" not in preview and "eval" not in preview
+    assert output("foreground").split() == [str(tmp_path), "1"]
+    # The documented baseline (README "Credentials and terminal commands"):
+    # a Jake secret already in Hermes' process environment reaches terminal
+    # commands, as without the plugin; pinned Hermes gives a plugin no
+    # supported way to add it to the scrub (jake-tools#4).
+    assert output("background_env").strip() == "1"
