@@ -23,8 +23,9 @@ transcription-service/  # native Swift HTTP service (FluidAudio); see its README
 ```
 
 `nix develop` (flake.nix, loaded by direnv via `.envrc`) provides `uv`, a Nix
-Python 3.14, `swift-format`, `sox` and `nixfmt`. The Swift toolchain comes from
-Xcode or the Command Line Tools, never nixpkgs.
+Python 3.14, `swift-format`, `sox` and `nixfmt`. The Swift service builds with
+nixpkgs' Swift and Apple SDK (`nix/transcription-service.nix`), never Xcode or
+the Command Line Tools.
 
 ## Developing
 
@@ -268,16 +269,29 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
   endpoint is configured.
 - No alternate backends, no direct inference in Python, no job store, no
   polling API. One job at a time, bounded queue, client disconnect cancels at
-  the engine's next check. Timeouts are reported with `retry_safe=false` and
-  never retried.
-- Build and test with Apple's toolchain: `swift build`, and `swift test`
-  (under Command Line Tools pass
-  `-Xswiftc -plugin-path -Xswiftc /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing`,
-  which `transcription-service/test.sh` does). Swift tests run the real
-  server with a stub engine: mechanics only. The real engine is exercised by
-  `tests/test_transcription_live.py` (`--slow`, macOS, built binary and
-  provisioned models required); it is the only evidence about transcription
-  quality or latency, and a fake transcript is never that evidence.
+  the engine's next check, and so does the service's own
+  `--request-timeout-seconds` (answered `504 timeout`). Timeouts are reported
+  with `retry_safe=false` and never retried.
+- Build with Nix only: `nix build .#transcription-service` (nixpkgs' Swift
+  and Apple SDK; SwiftPM dependencies vendored from `Package.resolved` by
+  `fetchSwiftPMDeps`), and test with
+  `nix build .#checks.aarch64-darwin.transcription-service` (the `swift-test`
+  pre-commit hook). No Xcode or Command Line Tools fallback. SwiftPM fetches
+  every binary target even when only a disabled trait links it, so
+  `nix/fluidaudio-drop-nemo-binary-target.patch` removes FluidAudio's NeMo
+  xcframework; refresh it with a FluidAudio bump. After changing
+  `Package.resolved`, update the `fetchSwiftPMDeps` hash.
+- Models are a Nix output too: `nix build .#transcription-models` fetches the
+  files `provision` writes, pinned by revision and SHA-256 in
+  `nix/transcription-models.json`, and is passed read-only as `--models-dir`.
+  Regenerate the manifest whenever `ModelPins` or FluidAudio changes. Core ML
+  still keeps a per-user, per-device cache under the running user's
+  `~/Library/Caches` (and `/var/folders`); that is Core ML's, not ours.
+- Swift tests run the real server with a stub engine: mechanics only. The
+  real engine is exercised by `tests/test_transcription_live.py` (`--slow`,
+  macOS; point `JAKE_TRANSCRIPTION_SERVICE_BIN` and `TRANSCRIPTION_MODELS_DIR`
+  at the Nix outputs); it is the only evidence about transcription quality or
+  latency, and a fake transcript is never that evidence.
 - Fixtures for the live test are synthesised with macOS `say`
   (`tests/transcription_fixtures.py`); nothing binary is committed.
 
@@ -288,8 +302,7 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
 | `uv`                | dependency management and script runner                |
 | `claude-agent-sdk`  | LLM calls; drives the local `claude` CLI               |
 | `az` (Azure CLI)    | `newsletter` commands (Microsoft Graph token)          |
-| `swift` (Xcode/CLT) | building and testing `transcription-service/`          |
-| `nix`               | optional: `nix develop` for the dev tools above        |
+| `nix`               | building and testing `transcription-service/` (Swift and SDK from nixpkgs); `nix develop` for the dev tools above |
 If a required external tool is missing, report the blocker. Do not mock
 preflight checks or skip them silently.
 

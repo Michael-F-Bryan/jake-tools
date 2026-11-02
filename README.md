@@ -258,10 +258,11 @@ runs one job at a time with a bounded queue; a timeout is reported with
 on the request. `jake-tools-mcp doctor` checks reachability, readiness and the
 token. Guidance for agents is the `skill://transcription` resource.
 
-The service itself is a Swift package built with Apple's toolchain
-(`swift build`, then `transcription-service provision` once online, then
-`transcription-service serve --token-file …`). `nix develop` provides the
-remaining development tools (`uv`, `swift-format`, `sox`).
+The service itself is a Swift package built with nixpkgs' Swift and Apple SDK
+(`nix build .#transcription-service`); its pinned models are another output
+(`nix build .#transcription-models`), passed read-only as `serve --models-dir`.
+`nix develop` provides the remaining development tools (`uv`, `swift-format`,
+`sox`).
 
 ## Codex usage alerts
 

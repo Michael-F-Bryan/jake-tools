@@ -192,6 +192,7 @@ async def test_file_problems_are_invalid_argument_without_contacting_the_service
         (400, "invalid_input", "invalid_argument", "invalid_input"),
         (413, "payload_too_large", "invalid_argument", "payload_too_large"),
         (500, "inference_failed", "upstream_error", "inference_failed"),
+        (504, "timeout", "upstream_error", "timeout"),
     ],
 )
 async def test_service_errors_map_to_stable_codes_with_actionable_detail(

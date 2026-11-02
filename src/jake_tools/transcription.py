@@ -188,6 +188,8 @@ _STATUS_KINDS: dict[int, TranscriptionErrorKind] = {
     429: "overloaded",
     500: "inference_failed",
     503: "not_ready",
+    # The service cancelled the request at its --request-timeout-seconds.
+    504: "timeout",
 }
 
 

@@ -15,9 +15,10 @@ of mechanics and of basic recognition quality, not of accuracy on real
 meetings. Skipped (with the reason) when the binary, the models or the TTS
 voices are not available; never faked.
 
-Requirements: ``transcription-service/.build/{debug,release}/transcription-service``
-(or ``JAKE_TRANSCRIPTION_SERVICE_BIN``) and provisioned models
-(``TRANSCRIPTION_MODELS_DIR`` or FluidAudio's default cache).
+Requirements: the service binary (``JAKE_TRANSCRIPTION_SERVICE_BIN``, e.g.
+``nix build .#transcription-service``, or a SwiftPM ``.build``) and models
+(``TRANSCRIPTION_MODELS_DIR``, e.g. ``nix build .#transcription-models``, or
+FluidAudio's default cache).
 """
 
 from __future__ import annotations
@@ -160,12 +161,14 @@ def live_service(tmp_path_factory: pytest.TempPathFactory) -> Iterator[LiveServi
     binary = _service_binary()
     if binary is None:
         pytest.skip(
-            "transcription-service is not built; run `swift build` in transcription-service/"
+            "transcription-service is not built; set JAKE_TRANSCRIPTION_SERVICE_BIN to "
+            "the binary from `nix build .#transcription-service`"
         )
     models = _models_root()
     if not (models / "parakeet-tdt-0.6b-v3").is_dir():
         pytest.skip(
-            f"models are not provisioned under {models}; run `transcription-service provision`"
+            f"models are not under {models}; set TRANSCRIPTION_MODELS_DIR to "
+            "`nix build .#transcription-models`"
         )
     reason = tools_available()
     if reason is not None:

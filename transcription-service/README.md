@@ -16,23 +16,39 @@ design brief is `_working/transcription-service/README.md`.
 | HTTP | Hummingbird `2.28.0`, MultipartKit `5.0.0-beta.2` (streaming parser) | exact |
 
 Minimum macOS 15 on Apple silicon (FluidAudio reports a Core ML BNNS crash in
-the offline diarizer on macOS 14). Built with Apple's toolchain (Xcode or the
-Command Line Tools, Swift 6.2+), not nixpkgs' Swift.
+the offline diarizer on macOS 14). Built with nixpkgs' Swift (6.3) and Apple
+SDK by [`nix/transcription-service.nix`](../nix/transcription-service.nix),
+never Xcode or the Command Line Tools. SwiftPM dependencies are vendored from
+`Package.resolved` by a fixed-output fetch. FluidAudio's NeMo
+text-normalisation xcframework, which only the disabled `NemoTextProcessing`
+trait links but SwiftPM would still download, is patched out of its manifest
+([`nix/fluidaudio-drop-nemo-binary-target.patch`](../nix/fluidaudio-drop-nemo-binary-target.patch)).
 
 ## Running
 
 ```bash
-cd transcription-service
-swift build -c release
-
-# Once, online: download and compile the pinned models.
-.build/release/transcription-service provision [--models-dir DIR]
-
-# Then, offline:
+# From the repository root.
+nix build .#transcription-service .#transcription-models
 echo -n 'some-long-random-token' > /path/to/token
-.build/release/transcription-service serve --token-file /path/to/token \
-    --host 127.0.0.1 --port 8787 [--models-dir DIR]
+result/bin/transcription-service serve --token-file /path/to/token \
+    --host 127.0.0.1 --port 8787 --models-dir result-1
 ```
+
+`transcription-models` is the pinned models root, read-only in the Nix store:
+the same tree `provision` writes, fetched file by file at the pinned revisions
+and checked against the SHA-256s in
+[`nix/transcription-models.json`](../nix/transcription-models.json), with the
+`.fluidaudio-revision` markers that offline loading checks. Regenerate the
+manifest when `ModelPins` or FluidAudio changes: `provision` into an empty
+directory, then hash every file. `provision [--models-dir DIR]` still works
+for a writable models directory outside Nix.
+
+Loading runs no download or model compilation of ours: the repositories ship
+compiled `.mlmodelc` bundles. Core ML still specialises each model for the
+device on first load and caches that per user under `~/Library/Caches/<process
+name>/` (and the user's `/var/folders`), so the first start after a model or
+OS change is slower (about 11 s for Parakeet on an M4 Max) and later starts
+reuse the cache. The running user therefore needs a writable home of its own.
 
 `serve` binds immediately and reports `starting` on `/health` while it loads
 and warms the models; it reports `ready` only after a warm-up inference has
@@ -43,7 +59,7 @@ Flags (all have defaults): `--host 127.0.0.1`, `--port 8787`, `--token-file`
 (or `TRANSCRIPTION_API_TOKEN`), `--models-dir` (or `TRANSCRIPTION_MODELS_DIR`,
 default FluidAudio's cache `~/Library/Application Support/FluidAudio/Models`),
 `--max-upload-bytes 2147483648`, `--max-files 64`, `--max-duration-seconds
-10800`, `--max-queued 4`, `--work-dir` (default
+10800`, `--max-queued 4`, `--request-timeout-seconds 1800`, `--work-dir` (default
 `$TMPDIR/jake-transcription-service`), `--tls-certificate` +
 `--tls-private-key` (PEM; enables HTTPS, TLS 1.2+), `--log-level info`.
 
@@ -174,6 +190,7 @@ uploaded name and limits by their value, never audio or transcript content.
 | 503 | `not_ready` | Models still loading (`Retry-After: 15`) or failed to load. |
 | 429 | `overloaded` | `--max-queued` + 1 requests already admitted (`Retry-After: 30`). Decided before the body is read; nothing was uploaded or started. |
 | 500 | `inference_failed` | The engine failed on an accepted recording; details are in the service log only. |
+| 504 | `timeout` | The request ran past `--request-timeout-seconds` (from admission, upload and queueing included) and was cancelled. |
 | 500 | `internal_error` | Anything else. |
 
 ## Concurrency, cancellation, failure
@@ -190,11 +207,16 @@ uploaded name and limits by their value, never audio or transcript content.
   (between decoded audio buffers, per ASR chunk/decode step, and in the
   diarizer's PLDA scoring), not instantly. Its temporary directory is removed
   either way.
+- `--request-timeout-seconds` bounds each request from admission to response
+  (a stalled upload included): on expiry it is cancelled exactly as for a
+  disconnect, and once the work has stopped the client gets `504 timeout`.
+  Set it below the client's own timeout so the client sees why.
 - `SIGTERM` drains: the listener closes at once (health checks and new
-  requests get connection refused, not `503`), the running job finishes, and
-  the process exits 0. A 98 minute recording runs about 70 s on an M4 Max, so
-  a supervisor's exit timeout (launchd's `ExitTimeOut`, default 20 s) shorter
-  than the longest job kills it part-way. Set it deliberately.
+  requests get connection refused, not `503`), admitted requests finish or hit
+  their deadline, and the process exits 0. Draining therefore takes at most
+  `--request-timeout-seconds` plus one cancellation check; a supervisor's exit
+  timeout (launchd's `ExitTimeOut`, default 20 s) must exceed that, or it
+  kills a job part-way. A 98 minute recording runs about 70 s on an M4 Max.
 - Nothing survives a restart. In-flight requests fail with the connection, and
   the service reloads and re-warms the models before reporting `ready`.
 - The service never retries inference on its own, and neither does the Python
@@ -203,21 +225,27 @@ uploaded name and limits by their value, never audio or transcript content.
 ## Deployment boundary
 
 The service needs the models directory (read), its work directory (write) and
-the listening socket. It does not need the repository, agent credentials,
-`$HOME` beyond the default models path, or the container runtime. Bind it to
-the interface the MCP server's network can reach (host loopback is not
-reachable from a container by default) and terminate TLS, either with the
-built-in `--tls-*` flags or a proxy, so the bearer token is never plaintext on
-a shared network. Host installation, the launchd service, token provisioning
+the listening socket, plus the writable home Core ML caches into. It does not
+need the repository, agent credentials, or the container runtime. Bind it to
+the interface the MCP server's network can reach (with Docker Desktop, host
+loopback is not reachable from a container; OrbStack forwards
+`host.docker.internal` to it) and terminate TLS, either with the built-in
+`--tls-*` flags or a proxy, whenever the token would cross a shared network. Host installation, the launchd service, token provisioning
 and firewall rules belong to `nixfiles` and are a separate step.
 
 ## Tests
 
 ```bash
-swift test          # unit tests (reconciliation, admission, multipart) and the
-                    # real server with a stub engine: mechanics only
+# Unit tests (reconciliation, admission, multipart, deadlines) and the real
+# server with a stub engine, under the same Nix toolchain: mechanics only.
+nix build --no-link .#checks.aarch64-darwin.transcription-service
 ```
 
 The real engine is exercised by `tests/test_transcription_live.py` in the
-repository root (`uv run pytest --slow -k transcription_live`), which builds
-nothing: it expects this package built and the models provisioned.
+repository root, which builds nothing:
+
+```bash
+JAKE_TRANSCRIPTION_SERVICE_BIN=$(nix build --print-out-paths .#transcription-service)/bin/transcription-service \
+TRANSCRIPTION_MODELS_DIR=$(nix build --print-out-paths .#transcription-models) \
+  uv run pytest --slow -k transcription_live
+```

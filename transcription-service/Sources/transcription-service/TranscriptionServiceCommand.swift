@@ -87,6 +87,11 @@ struct Serve: AsyncParsableCommand {
     @Option(name: .customLong("max-queued"), help: "Requests allowed to wait behind the running one.")
     var maxQueued: Int = 4
 
+    @Option(
+        name: .customLong("request-timeout-seconds"),
+        help: "Longest a request may take from admission to response, upload and queueing included.")
+    var requestTimeoutSeconds: Double = 30 * 60
+
     @Option(name: .customLong("work-dir"), help: "Where uploads are staged while a request runs.")
     var workDir: String?
 
@@ -100,7 +105,8 @@ struct Serve: AsyncParsableCommand {
         if (tlsCertificate == nil) != (tlsPrivateKey == nil) {
             throw ValidationError("--tls-certificate and --tls-private-key must be given together")
         }
-        guard maxQueued >= 0, maxFiles >= 1, maxUploadBytes >= 1, maxDurationSeconds > 0 else {
+        guard maxQueued >= 0, maxFiles >= 1, maxUploadBytes >= 1, maxDurationSeconds > 0, requestTimeoutSeconds > 0
+        else {
             throw ValidationError("limits must be positive")
         }
     }
@@ -126,6 +132,7 @@ struct Serve: AsyncParsableCommand {
             maxDurationSeconds: maxDurationSeconds,
             maxQueued: maxQueued,
             workDirectory: workDirectory,
+            requestTimeoutSeconds: requestTimeoutSeconds,
             tls: tlsCertificate.flatMap { certificate in
                 tlsPrivateKey.map { ServiceConfiguration.TLS(certificateChainPath: certificate, privateKeyPath: $0) }
             })

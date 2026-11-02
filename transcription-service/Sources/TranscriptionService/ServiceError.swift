@@ -23,6 +23,8 @@ public struct ServiceError: Error, Sendable, Equatable {
         case overloaded
         /// The engine failed on an accepted recording.
         case inferenceFailed = "inference_failed"
+        /// The request ran past `--request-timeout-seconds` and was cancelled.
+        case timeout
         case internalError = "internal_error"
 
         public var status: HTTPResponse.Status {
@@ -33,6 +35,7 @@ public struct ServiceError: Error, Sendable, Equatable {
             case .notReady: .serviceUnavailable
             case .overloaded: .tooManyRequests
             case .inferenceFailed: .internalServerError
+            case .timeout: .gatewayTimeout
             case .internalError: .internalServerError
             }
         }
