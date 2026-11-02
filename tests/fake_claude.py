@@ -330,7 +330,7 @@ class Session:
             seen.append(self.echo(message))
 
     def ask(
-        self, arguments: dict[str, Any], *, abandon_after: float | None = None
+        self, arguments: dict[str, Any], *, abandon_when: Path | None = None
     ) -> str:
         handshake()
         rpc_id = next(_rpc_ids)
@@ -342,8 +342,9 @@ class Session:
                 "params": {"name": "ask_parent", "arguments": arguments},
             }
         )
-        if abandon_after is not None:
-            time.sleep(abandon_after)
+        if abandon_when is not None:
+            while not abandon_when.exists():
+                time.sleep(0.01)
             send_mcp(
                 {
                     "jsonrpc": "2.0",
@@ -470,14 +471,16 @@ class Session:
         self.result(final)
 
     def turn_ask_one_abandoned(self, text: str) -> None:
-        """Two questions at once; the CLI abandons the first after a second."""
+        """Two questions at once; ARG is the file that releases cancellation."""
+        assert self.arg is not None
+        withdraw = Path(self.arg)
         answers: dict[str, str] = {}
 
-        def one(question: str, abandon: float | None) -> None:
-            answers[question] = self.ask({"question": question}, abandon_after=abandon)
+        def one(question: str, abandon: Path | None) -> None:
+            answers[question] = self.ask({"question": question}, abandon_when=abandon)
 
         threads = [
-            threading.Thread(target=one, args=("abandoned?", 1.0)),
+            threading.Thread(target=one, args=("abandoned?", withdraw)),
             threading.Thread(target=one, args=("kept?", None)),
         ]
         for thread in threads:

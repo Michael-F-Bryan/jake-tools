@@ -1062,28 +1062,73 @@ async def test_two_pending_questions_need_both_answers(
     )
 
 
+@pytest.mark.parametrize("expire_between_reads", [False, True])
 async def test_an_abandoned_question_is_withdrawn_and_the_other_stays_pending(
-    mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
+    mcp_server: ServerFactory,
+    fake_env: dict[str, str],
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    expire_between_reads: bool,
 ) -> None:
+    original_call = call
+    released = False
+    withdraw = workdir / "withdraw-question"
+
+    async def interleave_expiry(
+        session: ClientSession, tool: str, **arguments: Any
+    ) -> dict[str, Any]:
+        nonlocal released
+        result = await original_call(session, tool, **arguments)
+        if (
+            not released
+            and tool == "claude_poll"
+            and result.get("pending_questions_total") == 2
+        ):
+            withdraw.touch()
+            released = True
+            if expire_between_reads:
+                # Hold the real poll response until the later transcript read can
+                # see withdrawal. The two API calls are not an atomic observation.
+                with anyio.fail_after(10):
+                    while True:
+                        events, _ = await read_transcript(session, arguments["task_id"])
+                        if "input_expired" in kinds(events):
+                            break
+                        await anyio.sleep(0.01)
+        return result
+
+    monkeypatch.setitem(globals(), "call", interleave_expiry)
     async with mcp_server(fake_env) as session:
         started = await start(
-            session, workdir, "[[scenario:ask_one_abandoned]] go", allow_questions=True
+            session,
+            workdir,
+            f"[[scenario:ask_one_abandoned:{withdraw}]] go",
+            allow_questions=True,
         )
         task_id = started["task_id"]
         waiting, events, cursor = await poll_until(
-            session, task_id, lambda _, evs: "input_expired" in kinds(evs)
+            session,
+            task_id,
+            # Transcript history may be newer than the poll snapshot. Wait
+            # for withdrawal in both before choosing a request to answer.
+            lambda snapshot, evs: (
+                "input_expired" in kinds(evs)
+                and [r["question"] for r in snapshot["pending_questions"]] == ["kept?"]
+            ),
         )
         expired = next(e for e in events if e["kind"] == "input_expired")
         status = await call(session, "claude_status", task_id=task_id)
         kept = waiting["pending_questions"]
-        await call(
+        answered = await call(
             session,
             "claude_update",
             task_id=task_id,
             responses={kept[0]["request_id"]: {"answer": "yes"}},
         )
+        assert answered["results"][0]["outcome"] == "accepted"
         final, _, _ = await poll_until(session, task_id, terminal, cursor=cursor)
 
+    assert released
     assert "withdrawn" in expired["detail"]["reason"]
     assert [r["question"] for r in kept] == ["kept?"]
     assert waiting["status"] == "input_required"  # the other question is open
