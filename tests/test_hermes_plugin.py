@@ -241,8 +241,12 @@ def test_only_granted_capabilities_are_registered(tmp_path: Path) -> None:
     register_operations(ctx, ("claude",), config, lambda: config)
     assert set(ctx.tools) == {op.name for op in OPERATIONS if op.capability == "claude"}
     assert {t["toolset"] for t in ctx.tools.values()} == {"jake_tools_claude"}
+    # polish_transcript sends transcript text to Claude, so `claude` grants
+    # it, with the transcription guide that documents it.
+    assert "polish_transcript" in ctx.tools
     assert ctx.skills == {
-        "claude-delegation": SKILLS_DIR / "claude-delegation" / "SKILL.md"
+        "claude-delegation": SKILLS_DIR / "claude-delegation" / "SKILL.md",
+        "transcription": SKILLS_DIR / "transcription" / "SKILL.md",
     }
 
     nothing = RecordingContext()
@@ -261,6 +265,7 @@ def test_transcription_needs_its_endpoint(tmp_path: Path) -> None:
     )
     ctx = RecordingContext()
     register_operations(ctx, ("transcription",), with_endpoint, lambda: with_endpoint)
+    # Local transcription alone never grants sending text to a cloud model.
     assert set(ctx.tools) == {"transcribe"}
     assert set(ctx.skills) == {"transcription"}
 

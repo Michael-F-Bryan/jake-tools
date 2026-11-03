@@ -1,6 +1,6 @@
 ---
 name: transcription
-description: Transcribe and diarise local audio files with the `transcribe` tool; what the structured transcript promises about timestamps, file boundaries and anonymous speakers, and how to handle each error.
+description: Transcribe and diarise local audio files with the `transcribe` tool, and turn a saved result into a clean-verbatim review draft with `polish_transcript`; what each promises about timestamps, file boundaries, anonymous speakers and wording, what polishing sends to Claude, and how to handle each error.
 ---
 
 # Transcription
@@ -8,9 +8,10 @@ description: Transcribe and diarise local audio files with the `transcribe` tool
 `transcribe(files)` uploads audio files that jake-tools can read (the MCP server's, or for the
 native Hermes tool Hermes' own, filesystem) to the native
 transcription service and returns one complete, structured transcript. All
-inference is local to that host; nothing goes to a cloud provider. The tool is
-only present when jake-tools has `transcription.api_base_url` configured; if
-you cannot see it, there is no transcription capability here.
+`transcribe` inference is local to that host; nothing goes to a cloud provider.
+The tool is only present when jake-tools has `transcription.api_base_url`
+configured; if you cannot see it, there is no transcription capability here.
+`polish_transcript` (below) is different: it sends transcript text to Claude.
 
 ## Calling it
 
@@ -54,6 +55,16 @@ What this does and does not promise:
   `speaker_1` in any other call. Identify people from context only, and say so.
 - **Speaker identity is continuous across file boundaries** within a call: a
   speaker in file 1 keeps their label in file 2.
+- **Short excerpts can merge distinct speakers.** In live comparisons, a
+  30-second conversation excerpt and a one-minute group-meeting excerpt each
+  returned one speaker, while the matching passages within five-minute inputs
+  had two and three speaker labels respectively. Identical decoded-audio
+  controls supported a context-length effect. Prefer transcribing/diarising
+  the full meeting (or a longer contiguous excerpt), then slicing the resulting
+  timed transcript for polishing or review. Do not treat one speaker detected
+  in a short clip as proof that only one person spoke, or invent missing speaker
+  boundaries in text. These observations establish neither a universal minimum
+  duration nor correct attribution in longer results.
 - **Overlap is attributed, not resolved.** When two speakers' turns cover a
   word, it goes to the larger overlap and is flagged `overlap: true`. Treat such
   words, and anything with `speaker: null`, as uncertain attribution.
@@ -68,6 +79,66 @@ What this does and does not promise:
   (about 85–89% word agreement, about 93% speaker agreement) but never
   against hand-checked ground truth. Domain terms and acronyms are often
   misheard, and numbers come back as words.
+
+## Polishing a saved transcript
+
+`polish_transcript(transcript_path, output_directory, glossary?, start_seconds?,
+end_seconds?, max_budget_usd?)` reads a saved `transcribe` result (the whole
+JSON, or just its `transcript`) and writes a **new** directory: a readable
+draft for a person to review, not a verified record.
+
+- **Cloud boundary.** The transcript's words, timings, labels and any glossary
+  go to Anthropic's Claude models through jake-tools' local Claude CLI
+  (tool-less calls, no settings files or MCP servers). The audio never does.
+  Do not polish a conversation that must not leave the host. It belongs to the
+  `claude` capability, so a transcription-only grant does not include it.
+- **Paths** are absolute, as jake-tools sees them. The source file is read
+  once and never written (its SHA-256 is re-checked). `output_directory` must
+  not exist (`invalid_argument` otherwise) and its parent must.
+- **What changes.** Code removes standalone um/uh/erm. A conservative edit pass
+  may also propose these, and code accepts only what it can check against the
+  source words: a stutter (one identical adjacent copy always stays; never a
+  repeated number, which may be a year or digits, nor a lone repeated
+  negation or intensifier); a restart that the speaker then says again word
+  for word, or a cut-off word they then finish ("pr produced"); a set-off
+  "you know" / "I mean"; and punctuation or a first letter's case on one word
+  (never a question mark, a name's capital or an all-caps word). Nothing may
+  cross or empty a speaker turn, and stutters and restarts in unassigned or
+  overlapping speech stay. There is no free replacement, no ordinary-word
+  "repair" and no speaker change. Labels and timings are the source's (`null`
+  shows as "Unassigned speaker"). Much of the readability comes from layout and
+  filler removal; many restarts and false starts stay as spoken.
+- **Glossary** (optional): `"TERM"` or `"TERM: what it is"` strings. Each
+  occurrence is decided separately from its context and shown as `[TERM?]`,
+  a tentative candidate, with the heard words listed. It is never a
+  find-and-replace. Do not invent terms: pass only ones you know are used.
+- **Review.** A separate detection-only pass lists material problems
+  (`possible_misrecognition`, `unclear_meaning`, `fragment`,
+  `attribution_doubt`) as `[R#]` markers and a list with timestamps and
+  source words. It cannot supply wording. When it questions an edit, or flags
+  a passage containing edits, those edits are undone and the source words
+  shown (code's own um/uh/erm removal stays). It has no audio and is not exhaustive. An
+  unflagged passage is **not** verified, and the draft cannot recover speech
+  the recogniser dropped or speakers diarisation merged.
+- **Known risk.** A meaningful repeat can look like a stutter when the
+  recogniser drops the sentence boundary between them ("it's done. Done
+  properly." heard as "it's done done properly"), so one copy may be removed,
+  and the review may not notice. `ledger.json` keeps every removed word.
+- **Files.** `transcript.md` (the draft), `ledger.json` (every source word by
+  stable ID with its status and display, every edit with its source words, and
+  every refused decision), `review.json`, `metadata.json` (policy, models,
+  limits, per-chunk outcomes, cost; written last) and `diagnostics/` (each
+  call's exact prompt and parsed reply or error).
+- **Limits.** Work is split into chunks of about 900 words at speaker turns,
+  two calls each, at most 16 chunks per call (about 1.5–2 hours of speech).
+  For longer recordings, polish consecutive windows with
+  `start_seconds`/`end_seconds`. Each call has its own cost and time cap. The
+  whole call stays within `max_budget_usd` (default 5, at most 25) and finishes
+  within about 270 s. A chunk whose pass failed, timed out or did not fit the
+  budget or time is named in `chunks[]`, marked in the draft, and makes
+  `status: "partial"`. A partial draft is still source-faithful (fillers only
+  there) but unpolished or unreviewed where marked. Do not resubmit to the same
+  `output_directory`; pick a new one.
 
 ## Errors
 
@@ -86,6 +157,8 @@ Every failure is a result with `isError: true` and a stable `code`:
 | `upstream_error` | `tls_failed` | The service answered but TLS failed, usually a certificate the MCP server does not trust. Report it as a configuration problem; do not loop. |
 | `upstream_error` | `timeout` (`retry_safe: false`) | No answer within the configured time. **The service may still be processing the request.** Do not resubmit automatically; check with the user, and if you must retry, expect to wait for the earlier job too. |
 | `upstream_error` | `inference_failed`, `bad_response` | The engine failed on this recording, or answered off-contract. Report it with the message. |
+| `invalid_argument` | (`polish_transcript`) `detail.argument` names it | A relative path, an existing `output_directory`, a file that is not a `transcribe` result, an empty window, a window too long for one call, or a bad glossary/budget. Fix the argument. |
+| `upstream_error` | (`polish_transcript`) `detail.integration: claude` | Not one chunk could be edited (Claude unavailable, rate-limited, or out of budget). `detail.output_directory` holds the diagnostics; use a new directory for any retry. |
 
 Never retry uncertain failures in a loop: each attempt queues more work on a
 single-job service.

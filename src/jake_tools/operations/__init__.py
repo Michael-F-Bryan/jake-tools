@@ -50,7 +50,8 @@ SKILL_GUIDES: dict[str, str] = {
     ),
     "transcription": (
         "The guide explains the transcript schema, what speaker and overlap fields "
-        "do and do not promise, and how to handle each error."
+        "do and do not promise, what polishing sends to Claude, changes and leaves "
+        "unverified, and how to handle each error."
     ),
 }
 """What each packaged skill gives a caller, for the adapters' skill pointers."""

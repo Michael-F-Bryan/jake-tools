@@ -268,6 +268,23 @@ The service itself is a Swift package built with nixpkgs' Swift and Apple SDK
 `nix develop` provides the remaining development tools (`uv`, `swift-format`,
 `sox`).
 
+### Polishing a saved transcript
+
+`polish_transcript(transcript_path, output_directory, glossary?, start_seconds?,
+end_seconds?, max_budget_usd?)` turns a saved `transcribe` result into a
+clean-verbatim Markdown draft in a new directory, with a word ledger, review
+items, metadata and the exact prompts and replies. It sends the transcript's
+**text** (never audio) to Claude through the local CLI. That is why it is a
+`claude` capability and not `transcription`, and why it needs no
+transcription endpoint. Per chunk of about 900 words, a conservative edit pass
+proposes filler, stutter and restart deletions, punctuation and optional
+glossary candidates, and code validates each against the source words. A
+detection-only review then flags places to check. Neither can rewrite
+wording or speakers. Limits: 16 chunks per call, `max_budget_usd` (default 5),
+about 270 s. Code is in `src/jake_tools/polishing/`; contract and caveats are
+in `skill://transcription`; `tests/test_polish_transcript_live.py` (`--slow`)
+is the real-model acceptance.
+
 ## Codex usage alerts
 
 ```bash

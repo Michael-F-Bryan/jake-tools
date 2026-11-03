@@ -37,6 +37,10 @@ before it takes the brief, as CLI 2.1.309 did (observed).
 with ``Agent`` reported as ``Task``. Which names are unavailable is the
 test's choice, ``$FAKE_CLAUDE_UNAVAILABLE_TOOLS`` (comma-separated); the
 fake has no catalogue either.
+
+A call with ``--json-schema`` (``run_structured``) gets the result's
+``structured_output`` from ``$FAKE_CLAUDE_STRUCTURED_OUTPUT``, a JSON object
+keyed by the schema's title; the test chooses it, so it proves transport only.
 """
 
 from __future__ import annotations
@@ -293,6 +297,7 @@ class Session:
         self.save()
         emit(
             {
+                **self.structured_output(),
                 "type": "result",
                 "subtype": subtype,
                 "duration_ms": 5,
@@ -313,6 +318,16 @@ class Session:
                 "uuid": str(uuid.uuid4()),
             }
         )
+
+    def structured_output(self) -> dict[str, Any]:
+        """With ``--json-schema``, the reply ``$FAKE_CLAUDE_STRUCTURED_OUTPUT``
+        (a JSON object keyed by schema title) holds for that schema."""
+        schema = self.args.get("json-schema")
+        replies = os.environ.get("FAKE_CLAUDE_STRUCTURED_OUTPUT")
+        if not schema or not replies:
+            return {}
+        title = json.loads(schema).get("title")
+        return {"structured_output": json.loads(replies).get(title)}
 
     # --- incoming messages -------------------------------------------------------
 

@@ -15,6 +15,7 @@ src/jake_tools/
   claude_runs/    # delegated tasks: run dirs, worker, events, inbox, service
   operations/     # agent-facing tool operations shared by every adapter
   mcp/            # stdio MCP adapter (other clients)
+  polishing/      # polish_transcript: guarded clean-verbatim drafts via Claude
   prompting.py    # typed Jinja prompts bound to a response model
   newsletters.py  # SharePoint Graph client
   transcription.py # HTTP client + transcript contract for transcription-service

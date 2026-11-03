@@ -187,7 +187,7 @@ def structured_tool(
 
 
 _INSTRUCTIONS = (
-    "jake-tools: Clockify history, catalogue, verified completed-entry creation, Jira reconciliation, bounded Claude delegation and, when an endpoint is configured, local audio transcription with speaker diarisation (`transcribe`). "
+    "jake-tools: Clockify history, catalogue, verified completed-entry creation, Jira reconciliation, bounded Claude delegation, clean-verbatim polishing of a saved transcript through Claude (`polish_transcript`; sends transcript text, never audio) and, when an endpoint is configured, local audio transcription with speaker diarisation (`transcribe`). "
     "Clockify history/catalogue/create require clockify.workspaces allowlisting. Never automatically retry uncertain entry writes. "
     "Every tool returns JSON as structured content. Failures are results with "
     "isError=true and a stable `code` field (missing_credentials, "

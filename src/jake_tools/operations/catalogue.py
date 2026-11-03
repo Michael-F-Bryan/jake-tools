@@ -16,6 +16,7 @@ from . import (
     clockify_jira_sync,
     clockify_time_entries,
     clockify_workspace_catalogue,
+    polish_transcript,
     transcribe,
 )
 
@@ -32,6 +33,8 @@ OPERATIONS: tuple[Operation, ...] = (
     claude_steer.OPERATION,
     claude_update.OPERATION,
     claude_cancel.OPERATION,
+    # Sends transcript text to Claude, so it is a `claude` capability.
+    polish_transcript.OPERATION,
     # Unavailable unless transcription.api_base_url is configured.
     transcribe.OPERATION,
 )

@@ -123,6 +123,7 @@ async def test_stdio_tool_descriptions_point_to_readable_relevant_skills(
         "claude_steer": "claude-delegation",
         "claude_update": "claude-delegation",
         "claude_cancel": "claude-delegation",
+        "polish_transcript": "transcription",
         "transcribe": "transcription",
     }
     async with mcp_server(mcp_env) as session:
