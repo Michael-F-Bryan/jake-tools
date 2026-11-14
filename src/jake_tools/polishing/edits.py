@@ -507,7 +507,12 @@ class _ChunkEditor:
             and looks_like_name(source, sentence_initial=word.sentence_initial)
         ):
             return "lowercases a possible name"
-        if core[0].isupper() and new_core[0].islower() and len(core) > 1 and core.isupper():
+        if (
+            core[0].isupper()
+            and new_core[0].islower()
+            and len(core) > 1
+            and core.isupper()
+        ):
             return "lowercases an all-caps word"
         if decision.display == source:
             return "no change"
