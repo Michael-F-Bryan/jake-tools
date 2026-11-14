@@ -36,9 +36,20 @@ only built-in tool names, counts, versions and result status remain.
 from the CLI's source. It is not a supported route and not an accepted
 dependency. Its list result is stored only as a size (`content_chars`).
 
+## Later receipts (same day)
+
+- `guard-read-canary-under-allow-rule.json`, `guard-artifact-list-and-other-url-under-allow-rule.json`:
+  real-runtime records, from `guard_receipt.py.txt`, that the `tool_guard`
+  `PreToolUse` hook is consulted for calls an allow rule approves and that a deny
+  stops them before they run (harmless calls only).
+- The disposable artifact's publish, readback and update receipts are summarised
+  in `docs/claude-tools.md` ("Demonstrated 2026-11-14"); their raw results are
+  kept outside the repository, and the shell-bearing readback is
+  `tests/artifact_fixtures/read_result.txt`.
+
 ## Archived probe source (research receipts)
 
-`probe_exposure.py.txt`, `probe_override_list.py.txt` and
+`probe_exposure.py.txt`, `probe_override_list.py.txt`, `guard_receipt.py.txt` and
 `sanitise_evidence.py.txt` are the exact source of the one-off probes that
 produced these files, archived as receipts. They are not repository code:
 they are not maintained, linted or type-checked, and they call

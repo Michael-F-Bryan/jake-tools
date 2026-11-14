@@ -1,0 +1,59 @@
+{
+ "probe": "guard-artifact-list-and-other-url-under-allow-rule",
+ "init_tools": [
+  "Artifact",
+  "ArtifactComments",
+  "ArtifactData"
+ ],
+ "tool_uses": [
+  {
+   "name": "Artifact",
+   "input": {
+    "action": "list"
+   }
+  },
+  {
+   "name": "Artifact",
+   "input": {
+    "action": "read",
+    "url": "https://claude.ai/artifact/Qm3Kz7Tn5Rv9Wx2YbDfGhj"
+   }
+  }
+ ],
+ "tool_results": [
+  {
+   "is_error": true,
+   "text": "PreToolUse:Artifact hook error: only Artifact action 'read' of the one URL is permitted"
+  },
+  {
+   "is_error": true,
+   "text": "PreToolUse:Artifact hook error: only https://claude.ai/artifact/Hs4Jp8Ek6Ct2Ua3NxLyMwb may be read"
+  }
+ ],
+ "allow_rule": "Artifact (approves every Artifact call)",
+ "consulted": [
+  [
+   "Artifact",
+   {
+    "action": "list"
+   }
+  ],
+  [
+   "Artifact",
+   {
+    "action": "read",
+    "url": "https://claude.ai/artifact/Qm3Kz7Tn5Rv9Wx2YbDfGhj"
+   }
+  ]
+ ],
+ "denied": [
+  [
+   "Artifact",
+   "only Artifact action 'read' of the one URL is permitted"
+  ],
+  [
+   "Artifact",
+   "only https://claude.ai/artifact/Hs4Jp8Ek6Ct2Ua3NxLyMwb may be read"
+  ]
+ ]
+}

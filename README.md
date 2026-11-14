@@ -26,8 +26,8 @@ Hermes' own Python environment (nixfiles does this with the flake's
 `plugins.enabled`, and registers:
 
 - **Tools**, for the capabilities in
-  `plugins.entries.jake-tools.settings.capabilities` (`claude`, `clockify`,
-  `transcription`; unset means none). They have the MCP tools' names,
+  `plugins.entries.jake-tools.settings.capabilities` (`artifact`, `claude`,
+  `clockify`, `transcription`; unset means none). They have the MCP tools' names,
   schemas, results and error codes; failures are
   `{"error", "code", "message", "detail"}`. `transcribe` also needs
   `transcription.api_base_url`. `ping` stays MCP-only.
@@ -226,7 +226,7 @@ so they survive server restarts:
   It also takes an idempotent `request_id`, an opt-in `allow_questions`,
   and `resume_task_id` to continue a finished task's conversation as a new
   task. [docs/claude-tools.md](docs/claude-tools.md) records the evidence
-  behind this, and why there is no artifact-publishing tool.
+  behind this, and the evidence for the experimental artifact tools.
 - `claude_poll` waits (up to 120 s) until the task needs its caller (a
   question, the end, a new denial or warning, undeliverable steering) and
   returns a compact snapshot with an observation token: progress, pending
@@ -291,6 +291,30 @@ wording or speakers. Limits: 16 chunks per call, `max_budget_usd` (default 5),
 about 270 s. Code is in `src/jake_tools/polishing/`; contract and caveats are
 in `skill://transcription`; `tests/test_polish_transcript_live.py` (`--slow`)
 is the real-model acceptance.
+
+### Publishing an HTML file as a private Claude Artifact (experimental)
+
+`artifact_publish(file_path)` publishes an existing `.html`/`.htm` file as a
+**new** private artifact on claude.ai through the signed-in Claude account and
+verifies it in a separate session; `artifact_read(url, file_path?,
+expected_version_id?, output_path?)` reads one back without changing anything
+(`jake-tools artifact publish|read` do the same from a shell; `read` exits
+nonzero when `--file` or `--expected-version-id` is given and does not hold).
+The file's contents are sent to Anthropic.
+
+It rests on an **undocumented** Claude Code mechanism: the SDK hides the
+`Artifact` tool unless `CLAUDE_CODE_ARTIFACT` is set, which Jake does for these
+sessions only. It may change without notice, so the tools are off unless
+`artifacts.enabled = true` (`JAKE_TOOLS_ARTIFACTS_ENABLED`) and, under Hermes,
+the `artifact` capability is granted. Each session is guarded before every
+tool call so it can only read the one file and publish it once (or read the one
+URL); a prompt is not what keeps it there. `verified` means the hosted file,
+with Claude Code's fixed document shell removed, equals the local file and the
+readback reported `private`. Updates, sharing, listing and deleting are not
+supported. Evidence and caveats: `docs/claude-tools.md`; usage:
+`skill://artifact-publishing`; code: `src/jake_tools/artifacts/`;
+`tests/test_artifacts_live.py` (`--slow`, `live`) needs an existing target for
+readback and refuses to create an artifact unless explicitly told to.
 
 ## Codex usage alerts
 

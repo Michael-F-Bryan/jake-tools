@@ -9,10 +9,12 @@ still behaves this way: ``test_artifacts_live.py`` (``--slow``, ``live``) does.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
+import click.testing
 import pytest
 from claude_agent_sdk import (
     AssistantMessage,
@@ -25,6 +27,7 @@ from claude_agent_sdk import (
     ToolUseBlock,
     UserMessage,
 )
+from click.testing import CliRunner
 
 from jake_tools.artifacts import SourceError, publish, read
 from jake_tools.artifacts.parse import (
@@ -160,7 +163,9 @@ class FakeClaude:
                             )
                             decision = out.get("hookSpecificOutput", {})
                             if decision.get("permissionDecision") == "deny":
-                                denied[block.id] = decision["permissionDecisionReason"]
+                                denied[block.id] = decision.get(
+                                    "permissionDecisionReason", ""
+                                )
             if isinstance(message, UserMessage) and isinstance(message.content, list):
                 block = message.content[0]
                 if isinstance(block, ToolResultBlock) and block.tool_use_id in denied:
@@ -342,7 +347,10 @@ async def test_a_failed_readback_keeps_the_published_identity(source: Path) -> N
 
 
 async def test_local_file_changing_during_the_call_is_reported(source: Path) -> None:
-    fake = FakeClaude(on_publish=lambda: source.write_bytes(SOURCE + b"<!-- x -->"))
+    def change() -> None:
+        source.write_bytes(SOURCE + b"<!-- x -->")
+
+    fake = FakeClaude(on_publish=change)
     result = await publish(str(source), agent=fake.agent())
     assert result.verified is False
     assert "the local file changed while the call ran" in result.problems
@@ -682,3 +690,116 @@ async def test_read_without_a_version_in_the_header_does_not_match() -> None:
     )
     result = await read(URL, expected_version_id=VERSION_ID, agent=fake.agent())
     assert result.version_matches is False
+
+
+# -- the CLI: failed checks and uncertain writes are not exit 0 ----------------------
+
+
+def _cli(
+    monkeypatch: pytest.MonkeyPatch, fake: FakeClaude, *args: str
+) -> click.testing.Result:
+    from jake_tools.artifacts import service
+    from jake_tools.cli import main
+
+    monkeypatch.setattr(service, "ClaudeAgent", lambda: fake.agent())
+    return CliRunner().invoke(main, ["artifact", *args])
+
+
+def test_cli_read_succeeds_when_file_and_version_match(
+    source: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _cli(
+        monkeypatch,
+        FakeClaude(),
+        "read",
+        URL,
+        "--file",
+        str(source),
+        "--expected-version-id",
+        VERSION_ID,
+        "--json",
+    )
+    assert result.exit_code == 0, result.output
+    body = json.loads(result.output)
+    assert body["matches_file"] is True and body["version_matches"] is True
+
+
+def test_cli_read_fails_when_the_file_differs_but_prints_the_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = tmp_path / "other.html"
+    other.write_bytes(SOURCE + b"x")
+    result = _cli(
+        monkeypatch, FakeClaude(), "read", URL, "--file", str(other), "--json"
+    )
+    assert result.exit_code != 0
+    assert '"matches_file": false' in result.output
+    assert "does not match --file" in result.output
+
+
+def test_cli_read_fails_when_the_expected_version_is_not_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _cli(
+        monkeypatch, FakeClaude(), "read", URL, "--expected-version-id", "999-aaaa"
+    )
+    assert result.exit_code != 0
+    assert "version_matches: False" in result.output
+    assert "not '999-aaaa'" in result.output
+
+
+def test_cli_read_fails_when_the_comparison_cannot_be_made(
+    source: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    odd = READ_TEXT.replace("<!doctype html><html>", "<html>", 1)
+    fake = FakeClaude(
+        read_stream=lambda: [
+            _init(["Artifact"]),
+            _use_id("rd", "Artifact", action="read", url=URL),
+            _result_of("rd", odd),
+            _end(),
+        ]
+    )
+    result = _cli(monkeypatch, fake, "read", URL, "--file", str(source))
+    assert result.exit_code != 0  # unknown is not a pass
+
+
+def test_cli_publish_error_keeps_the_uncertain_write_evidence(
+    source: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def crash(path: Path) -> list[Message]:
+        return [
+            _init(["Read", "Artifact"]),
+            _use_id("pub", "Artifact", action="publish", file_path=str(path)),
+            AssistantMessage(content=[TextBlock(text=f"made {URL}")], model="haiku"),
+        ]
+
+    fake = FakeClaude(publish_stream=crash, fail_after_stream=True)
+    for flags in (["--json"], []):
+        result = _cli(monkeypatch, fake, "publish", str(source), *flags)
+        assert result.exit_code != 0
+        assert URL in result.output
+        assert "retry_safe" in result.output and "false" in result.output.lower()
+        assert "UNKNOWN" in result.output
+    parsed = json.loads(
+        _cli(monkeypatch, fake, "publish", str(source), "--json").output.split(
+            "Error: ", 1
+        )[-1]
+    )
+    assert parsed["detail"]["urls_seen"] == [URL]
+    assert parsed["detail"]["retry_safe"] is False
+
+
+def test_cli_publish_after_a_crash_prints_the_receipt_and_fails(
+    source: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _cli(
+        monkeypatch,
+        FakeClaude(fail_after_stream=True),
+        "publish",
+        str(source),
+        "--json",
+    )
+    assert result.exit_code != 0
+    assert URL in result.output and '"verified": false' in result.output
+    assert "NOT verified" in result.output

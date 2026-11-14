@@ -1,0 +1,39 @@
+"""Archived probe: record, on the real runtime, that the tool_guard PreToolUse hook is consulted
+for calls an allow rule approves and that a deny prevents execution. Harmless calls only:
+a canary Read, and Artifact list/read-of-another-URL (denied before they run; read-only anyway).
+Usage: guard_receipt.py OUTDIR  (run from the repo root with its venv)"""
+import asyncio, json, sys, tempfile
+from pathlib import Path
+from jake_tools.artifacts.guard import ArtifactGuard
+from jake_tools.artifacts.service import ARTIFACT_ENV
+from jake_tools.claude import AgentSpec, ClaudeAgent, describe
+
+out = Path(sys.argv[1]); out.mkdir(parents=True, exist_ok=True)
+
+async def trace(prompt, spec, name, guard_state):
+    views = []
+    agent = ClaudeAgent().with_message_observer(lambda m: views.append(describe(m)))
+    await agent.run(prompt, spec)
+    rec = {"probe": name, "init_tools": next((v.tools for v in views if v.kind == "init"), None),
+           "tool_uses": [{"name": u.name, "input": u.input} for v in views for u in v.tool_uses],
+           "tool_results": [{"is_error": r.is_error, "text": r.text[:240]} for v in views for r in v.tool_results],
+           **guard_state()}
+    (out / f"{name}.json").write_text(json.dumps(rec, indent=1))
+    print(name, "uses", len(rec["tool_uses"]), "consulted", len(rec["consulted"]), "denied", len(rec["denied"]))
+
+async def main():
+    d = Path(tempfile.mkdtemp(prefix="guard-receipt-"))
+    (d / "ok.txt").write_text("ALLOWED-0b84d6e1"); (d / "secret.txt").write_text("CANARY-7f3a91c2")
+    consulted, denied = [], []
+    def g(tool, inp):
+        consulted.append([tool, inp]); r = None if str(inp.get("file_path", "")).endswith("ok.txt") else "only ok.txt may be read"
+        if r: denied.append([tool, r])
+        return r
+    await trace(f"Use the Read tool on each file, one call each, and report what each says: {d/'ok.txt'} and {d/'secret.txt'}",
+        AgentSpec(model="haiku", tools=("Read",), allowed_tools=("Read",), tool_guard=g, cwd=d, permission_mode="dontAsk", max_turns=6, max_budget_usd=0.25),
+        "guard-read-canary-under-allow-rule", lambda: {"allow_rule": "Read (approves every Read)", "consulted": consulted, "denied": denied})
+    guard = ArtifactGuard.for_read("https://claude.ai/artifact/Hs4Jp8Ek6Ct2Ua3NxLyMwb")
+    await trace('First call the Artifact tool with action "list". Then call it with action "read" and url "https://claude.ai/artifact/Qm3Kz7Tn5Rv9Wx2YbDfGhj". Report what each returned.',
+        AgentSpec(model="haiku", tools=("Artifact",), allowed_tools=("Artifact",), tool_guard=guard, env=dict(ARTIFACT_ENV), cwd=d, permission_mode="dontAsk", max_turns=6, max_budget_usd=0.25),
+        "guard-artifact-list-and-other-url-under-allow-rule", lambda: {"allow_rule": "Artifact (approves every Artifact call)", "consulted": guard.consulted, "denied": guard.denied})
+asyncio.run(main())

@@ -16,6 +16,7 @@ src/jake_tools/
   operations/     # agent-facing tool operations shared by every adapter
   mcp/            # stdio MCP adapter (other clients)
   polishing/      # polish_transcript: guarded clean-verbatim drafts via Claude
+  artifacts/      # experimental: publish an HTML file as a private Claude Artifact, read back
   prompting.py    # typed Jinja prompts bound to a response model
   newsletters.py  # SharePoint Graph client
   transcription.py # HTTP client + transcript contract for transcription-service
@@ -108,7 +109,7 @@ instructions, or that generated output meets a semantic quality bar.
   exposed tools. Never put a rule in `tools`, and never add a hard-coded
   list of tool names: the CLI is the authority and silently drops names it
   does not provide, so check the session's `init` tool list
-  (`MessageView.tools`). Evidence, and the artifact-publishing blocker:
+  (`MessageView.tools`). Evidence, and the experimental artifact route:
   `docs/claude-tools.md`.
 - `ctx.obj` is never set or read anywhere in this codebase. Every CLI
   dependency is built by the command that needs it: a decorator (see
@@ -313,6 +314,33 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
   latency, and a fake transcript is never that evidence.
 - Fixtures for the live test are synthesised with macOS `say`
   (`tests/transcription_fixtures.py`); nothing binary is committed.
+
+## Claude Artifacts (`jake_tools.artifacts`, experimental)
+
+`artifact_publish` / `artifact_read` drive Claude Code's `Artifact` tool through
+`ClaudeAgent`. Rules that keep them honest:
+
+- The tool is hidden from SDK sessions unless the **undocumented**
+  `CLAUDE_CODE_ARTIFACT` is set; it is set only through `AgentSpec.env` for
+  these sessions, never persisted, never given to `claude_start` tasks, and
+  the operations are off unless `artifacts.enabled`. Do not describe the route
+  as supported.
+- Authority is enforced *before* each call by `AgentSpec.tool_guard` (a
+  `PreToolUse` hook, which also runs for allow-rule-approved calls), never by
+  a prompt or an audit afterwards. A read session has no write authority.
+  Never loosen `ArtifactGuard`, add `url`/`edits`/`share`/`delete`/`list`
+  permission, or suppress `setting_sources` (user/project/managed
+  `enableArtifact`/deny rules must still apply).
+- The model is a conduit: outcomes come from the tool's own results, and
+  `verified` is a byte comparison in code of a *separate* readback with the
+  pinned document shell (`parse.SHELL_PREFIX`) removed. A different shell is
+  an unverified result, not an approximate pass. Re-record
+  `tests/artifact_fixtures/` if Claude Code changes its wording.
+- No call is retried (a repeat creates a second artifact); an unknown outcome
+  says `retry_safe: false` and the URLs seen. A receipt survives failures after
+  a publish.
+- Tests that publish are gated behind an explicit environment value and must
+  never run without authority for that exact synthetic fixture.
 
 ## External dependencies
 

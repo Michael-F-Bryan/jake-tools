@@ -1,7 +1,7 @@
 # Claude tools, permissions and artifact publishing: evidence
 
-What `claude_start`'s `tools`/`allowed_tools` contract rests on, and why
-there is no artifact-publishing tool. Observed on 2026-10-21 with
+What `claude_start`'s `tools`/`allowed_tools` contract rests on, and the
+evidence behind the experimental artifact tools (last section). Observed on 2026-10-21 with
 `claude-agent-sdk` 0.2.168 (bundled CLI 2.1.301, which does not start on
 this Nix host) driving the installed Claude Code CLI 2.1.293, signed in with
 a claude.ai Max login (`claude auth status`: `authMethod: claude.ai`,
@@ -112,7 +112,7 @@ Haiku, `dontAsk`, no settings files, through the real server and worker
   record or system message. The worker records such a call from those
   exact error openings, labelled `source: inferred_from_tool_error`.
 
-## Artifact publishing: off by default in SDK sessions, no tool shipped
+## Artifact publishing: off by default in SDK sessions; an experimental route
 
 The first useful slice (issue #15) is to publish an existing self-contained
 HTML file as a private claude.ai artifact, return its identity and URL, and
@@ -204,10 +204,10 @@ support decision, not something this evidence makes. It is not a supported
 integration and nothing in Jake sets it. Overriding `CLAUDE_CODE_ENTRYPOINT`
 would be spoofing a launch identity and was not tried.
 
-Not established: how plain `claude -p` was refused (its effective
-entrypoint was not observed, so no gate beyond step 4 is inferred), whether
-publish and exact readback work, and whether an upstream-supported opt-in
-exists.
+Not established by the re-check alone: how plain `claude -p` was refused
+(its effective entrypoint was not observed, so no gate beyond step 4 is
+inferred) and whether an upstream-supported opt-in exists. Publish and
+readback are covered below.
 
 The Artifact tool's inputs, from the same binary, name publish operations
 (`publish_version`, `edit_version`, `publish_files`, `create_from_type`)
@@ -218,9 +218,78 @@ whether publish inputs carry one was not read. `claude.ai Claude Docs` is
 a `claudeai` connector in SDK sessions; it creates new documents rather
 than publishing an existing file, and was not examined further.
 
+### Demonstrated 2026-11-14: publish, readback and update of one disposable artifact
+
+Authorised by Michael for one disposable synthetic private artifact (a
+`~400` byte page, no real content), through the SDK with the process-local
+override above, no private endpoints, no TUI, entrypoint untouched, no
+sharing change. Receipts: `docs/evidence/artifact-sdk-exposure-2026-11-14/`.
+
+- **Publish** is `Artifact` with `{action: "publish", file_path, ...}`. The
+  result text is `Published <path> at <URL> (Version 1, version id ...)` and
+  says the artifact is private and that sharing cannot be changed from the
+  tool. `title` was ignored: the file's `<title>` names the artifact.
+- **Readback** in a fresh session is `{action: "read", url}`. The result
+  starts `[Artifact <uuid> (version <id>) \u2014 owned by you, private (...)...]`
+  and returns the page inline between `<cowritten-artifact-html>` tags; it
+  saved no local file. The hosted HTML is **not** the file: it is the file
+  inside a fixed 531-byte document shell (`parse.SHELL_PREFIX`) and a
+  `\n</body></html>` suffix. With exactly that shell removed, v1 (395 bytes,
+  sha256 `1619f473...`) and v2 (439 bytes, `fea743c0...`) were byte-identical to
+  the local files. The same shell came back from CLI 2.1.318 and the
+  SDK-bundled 2.1.325. The shell is not documented or promised.
+- **Identity and visibility.** The URL `.../artifact/V4iHumJLsDrW9EBEtZfqZj`
+  and the artifact id `e3448f84-1ca6-4757-9dd4-3bb5616d043a` stayed the same
+  from v1 to v2; each readback reported `private`. That is the state the
+  service reported at read time, not an inference from the documented default.
+- **Update** (not shipped) passes `url` to a publish from another session.
+  The tool refuses until that session has read the live version, and refused
+  an unchanged resend; the third attempt succeeded. An update needs a
+  pre-read, a conflict policy and an expected-version check, so it is a later
+  slice.
+- **Listing.** `{"action": "list"}` returns the account's artifact list (title
+  and URL per entry), not operation help.
+
+### Pre-execution authority (why a prompt is not enough)
+
+A model can be steered by hosted HTML or a tool result, so the shipped
+sessions do not rely on the prompt or on an after-the-fact audit.
+`AgentSpec.tool_guard` runs a caller's check in a `PreToolUse` hook before
+every tool call. On the real runtime (`guard-*.json` receipts, and
+`tests/test_artifacts_live.py`):
+
+- the hook ran for calls that an allow rule (`Read`, `Artifact`) approves, and
+  its deny stopped them: a canary `Read` never ran, and an `Artifact` `list`
+  and a `read` of another URL were refused before they executed;
+- a call the tool rejects as malformed (`<tool_use_error>`) fails input
+  validation first, never reaches the hook and never executes, so the service
+  counts such calls separately instead of treating them as unguarded;
+- `can_use_tool` was not used: it is only consulted for calls that would
+  otherwise prompt.
+
+`artifacts.guard` permits one `Read` of the one file and one new `publish` of
+it (no `url`, `edits` or sharing), or one `read` of the one URL, and denies
+everything else. A call that reached neither the guard nor the tool's own
+validation makes the result unverified. User, project and managed settings stay
+in force, so `enableArtifact: false` or an `Artifact` deny rule still turns the
+tool off.
+
+### The experimental tools
+
+`artifact_publish(file_path)` and `artifact_read(url, ...)` (also
+`jake-tools artifact publish|read`) use that route behind an off-by-default
+`artifacts.enabled` setting and a separate `artifact` Hermes capability. They
+publish only a new artifact, never update, share, list or delete, and never
+retry. Read their `verified`, `private_confirmed` and `problems` fields, not a
+URL alone. The mechanism is undocumented and may change without notice; whether
+to depend on it is a support decision. The shipped `artifact_publish` itself
+has been exercised only against the recorded results above until a further
+disposable publication is authorised.
+
 Per the task's constraints, nothing here uses private endpoints, TUI
-scraping, browser automation or spoofed interactive sessions. No artifact
-was created, and no existing artifact was touched.
-`test_live_unavailable_tool_fails_the_task_by_name` doubles as the gate: if
-a session ever lists `Artifact`, re-run these checks. Visibility control
-through the SDK would still need its own check.
+scraping, browser automation or spoofed interactive sessions. One disposable
+artifact (above) was created and updated; no other artifact was touched, and
+no sharing was changed.
+`test_live_unavailable_tool_fails_the_task_by_name` still gates delegated
+tasks: the override is set only for the artifact sessions, never for
+`claude_start`, so those still lack `Artifact`.

@@ -1,0 +1,51 @@
+{
+ "probe": "guard-read-canary-under-allow-rule",
+ "init_tools": [
+  "Read"
+ ],
+ "tool_uses": [
+  {
+   "name": "Read",
+   "input": {
+    "file_path": "<tmp>/ok.txt"
+   }
+  },
+  {
+   "name": "Read",
+   "input": {
+    "file_path": "<tmp>/secret.txt"
+   }
+  }
+ ],
+ "tool_results": [
+  {
+   "is_error": false,
+   "text": "1\tALLOWED-0b84d6e1"
+  },
+  {
+   "is_error": true,
+   "text": "PreToolUse:Read hook error: only ok.txt may be read"
+  }
+ ],
+ "allow_rule": "Read (approves every Read)",
+ "consulted": [
+  [
+   "Read",
+   {
+    "file_path": "<tmp>/ok.txt"
+   }
+  ],
+  [
+   "Read",
+   {
+    "file_path": "<tmp>/secret.txt"
+   }
+  ]
+ ],
+ "denied": [
+  [
+   "Read",
+   "only ok.txt may be read"
+  ]
+ ]
+}

@@ -1,6 +1,7 @@
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from claude_agent_sdk import (
@@ -813,16 +814,16 @@ def test_describe_drops_thinking_and_flattens_tool_activity() -> None:
 # -- AgentSpec.tool_guard ---------------------------------------------------------
 
 
-async def _run_hook(spec: AgentSpec, tool: str, tool_input: dict[str, object]) -> dict:
+async def _run_hook(
+    spec: AgentSpec, tool: str, tool_input: dict[str, object]
+) -> dict[str, Any]:
     options = spec.to_options()
-    (matcher,) = options.hooks["PreToolUse"]  # type: ignore[index]
+    assert options.hooks is not None
+    (matcher,) = options.hooks["PreToolUse"]
     assert matcher.matcher is None  # every tool
     (hook,) = matcher.hooks
-    return await hook(  # type: ignore[return-value,arg-type]
-        {"tool_name": tool, "tool_input": tool_input},
-        "tu-1",
-        None,  # type: ignore[arg-type]
-    )
+    event = cast(Any, {"tool_name": tool, "tool_input": tool_input})
+    return cast(dict[str, Any], await hook(event, "tu-1", cast(Any, None)))
 
 
 def test_no_guard_means_no_hooks() -> None:
