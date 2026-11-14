@@ -249,6 +249,41 @@ async def test_real_upstream_pagination_is_unfiltered(
     ] == [["1"], ["2"]]
 
 
+async def test_unstable_pagination_reports_scan_evidence_not_coverage(
+    mcp_server: ServerFactory, clockify_env: dict[str, str], upstream: Upstream
+) -> None:
+    upstream.entries = [
+        entry("dup", description="PRIVATE"),
+        entry("dup", description="PRIVATE"),
+    ]
+    async with mcp_server(clockify_env) as session:
+        result = await session.call_tool(
+            "clockify_time_entries", {"start": START, "end": END}
+        )
+    assert result.is_error and result.structured_content is not None
+    content = result.structured_content
+    assert content["code"] == "upstream_error"
+    assert content["message"] == (
+        "Clockify error: Clockify pagination repeated record IDs; "
+        "coverage is incomplete"
+    )
+    assert content["detail"]["integration"] == "clockify"
+    assert content["detail"]["complete"] is False
+    assert content["detail"]["failure"] == {
+        "reason": "duplicate_within_page",
+        "resource": "time-entries",
+        "page": 1,
+        "page_size": 5000,
+        "page_records": 2,
+        "records_seen": 0,
+        "duplicate_count": 1,
+    }
+    assert "PRIVATE" not in json.dumps(content)
+    assert "coverage" not in content
+    scans = [p for _, p, _ in upstream.requests if p.endswith("/time-entries")]
+    assert len(scans) == 1
+
+
 @pytest.mark.parametrize(
     "outcome,expected,known_id",
     [

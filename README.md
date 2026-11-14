@@ -194,6 +194,13 @@ Coverage reports upstream paths, filters, page counts and record counts. Missing
 names fail the request rather than returning an apparently complete result.
 Each upstream list is bounded at 1,000 pages of 5,000 records; repeated IDs,
 oversized pages or reaching the bound are errors, never successful truncation.
+Such an `upstream_error` carries `detail.complete: false` and `detail.failure`
+(`reason`, `resource`, `page`, `page_size`, `page_records`, `records_seen`,
+`duplicate_count`): counts only, never record IDs, entry content or credentials.
+There is no automatic restart or deduplication: an offset scan that repeated IDs
+may also have skipped records unseen; a caller's retry of the whole call is only as
+trustworthy as any clean, non-snapshot scan. Whether a bounded restart is defensible is
+unresolved (jake-tools#13).
 Upstream pagination is not an atomic snapshot: concurrent changes can still affect
 coverage. No live-account overlap or API compatibility validation has been done.
 

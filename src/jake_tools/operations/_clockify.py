@@ -8,7 +8,12 @@ from collections.abc import Callable
 import anyio.to_thread
 from pydantic import BaseModel
 
-from ..clockify import ClockifyClient, ClockifyError, validate_clockify_id
+from ..clockify import (
+    ClockifyClient,
+    ClockifyError,
+    ClockifyPaginationError,
+    validate_clockify_id,
+)
 from ..clockify_time import CreateTimeEntryError
 from ..config import Config
 from .errors import ToolError
@@ -70,10 +75,11 @@ async def call_clockify[ResultT: BaseModel](
             message = message.replace(
                 config.clockify_api_key.value, "[CLOCKIFY_API_KEY]"
             )
+        detail: dict[str, object] = {"integration": "clockify"}
+        if isinstance(exc, ClockifyPaginationError):
+            detail |= exc.detail()
         raise ToolError(
-            "upstream_error",
-            "Clockify error: " + message,
-            detail={"integration": "clockify"},
+            "upstream_error", "Clockify error: " + message, detail=detail
         ) from exc
     except ValueError as exc:
         raise ToolError("invalid_argument", str(exc)) from exc
