@@ -22,6 +22,52 @@ class ClockifyError(UpstreamError):
     pass
 
 
+PaginationReason = Literal[
+    "duplicate_within_page",
+    "repeated_across_pages",
+    "repeated_page",
+    "oversized_page",
+    "page_bound",
+]
+
+
+class PaginationFailure(BaseModel):
+    """Why a scan could not establish coverage.
+
+    Counts and the endpoint's resource name only: never record IDs, entry
+    content or credentials, since upstream IDs are not validated data.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    reason: PaginationReason
+    # The last path segment of the scanned list, e.g. ``time-entries``.
+    resource: str
+    page: int
+    page_size: int
+    page_records: int
+    # Distinct records accepted on earlier pages of this scan.
+    records_seen: int
+    # Occurrences on this page of an ID already seen within the page or on an
+    # earlier page.
+    duplicate_count: int
+
+
+class ClockifyPaginationError(ClockifyError):
+    """A paginated read is incomplete. Nothing was deduplicated or retried."""
+
+    def __init__(self, message: str, failure: PaginationFailure) -> None:
+        super().__init__(message, safe_summary=message)
+        self.failure = failure
+
+    def detail(self) -> dict[str, object]:
+        return {
+            "complete": False,
+            "strategy": "single page-number scan from page 1; no retry, deduplication or merge",
+            "failure": self.failure.model_dump(mode="json"),
+        }
+
+
 def validate_clockify_id(value: str) -> str:
     """Accept opaque IDs, never URL path/query syntax (including escapes)."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
@@ -370,20 +416,52 @@ class ClockifyClient:
         results: list[ModelT] = []
         page = 1
         seen: set[str] = set()
+        previous_pages: list[list[str]] = []
+
+        def incomplete(
+            reason: PaginationReason, what: str, ids: list[str], duplicates: int
+        ) -> ClockifyPaginationError:
+            return ClockifyPaginationError(
+                f"Clockify pagination {what}; coverage is incomplete",
+                PaginationFailure(
+                    reason=reason,
+                    resource=path.rsplit("/", 1)[-1],
+                    page=page,
+                    page_size=self._PAGE_SIZE,
+                    page_records=len(ids),
+                    records_seen=len(seen),
+                    duplicate_count=duplicates,
+                ),
+            )
+
         while page <= self._MAX_PAGES:
             page_params = {**params, "page-size": self._PAGE_SIZE, "page": page}
             data = self._request_json("GET", path, params=page_params)
             items = self._validate_list(model, data, path)
-            if len(items) > self._PAGE_SIZE:
-                raise ClockifyError(
-                    "Clockify returned an oversized page; coverage is incomplete"
-                )
             ids = [str(item.model_dump()["id"]) for item in items]
-            if len(ids) != len(set(ids)) or seen.intersection(ids):
-                raise ClockifyError(
-                    "Clockify pagination repeated record IDs; coverage is incomplete"
+            if len(items) > self._PAGE_SIZE:
+                raise incomplete("oversized_page", "returned an oversized page", ids, 0)
+            # Offset pagination is not a snapshot: a repeat means records
+            # moved between pages while we read, and a record may equally have
+            # moved the other way unseen. Never deduplicate and claim coverage.
+            repeats = 0
+            known = set(seen)
+            for record_id in ids:
+                repeats += record_id in known
+                known.add(record_id)
+            if ids in previous_pages:
+                raise incomplete(
+                    "repeated_page", "repeated a page of record IDs", ids, repeats
                 )
+            if repeats:
+                reason: PaginationReason = (
+                    "duplicate_within_page"
+                    if len(ids) != len(set(ids))
+                    else "repeated_across_pages"
+                )
+                raise incomplete(reason, "repeated record IDs", ids, repeats)
             seen.update(ids)
+            previous_pages.append(ids)
             results.extend(items)
             if len(items) < self._PAGE_SIZE:
                 self.pagination_reads.append(
@@ -397,9 +475,8 @@ class ClockifyClient:
                 )
                 return results
             page += 1
-        raise ClockifyError(
-            "Clockify pagination exceeded the page bound; coverage is incomplete"
-        )
+        page = self._MAX_PAGES
+        raise incomplete("page_bound", "exceeded the page bound", [], 0)
 
     def _request_json(
         self,

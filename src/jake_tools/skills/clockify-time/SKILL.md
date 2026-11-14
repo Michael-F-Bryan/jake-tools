@@ -85,7 +85,11 @@ History scans ALL authenticated-user entries without date filtering on every
 call, including arbitrarily old straddling entries. It can be expensive for a
 large account. Coverage reports list paths, filters, pages, records and strategy.
 Names must resolve or the call fails; no silent name gaps. Each upstream list is
-bounded at 1,000 pages of 5,000 records and errors rather than truncating. Pagination
+bounded at 1,000 pages of 5,000 records and errors rather than truncating. A scan
+that repeats record IDs fails as `upstream_error` with `detail.complete: false` and
+`detail.failure` (reason, page, records seen, duplicate count; no IDs or content).
+That history is NOT covered: never build a timesheet from it, and never treat a
+retry as proof beyond its own clean result. There is no automatic restart. Pagination
 is not an atomic snapshot; concurrent writes can affect coverage despite cursor
 change detection. No live-account API compatibility check has been performed.
 
