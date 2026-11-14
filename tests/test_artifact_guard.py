@@ -62,10 +62,25 @@ def test_publish_denies_everything_else(
     assert guard.denied and guard.publishes_allowed == 0
 
 
-def test_a_normalised_path_is_the_same_file_but_a_sibling_is_not() -> None:
+def test_only_the_exact_canonical_string_names_the_file() -> None:
     guard = publish_guard()
-    assert guard("Read", {"file_path": "/work/./report.html"}) is None
-    assert guard("Read", {"file_path": "/work/report.html.bak"}) is not None
+    assert guard("Read", {"file_path": "/work/report.html"}) is None
+    # Lexically equal, but the tool resolves symlinks first, so these may name
+    # another file: no normalisation.
+    for lookalike in (
+        "/work/./report.html",
+        "/work//report.html",
+        "/work/link/../report.html",
+        "/work/report.html/",
+        "/work/report.html.bak",
+    ):
+        assert guard("Read", {"file_path": lookalike}) is not None, lookalike
+        assert (
+            ArtifactGuard.for_publish(FILE)(
+                "Artifact", {"action": "publish", "file_path": lookalike}
+            )
+            is not None
+        )
 
 
 def test_the_file_may_be_read_only_a_few_times() -> None:
@@ -120,3 +135,44 @@ def test_every_call_is_recorded_even_when_denied() -> None:
     guard("Artifact", {"action": "read", "url": URL})
     assert [c[0] for c in guard.consulted] == ["Artifact", "Artifact"]
     assert len(guard.denied) == 1
+
+
+def test_two_layers_asking_about_one_call_get_one_counted_answer() -> None:
+    guard = publish_guard()
+    call = {"action": "publish", "file_path": str(FILE)}
+    assert guard("Artifact", call, "tu-1") is None  # the PreToolUse hook
+    assert guard("Artifact", call, "tu-1") is None  # can_use_tool: same call
+    assert guard.publishes_allowed == 1 and len(guard.consulted) == 1
+    # A different call is a different decision, and the second publish is refused.
+    assert guard("Artifact", call, "tu-2") is not None
+    # A denial is also stable for the call.
+    assert guard("Artifact", call, "tu-2") is not None
+    assert len(guard.denied) == 1
+
+
+def test_an_approval_is_never_reused_for_a_changed_request_with_the_same_id() -> None:
+    """Another hook may rewrite a call's input between the two layers. The
+    approval of the safe form must not carry over to the changed form."""
+    safe = {"action": "publish", "file_path": str(FILE)}
+    guard = publish_guard()
+    assert guard("Artifact", safe, "tu-1") is None  # PreToolUse: the safe request
+    # can_use_tool then sees the SAME id with a rewritten input:
+    for changed in (
+        {"action": "share", "url": URL},
+        {"action": "publish", "file_path": str(FILE), "url": URL},  # an update
+        {"action": "publish", "file_path": "/etc/other.html"},
+    ):
+        reason = guard("Artifact", changed, "tu-1")
+        assert reason is not None and "changed between enforcement layers" in reason
+    # ...and the id stays denied, even for the original request afterwards.
+    assert guard("Artifact", safe, "tu-1") is not None
+    assert guard("Artifact", {"action": "share", "url": URL}, "tu-1") is not None
+    # A different tool under the same id is a change too.
+    assert guard("Read", {"file_path": str(FILE)}, "tu-1") is not None
+
+
+def test_key_order_does_not_make_an_identical_request_look_changed() -> None:
+    guard = publish_guard()
+    assert guard("Artifact", {"action": "publish", "file_path": str(FILE)}, "a") is None
+    assert guard("Artifact", {"file_path": str(FILE), "action": "publish"}, "a") is None
+    assert guard.publishes_allowed == 1

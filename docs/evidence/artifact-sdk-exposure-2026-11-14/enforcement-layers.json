@@ -1,0 +1,68 @@
+{
+ "note": "Harmless canary Read and denied Artifact list only; no publish/edit/share/delete. A = PreToolUse hook + blanket Read allow rule (dontAsk). B = `ask` rule + can_use_tool, no allow rule, mode default. Rows A-none, A-project-disableAllHooks, B-none shown. The managed-settings rows were discarded: CLAUDE_CODE_MANAGED_SETTINGS_PATH is not honoured by CLI 2.1.318 (control: managed enableArtifact:false did not remove Artifact), so a real managed policy was NOT tested.",
+ "rows": [
+  {
+   "name": "A-none",
+   "design": "A",
+   "layer": "none",
+   "consulted": [
+    [
+     "hook",
+     "Read",
+     {
+      "file_path": "<tmp>/secret.txt"
+     }
+    ]
+   ],
+   "results": [
+    "PreToolUse:Read hook error: guard denies all"
+   ],
+   "executed_a_denied_call": false
+  },
+  {
+   "name": "A-project-disableAllHooks",
+   "design": "A",
+   "layer": "project:disableAllHooks",
+   "consulted": [
+    [
+     "hook",
+     "Read",
+     {
+      "file_path": "<tmp>/secret.txt"
+     }
+    ]
+   ],
+   "results": [
+    "PreToolUse:Read hook error: guard denies all"
+   ],
+   "executed_a_denied_call": false
+  },
+  {
+   "name": "B-none",
+   "design": "B",
+   "layer": "none",
+   "consulted": [
+    [
+     "can_use_tool",
+     "Artifact",
+     {
+      "action": "list"
+     }
+    ],
+    [
+     "can_use_tool",
+     "Read",
+     {
+      "file_path": "<tmp>/secret.txt"
+     }
+    ]
+   ],
+   "results": [
+    "guard denies all",
+    "guard denies all"
+   ],
+   "executed_a_denied_call": false
+  }
+ ],
+ "control_managed_settings_path_honoured": false
+}

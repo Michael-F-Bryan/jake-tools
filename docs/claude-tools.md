@@ -253,26 +253,50 @@ sharing change. Receipts: `docs/evidence/artifact-sdk-exposure-2026-11-14/`.
 ### Pre-execution authority (why a prompt is not enough)
 
 A model can be steered by hosted HTML or a tool result, so the shipped
-sessions do not rely on the prompt or on an after-the-fact audit.
-`AgentSpec.tool_guard` runs a caller's check in a `PreToolUse` hook before
-every tool call. On the real runtime (`guard-*.json` receipts, and
-`tests/test_artifacts_live.py`):
+sessions do not rely on the prompt or on an after-the-fact audit. A new
+private publish needs no approval of its own (the artifacts page says so), so
+no permission rule can gate it; only code that runs before the call can.
+`AgentSpec.tool_guard` therefore enforces one caller-supplied decision per tool
+call at **two independent points of the same session**, with **no allow rule**
+and no extra model session:
 
-- the hook ran for calls that an allow rule (`Read`, `Artifact`) approves, and
-  its deny stopped them: a canary `Read` never ran, and an `Artifact` `list`
-  and a `read` of another URL were refused before they executed;
-- a call the tool rejects as malformed (`<tool_use_error>`) fails input
-  validation first, never reaches the hook and never executes, so the service
-  counts such calls separately instead of treating them as unguarded;
-- `can_use_tool` was not used: it is only consulted for calls that would
-  otherwise prompt.
+1. a `PreToolUse` hook, and
+2. a `can_use_tool` callback, reached because an `ask` rule is set for every
+   exposed tool (the SDK needs streaming input and the CLI's `default` mode for
+   it; `can_use_tool` is not asked under `dontAsk`).
 
-`artifacts.guard` permits one `Read` of the one file and one new `publish` of
-it (no `url`, `edits` or sharing), or one `read` of the one URL, and denies
-everything else. A call that reached neither the guard nor the tool's own
-validation makes the result unverified. User, project and managed settings stay
-in force, so `enableArtifact: false` or an `Artifact` deny rule still turns the
-tool off.
+The guard answers consistently per `tool_use_id`. Evidence on the real runtime
+(CLI 2.1.318; `tests/test_artifacts_live.py`, `guard-*.json`,
+`enforcement-layers.json`, `hooks-vs-settings-flags.json`), using only harmless
+calls (a canary `Read`; a denied read-only `Artifact` `list` and a `read` of
+another URL):
+
+- The hook alone, and `can_use_tool` alone, each stopped the denied call. An
+  allow rule does **not** make `can_use_tool` run (hence no allow rule), but the
+  hook still runs for calls an allow rule approves.
+- `disableAllHooks` and `allowManagedHooksOnly` set through `--settings` and
+  through project settings did not stop an SDK hook callback. With
+  `disableAllHooks` plus an allow rule for `Read` in project settings,
+  `can_use_tool` still denied the canary (the `ask` rule wins over `allow`).
+- A call the tool rejects as malformed (`<tool_use_error>`) fails input
+  validation first, never reaches either layer and never executes, so the
+  service counts such calls separately instead of treating them as unguarded.
+
+**Boundary, not tested:** a *managed* (policy) settings file could not be
+exercised. The CLI's `CLAUDE_CODE_MANAGED_SETTINGS_PATH` was not honoured (a
+managed `enableArtifact: false` did not remove the tool), and writing the
+system managed-settings location would change the runtime. A managed policy that
+disables hooks, or removes our `ask` rule, is therefore unproven either way; the
+design leaves two layers and no allow rule so that either alone still enforces,
+and a call that reaches neither the guard nor the tool's own validation makes
+the result unverified. This is not a general preflight: the claim is the
+layers listed above, in the actual session.
+
+`artifacts.guard` permits one `Read` of the one file (its exact canonical
+path) and one new `publish` of it (no `url`, `edits` or sharing), or one `read`
+of the one URL, and denies everything else. User, project and managed settings
+stay in force, so `enableArtifact: false` or an `Artifact` deny rule still turns
+the tool off.
 
 ### The experimental tools
 

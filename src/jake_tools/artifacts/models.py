@@ -75,6 +75,9 @@ class ArtifactPublishResult(BaseModel):
     version: int
     version_id: str
     verified: bool
+    retry_safe: bool = False
+    """Always false: the artifact exists, and publishing again would create a
+    second one. Fix `problems`, or delete the artifact by hand first."""
     private_confirmed: bool
     """The readback reported the artifact as private. A shared artifact, or a
     read that did not say, is ``False``."""

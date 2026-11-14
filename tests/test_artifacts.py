@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import AsyncIterator, Callable
+import os
+from collections.abc import AsyncIterable, AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +21,11 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     Message,
+    PermissionResultDeny,
     ResultMessage,
     SystemMessage,
     TextBlock,
+    ToolPermissionContext,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -87,10 +90,14 @@ def _end() -> ResultMessage:
 class FakeClaude:
     """A fake ``query``: one scripted stream per session kind.
 
-    It plays the CLI's part towards the guard: before each scripted tool call
-    it runs the ``PreToolUse`` hook the production code installed, and a deny
-    replaces that call's scripted result with the CLI's refusal. The guard,
-    the hook wiring and everything after it are production code."""
+    It plays the CLI's part towards the guard, as the real runtime was seen to:
+    before each scripted tool call it runs the ``PreToolUse`` hook and the
+    ``can_use_tool`` callback the production code installed (either can be
+    switched off to model a layer that does not run), and a deny from either
+    replaces that call's scripted result with the CLI's refusal. A call whose
+    scripted result is a ``<tool_use_error>`` never reaches either (the tool
+    validates first). The guard, the wiring and everything after are production
+    code."""
 
     def __init__(
         self,
@@ -98,13 +105,18 @@ class FakeClaude:
         publish_stream: Callable[[Path], list[Message]] | None = None,
         read_stream: Callable[[], list[Message]] | None = None,
         on_publish: Callable[[], None] | None = None,
-        run_hooks: bool = True,
+        hook_layer: bool = True,
+        permission_layer: bool = True,
+        rewrite_for_permission: Callable[[dict[str, Any]], dict[str, Any]]
+        | None = None,
         fail_after_stream: bool = False,
     ) -> None:
         self.publish_stream = publish_stream or self._default_publish
         self.read_stream = read_stream or self._default_read
         self.on_publish = on_publish
-        self.run_hooks = run_hooks
+        self.hook_layer = hook_layer
+        self.permission_layer = permission_layer
+        self.rewrite_for_permission = rewrite_for_permission
         self.fail_after_stream = fail_after_stream
         self.calls: list[tuple[str, ClaudeAgentOptions]] = []
 
@@ -129,13 +141,53 @@ class FakeClaude:
     def agent(self) -> ClaudeAgent:
         return ClaudeAgent(run_query=self)  # type: ignore[arg-type]
 
-    async def _play(
-        self, messages: list[Message], options: ClaudeAgentOptions
+    async def _denial(
+        self, block: ToolUseBlock, options: ClaudeAgentOptions
+    ) -> str | None:
+        """The reason the production layers would refuse ``block``, if any."""
+        if self.hook_layer:
+            for matcher in (options.hooks or {}).get("PreToolUse", []):
+                for hook in matcher.hooks:
+                    out = await hook(
+                        {  # type: ignore[arg-type]
+                            "hook_event_name": "PreToolUse",
+                            "tool_name": block.name,
+                            "tool_input": block.input,
+                            "tool_use_id": block.id,
+                        },
+                        block.id,
+                        None,  # type: ignore[arg-type]
+                    )
+                    decision = out.get("hookSpecificOutput", {})
+                    if decision.get("permissionDecision") == "deny":
+                        return decision.get("permissionDecisionReason", "")
+        if self.permission_layer and options.can_use_tool is not None:
+            seen_by_permission = dict(block.input)
+            if self.rewrite_for_permission is not None:
+                # another hook changed the call's input after PreToolUse
+                seen_by_permission = self.rewrite_for_permission(seen_by_permission)
+            verdict = await options.can_use_tool(
+                block.name,
+                seen_by_permission,
+                ToolPermissionContext(tool_use_id=block.id),
+            )
+            if isinstance(verdict, PermissionResultDeny):
+                return verdict.message
+        return None
+
+    async def _session(
+        self, prompt: str | AsyncIterable[dict[str, Any]], options: ClaudeAgentOptions
     ) -> AsyncIterator[Message]:
-        hooks = (options.hooks or {}).get("PreToolUse", [])
-        denied: dict[str, str] = {}
-        # The CLI validates a tool's input before running hooks: a call whose
-        # result is a validation error never reaches the hook.
+        if not isinstance(prompt, str):  # can_use_tool needs streaming input
+            prompt = "".join([m["message"]["content"] async for m in prompt])
+        self.calls.append((prompt, options))
+        if prompt.startswith("Publish"):
+            path = Path(prompt.split("Read tool: ", 1)[1].split("\n", 1)[0])
+            if self.on_publish is not None:
+                self.on_publish()
+            messages = self.publish_stream(path)
+        else:
+            messages = self.read_stream()
         invalid = {
             b.tool_use_id
             for m in messages
@@ -144,28 +196,14 @@ class FakeClaude:
             if isinstance(b, ToolResultBlock)
             and str(b.content).startswith("<tool_use_error>")
         }
+        denied: dict[str, str] = {}
         for message in messages:
-            if isinstance(message, AssistantMessage) and self.run_hooks:
+            if isinstance(message, AssistantMessage):
                 for block in message.content:
-                    if not isinstance(block, ToolUseBlock) or block.id in invalid:
-                        continue
-                    for matcher in hooks:
-                        for hook in matcher.hooks:
-                            out = await hook(
-                                {  # type: ignore[arg-type]
-                                    "hook_event_name": "PreToolUse",
-                                    "tool_name": block.name,
-                                    "tool_input": block.input,
-                                    "tool_use_id": block.id,
-                                },
-                                block.id,
-                                None,  # type: ignore[arg-type]
-                            )
-                            decision = out.get("hookSpecificOutput", {})
-                            if decision.get("permissionDecision") == "deny":
-                                denied[block.id] = decision.get(
-                                    "permissionDecisionReason", ""
-                                )
+                    if isinstance(block, ToolUseBlock) and block.id not in invalid:
+                        reason = await self._denial(block, options)
+                        if reason is not None:
+                            denied[block.id] = reason
             if isinstance(message, UserMessage) and isinstance(message.content, list):
                 block = message.content[0]
                 if isinstance(block, ToolResultBlock) and block.tool_use_id in denied:
@@ -180,17 +218,12 @@ class FakeClaude:
             raise RuntimeError("the CLI exited unexpectedly")
 
     def __call__(
-        self, *, prompt: str, options: ClaudeAgentOptions
+        self,
+        *,
+        prompt: str | AsyncIterable[dict[str, Any]],
+        options: ClaudeAgentOptions,
     ) -> AsyncIterator[Message]:
-        self.calls.append((prompt, options))
-        if prompt.startswith("Publish"):
-            path = Path(prompt.split("Read tool: ", 1)[1].split("\n", 1)[0])
-            if self.on_publish is not None:
-                self.on_publish()
-            messages = self.publish_stream(path)
-        else:
-            messages = self.read_stream()
-        return self._play(messages, options)
+        return self._session(prompt, options)
 
 
 @pytest.fixture
@@ -453,7 +486,14 @@ async def test_publish_verifies_the_hosted_bytes_in_a_separate_session(
             "CLAUDE_CODE_ARTIFACT_AUTO_OPEN": "0",
         }
         assert options.strict_mcp_config is True  # no unrelated connectors
-        assert options.permission_mode == "dontAsk"
+        # No allow rule: the guard is the only thing that approves, asked by the
+        # PreToolUse hook and again by can_use_tool (an `ask` rule per tool).
+        assert options.permission_mode == "default"
+        assert options.allowed_tools == []
+        assert options.can_use_tool is not None
+        assert json.loads(options.settings or "{}") == {
+            "permissions": {"ask": options.tools}
+        }
         # User, project and managed policy stay in force: never suppressed.
         assert options.setting_sources is None
         # The guard is wired as a PreToolUse hook on every call.
@@ -465,7 +505,14 @@ async def test_publish_verifies_the_hosted_bytes_in_a_separate_session(
     assert URL in read_prompt and str(source) in publish_prompt
 
 
-async def test_hostile_calls_are_denied_before_they_run(source: Path) -> None:
+@pytest.mark.parametrize(
+    ("hook_layer", "permission_layer"),
+    [(True, True), (True, False), (False, True)],
+    ids=["both-layers", "hook-only", "can_use_tool-only"],
+)
+async def test_hostile_calls_are_denied_before_they_run(
+    source: Path, hook_layer: bool, permission_layer: bool
+) -> None:
     """Steered by hosted content or a tool result, a model might try these."""
 
     def stream(path: Path) -> list[Message]:
@@ -492,7 +539,9 @@ async def test_hostile_calls_are_denied_before_they_run(source: Path) -> None:
             _end(),
         ]
 
-    fake = FakeClaude(publish_stream=stream)
+    fake = FakeClaude(
+        publish_stream=stream, hook_layer=hook_layer, permission_layer=permission_layer
+    )
     result = await publish(str(source), agent=fake.agent())
 
     assert result.url == URL and result.verified is True
@@ -572,8 +621,27 @@ async def test_publish_with_a_wrong_file_is_refused_with_a_safe_retry(
     assert len(fake.calls) == 1
 
 
-async def test_a_calls_the_guard_never_saw_is_not_trusted(source: Path) -> None:
-    fake = FakeClaude(run_hooks=False)  # the runtime did not consult the guard
+async def test_either_layer_alone_still_enforces_the_read_session_authority() -> None:
+    for kwargs in ({"hook_layer": False}, {"permission_layer": False}):
+        fake = FakeClaude(
+            read_stream=lambda: [
+                _init(["Artifact"]),
+                _use_id("x", "Artifact", action="share", url=URL),
+                _result_of("x", "shared (EXECUTED)"),
+                _use_id("rd", "Artifact", action="read", url=URL),
+                _result_of("rd", READ_TEXT),
+                _end(),
+            ],
+            **kwargs,  # type: ignore[arg-type]
+        )
+        result = await read(URL, agent=fake.agent())
+        assert result.private is True
+
+
+async def test_if_neither_layer_ran_the_result_is_not_trusted(source: Path) -> None:
+    """Defence in depth only: with no approving layer at all the CLI itself would
+    refuse (there is no allow rule); and if a call still escaped, say so."""
+    fake = FakeClaude(hook_layer=False, permission_layer=False)
     result = await publish(str(source), agent=fake.agent())
     assert result.verified is False
     assert any("not checked by the guard" in p for p in result.problems)
@@ -623,7 +691,7 @@ async def test_an_allowed_publish_that_returns_no_url_has_an_unknown_outcome(
     assert detail is not None
     assert detail["publish_attempted"] is True and detail["publish_allowed"] is True
     assert detail["retry_safe"] is False
-    assert len(fake.calls) == 1  # never retried: a retry could create a second one
+    assert len(fake.calls) == 1  # one attempt, never retried
 
 
 async def test_a_crash_before_the_result_reports_urls_seen(source: Path) -> None:
@@ -803,3 +871,118 @@ def test_cli_publish_after_a_crash_prints_the_receipt_and_fails(
     assert result.exit_code != 0
     assert URL in result.output and '"verified": false' in result.output
     assert "NOT verified" in result.output
+
+
+# -- F2: the tool resolves symlinks, so the guard accepts one exact canonical path --
+
+
+def test_a_symlinked_source_is_published_by_its_canonical_path(tmp_path: Path) -> None:
+    from jake_tools.artifacts.service import load_source
+
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "page.html").write_bytes(SOURCE)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    path, _ = load_source(str(link / "page.html"))
+    assert path == (real / "page.html").resolve()
+
+
+async def test_dot_dot_through_a_symlink_is_denied_not_normalised(
+    tmp_path: Path,
+) -> None:
+    """``/x/link/../c.html`` is lexically ``/x/c.html`` but the tool follows
+    ``link`` first, so it names a different file. Only the exact string passes."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "c.html").write_bytes(b"<p>not the source</p>")
+    work = tmp_path / "x"
+    work.mkdir()
+    (work / "c.html").write_bytes(SOURCE)
+    (work / "link").symlink_to(elsewhere)
+    (tmp_path / "c.html").write_bytes(b"<p>what link/.. really is</p>")
+    source = work / "c.html"
+    sneaky = (
+        f"{work}/link/../c.html"  # lexically the source; really elsewhere/../c.html
+    )
+    assert os.path.normpath(sneaky) == str(source)
+    assert Path(sneaky).read_bytes() != SOURCE  # the OS resolves link first
+
+    def stream(path: Path) -> list[Message]:
+        return [
+            _init(["Read", "Artifact"]),
+            _use_id("pub", "Artifact", action="publish", file_path=sneaky),
+            _result_of("pub", PUBLISH_TEXT + " (EXECUTED)"),
+            _end(),
+        ]
+
+    fake = FakeClaude(publish_stream=stream)
+    with pytest.raises(ToolError) as caught:
+        await publish(str(source), agent=fake.agent())
+    assert "denied before it ran" in caught.value.message
+    assert caught.value.detail is not None and caught.value.detail["retry_safe"] is True
+
+
+# -- F4: a local failure after a successful publish keeps the receipt ---------------
+
+
+async def test_an_oserror_during_readback_setup_keeps_url_and_never_retries(
+    source: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tempfile
+
+    from jake_tools.artifacts import service
+
+    real = tempfile.TemporaryDirectory
+    made = {"n": 0}
+
+    def flaky(*args: Any, **kwargs: Any) -> Any:
+        made["n"] += 1
+        # 1: the publish session, 2: the readback session fails.
+        if made["n"] == 2:
+            raise OSError(28, "No space left on device")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(service.tempfile, "TemporaryDirectory", flaky)
+    result = await publish(str(source), agent=FakeClaude().agent())
+    assert result.url == URL and result.version_id == VERSION_ID
+    assert result.verified is False and result.retry_safe is False
+    assert any("readback failed" in p and "space" in p for p in result.problems)
+
+
+async def test_an_oserror_before_any_publish_is_a_clean_safe_retry(
+    source: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jake_tools.artifacts import service
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(service.tempfile, "TemporaryDirectory", broken)
+    fake = FakeClaude()
+    with pytest.raises(ToolError) as caught:
+        await publish(str(source), agent=fake.agent())
+    assert caught.value.detail is not None
+    assert caught.value.detail["retry_safe"] is True
+    assert caught.value.detail["publish_attempted"] is False
+    assert fake.calls == []
+
+
+async def test_a_call_rewritten_between_the_layers_is_denied_not_approved(
+    source: Path,
+) -> None:
+    """The hook approves the safe publish; another hook then rewrites the same
+    call (same id) into an update of someone else's artifact. The permission
+    layer must see a different request and deny it, not reuse the approval."""
+    fake = FakeClaude(
+        rewrite_for_permission=lambda tool_input: {**tool_input, "url": URL},
+    )
+    with pytest.raises(ToolError) as caught:
+        await publish(str(source), agent=fake.agent())
+    detail = caught.value.detail
+    assert detail is not None
+    assert any(
+        "changed between enforcement layers" in d
+        for d in detail["denied_before_running"]
+    )
+    assert len(fake.calls) == 1  # the readback never ran: nothing was published

@@ -38,10 +38,16 @@ dependency. Its list result is stored only as a size (`content_chars`).
 
 ## Later receipts (same day)
 
-- `guard-read-canary-under-allow-rule.json`, `guard-artifact-list-and-other-url-under-allow-rule.json`:
-  real-runtime records, from `guard_receipt.py.txt`, that the `tool_guard`
-  `PreToolUse` hook is consulted for calls an allow rule approves and that a deny
-  stops them before they run (harmless calls only).
+- `guard-*.json` (from `guard_receipt.py.txt`): the hook-only form of the guard on
+  the real runtime, with a blanket allow rule: consulted for allow-approved calls,
+  denies stopped them (harmless calls only).
+- `hooks-vs-settings-flags.json` (`hooks_settings_probe.py.txt`): `disableAllHooks` /
+  `allowManagedHooksOnly` through `--settings` did not stop an SDK hook callback.
+- `enforcement-layers.json` (`enforcement_matrix.py.txt`): hook with an allow rule
+  (also under project `disableAllHooks`), and `can_use_tool` behind an `ask` rule
+  with no allow rule. Managed-settings rows were discarded: the control
+  (`managed_effective.py.txt`) showed `CLAUDE_CODE_MANAGED_SETTINGS_PATH` is not
+  honoured, so a real managed policy is untested.
 - The disposable artifact's publish, readback and update receipts are summarised
   in `docs/claude-tools.md` ("Demonstrated 2026-11-14"); their raw results are
   kept outside the repository, and the shell-bearing readback is
@@ -49,7 +55,8 @@ dependency. Its list result is stored only as a size (`content_chars`).
 
 ## Archived probe source (research receipts)
 
-`probe_exposure.py.txt`, `probe_override_list.py.txt`, `guard_receipt.py.txt` and
+`probe_exposure.py.txt`, `probe_override_list.py.txt`, `guard_receipt.py.txt`,
+`hooks_settings_probe.py.txt`, `enforcement_matrix.py.txt`, `managed_effective.py.txt` and
 `sanitise_evidence.py.txt` are the exact source of the one-off probes that
 produced these files, archived as receipts. They are not repository code:
 they are not maintained, linted or type-checked, and they call

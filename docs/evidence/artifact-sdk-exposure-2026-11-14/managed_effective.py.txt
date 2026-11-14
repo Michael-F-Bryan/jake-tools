@@ -1,0 +1,17 @@
+"""Control: is CLAUDE_CODE_MANAGED_SETTINGS_PATH honoured? Managed enableArtifact:false must remove Artifact from init.tools."""
+import asyncio, json, shutil, sys, tempfile
+from pathlib import Path
+from claude_agent_sdk import ClaudeAgentOptions, query
+async def stream(t):
+    yield {"type": "user", "message": {"role": "user", "content": t}, "parent_tool_use_id": None}
+async def one(managed):
+    d = Path(tempfile.mkdtemp(prefix="managed-")); env = {"CLAUDE_CODE_ARTIFACT": "1", "CLAUDE_CODE_ARTIFACT_AUTO_OPEN": "0"}
+    if managed is not None:
+        (d / "m.json").write_text(json.dumps(managed)); env["CLAUDE_CODE_MANAGED_SETTINGS_PATH"] = str(d / "m.json")
+    tools = None
+    async for m in query(prompt=stream("Reply: ok. Use no tools."), options=ClaudeAgentOptions(model="haiku", tools=["Read", "Artifact"], cwd=d, max_turns=1, permission_mode="dontAsk", cli_path=shutil.which("claude"), env=env, strict_mcp_config=True)):
+        if type(m).__name__ == "SystemMessage" and m.subtype == "init": tools = [t for t in m.data["tools"] if not t.startswith("mcp__")]
+    print("managed=", managed, "-> init tools:", tools)
+async def main():
+    await one(None); await one({"enableArtifact": False})
+asyncio.run(main())

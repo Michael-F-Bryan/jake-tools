@@ -23,6 +23,7 @@ external MCP server.
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 import shutil
 from collections.abc import (
@@ -39,6 +40,7 @@ from typing import Any, Literal, Protocol, cast
 
 from claude_agent_sdk import (
     AssistantMessage,
+    CanUseTool,
     ClaudeAgentOptions,
     ClaudeSDKClient,
     EffortLevel,
@@ -47,11 +49,15 @@ from claude_agent_sdk import (
     McpServerConfig,
     Message,
     PermissionMode,
+    PermissionResult,
+    PermissionResultAllow,
+    PermissionResultDeny,
     ResultMessage,
     SdkMcpTool,
     SettingSource,
     SystemMessage,
     TextBlock,
+    ToolPermissionContext,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -247,10 +253,11 @@ def unexposed_tools(requested: Iterable[str], exposed: Iterable[str]) -> list[st
     return missing
 
 
-ToolGuard = Callable[[str, dict[str, Any]], str | None]
-"""Decides one tool call before it runs: ``None`` lets it continue to the
-normal permission rules, a string denies it with that reason. See
-:attr:`AgentSpec.tool_guard`."""
+ToolGuard = Callable[[str, dict[str, Any], str | None], str | None]
+"""Decides one tool call before it runs: ``(tool, input, tool_use_id)``.
+``None`` permits it, a string denies it with that reason. It may be asked
+about the same call by more than one enforcement layer and must answer
+consistently for one ``tool_use_id``. See :attr:`AgentSpec.tool_guard`."""
 
 
 class AgentSpec(BaseModel):
@@ -280,13 +287,19 @@ class AgentSpec(BaseModel):
     settings); ``()`` isolates the run from every settings file. ``cwd`` and
     ``env`` are the subprocess's working directory and extra environment.
 
-    ``tool_guard`` is a caller's in-process check that runs before *every*
-    tool call, ahead of the permission rules. It is wired as a ``PreToolUse``
-    hook, which the CLI runs for calls an allow rule would approve too (a
-    ``can_use_tool`` callback is only consulted for calls that would prompt),
-    and a deny from it cannot be overridden by those rules. A guard that raises
-    denies the call. It is for code that must not rely on a prompt to keep a
-    model inside its authority; it is not exposed to task callers.
+    ``tool_guard`` is a caller's in-process authority check for *every* call
+    to an exposed tool, enforced at two independent points of the one session:
+    a ``PreToolUse`` hook (which runs for calls an allow rule would approve;
+    ``can_use_tool`` alone would not be asked about those) and a
+    ``can_use_tool`` callback, reached because an ``ask`` rule is set for each
+    built-in tool in ``tools`` (MCP and local tools are refused with a guard). With
+    a guard there are no allow rules for exposed tools: the
+    guard is the only thing that approves, so a layer that does not run leaves
+    the other (and, with neither, the CLI's own refusal under no approval) in
+    force. The mode must be the CLI default (``can_use_tool`` is not asked under
+    ``dontAsk``), so ``permission_mode`` is forced to ``default``. A guard that
+    raises denies. It is for code that must not rely on a prompt to keep a model
+    inside its authority; it is not exposed to task callers.
 
     ``local_tools`` are served in-process and auto-approved like ``tools``.
     ``session_id`` names the Claude session a fresh conversation creates;
@@ -350,6 +363,25 @@ class AgentSpec(BaseModel):
             )
             local_names = [local_tool_name(t.name) for t in self.local_tools]
         rules = self.tools if self.allowed_tools is None else self.allowed_tools
+        settings: str | None = None
+        permission_mode = self.permission_mode
+        can_use_tool: CanUseTool | None = None
+        if self.tool_guard is not None:
+            if self.allowed_tools or permission_mode not in (None, "default"):
+                raise ValueError(
+                    "tool_guard approves calls itself: it takes no allowed_tools "
+                    "and runs only in permission_mode 'default'"
+                )
+            if self.mcp_servers or self.mcp_tools or self.local_tools:
+                raise ValueError(
+                    "tool_guard covers the built-in `tools` only: it cannot be "
+                    "combined with mcp_servers, mcp_tools or local_tools, whose "
+                    "calls it would neither ask about nor stop"
+                )
+            rules = ()
+            permission_mode = "default"
+            can_use_tool = _guard_can_use_tool(self.tool_guard)
+            settings = json.dumps({"permissions": {"ask": list(self.tools)}})
         return ClaudeAgentOptions(
             # The SDK's bundled ELF may require a loader absent on Nix.
             # Prefer the installed CLI; retain SDK discovery if none exists.
@@ -372,7 +404,9 @@ class AgentSpec(BaseModel):
             setting_sources=(
                 None if self.setting_sources is None else list(self.setting_sources)
             ),
-            permission_mode=self.permission_mode,
+            permission_mode=permission_mode,
+            can_use_tool=can_use_tool,
+            settings=settings,
             hooks=_guard_hooks(self.tool_guard),
             session_id=self.session_id,
             resume=self.resume,
@@ -393,6 +427,7 @@ def _guard_hooks(guard: ToolGuard | None) -> dict[Any, list[HookMatcher]] | None
             reason = guard(
                 str(input_data.get("tool_name")),
                 dict(input_data.get("tool_input") or {}),
+                tool_use_id or input_data.get("tool_use_id"),
             )
         except Exception as exc:
             reason = f"the tool guard failed ({type(exc).__name__}); call denied"
@@ -407,6 +442,33 @@ def _guard_hooks(guard: ToolGuard | None) -> dict[Any, list[HookMatcher]] | None
         }
 
     return {"PreToolUse": [HookMatcher(matcher=None, hooks=[pre_tool_use])]}
+
+
+def _guard_can_use_tool(guard: ToolGuard) -> CanUseTool:
+    """The ``can_use_tool`` layer: the same guard, asked for each call that
+    reaches a permission decision (every exposed tool has an ``ask`` rule)."""
+
+    async def can_use_tool(
+        tool_name: str, tool_input: dict[str, Any], context: ToolPermissionContext
+    ) -> PermissionResult:
+        try:
+            reason = guard(tool_name, dict(tool_input), context.tool_use_id)
+        except Exception as exc:
+            reason = f"the tool guard failed ({type(exc).__name__}); call denied"
+        if reason is None:
+            return PermissionResultAllow()
+        return PermissionResultDeny(message=reason)
+
+    return can_use_tool
+
+
+async def _as_stream(prompt: str) -> AsyncIterator[dict[str, Any]]:
+    """A prompt as the streaming input ``can_use_tool`` requires."""
+    yield {
+        "type": "user",
+        "message": {"role": "user", "content": prompt},
+        "parent_tool_use_id": None,
+    }
 
 
 def _sdk_tool(local: LocalTool) -> SdkMcpTool[Any]:
@@ -671,7 +733,8 @@ class ClaudeAgent:
         result: ResultMessage | None = None
         rate_limit_detail: str | None = None
         try:
-            async for message in self.run_query(prompt=prompt, options=options):
+            sent: Any = _as_stream(prompt) if options.can_use_tool else prompt
+            async for message in self.run_query(prompt=sent, options=options):
                 if self.on_message is not None:
                     self.on_message(message)
                 if isinstance(message, AssistantMessage):

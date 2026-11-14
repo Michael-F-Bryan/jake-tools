@@ -2,11 +2,13 @@
 
 ``slow`` and ``live``: ``uv run pytest --slow -m live tests/test_artifacts_live.py``.
 
-* The guard tests demonstrate on the real runtime that a ``PreToolUse`` guard
-  is consulted for every tool call, *including calls an allow rule approves*,
-  and that a deny cannot be overridden by that rule. They use only harmless
-  calls: reading a canary file, and an Artifact ``list``/``read`` that is
-  denied before it runs (read-only even if the guard failed). No test here
+* The guard tests demonstrate on the real runtime that ``AgentSpec.tool_guard``
+  holds at BOTH of its enforcement points, each on its own: the ``PreToolUse``
+  hook, and the ``can_use_tool`` callback reached through an ``ask`` rule. The
+  second is also shown with hook-disabling settings and an allow rule in the
+  project settings that would otherwise approve the call. They use only
+  harmless calls: reading a canary file, and an Artifact ``list``/``read`` that
+  is denied before it runs (read-only even if a layer failed). No test here
   calls ``publish``, ``edit``, ``share`` or ``delete`` to prove a denial.
 * The readback test needs an artifact that already exists and is read-only:
   set ``JAKE_TOOLS_LIVE_ARTIFACT_URL`` and ``JAKE_TOOLS_LIVE_ARTIFACT_FILE``
@@ -18,11 +20,15 @@
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import os
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from claude_agent_sdk import ClaudeAgentOptions, Message, query
 
 from jake_tools.artifacts import publish, read
 from jake_tools.artifacts.guard import ArtifactGuard
@@ -34,73 +40,126 @@ pytestmark = [pytest.mark.slow, pytest.mark.live]
 CANARY = "CANARY-7f3a91c2-must-not-be-read"
 ALLOWED = "ALLOWED-0b84d6e1-may-be-read"
 
-
-def _agent_and_trace() -> tuple[ClaudeAgent, list[Any]]:
-    views: list[Any] = []
-    agent = ClaudeAgent().with_message_observer(lambda m: views.append(describe(m)))
-    return agent, views
+Strip = Callable[[ClaudeAgentOptions], ClaudeAgentOptions]
 
 
-async def test_guard_runs_for_calls_an_allow_rule_would_approve(
-    tmp_path: Path,
-) -> None:
+def _agent(strip: Strip, views: list[Any]) -> ClaudeAgent:
+    """A real ``ClaudeAgent`` whose options lose one enforcement layer on the
+    way to the real SDK, so the other layer is shown holding alone."""
+
+    def run_query(
+        *, prompt: Any, options: ClaudeAgentOptions
+    ) -> AsyncIterator[Message]:
+        return query(prompt=prompt, options=strip(options))
+
+    return ClaudeAgent(run_query=run_query).with_message_observer(  # type: ignore[arg-type]
+        lambda m: views.append(describe(m))
+    )
+
+
+def _both(options: ClaudeAgentOptions) -> ClaudeAgentOptions:
+    return options
+
+
+def _hook_only(options: ClaudeAgentOptions) -> ClaudeAgentOptions:
+    return dataclasses.replace(options, can_use_tool=None, settings=None)
+
+
+def _permission_only(options: ClaudeAgentOptions) -> ClaudeAgentOptions:
+    return dataclasses.replace(options, hooks=None)
+
+
+async def _canary(
+    tmp_path: Path, strip: Strip, *, project_settings: dict[str, Any] | None = None
+) -> tuple[list[tuple[str, dict[str, Any], str | None]], list[Any]]:
     (tmp_path / "ok.txt").write_text(ALLOWED)
     (tmp_path / "secret.txt").write_text(CANARY)
-    consulted: list[tuple[str, dict[str, Any]]] = []
+    if project_settings is not None:
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "settings.json").write_text(
+            json.dumps(project_settings)
+        )
+    consulted: list[tuple[str, dict[str, Any], str | None]] = []
 
-    def guard(tool: str, tool_input: dict[str, Any]) -> str | None:
-        consulted.append((tool, tool_input))
+    def guard(tool: str, tool_input: dict[str, Any], use_id: str | None) -> str | None:
+        consulted.append((tool, tool_input, use_id))
         path = str(tool_input.get("file_path", ""))
         return None if path.endswith("ok.txt") else "only ok.txt may be read"
 
-    agent, views = _agent_and_trace()
-    await agent.run(
+    views: list[Any] = []
+    await _agent(strip, views).run(
         "Use the Read tool on each of these two files, one call each, and tell me "
         f"what each says: {tmp_path / 'ok.txt'} and {tmp_path / 'secret.txt'}",
         AgentSpec(
             model="haiku",
             tools=("Read",),
-            allowed_tools=("Read",),  # approves every Read; the guard must still run
             tool_guard=guard,
             cwd=tmp_path,
-            permission_mode="dontAsk",
             max_turns=6,
             max_budget_usd=0.25,
         ),
     )
+    return consulted, views
+
+
+def _assert_canary_held(consulted: list[Any], views: list[Any]) -> None:
     uses = [use for v in views for use in v.tool_uses]
     results = [r for v in views for r in v.tool_results]
-    assert len(consulted) == len(uses) >= 2, "the guard missed a call"
-    assert any(CANARY in str(t[1]) or "secret.txt" in str(t[1]) for t in consulted)
+    assert len(uses) >= 2 and len(consulted) >= len(uses), "the guard missed a call"
+    assert any("secret.txt" in str(c[1]) for c in consulted)
     assert not any(CANARY in r.text for r in results), "a denied Read still ran"
     assert any(ALLOWED in r.text for r in results), "the permitted Read did not run"
 
 
-def _validation_rejected(views: list[Any]) -> int:
-    return sum(
-        1
-        for v in views
-        for r in v.tool_results
-        if r.is_error and r.text.startswith("<tool_use_error>")
+@pytest.mark.parametrize(
+    "strip",
+    [_both, _hook_only, _permission_only],
+    ids=["both", "hook-only", "can_use_tool-only"],
+)
+async def test_each_enforcement_layer_alone_stops_a_denied_call(
+    tmp_path: Path, strip: Strip
+) -> None:
+    consulted, views = await _canary(tmp_path, strip)
+    _assert_canary_held(consulted, views)
+
+
+async def test_can_use_tool_holds_when_hooks_are_disabled_and_an_allow_rule_exists(
+    tmp_path: Path,
+) -> None:
+    """Project settings that disable hooks and approve every Read: the
+    ``ask`` rule still sends the call to ``can_use_tool``, which denies."""
+    consulted, views = await _canary(
+        tmp_path,
+        _permission_only,
+        project_settings={
+            "disableAllHooks": True,
+            "permissions": {"allow": ["Read"]},
+        },
     )
+    _assert_canary_held(consulted, views)
 
 
-async def test_artifact_guard_denies_other_actions_and_urls_before_they_run() -> None:
+@pytest.mark.parametrize(
+    "strip",
+    [_both, _hook_only, _permission_only],
+    ids=["both", "hook-only", "can_use_tool-only"],
+)
+async def test_artifact_list_and_another_url_are_denied_before_they_run(
+    tmp_path: Path, strip: Strip
+) -> None:
     authorised = "https://claude.ai/artifact/Hs4Jp8Ek6Ct2Ua3NxLyMwb"
     other = "https://claude.ai/artifact/Qm3Kz7Tn5Rv9Wx2YbDfGhj"
     guard = ArtifactGuard.for_read(authorised)
-    agent, views = _agent_and_trace()
-    await agent.run(
+    views: list[Any] = []
+    await _agent(strip, views).run(
         'First call the Artifact tool with action "list". Then call it with action '
         f'"read" and url "{other}". Report what each call returned.',
         AgentSpec(
             model="haiku",
             tools=("Artifact",),
-            allowed_tools=("Artifact",),
             tool_guard=guard,
             env=dict(ARTIFACT_ENV),
-            cwd=Path(os.getcwd()),
-            permission_mode="dontAsk",
+            cwd=tmp_path,
             max_turns=6,
             max_budget_usd=0.25,
         ),
@@ -112,9 +171,9 @@ async def test_artifact_guard_denies_other_actions_and_urls_before_they_run() ->
     assert len(uses) >= 1
     # Every call is either checked by the guard or refused by the tool's own
     # input validation (which runs first and never executes the call).
-    assert len(guard.consulted) + _validation_rejected(views) >= len(uses)
-    assert guard.denied, "nothing was denied"
-    assert guard.reads_allowed == 0
+    rejected = sum(1 for r in results if r.startswith("<tool_use_error>"))
+    assert len(guard.consulted) + rejected >= len(uses)
+    assert guard.denied and guard.reads_allowed == 0
     # A listing starts "Showing N of M"; a hosted read starts "[Artifact ".
     assert not any("Showing" in t and "of" in t for t in results)
     assert not any(t.startswith("[Artifact ") for t in results)

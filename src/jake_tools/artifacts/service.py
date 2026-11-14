@@ -10,9 +10,11 @@ facts shape the design:
   Michael accepted that route as experimental; it is not a supported option.
 * A tool can only be called by a model turn, and a model can be steered by what
   it reads. Authority is therefore enforced *before* each call by a
-  :class:`~.guard.ArtifactGuard` (a ``PreToolUse`` hook), never by the prompt
-  or an audit afterwards. The guard also records every call it saw; a call it
-  did not see is reported, not trusted.
+  :class:`~.guard.ArtifactGuard`, never by the prompt or an audit afterwards.
+  The session has no allow rule: the guard is asked by a ``PreToolUse`` hook
+  and again by ``can_use_tool`` (an ``ask`` rule per tool), two independent
+  points, and is the only thing that approves. The guard records every call it
+  saw; a call it did not see is reported, not trusted.
 * Nothing the model says is evidence. The outcome comes from the tool's own
   results in the message stream, and the content is checked by reading the
   artifact back in a *separate* session and comparing bytes in code.
@@ -94,10 +96,13 @@ class SourceError(ValueError):
 
 
 def load_source(file_path: str) -> tuple[Path, bytes]:
-    """Validate the file to publish and return its absolute path and bytes."""
+    """Validate the file to publish; return its canonical absolute path and bytes."""
     path = Path(file_path).expanduser()
     if not path.is_absolute():
         raise SourceError("file_path", "file_path must be an absolute path")
+    # The tool follows symlinks itself. Resolve once, so the model is handed
+    # (and the guard accepts) exactly one unambiguous path.
+    path = path.resolve()
     if path.suffix.lower() not in EXTENSIONS:
         raise SourceError("file_path", "file_path must be an .html or .htm file")
     if not path.is_file():
@@ -230,11 +235,24 @@ async def _run(
             previous(message)
         session.add(message)
 
-    with tempfile.TemporaryDirectory(prefix="jake-artifact-") as cwd:
+    try:
+        workdir = tempfile.TemporaryDirectory(prefix="jake-artifact-")
+    except OSError as exc:
+        raise ToolError(
+            "upstream_error",
+            f"no working directory could be created ({exc.strerror}); nothing "
+            "was started and nothing was published.",
+            detail={
+                "integration": "claude_artifact",
+                "reason": "workdir_unavailable",
+                "publish_attempted": False,
+                "retry_safe": True,
+            },
+        ) from exc
+    with workdir as cwd:
         spec = AgentSpec(
             model=MODEL,
             tools=tools,
-            allowed_tools=tools,
             tool_guard=guard,
             # A neutral working directory: no project settings, CLAUDE.md or
             # hooks of whatever directory the file lives in. User and managed
@@ -242,7 +260,6 @@ async def _run(
             # default), so an enableArtifact:false or Artifact deny rule wins.
             cwd=Path(cwd),
             env=dict(ARTIFACT_ENV),
-            permission_mode="dontAsk",
             max_turns=SESSION_TURNS,
             max_budget_usd=SESSION_BUDGET_USD,
         )
@@ -468,11 +485,12 @@ async def publish(
     read_failed = False
     try:
         read = await _read(agent, done.url)
-    except ToolError as exc:
+    except (ToolError, OSError) as exc:
         # The artifact exists: keep its identity rather than losing it to a
         # failed check, and say the check did not happen.
         read_failed = True
-        problems.append(f"the readback failed ({exc.message})")
+        why = exc.message if isinstance(exc, ToolError) else (exc.strerror or str(exc))
+        problems.append(f"the readback failed ({why})")
         read = _Read(Readback(url=done.url), None, None, None)
     try:
         if path.read_bytes() != data:

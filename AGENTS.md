@@ -325,12 +325,15 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
   these sessions, never persisted, never given to `claude_start` tasks, and
   the operations are off unless `artifacts.enabled`. Do not describe the route
   as supported.
-- Authority is enforced *before* each call by `AgentSpec.tool_guard` (a
-  `PreToolUse` hook, which also runs for allow-rule-approved calls), never by
-  a prompt or an audit afterwards. A read session has no write authority.
-  Never loosen `ArtifactGuard`, add `url`/`edits`/`share`/`delete`/`list`
-  permission, or suppress `setting_sources` (user/project/managed
-  `enableArtifact`/deny rules must still apply).
+- Authority is enforced *before* each call by `AgentSpec.tool_guard`, never by
+  a prompt or an audit afterwards: one decision per `tool_use_id` asked by a
+  `PreToolUse` hook and by `can_use_tool` (an `ask` rule per tool), with **no
+  allow rule** (an allow rule stops `can_use_tool` being asked) and no extra
+  model session. A read session has no write authority. Never loosen
+  `ArtifactGuard`, add `url`/`edits`/`share`/`delete`/`list` permission, add an
+  allow rule, or suppress `setting_sources` (user/project/managed
+  `enableArtifact`/deny rules must still apply). A managed policy that disables
+  both layers is untested; do not claim it.
 - The model is a conduit: outcomes come from the tool's own results, and
   `verified` is a byte comparison in code of a *separate* readback with the
   pinned document shell (`parse.SHELL_PREFIX`) removed. A different shell is
