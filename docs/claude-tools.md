@@ -252,51 +252,53 @@ sharing change. Receipts: `docs/evidence/artifact-sdk-exposure-2026-11-14/`.
 
 ### Pre-execution authority (why a prompt is not enough)
 
-A model can be steered by hosted HTML or a tool result, so the shipped
-sessions do not rely on the prompt or on an after-the-fact audit. A new
-private publish needs no approval of its own (the artifacts page says so), so
-no permission rule can gate it; only code that runs before the call can.
-`AgentSpec.tool_guard` therefore enforces one caller-supplied decision per tool
-call at **two independent points of the same session**, with **no allow rule**
-and no extra model session:
+A model can be steered by hosted HTML or a tool result, so the shipped sessions
+do not rely on the prompt or on an after-the-fact audit. A new private publish
+needs no approval of its own (the artifacts page says so), so no permission rule
+can gate it; only code that runs before the call can. `AgentSpec.tool_guard`
+runs a caller's check in a `PreToolUse` hook before every tool call. The
+sessions keep a blanket allow rule for their two tools (`allowed_tools`,
+`dontAsk`); the hook is what denies. It judges the **raw model-supplied input**:
+any key outside the permitted set, including a model-supplied `__*` key, is
+denied, and private runtime metadata is never broadly allowed.
 
-1. a `PreToolUse` hook, and
-2. a `can_use_tool` callback, reached because an `ask` rule is set for every
-   exposed tool (the SDK needs streaming input and the CLI's `default` mode for
-   it; `can_use_tool` is not asked under `dontAsk`).
-
-The guard answers consistently per `tool_use_id`. Evidence on the real runtime
-(CLI 2.1.318; `tests/test_artifacts_live.py`, `guard-*.json`,
-`enforcement-layers.json`, `hooks-vs-settings-flags.json`), using only harmless
-calls (a canary `Read`; a denied read-only `Artifact` `list` and a `read` of
+Evidence on the real runtime (CLI 2.1.318 with the SDK pinned in `uv.lock`;
+`tests/test_artifacts_live.py` and the `*.json` receipts here), harmless calls
+only (a canary `Read`; a denied read-only `Artifact` `list` and `read` of
 another URL):
 
-- The hook alone, and `can_use_tool` alone, each stopped the denied call. An
-  allow rule does **not** make `can_use_tool` run (hence no allow rule), but the
-  hook still runs for calls an allow rule approves.
+- the hook ran for calls that an allow rule approves, and its deny stopped them;
 - `disableAllHooks` and `allowManagedHooksOnly` set through `--settings` and
-  through project settings did not stop an SDK hook callback. With
-  `disableAllHooks` plus an allow rule for `Read` in project settings,
-  `can_use_tool` still denied the canary (the `ask` rule wins over `allow`).
-- A call the tool rejects as malformed (`<tool_use_error>`) fails input
-  validation first, never reaches either layer and never executes, so the
-  service counts such calls separately instead of treating them as unguarded.
+  through project settings did **not** disable the SDK hook;
+- a call the tool rejects as malformed (`<tool_use_error>`) fails input
+  validation first, never reaches the hook and never executes, so the service
+  counts such calls separately instead of treating them as unguarded.
 
-**Boundary, not tested:** a *managed* (policy) settings file could not be
-exercised. The CLI's `CLAUDE_CODE_MANAGED_SETTINGS_PATH` was not honoured (a
-managed `enableArtifact: false` did not remove the tool), and writing the
-system managed-settings location would change the runtime. A managed policy that
-disables hooks, or removes our `ask` rule, is therefore unproven either way; the
-design leaves two layers and no allow rule so that either alone still enforces,
-and a call that reaches neither the guard nor the tool's own validation makes
-the result unverified. This is not a general preflight: the claim is the
-layers listed above, in the actual session.
+A second layer was tried and **dropped**. `can_use_tool` behind an `ask` rule
+did consult the guard in the matrix (`enforcement-layers.json`), but the native
+runtime enriches that callback's input with private metadata (for example an
+`__artifactReadTargetPin`, consent flags and a display target), which broke a
+real read. Matching or allowing those keys would couple Jake to undocumented
+internals, so there is one layer, the hook.
 
-`artifacts.guard` permits one `Read` of the one file (its exact canonical
-path) and one new `publish` of it (no `url`, `edits` or sharing), or one `read`
-of the one URL, and denies everything else. User, project and managed settings
-stay in force, so `enableArtifact: false` or an `Artifact` deny rule still turns
-the tool off.
+Boundaries, stated plainly:
+
+- A real **managed (policy)** settings file was not tested: the CLI's
+  `CLAUDE_CODE_MANAGED_SETTINGS_PATH` was not honoured (a managed
+  `enableArtifact: false` did not remove the tool), and writing the system
+  location would change the runtime. Whether a managed policy can disable the
+  SDK hook is unproven either way.
+- This holds for the tested CLI and flags. A Claude Code upgrade needs the live
+  tests re-run.
+- The service also compares the guard's record of what it saw with the tool
+  calls in the stream. That is **detection, not enforcement**: it marks a result
+  unverified if a call escaped the hook, but by then the call may have run.
+
+`artifacts.guard` permits one `Read` of the one file (its exact canonical path,
+no normalisation, so a symlink cannot redirect it) and one new `publish` of it
+(no `url`, `edits` or sharing), or one `read` of the one URL, and denies
+everything else. User, project and managed settings stay in force, so
+`enableArtifact: false` or an `Artifact` deny rule still turns the tool off.
 
 ### The experimental tools
 

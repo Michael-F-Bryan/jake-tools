@@ -137,42 +137,22 @@ def test_every_call_is_recorded_even_when_denied() -> None:
     assert len(guard.denied) == 1
 
 
-def test_two_layers_asking_about_one_call_get_one_counted_answer() -> None:
-    guard = publish_guard()
-    call = {"action": "publish", "file_path": str(FILE)}
-    assert guard("Artifact", call, "tu-1") is None  # the PreToolUse hook
-    assert guard("Artifact", call, "tu-1") is None  # can_use_tool: same call
-    assert guard.publishes_allowed == 1 and len(guard.consulted) == 1
-    # A different call is a different decision, and the second publish is refused.
-    assert guard("Artifact", call, "tu-2") is not None
-    # A denial is also stable for the call.
-    assert guard("Artifact", call, "tu-2") is not None
-    assert len(guard.denied) == 1
-
-
-def test_an_approval_is_never_reused_for_a_changed_request_with_the_same_id() -> None:
-    """Another hook may rewrite a call's input between the two layers. The
-    approval of the safe form must not carry over to the changed form."""
-    safe = {"action": "publish", "file_path": str(FILE)}
-    guard = publish_guard()
-    assert guard("Artifact", safe, "tu-1") is None  # PreToolUse: the safe request
-    # can_use_tool then sees the SAME id with a rewritten input:
-    for changed in (
-        {"action": "share", "url": URL},
-        {"action": "publish", "file_path": str(FILE), "url": URL},  # an update
-        {"action": "publish", "file_path": "/etc/other.html"},
-    ):
-        reason = guard("Artifact", changed, "tu-1")
-        assert reason is not None and "changed between enforcement layers" in reason
-    # ...and the id stays denied, even for the original request afterwards.
-    assert guard("Artifact", safe, "tu-1") is not None
-    assert guard("Artifact", {"action": "share", "url": URL}, "tu-1") is not None
-    # A different tool under the same id is a change too.
-    assert guard("Read", {"file_path": str(FILE)}, "tu-1") is not None
-
-
-def test_key_order_does_not_make_an_identical_request_look_changed() -> None:
-    guard = publish_guard()
-    assert guard("Artifact", {"action": "publish", "file_path": str(FILE)}, "a") is None
-    assert guard("Artifact", {"file_path": str(FILE), "action": "publish"}, "a") is None
-    assert guard.publishes_allowed == 1
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"__artifactReadTargetPin": "x"},
+        {"__consent": True},
+        {"displayTarget": "x"},
+        {"updatedInput": {}},
+    ],
+)
+def test_unexpected_keys_are_denied_including_private_looking_ones(
+    extra: dict[str, object],
+) -> None:
+    """The guard judges the raw model-supplied input; the runtime may enrich
+    input later, but a model that supplies ``__*`` metadata is denied."""
+    publish = publish_guard()
+    assert publish("Artifact", {"action": "publish", "file_path": str(FILE), **extra})
+    read = ArtifactGuard.for_read(URL)
+    assert read("Artifact", {"action": "read", "url": URL, **extra})
+    assert publish.publishes_allowed == 0 and read.reads_allowed == 0

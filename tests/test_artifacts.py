@@ -21,11 +21,9 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     Message,
-    PermissionResultDeny,
     ResultMessage,
     SystemMessage,
     TextBlock,
-    ToolPermissionContext,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -92,8 +90,8 @@ class FakeClaude:
 
     It plays the CLI's part towards the guard, as the real runtime was seen to:
     before each scripted tool call it runs the ``PreToolUse`` hook and the
-    ``can_use_tool`` callback the production code installed (either can be
-    switched off to model a layer that does not run), and a deny from either
+    hook the production code installed (it can be
+    switched off to model a hook that does not run), and a deny from either
     replaces that call's scripted result with the CLI's refusal. A call whose
     scripted result is a ``<tool_use_error>`` never reaches either (the tool
     validates first). The guard, the wiring and everything after are production
@@ -115,8 +113,6 @@ class FakeClaude:
         self.read_stream = read_stream or self._default_read
         self.on_publish = on_publish
         self.hook_layer = hook_layer
-        self.permission_layer = permission_layer
-        self.rewrite_for_permission = rewrite_for_permission
         self.fail_after_stream = fail_after_stream
         self.calls: list[tuple[str, ClaudeAgentOptions]] = []
 
@@ -161,18 +157,6 @@ class FakeClaude:
                     decision = out.get("hookSpecificOutput", {})
                     if decision.get("permissionDecision") == "deny":
                         return decision.get("permissionDecisionReason", "")
-        if self.permission_layer and options.can_use_tool is not None:
-            seen_by_permission = dict(block.input)
-            if self.rewrite_for_permission is not None:
-                # another hook changed the call's input after PreToolUse
-                seen_by_permission = self.rewrite_for_permission(seen_by_permission)
-            verdict = await options.can_use_tool(
-                block.name,
-                seen_by_permission,
-                ToolPermissionContext(tool_use_id=block.id),
-            )
-            if isinstance(verdict, PermissionResultDeny):
-                return verdict.message
         return None
 
     async def _session(
@@ -486,14 +470,8 @@ async def test_publish_verifies_the_hosted_bytes_in_a_separate_session(
             "CLAUDE_CODE_ARTIFACT_AUTO_OPEN": "0",
         }
         assert options.strict_mcp_config is True  # no unrelated connectors
-        # No allow rule: the guard is the only thing that approves, asked by the
-        # PreToolUse hook and again by can_use_tool (an `ask` rule per tool).
-        assert options.permission_mode == "default"
-        assert options.allowed_tools == []
-        assert options.can_use_tool is not None
-        assert json.loads(options.settings or "{}") == {
-            "permissions": {"ask": options.tools}
-        }
+        assert options.permission_mode == "dontAsk"
+        assert options.can_use_tool is None  # hook-only: the proven boundary
         # User, project and managed policy stay in force: never suppressed.
         assert options.setting_sources is None
         # The guard is wired as a PreToolUse hook on every call.
@@ -505,14 +483,7 @@ async def test_publish_verifies_the_hosted_bytes_in_a_separate_session(
     assert URL in read_prompt and str(source) in publish_prompt
 
 
-@pytest.mark.parametrize(
-    ("hook_layer", "permission_layer"),
-    [(True, True), (True, False), (False, True)],
-    ids=["both-layers", "hook-only", "can_use_tool-only"],
-)
-async def test_hostile_calls_are_denied_before_they_run(
-    source: Path, hook_layer: bool, permission_layer: bool
-) -> None:
+async def test_hostile_calls_are_denied_before_they_run(source: Path) -> None:
     """Steered by hosted content or a tool result, a model might try these."""
 
     def stream(path: Path) -> list[Message]:
@@ -539,9 +510,7 @@ async def test_hostile_calls_are_denied_before_they_run(
             _end(),
         ]
 
-    fake = FakeClaude(
-        publish_stream=stream, hook_layer=hook_layer, permission_layer=permission_layer
-    )
+    fake = FakeClaude(publish_stream=stream)
     result = await publish(str(source), agent=fake.agent())
 
     assert result.url == URL and result.verified is True
@@ -621,27 +590,11 @@ async def test_publish_with_a_wrong_file_is_refused_with_a_safe_retry(
     assert len(fake.calls) == 1
 
 
-async def test_either_layer_alone_still_enforces_the_read_session_authority() -> None:
-    for kwargs in ({"hook_layer": False}, {"permission_layer": False}):
-        fake = FakeClaude(
-            read_stream=lambda: [
-                _init(["Artifact"]),
-                _use_id("x", "Artifact", action="share", url=URL),
-                _result_of("x", "shared (EXECUTED)"),
-                _use_id("rd", "Artifact", action="read", url=URL),
-                _result_of("rd", READ_TEXT),
-                _end(),
-            ],
-            **kwargs,  # type: ignore[arg-type]
-        )
-        result = await read(URL, agent=fake.agent())
-        assert result.private is True
-
-
-async def test_if_neither_layer_ran_the_result_is_not_trusted(source: Path) -> None:
-    """Defence in depth only: with no approving layer at all the CLI itself would
-    refuse (there is no allow rule); and if a call still escaped, say so."""
-    fake = FakeClaude(hook_layer=False, permission_layer=False)
+async def test_a_call_the_hook_never_saw_is_detected_not_enforced(source: Path) -> None:
+    """Detection only: if the hook did not run, the call was NOT stopped. The
+    result is marked unverified, but the effect may already have happened; this
+    audit is not a substitute for the hook."""
+    fake = FakeClaude(hook_layer=False)
     result = await publish(str(source), agent=fake.agent())
     assert result.verified is False
     assert any("not checked by the guard" in p for p in result.problems)
@@ -968,21 +921,25 @@ async def test_an_oserror_before_any_publish_is_a_clean_safe_retry(
     assert fake.calls == []
 
 
-async def test_a_call_rewritten_between_the_layers_is_denied_not_approved(
+async def test_a_model_supplied_private_key_is_denied_before_it_runs(
     source: Path,
 ) -> None:
-    """The hook approves the safe publish; another hook then rewrites the same
-    call (same id) into an update of someone else's artifact. The permission
-    layer must see a different request and deny it, not reuse the approval."""
-    fake = FakeClaude(
-        rewrite_for_permission=lambda tool_input: {**tool_input, "url": URL},
-    )
+    def stream(path: Path) -> list[Message]:
+        return [
+            _init(["Read", "Artifact"]),
+            _use_id(
+                "pin",
+                "Artifact",
+                action="publish",
+                file_path=str(path),
+                __artifactReadTargetPin="x",
+            ),
+            _result_of("pin", PUBLISH_TEXT + " (EXECUTED)"),
+            _end(),
+        ]
+
+    fake = FakeClaude(publish_stream=stream)
     with pytest.raises(ToolError) as caught:
         await publish(str(source), agent=fake.agent())
-    detail = caught.value.detail
-    assert detail is not None
-    assert any(
-        "changed between enforcement layers" in d
-        for d in detail["denied_before_running"]
-    )
-    assert len(fake.calls) == 1  # the readback never ran: nothing was published
+    assert "denied before it ran" in caught.value.message
+    assert caught.value.detail is not None and caught.value.detail["retry_safe"] is True

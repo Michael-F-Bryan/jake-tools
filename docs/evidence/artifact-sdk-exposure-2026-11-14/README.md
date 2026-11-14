@@ -45,7 +45,8 @@ dependency. Its list result is stored only as a size (`content_chars`).
   `allowManagedHooksOnly` through `--settings` did not stop an SDK hook callback.
 - `enforcement-layers.json` (`enforcement_matrix.py.txt`): hook with an allow rule
   (also under project `disableAllHooks`), and `can_use_tool` behind an `ask` rule
-  with no allow rule. Managed-settings rows were discarded: the control
+  with no allow rule. The `can_use_tool` design is NOT shipped (the runtime
+  enriches that callback's input with private metadata and a real read failed). Managed-settings rows were discarded: the control
   (`managed_effective.py.txt`) showed `CLAUDE_CODE_MANAGED_SETTINGS_PATH` is not
   honoured, so a real managed policy is untested.
 - The disposable artifact's publish, readback and update receipts are summarised

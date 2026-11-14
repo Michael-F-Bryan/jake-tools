@@ -313,8 +313,8 @@ It rests on an **undocumented** Claude Code mechanism: the SDK hides the
 sessions only. It may change without notice, so the tools are off unless
 `artifacts.enabled = true` (`JAKE_TOOLS_ARTIFACTS_ENABLED`) and, under Hermes,
 the `artifact` capability is granted. Each session is guarded before every
-tool call, at two independent points and with no allow rule, so it can only read
-the one file and publish it once (or read the one URL); a prompt is not what
+tool call by a `PreToolUse` hook that judges the raw model input, so it can only
+read the one file and publish it once (or read the one URL); a prompt is not what
 keeps it there. `verified` means the hosted file,
 with Claude Code's fixed document shell removed, equals the local file and the
 readback reported `private`. Updates, sharing, listing and deleting are not

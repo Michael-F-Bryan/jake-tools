@@ -23,13 +23,14 @@ override your Claude settings.
 
 ## Authority is enforced before each call
 
-A model can be steered by what it reads, so a prompt is not a permission. Each session has no allow
-rule; one guard approves each call, at two independent points (a `PreToolUse` hook and a
-`can_use_tool` callback). A publish session may `Read` the one file (its exact canonical path) and
-make one `publish` of it; a read session may make one `read` of the one URL. `list`, `share`,
-`delete`, updates (`url`), `edits`, other files or URLs, a second publish and every other tool are
-denied before they run. Calls the guard refused are listed in `denied_before_running`; they had no
-effect. A managed (policy) settings file that disabled both layers could not be tested; see
+A model can be steered by what it reads, so a prompt is not a permission. Each session is guarded
+before every tool call by a `PreToolUse` hook that judges the raw model input: a publish session
+may `Read` the one file (its exact canonical path) and make one `publish` of it; a read session may
+make one `read` of the one URL. `list`, `share`, `delete`, updates (`url`), `edits`, any extra input
+key, other files or URLs, a second publish and every other tool are denied before they run. Calls
+the guard refused are listed in `denied_before_running`; they had no effect. A managed (policy)
+settings file that disabled the hook was not tested, and a Claude Code upgrade needs a recheck; a
+call that escaped the hook is only detected afterwards (the result is unverified), not prevented. See
 `docs/claude-tools.md`.
 
 ## What a result tells you

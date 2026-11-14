@@ -325,15 +325,17 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
   these sessions, never persisted, never given to `claude_start` tasks, and
   the operations are off unless `artifacts.enabled`. Do not describe the route
   as supported.
-- Authority is enforced *before* each call by `AgentSpec.tool_guard`, never by
-  a prompt or an audit afterwards: one decision per `tool_use_id` asked by a
-  `PreToolUse` hook and by `can_use_tool` (an `ask` rule per tool), with **no
-  allow rule** (an allow rule stops `can_use_tool` being asked) and no extra
-  model session. A read session has no write authority. Never loosen
-  `ArtifactGuard`, add `url`/`edits`/`share`/`delete`/`list` permission, add an
-  allow rule, or suppress `setting_sources` (user/project/managed
-  `enableArtifact`/deny rules must still apply). A managed policy that disables
-  both layers is untested; do not claim it.
+- Authority is enforced *before* each call by `AgentSpec.tool_guard`, a
+  `PreToolUse` hook (it runs even when an allow rule approves the call) that
+  judges the **raw model-supplied input** and denies any key outside the
+  permitted set, including `__*`. A `can_use_tool` second layer was tried and
+  dropped: the runtime enriches its input with private metadata. Do not add a
+  compatibility layer for that metadata. The post-hoc "call the guard never
+  saw" check is detection, not enforcement. A managed policy that disables
+  the hook is untested; a CLI upgrade needs `tests/test_artifacts_live.py`
+  re-run. A read session has no write authority. Never loosen `ArtifactGuard`,
+  add `url`/`edits`/`share`/`delete`/`list` permission, or suppress
+  `setting_sources` (user/project/managed `enableArtifact`/deny rules apply).
 - The model is a conduit: outcomes come from the tool's own results, and
   `verified` is a byte comparison in code of a *separate* readback with the
   pinned document shell (`parse.SHELL_PREFIX`) removed. A different shell is

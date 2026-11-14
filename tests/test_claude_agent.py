@@ -814,90 +814,32 @@ def test_describe_drops_thinking_and_flattens_tool_activity() -> None:
 # -- AgentSpec.tool_guard ---------------------------------------------------------
 
 
-def _hook_of(spec: AgentSpec) -> Any:
+async def _run_hook(
+    spec: AgentSpec, tool: str, tool_input: dict[str, object]
+) -> dict[str, Any]:
     options = spec.to_options()
     assert options.hooks is not None
     (matcher,) = options.hooks["PreToolUse"]
     assert matcher.matcher is None  # every tool
     (hook,) = matcher.hooks
-    return hook
-
-
-async def _run_hook(
-    spec: AgentSpec, tool: str, tool_input: dict[str, object]
-) -> dict[str, Any]:
     event = cast(Any, {"tool_name": tool, "tool_input": tool_input})
-    return cast(dict[str, Any], await _hook_of(spec)(event, "tu-1", cast(Any, None)))
+    return cast(dict[str, Any], await hook(event, "tu-1", cast(Any, None)))
 
 
-def test_no_guard_means_no_hooks_and_no_permission_callback() -> None:
-    options = AgentSpec().to_options()
-    assert options.hooks is None and options.can_use_tool is None
-    assert options.settings is None
-
-
-def test_a_guard_is_enforced_at_two_points_with_no_allow_rule() -> None:
-    options = AgentSpec(
-        tools=("Read", "Artifact"), tool_guard=lambda t, i, u: None
-    ).to_options()
-    assert options.hooks is not None and options.can_use_tool is not None
-    assert options.allowed_tools == []  # the guard is the only thing that approves
-    assert (
-        options.permission_mode == "default"
-    )  # can_use_tool is not asked under dontAsk
-    assert json.loads(options.settings or "") == {
-        "permissions": {"ask": ["Read", "Artifact"]}
-    }
-
-
-def test_a_guard_refuses_combinations_it_does_not_cover() -> None:
-    from claude_agent_sdk import create_sdk_mcp_server
-
-    from jake_tools.claude import LocalTool, LocalToolResult
-
-    async def handler(arguments: dict[str, Any]) -> LocalToolResult:
-        return LocalToolResult(text="")
-
-    local = LocalTool(
-        name="ask", description="d", input_schema={"type": "object"}, handler=handler
-    )
-    extras: tuple[dict[str, Any], ...] = (
-        {"mcp_tools": ("mcp__x__y",)},
-        {"local_tools": (local,)},
-        {"mcp_servers": {"x": create_sdk_mcp_server("x")}},
-    )
-    for extra in extras:
-        with pytest.raises(ValueError, match="built-in `tools` only"):
-            AgentSpec(
-                tools=("Read",), tool_guard=lambda t, i, u: None, **extra
-            ).to_options()
-
-
-@pytest.mark.parametrize(
-    "spec",
-    [
-        {"allowed_tools": ("Read",)},
-        {"permission_mode": "dontAsk"},
-        {"permission_mode": "bypassPermissions"},
-    ],
-)
-def test_a_guard_refuses_settings_that_would_approve_around_it(
-    spec: dict[str, Any],
-) -> None:
-    with pytest.raises(ValueError, match="tool_guard approves calls itself"):
-        AgentSpec(tools=("Read",), tool_guard=lambda t, i, u: None, **spec).to_options()
+def test_no_guard_means_no_hooks() -> None:
+    assert AgentSpec().to_options().hooks is None
 
 
 async def test_a_guard_becomes_a_pre_tool_use_hook_that_can_only_deny() -> None:
-    seen: list[tuple[str, dict[str, object], str | None]] = []
+    seen: list[tuple[str, dict[str, object]]] = []
 
-    def guard(
-        tool: str, tool_input: dict[str, object], use_id: str | None
-    ) -> str | None:
-        seen.append((tool, tool_input, use_id))
+    def guard(tool: str, tool_input: dict[str, object]) -> str | None:
+        seen.append((tool, tool_input))
         return None if tool == "Read" else f"{tool} is not allowed"
 
-    spec = AgentSpec(tools=("Read", "Bash"), tool_guard=guard)
+    spec = AgentSpec(
+        tools=("Read", "Bash"), allowed_tools=("Read", "Bash"), tool_guard=guard
+    )
     assert await _run_hook(spec, "Read", {"file_path": "/a"}) == {}
     denied = await _run_hook(spec, "Bash", {"command": "ls"})
     assert denied == {
@@ -907,90 +849,20 @@ async def test_a_guard_becomes_a_pre_tool_use_hook_that_can_only_deny() -> None:
             "permissionDecisionReason": "Bash is not allowed",
         }
     }
-    assert seen == [
-        ("Read", {"file_path": "/a"}, "tu-1"),
-        ("Bash", {"command": "ls"}, "tu-1"),
-    ]
+    assert seen == [("Read", {"file_path": "/a"}), ("Bash", {"command": "ls"})]
 
 
-async def test_the_same_guard_answers_can_use_tool_with_the_call_id() -> None:
-    from claude_agent_sdk import (
-        PermissionResultAllow,
-        PermissionResultDeny,
-        ToolPermissionContext,
-    )
-
-    def guard(
-        tool: str, tool_input: dict[str, object], use_id: str | None
-    ) -> str | None:
-        return None if use_id == "ok" else f"no {tool} for {use_id}"
-
-    options = AgentSpec(tools=("Read",), tool_guard=guard).to_options()
-    assert options.can_use_tool is not None
-    allowed = await options.can_use_tool(
-        "Read", {}, ToolPermissionContext(tool_use_id="ok")
-    )
-    denied = await options.can_use_tool(
-        "Read", {}, ToolPermissionContext(tool_use_id="x")
-    )
-    assert isinstance(allowed, PermissionResultAllow)
-    assert (
-        isinstance(denied, PermissionResultDeny) and denied.message == "no Read for x"
-    )
-
-
-async def test_a_guard_that_raises_denies_in_both_layers() -> None:
-    from claude_agent_sdk import PermissionResultDeny, ToolPermissionContext
-
-    def guard(
-        tool: str, tool_input: dict[str, object], use_id: str | None
-    ) -> str | None:
+async def test_a_guard_that_raises_denies() -> None:
+    def guard(tool: str, tool_input: dict[str, object]) -> str | None:
         raise RuntimeError("boom")
 
-    spec = AgentSpec(tools=("Read",), tool_guard=guard)
-    out = await _run_hook(spec, "Read", {})
+    out = await _run_hook(AgentSpec(tool_guard=guard), "Read", {})
     decision = out["hookSpecificOutput"]
     assert decision["permissionDecision"] == "deny"
     assert "RuntimeError" in decision["permissionDecisionReason"]
-    options = spec.to_options()
-    assert options.can_use_tool is not None
-    verdict = await options.can_use_tool(
-        "Read", {}, ToolPermissionContext(tool_use_id="a")
-    )
-    assert (
-        isinstance(verdict, PermissionResultDeny) and "RuntimeError" in verdict.message
-    )
-
-
-async def test_a_guarded_run_sends_a_streaming_prompt() -> None:
-    """The SDK only accepts ``can_use_tool`` with streaming input."""
-    seen: list[object] = []
-
-    def fake(*, prompt: object, options: ClaudeAgentOptions) -> AsyncIterator[Message]:
-        seen.append(prompt)
-
-        async def stream() -> AsyncIterator[Message]:
-            yield _result()
-
-        return stream()
-
-    agent = ClaudeAgent(run_query=fake)  # type: ignore[arg-type]
-    await agent.run(
-        "hello", AgentSpec(tools=("Read",), tool_guard=lambda t, i, u: None)
-    )
-    await agent.run("plain")
-    (guarded,) = [p for p in seen if not isinstance(p, str)]
-    assert [m async for m in guarded] == [  # type: ignore[attr-defined]
-        {
-            "type": "user",
-            "message": {"role": "user", "content": "hello"},
-            "parent_tool_use_id": None,
-        }
-    ]
-    assert "plain" in seen
 
 
 def test_the_guard_is_never_serialised_with_the_spec() -> None:
-    spec = AgentSpec(tool_guard=lambda tool, tool_input, use_id: None)
+    spec = AgentSpec(tool_guard=lambda tool, tool_input: None)
     assert "tool_guard" not in spec.model_dump()
     assert AgentSpec().merge(spec).tool_guard is spec.tool_guard

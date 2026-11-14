@@ -3,10 +3,8 @@
 ``slow`` and ``live``: ``uv run pytest --slow -m live tests/test_artifacts_live.py``.
 
 * The guard tests demonstrate on the real runtime that ``AgentSpec.tool_guard``
-  holds at BOTH of its enforcement points, each on its own: the ``PreToolUse``
-  hook, and the ``can_use_tool`` callback reached through an ``ask`` rule. The
-  second is also shown with hook-disabling settings and an allow rule in the
-  project settings that would otherwise approve the call. They use only
+  stops denied calls through the ``PreToolUse`` hook, including calls a blanket
+  allow rule approves, and with hook-disabling project settings. They use only
   harmless calls: reading a canary file, and an Artifact ``list``/``read`` that
   is denied before it runs (read-only even if a layer failed). No test here
   calls ``publish``, ``edit``, ``share`` or ``delete`` to prove a denial.
@@ -20,7 +18,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
 from collections.abc import AsyncIterator, Callable
@@ -61,14 +58,6 @@ def _both(options: ClaudeAgentOptions) -> ClaudeAgentOptions:
     return options
 
 
-def _hook_only(options: ClaudeAgentOptions) -> ClaudeAgentOptions:
-    return dataclasses.replace(options, can_use_tool=None, settings=None)
-
-
-def _permission_only(options: ClaudeAgentOptions) -> ClaudeAgentOptions:
-    return dataclasses.replace(options, hooks=None)
-
-
 async def _canary(
     tmp_path: Path, strip: Strip, *, project_settings: dict[str, Any] | None = None
 ) -> tuple[list[tuple[str, dict[str, Any], str | None]], list[Any]]:
@@ -81,8 +70,8 @@ async def _canary(
         )
     consulted: list[tuple[str, dict[str, Any], str | None]] = []
 
-    def guard(tool: str, tool_input: dict[str, Any], use_id: str | None) -> str | None:
-        consulted.append((tool, tool_input, use_id))
+    def guard(tool: str, tool_input: dict[str, Any]) -> str | None:
+        consulted.append((tool, tool_input, None))
         path = str(tool_input.get("file_path", ""))
         return None if path.endswith("ok.txt") else "only ok.txt may be read"
 
@@ -111,42 +100,30 @@ def _assert_canary_held(consulted: list[Any], views: list[Any]) -> None:
     assert any(ALLOWED in r.text for r in results), "the permitted Read did not run"
 
 
-@pytest.mark.parametrize(
-    "strip",
-    [_both, _hook_only, _permission_only],
-    ids=["both", "hook-only", "can_use_tool-only"],
-)
-async def test_each_enforcement_layer_alone_stops_a_denied_call(
-    tmp_path: Path, strip: Strip
+async def test_the_hook_stops_a_denied_call_an_allow_rule_would_approve(
+    tmp_path: Path,
 ) -> None:
-    consulted, views = await _canary(tmp_path, strip)
+    consulted, views = await _canary(tmp_path, _both)
     _assert_canary_held(consulted, views)
 
 
-async def test_can_use_tool_holds_when_hooks_are_disabled_and_an_allow_rule_exists(
+async def test_the_hook_holds_with_hook_disabling_project_settings(
     tmp_path: Path,
 ) -> None:
-    """Project settings that disable hooks and approve every Read: the
-    ``ask`` rule still sends the call to ``can_use_tool``, which denies."""
+    """``disableAllHooks`` and ``allowManagedHooksOnly`` in project settings did
+    not disable the SDK hook (CLI 2.1.318); managed policy is untested."""
     consulted, views = await _canary(
         tmp_path,
-        _permission_only,
-        project_settings={
-            "disableAllHooks": True,
-            "permissions": {"allow": ["Read"]},
-        },
+        _both,
+        project_settings={"disableAllHooks": True, "allowManagedHooksOnly": True},
     )
     _assert_canary_held(consulted, views)
 
 
-@pytest.mark.parametrize(
-    "strip",
-    [_both, _hook_only, _permission_only],
-    ids=["both", "hook-only", "can_use_tool-only"],
-)
 async def test_artifact_list_and_another_url_are_denied_before_they_run(
-    tmp_path: Path, strip: Strip
+    tmp_path: Path,
 ) -> None:
+    strip = _both
     authorised = "https://claude.ai/artifact/Hs4Jp8Ek6Ct2Ua3NxLyMwb"
     other = "https://claude.ai/artifact/Qm3Kz7Tn5Rv9Wx2YbDfGhj"
     guard = ArtifactGuard.for_read(authorised)

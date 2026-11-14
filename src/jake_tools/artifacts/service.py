@@ -10,11 +10,11 @@ facts shape the design:
   Michael accepted that route as experimental; it is not a supported option.
 * A tool can only be called by a model turn, and a model can be steered by what
   it reads. Authority is therefore enforced *before* each call by a
-  :class:`~.guard.ArtifactGuard`, never by the prompt or an audit afterwards.
-  The session has no allow rule: the guard is asked by a ``PreToolUse`` hook
-  and again by ``can_use_tool`` (an ``ask`` rule per tool), two independent
-  points, and is the only thing that approves. The guard records every call it
-  saw; a call it did not see is reported, not trusted.
+  :class:`~.guard.ArtifactGuard` run as a ``PreToolUse`` hook (the CLI runs it
+  for calls the allow rule approves), judging the raw model-supplied input,
+  never by the prompt or an audit afterwards. Reading the guard's record of
+  what it saw against the stream afterwards only *detects* a call that escaped
+  it; it does not enforce.
 * Nothing the model says is evidence. The outcome comes from the tool's own
   results in the message stream, and the content is checked by reading the
   artifact back in a *separate* session and comparing bytes in code.
@@ -253,6 +253,7 @@ async def _run(
         spec = AgentSpec(
             model=MODEL,
             tools=tools,
+            allowed_tools=tools,
             tool_guard=guard,
             # A neutral working directory: no project settings, CLAUDE.md or
             # hooks of whatever directory the file lives in. User and managed
@@ -260,6 +261,7 @@ async def _run(
             # default), so an enableArtifact:false or Artifact deny rule wins.
             cwd=Path(cwd),
             env=dict(ARTIFACT_ENV),
+            permission_mode="dontAsk",
             max_turns=SESSION_TURNS,
             max_budget_usd=SESSION_BUDGET_USD,
         )
