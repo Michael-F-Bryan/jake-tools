@@ -832,9 +832,17 @@ async def test_too_long_a_window_is_refused_with_the_way_out(tmp_path: Path) -> 
         ("I mean it.", "I mean", "filler"),
         ("you know the answer", "you know", "filler"),
         # A restart must be said again, not followed by a different claim.
-        ("the committee approved the budget, the board rejected it", "the committee approved the budget,", "restart"),
+        (
+            "the committee approved the budget, the board rejected it",
+            "the committee approved the budget,",
+            "restart",
+        ),
         ("we approved, we rejected it", "we approved,", "restart"),
-        ("there's, for example, there seems to be appetite", "there's, for example,", "restart"),
+        (
+            "there's, for example, there seems to be appetite",
+            "there's, for example,",
+            "restart",
+        ),
         # A repeated number may be a year or dictated digits.
         ("it was in twenty twenty", "twenty", "repetition"),
         ("call four four four two", "four four", "repetition"),
@@ -861,7 +869,12 @@ def test_meaning_bearing_deletions_are_refused(
     [
         ("it's, you know, fine", "you know,", "filler", "It's, fine"),
         ("I mean, we could go", "I mean,", "filler", "We could go"),
-        ("I'm already pr produced a deck", "pr", "restart", "I'm already produced a deck"),
+        (
+            "I'm already pr produced a deck",
+            "pr",
+            "restart",
+            "I'm already produced a deck",
+        ),
         ("I was go- I was going home", "I was go-", "restart", "I was going home"),
         ("so we, so we start now", "so we,", "restart", "So we start now"),
     ],
@@ -888,8 +901,20 @@ def test_glossary_cannot_replace_modality_or_pronouns(tmp_path: Path) -> None:
         tmp_path,
         glossary=(GlossaryEntry(term="MIGHTY"), GlossaryEntry(term="USS")),
         glossary_decisions=[
-            {"first_word": 1, "last_word": 1, "text": "might", "term": "MIGHTY", "reason": "x"},
-            {"first_word": 5, "last_word": 5, "text": "us", "term": "USS", "reason": "x"},
+            {
+                "first_word": 1,
+                "last_word": 1,
+                "text": "might",
+                "term": "MIGHTY",
+                "reason": "x",
+            },
+            {
+                "first_word": 5,
+                "last_word": 5,
+                "text": "us",
+                "term": "USS",
+                "reason": "x",
+            },
         ],
     )
     assert rejected == [
@@ -927,7 +952,9 @@ def test_sentence_starts_keep_internal_capitals(tmp_path: Path) -> None:
 def test_model_edits_inside_a_flagged_passage_are_undone(tmp_path: Path) -> None:
     # Observed: the review flagged a passage as possibly not a plain stutter
     # but named no edit concern, so the deletion inside it stood.
-    turns: Turns = [("speaker_1", "Um so this is red red hat, okay. Then we we go home")]
+    turns: Turns = [
+        ("speaker_1", "Um so this is red red hat, okay. Then we we go home")
+    ]
     words = _words(turns, tmp_path)
     state, chunk = _whole(words)
     red, we = _id(words, "red"), _id(words, "we")
@@ -944,7 +971,13 @@ def test_model_edits_inside_a_flagged_passage_are_undone(tmp_path: Path) -> None
     findings = ReviewFindings.model_validate(
         {
             "issues": [
-                {"first_word": 1, "last_word": 7, "text": "so this is red red hat, okay.", "category": "unclear_meaning", "note": "May be a name, not a stutter."}
+                {
+                    "first_word": 1,
+                    "last_word": 7,
+                    "text": "so this is red red hat, okay.",
+                    "category": "unclear_meaning",
+                    "note": "May be a name, not a stutter.",
+                }
             ],
             "edit_concerns": [],
         }
@@ -953,7 +986,9 @@ def test_model_edits_inside_a_flagged_passage_are_undone(tmp_path: Path) -> None
     assert len(items) == 1 and rejected == []
     restored = [e for e in state.edits.values() if e.status == "restored_after_review"]
     assert sorted(e.kind for e in restored) == ["format", "repetition"]
-    assert all("May be a name, not a stutter." in (e.review_note or "") for e in restored)
+    assert all(
+        "May be a name, not a stutter." in (e.review_note or "") for e in restored
+    )
     # Outside the passage, and the code's own filler removal, still apply.
     assert state.edits["f0"].status == "applied"
     text = " ".join(w.display for w in ledger_words(state) if w.display)
