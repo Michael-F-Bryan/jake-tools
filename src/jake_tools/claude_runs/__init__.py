@@ -13,7 +13,7 @@ what runs inside the task.
 from __future__ import annotations
 
 from .control import (
-    MAX_LIVE_TASKS,
+    DEFAULT_MAX_LIVE_TASKS,
     CapacityExceededError,
     RunDefaults,
     StartRequest,
@@ -36,7 +36,7 @@ from .models import (
 from .rundir import UnknownTaskError
 
 __all__ = [
-    "MAX_LIVE_TASKS",
+    "DEFAULT_MAX_LIVE_TASKS",
     "CapacityExceededError",
     "ClaudeStartResult",
     "PermissionRule",
