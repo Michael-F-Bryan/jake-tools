@@ -473,7 +473,7 @@ class Driver:
                     f"(it may have been deleted); see worker.stderr. {_describe(exc)}"
                 ),
             )
-        return self.partial("failed", "sdk_error", error=_describe(exc))
+        return self.partial("failed", "sdk_error", error=_describe_stream_failure(exc))
 
     async def _drive(self, conversation: Conversation) -> Outcome:
         await conversation.send(self.brief, uuid=self.brief_uuid)
@@ -1077,6 +1077,33 @@ def _describe(exc: BaseException) -> str:
     """
     text = str(exc).strip()
     return _bounded(f"{type(exc).__name__}: {text}" if text else type(exc).__name__)
+
+
+STREAM_LIMIT_ADVICE = (
+    " The recorded task and session identity and any existing files remain "
+    "available for inspection (claude_status, claude_transcript). Inspect "
+    "them before deciding whether to continue with "
+    "claude_start(resume_task_id=...); do not regenerate completed work "
+    "blindly, and avoid reading large images inline."
+)
+
+
+def _describe_stream_failure(exc: BaseException) -> str:
+    """:func:`_describe`, plus what to do when one CLI message was too large.
+
+    The SDK raises ``CLIJSONDecodeError`` with this text when a stdout message
+    passes ``max_buffer_size``. The message is refused, never truncated. The
+    whole result stays within ``MAX_ERROR_CHARS``: the original error is cut
+    to make room, the advice is not.
+    """
+    if "exceeded maximum buffer size" not in str(exc):
+        return _describe(exc)
+    text = str(exc).strip()
+    original = f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+    room = MAX_ERROR_CHARS - len(STREAM_LIMIT_ADVICE)
+    if len(original) > room:
+        original = original[: room - 1] + "…"
+    return original + STREAM_LIMIT_ADVICE
 
 
 def _bounded(text: str) -> str:
