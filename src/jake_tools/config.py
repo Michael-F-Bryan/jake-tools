@@ -198,6 +198,10 @@ class Config(BaseModel):
     transcription_api_token: Resolved[str | None]
     transcription_timeout_seconds: Resolved[float]
 
+    artifacts_enabled: Resolved[bool]
+    """Whether ``artifact_publish`` and ``artifact_read`` are exposed. Off by
+    default: they depend on an undocumented Claude Code mechanism."""
+
     worker_environ: Mapping[str, str] | None = Field(
         default=None, repr=False, exclude=True
     )
@@ -228,6 +232,7 @@ class Config(BaseModel):
             self.transcription_api_base_url,
             self.transcription_api_token,
             self.transcription_timeout_seconds,
+            self.artifacts_enabled,
         )
 
     @property
@@ -275,6 +280,7 @@ _STR_TUPLE = TypeAdapter(tuple[str, ...])
 _PATH = TypeAdapter(Path)
 _INT = TypeAdapter(int)
 _FLOAT = TypeAdapter(float)
+_BOOL = TypeAdapter(bool)
 _EFFORT = TypeAdapter(EffortLevel | None)
 
 
@@ -408,6 +414,16 @@ def load_config(
                 _FLOAT,
             ),
             DEFAULT_TRANSCRIPTION_TIMEOUT_SECONDS,
+        ),
+        artifacts_enabled=resolve(
+            _Spec(
+                "artifacts.enabled",
+                "JAKE_TOOLS_ARTIFACTS_ENABLED",
+                "artifacts",
+                "enabled",
+                _BOOL,
+            ),
+            False,
         ),
         worker_environ=None if worker_environ is None else dict(worker_environ),
     )

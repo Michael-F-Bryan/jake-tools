@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from . import (
     Operation,
+    artifact_publish,
+    artifact_read,
     claude_cancel,
     claude_list,
     claude_poll,
@@ -37,4 +39,7 @@ OPERATIONS: tuple[Operation, ...] = (
     polish_transcript.OPERATION,
     # Unavailable unless transcription.api_base_url is configured.
     transcribe.OPERATION,
+    # Unavailable unless artifacts.enabled: an undocumented Claude Code mechanism.
+    artifact_publish.OPERATION,
+    artifact_read.OPERATION,
 )

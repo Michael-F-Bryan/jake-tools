@@ -109,7 +109,11 @@ async def test_stdio_starts_without_any_credentials_and_lists_skill_resources(
 async def test_stdio_tool_descriptions_point_to_readable_relevant_skills(
     mcp_server: ServerFactory, mcp_env: dict[str, str]
 ) -> None:
-    mcp_env = {**mcp_env, "TRANSCRIPTION_API_BASE_URL": "http://127.0.0.1:9"}
+    mcp_env = {
+        **mcp_env,
+        "TRANSCRIPTION_API_BASE_URL": "http://127.0.0.1:9",
+        "JAKE_TOOLS_ARTIFACTS_ENABLED": "true",
+    }
     expected = {
         "clockify_jira_sync": "clockify-jira-sync",
         "clockify_time_entries": "clockify-time",
@@ -125,6 +129,8 @@ async def test_stdio_tool_descriptions_point_to_readable_relevant_skills(
         "claude_cancel": "claude-delegation",
         "polish_transcript": "transcription",
         "transcribe": "transcription",
+        "artifact_publish": "artifact-publishing",
+        "artifact_read": "artifact-publishing",
     }
     async with mcp_server(mcp_env) as session:
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
@@ -389,3 +395,11 @@ def test_build_server_registers_ping_and_only_packaged_skills(tmp_path: Path) ->
 @pytest.fixture
 async def _unused() -> AsyncIterator[None]:  # keeps pytest-asyncio's mode exercised
     yield None
+
+
+async def test_artifact_tools_are_absent_unless_enabled(
+    mcp_server: ServerFactory, mcp_env: dict[str, str]
+) -> None:
+    async with mcp_server(mcp_env) as session:
+        names = {tool.name for tool in (await session.list_tools()).tools}
+    assert "artifact_publish" not in names and "artifact_read" not in names

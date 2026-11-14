@@ -256,6 +256,7 @@ def test_settings_listing_is_complete_and_stable(tmp_path: Path) -> None:
         "transcription.api_base_url",
         "TRANSCRIPTION_API_TOKEN",
         "transcription.timeout_seconds",
+        "artifacts.enabled",
     ]
     assert config.runs_dir.display_value().startswith(str(tmp_path))
 
@@ -308,3 +309,19 @@ def test_transcription_settings_follow_env_then_config_and_the_token_is_a_secret
         '[transcription]\napi_token = "from-config"\n'
     )
     assert load_config(_env(tmp_path)).transcription_api_token.value is None
+
+
+def test_artifacts_are_off_unless_explicitly_enabled(tmp_path: Path) -> None:
+    assert load_config(_env(tmp_path)).artifacts_enabled.value is False
+
+    config_home = tmp_path / ".config" / "jake-tools"
+    config_home.mkdir(parents=True)
+    (config_home / "config.toml").write_text("[artifacts]\nenabled = true\n")
+    from_config = load_config(_env(tmp_path))
+    assert from_config.artifacts_enabled.value is True
+    assert from_config.artifacts_enabled.source == "config"
+
+    off = load_config(_env(tmp_path, JAKE_TOOLS_ARTIFACTS_ENABLED="false"))
+    assert (
+        off.artifacts_enabled.value is False and off.artifacts_enabled.source == "env"
+    )

@@ -1,0 +1,684 @@
+"""Deterministic mechanics of ``jake_tools.artifacts``.
+
+The Claude query is the one external boundary and is faked here with the
+Artifact tool's *recorded* result texts (``tests/artifact_fixtures``). That
+proves parsing, auditing and byte comparison; it does not prove Claude Code
+still behaves this way: ``test_artifacts_live.py`` (``--slow``, ``live``) does.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import AsyncIterator, Callable
+from pathlib import Path
+from typing import Any
+
+import pytest
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    Message,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
+
+from jake_tools.artifacts import SourceError, publish, read
+from jake_tools.artifacts.parse import (
+    hosted_html,
+    parse_header,
+    parse_published,
+    remove_shell,
+)
+from jake_tools.claude import ClaudeAgent
+from jake_tools.operations.errors import ToolError
+
+FIXTURES = Path(__file__).parent / "artifact_fixtures"
+SOURCE = (FIXTURES / "probe.html").read_bytes()
+PUBLISH_TEXT = (FIXTURES / "publish_result.txt").read_text()
+READ_TEXT = (FIXTURES / "read_result.txt").read_text()
+URL = "https://claude.ai/artifact/V4iHumJLsDrW9EBEtZfqZj"
+VERSION_ID = "1794664145-2330"
+
+
+def _use(name: str, **input: Any) -> AssistantMessage:
+    return AssistantMessage(
+        content=[ToolUseBlock(id=f"tu-{name}", name=name, input=input)],
+        model="haiku",
+    )
+
+
+def _use_id(use_id: str, name: str, **input: Any) -> AssistantMessage:
+    return AssistantMessage(
+        content=[ToolUseBlock(id=use_id, name=name, input=input)], model="haiku"
+    )
+
+
+def _result_of(use_id: str, text: str, *, is_error: bool = False) -> UserMessage:
+    return UserMessage(
+        content=[ToolResultBlock(tool_use_id=use_id, content=text, is_error=is_error)]
+    )
+
+
+def _init(tools: list[str]) -> SystemMessage:
+    return SystemMessage(subtype="init", data={"session_id": "s", "tools": tools})
+
+
+def _end() -> ResultMessage:
+    return ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=2,
+        session_id="s",
+        total_cost_usd=0.01,
+        usage=None,
+        result="done",
+    )
+
+
+class FakeClaude:
+    """A fake ``query``: one scripted stream per session kind.
+
+    It plays the CLI's part towards the guard: before each scripted tool call
+    it runs the ``PreToolUse`` hook the production code installed, and a deny
+    replaces that call's scripted result with the CLI's refusal. The guard,
+    the hook wiring and everything after it are production code."""
+
+    def __init__(
+        self,
+        *,
+        publish_stream: Callable[[Path], list[Message]] | None = None,
+        read_stream: Callable[[], list[Message]] | None = None,
+        on_publish: Callable[[], None] | None = None,
+        run_hooks: bool = True,
+        fail_after_stream: bool = False,
+    ) -> None:
+        self.publish_stream = publish_stream or self._default_publish
+        self.read_stream = read_stream or self._default_read
+        self.on_publish = on_publish
+        self.run_hooks = run_hooks
+        self.fail_after_stream = fail_after_stream
+        self.calls: list[tuple[str, ClaudeAgentOptions]] = []
+
+    @staticmethod
+    def _default_publish(path: Path) -> list[Message]:
+        return [
+            _init(["Read", "Artifact"]),
+            _use_id("pub", "Artifact", action="publish", file_path=str(path)),
+            _result_of("pub", PUBLISH_TEXT),
+            _end(),
+        ]
+
+    @staticmethod
+    def _default_read() -> list[Message]:
+        return [
+            _init(["Artifact"]),
+            _use_id("rd", "Artifact", action="read", url=URL),
+            _result_of("rd", READ_TEXT),
+            _end(),
+        ]
+
+    def agent(self) -> ClaudeAgent:
+        return ClaudeAgent(run_query=self)  # type: ignore[arg-type]
+
+    async def _play(
+        self, messages: list[Message], options: ClaudeAgentOptions
+    ) -> AsyncIterator[Message]:
+        hooks = (options.hooks or {}).get("PreToolUse", [])
+        denied: dict[str, str] = {}
+        # The CLI validates a tool's input before running hooks: a call whose
+        # result is a validation error never reaches the hook.
+        invalid = {
+            b.tool_use_id
+            for m in messages
+            if isinstance(m, UserMessage) and isinstance(m.content, list)
+            for b in m.content
+            if isinstance(b, ToolResultBlock)
+            and str(b.content).startswith("<tool_use_error>")
+        }
+        for message in messages:
+            if isinstance(message, AssistantMessage) and self.run_hooks:
+                for block in message.content:
+                    if not isinstance(block, ToolUseBlock) or block.id in invalid:
+                        continue
+                    for matcher in hooks:
+                        for hook in matcher.hooks:
+                            out = await hook(
+                                {  # type: ignore[arg-type]
+                                    "hook_event_name": "PreToolUse",
+                                    "tool_name": block.name,
+                                    "tool_input": block.input,
+                                    "tool_use_id": block.id,
+                                },
+                                block.id,
+                                None,  # type: ignore[arg-type]
+                            )
+                            decision = out.get("hookSpecificOutput", {})
+                            if decision.get("permissionDecision") == "deny":
+                                denied[block.id] = decision["permissionDecisionReason"]
+            if isinstance(message, UserMessage) and isinstance(message.content, list):
+                block = message.content[0]
+                if isinstance(block, ToolResultBlock) and block.tool_use_id in denied:
+                    yield _result_of(
+                        block.tool_use_id,
+                        f"PreToolUse:Artifact hook error: {denied[block.tool_use_id]}",
+                        is_error=True,
+                    )
+                    continue
+            yield message
+        if self.fail_after_stream:
+            raise RuntimeError("the CLI exited unexpectedly")
+
+    def __call__(
+        self, *, prompt: str, options: ClaudeAgentOptions
+    ) -> AsyncIterator[Message]:
+        self.calls.append((prompt, options))
+        if prompt.startswith("Publish"):
+            path = Path(prompt.split("Read tool: ", 1)[1].split("\n", 1)[0])
+            if self.on_publish is not None:
+                self.on_publish()
+            messages = self.publish_stream(path)
+        else:
+            messages = self.read_stream()
+        return self._play(messages, options)
+
+
+@pytest.fixture
+def source(tmp_path: Path) -> Path:
+    path = tmp_path / "report.html"
+    path.write_bytes(SOURCE)
+    return path
+
+
+# -- parsing the recorded tool results ----------------------------------------
+
+
+def test_recorded_publish_result_yields_the_identity() -> None:
+    published = parse_published(PUBLISH_TEXT)
+    assert published is not None
+    assert published.url == URL
+    assert (published.version, published.version_id) == (1, VERSION_ID)
+
+
+def test_recorded_read_result_reports_owner_visibility_and_version() -> None:
+    header = parse_header(READ_TEXT)
+    assert header is not None
+    assert header.artifact_id == "e3448f84-1ca6-4757-9dd4-3bb5616d043a"
+    assert header.version_id == VERSION_ID
+    assert header.owned_by_you is True
+    assert header.visibility == "private"
+
+
+def test_hosted_file_is_the_source_inside_a_fixed_shell() -> None:
+    html = hosted_html(READ_TEXT)
+    assert html is not None
+    # The whole hosted response is NOT the file: a 531-byte shell surrounds it.
+    assert html.encode() != SOURCE
+    assert remove_shell(html) == SOURCE.decode()
+
+
+def test_unrecognised_shapes_fail_closed() -> None:
+    assert parse_published("Published nothing") is None
+    assert parse_header("not a header\n") is None
+    assert parse_header("[Artifact x (version y) — owned by you, private]") is None
+    assert hosted_html("no tags here") is None
+    assert remove_shell("<html>plain</html>") is None
+    assert remove_shell("<!doctype html><html><head>no body marker") is None
+    assert remove_shell("<!doctype html><html><head></head><body>\nx") is None
+
+
+def test_header_of_someone_elses_artifact_has_no_visibility() -> None:
+    other = READ_TEXT.replace("owned by you, private", "owned by someone else")
+    header = parse_header(other)
+    assert header is not None
+    assert header.owned_by_you is False
+    assert header.visibility is None
+
+
+def test_source_closing_tag_inside_the_file_does_not_end_the_content() -> None:
+    inner = "<p>&lt;/cowritten-artifact-html&gt; raw: </cowritten-artifact-html></p>"
+    text = (
+        f"[h]\n<cowritten-artifact-html>\n{inner}\n</cowritten-artifact-html>\n\ntail"
+    )
+    assert hosted_html(text) == inner
+
+
+# -- arguments --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "content", "fragment"),
+    [
+        ("r.txt", b"x", ".html"),
+        ("r.html", b"", "1.."),
+        ("r.html", b"\xff\xfe", "UTF-8"),
+        ("r.html", "a�b".encode(), "U\\+FFFD"),
+    ],
+)
+async def test_bad_files_are_rejected_before_any_session(
+    tmp_path: Path, name: str, content: bytes, fragment: str
+) -> None:
+    path = tmp_path / name
+    path.write_bytes(content)
+    fake = FakeClaude()
+    with pytest.raises(SourceError, match=fragment):
+        await publish(str(path), agent=fake.agent())
+    assert fake.calls == []
+
+
+async def test_relative_and_missing_paths_are_rejected(tmp_path: Path) -> None:
+    fake = FakeClaude()
+    with pytest.raises(SourceError, match="absolute"):
+        await publish("report.html", agent=fake.agent())
+    with pytest.raises(SourceError, match="existing file"):
+        await publish(str(tmp_path / "gone.html"), agent=fake.agent())
+    with pytest.raises(SourceError, match="url must look like"):
+        await read("https://example.com/artifact/x", agent=fake.agent())
+    assert fake.calls == []
+
+
+# -- publish ------------------------------------------------------------------------
+
+
+async def test_publish_reports_a_hosted_difference(source: Path) -> None:
+    changed = READ_TEXT.replace("Version 1.", "Version 9.")
+    fake = FakeClaude(
+        read_stream=lambda: [
+            _init(["Artifact"]),
+            _use_id("rd", "Artifact", action="read", url=URL),
+            _result_of("rd", changed),
+            _end(),
+        ]
+    )
+    result = await publish(str(source), agent=fake.agent())
+    assert result.verified is False
+    assert "the hosted file differs from the local file" in result.problems
+    assert result.url == URL  # the artifact exists and is not hidden
+
+
+async def test_publish_does_not_confirm_a_shared_artifact(source: Path) -> None:
+    shared = READ_TEXT.replace(
+        "owned by you, private", "owned by you, shared with your organization"
+    )
+    fake = FakeClaude(
+        read_stream=lambda: [
+            _init(["Artifact"]),
+            _use_id("rd", "Artifact", action="read", url=URL),
+            _result_of("rd", shared),
+            _end(),
+        ]
+    )
+    result = await publish(str(source), agent=fake.agent())
+    assert result.private_confirmed is False and result.verified is False
+    assert result.readback.visibility == "shared with your organization"
+
+
+async def test_unrecognised_shell_makes_no_content_claim(source: Path) -> None:
+    odd = READ_TEXT.replace("<!doctype html><html><head>", "<html><head>", 1)
+    fake = FakeClaude(
+        read_stream=lambda: [
+            _init(["Artifact"]),
+            _use_id("rd", "Artifact", action="read", url=URL),
+            _result_of("rd", odd),
+            _end(),
+        ]
+    )
+    result = await publish(str(source), agent=fake.agent())
+    assert result.verified is False
+    assert result.readback.shell_removed is False
+    assert result.readback.sha256 is None
+
+
+async def test_a_failed_readback_keeps_the_published_identity(source: Path) -> None:
+    fake = FakeClaude(read_stream=lambda: [_init(["Artifact"]), _end()])
+    result = await publish(str(source), agent=fake.agent())
+    assert result.url == URL and result.verified is False
+    assert any("readback failed" in p for p in result.problems)
+
+
+async def test_local_file_changing_during_the_call_is_reported(source: Path) -> None:
+    fake = FakeClaude(on_publish=lambda: source.write_bytes(SOURCE + b"<!-- x -->"))
+    result = await publish(str(source), agent=fake.agent())
+    assert result.verified is False
+    assert "the local file changed while the call ran" in result.problems
+
+
+async def test_missing_tool_is_reported_without_a_publish(source: Path) -> None:
+    fake = FakeClaude(publish_stream=lambda path: [_init(["Read"]), _end()])
+    with pytest.raises(ToolError) as caught:
+        await publish(str(source), agent=fake.agent())
+    assert caught.value.code == "upstream_error"
+    assert caught.value.detail is not None
+    assert caught.value.detail["reason"] == "tool_not_exposed"
+    assert caught.value.detail["publish_attempted"] is False
+    assert len(fake.calls) == 1
+
+
+# -- read ------------------------------------------------------------------------------
+
+
+async def test_read_compares_version_and_file_and_saves_the_hosted_file(
+    source: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "hosted.html"
+    result = await read(
+        URL,
+        file_path=str(source),
+        expected_version_id=VERSION_ID,
+        output_path=str(out),
+        agent=FakeClaude().agent(),
+    )
+    assert result.matches_file is True and result.version_matches is True
+    assert result.private is True
+    assert out.read_bytes() == SOURCE  # exact bytes, shell removed
+    assert result.saved_to == str(out)
+
+
+async def test_read_reports_a_different_file_and_version(
+    source: Path, tmp_path: Path
+) -> None:
+    other = tmp_path / "other.html"
+    other.write_bytes(SOURCE + b"x")
+    result = await read(
+        URL,
+        file_path=str(other),
+        expected_version_id="999-aaaa",
+        agent=FakeClaude().agent(),
+    )
+    assert result.matches_file is False and result.version_matches is False
+
+
+async def test_read_refuses_to_overwrite_and_never_reads_first(tmp_path: Path) -> None:
+    existing = tmp_path / "there.html"
+    existing.write_text("keep")
+    fake = FakeClaude()
+    with pytest.raises(SourceError, match="new file"):
+        await read(URL, output_path=str(existing), agent=fake.agent())
+    assert existing.read_text() == "keep" and fake.calls == []
+
+
+async def test_read_of_another_url_is_not_accepted() -> None:
+    fake = FakeClaude(
+        read_stream=lambda: [
+            _init(["Artifact"]),
+            _use_id(
+                "rd", "Artifact", action="read", url="https://claude.ai/artifact/Z"
+            ),
+            _result_of("rd", READ_TEXT),
+            _end(),
+        ]
+    )
+    with pytest.raises(ToolError, match="no readback for this URL"):
+        await read(URL, agent=fake.agent())
+
+
+# -- publish: authority is enforced before calls, not audited after ----------------
+
+
+async def test_publish_verifies_the_hosted_bytes_in_a_separate_session(
+    source: Path,
+) -> None:
+    fake = FakeClaude()
+    result = await publish(str(source), agent=fake.agent())
+
+    assert result.verified is True and result.problems == []
+    assert result.url == URL
+    assert result.artifact_id == "e3448f84-1ca6-4757-9dd4-3bb5616d043a"
+    assert (result.version, result.version_id) == (1, VERSION_ID)
+    assert result.private_confirmed is True
+    assert result.readback.visibility == "private"
+    assert result.source.sha256 == hashlib.sha256(SOURCE).hexdigest()
+    assert result.readback.sha256 == result.source.sha256
+    assert result.readback.bytes == len(SOURCE)
+    assert result.denied_before_running == []
+
+    (publish_prompt, publish_options), (read_prompt, read_options) = fake.calls
+    for options in (publish_options, read_options):
+        # Process-local, specific: the one undocumented switch and no auto-open.
+        assert options.env == {
+            "CLAUDE_CODE_ARTIFACT": "1",
+            "CLAUDE_CODE_ARTIFACT_AUTO_OPEN": "0",
+        }
+        assert options.strict_mcp_config is True  # no unrelated connectors
+        assert options.permission_mode == "dontAsk"
+        # User, project and managed policy stay in force: never suppressed.
+        assert options.setting_sources is None
+        # The guard is wired as a PreToolUse hook on every call.
+        assert [m.matcher for m in options.hooks["PreToolUse"]] == [None]  # type: ignore[index]
+        # Neutral working directory, not the file's (no project settings).
+        assert options.cwd != source.parent
+    assert publish_options.tools == ["Read", "Artifact"]
+    assert read_options.tools == ["Artifact"]
+    assert URL in read_prompt and str(source) in publish_prompt
+
+
+async def test_hostile_calls_are_denied_before_they_run(source: Path) -> None:
+    """Steered by hosted content or a tool result, a model might try these."""
+
+    def stream(path: Path) -> list[Message]:
+        return [
+            _init(["Read", "Artifact"]),
+            _use_id("l", "Artifact", action="list"),
+            _result_of("l", "Showing 25 of 48 (EXECUTED)"),
+            _use_id("s", "Artifact", action="share", url=URL),
+            _result_of("s", "shared (EXECUTED)"),
+            _use_id("d", "Artifact", action="delete", url=URL),
+            _result_of("d", "deleted (EXECUTED)"),
+            _use_id("r", "Read", file_path="/etc/passwd"),
+            _result_of("r", "root:x (EXECUTED)"),
+            _use_id("u", "Artifact", action="publish", file_path=str(path), url=URL),
+            _result_of("u", "updated (EXECUTED)"),
+            _use_id("e", "Artifact", action="publish", file_path=str(path), edits=[]),
+            _result_of("e", "edited (EXECUTED)"),
+            _use_id("o", "Artifact", action="publish", file_path="/etc/other.html"),
+            _result_of("o", "published other (EXECUTED)"),
+            _use_id("pub", "Artifact", action="publish", file_path=str(path)),
+            _result_of("pub", PUBLISH_TEXT),
+            _use_id("again", "Artifact", action="publish", file_path=str(path)),
+            _result_of("again", PUBLISH_TEXT.replace("V4iHum", "Second")),
+            _end(),
+        ]
+
+    fake = FakeClaude(publish_stream=stream)
+    result = await publish(str(source), agent=fake.agent())
+
+    assert result.url == URL and result.verified is True
+    assert len(result.denied_before_running) == 8  # everything but the one publish
+    joined = " ".join(result.denied_before_running)
+    for fragment in (
+        "'list'",
+        "'share'",
+        "'delete'",
+        "may be read",
+        "url is not permitted",
+        "edits is not permitted",
+        "may be published",
+        "only one publish",
+    ):
+        assert fragment in joined, fragment
+    assert len(fake.calls) == 2  # one publish session, one read session
+
+
+async def test_a_read_session_has_no_write_authority_and_no_file_access() -> None:
+    fake = FakeClaude(
+        read_stream=lambda: [
+            _init(["Artifact"]),
+            _use_id("x", "Artifact", action="delete", url=URL),
+            _result_of("x", "deleted (EXECUTED)"),
+            _use_id("p", "Artifact", action="publish", file_path="/tmp/x.html"),
+            _result_of("p", "published (EXECUTED)"),
+            _use_id("f", "Read", file_path="/etc/passwd"),
+            _result_of("f", "root:x (EXECUTED)"),
+            _use_id("rd", "Artifact", action="read", url=URL),
+            _result_of("rd", READ_TEXT),
+            _end(),
+        ]
+    )
+    result = await read(URL, agent=fake.agent())
+    assert result.private is True and result.shell_removed is True
+
+
+async def test_a_read_of_another_artifact_is_denied_not_used() -> None:
+    fake = FakeClaude(
+        read_stream=lambda: [
+            _init(["Artifact"]),
+            _use_id(
+                "rd",
+                "Artifact",
+                action="read",
+                url="https://claude.ai/artifact/Qm3Kz7Tn5Rv9Wx2YbDfGhj",
+            ),
+            _result_of("rd", READ_TEXT),
+            _end(),
+        ]
+    )
+    with pytest.raises(ToolError, match="no readback for this URL") as caught:
+        await read(URL, agent=fake.agent())
+    assert caught.value.detail is not None
+    assert caught.value.detail["denied_by_guard"]
+
+
+async def test_publish_with_a_wrong_file_is_refused_with_a_safe_retry(
+    source: Path,
+) -> None:
+    def stream(path: Path) -> list[Message]:
+        return [
+            _init(["Read", "Artifact"]),
+            _use_id("pub", "Artifact", action="publish", file_path="/etc/other.html"),
+            _result_of("pub", PUBLISH_TEXT),
+            _end(),
+        ]
+
+    fake = FakeClaude(publish_stream=stream)
+    with pytest.raises(ToolError) as caught:
+        await publish(str(source), agent=fake.agent())
+    assert "denied before it ran" in caught.value.message
+    assert caught.value.detail is not None
+    assert caught.value.detail["retry_safe"] is True
+    assert caught.value.detail["publish_allowed"] is False
+    assert len(fake.calls) == 1
+
+
+async def test_a_calls_the_guard_never_saw_is_not_trusted(source: Path) -> None:
+    fake = FakeClaude(run_hooks=False)  # the runtime did not consult the guard
+    result = await publish(str(source), agent=fake.agent())
+    assert result.verified is False
+    assert any("not checked by the guard" in p for p in result.problems)
+    with pytest.raises(ToolError, match="not checked by the guard"):
+        await read(URL, agent=fake.agent())
+
+
+async def test_a_tool_refused_call_is_not_counted_as_unguarded(source: Path) -> None:
+    """CLI 2.1.318 validates input first; such a call never reaches the hook."""
+
+    def stream(path: Path) -> list[Message]:
+        return [
+            _init(["Read", "Artifact"]),
+            _use_id("bad", "Artifact", action="read", url="not-a-url"),
+            _result_of(
+                "bad",
+                "<tool_use_error>not an artifact URL: x</tool_use_error>",
+                is_error=True,
+            ),
+            *FakeClaude._default_publish(path)[1:],
+        ]
+
+    fake = FakeClaude(publish_stream=stream)
+    result = await publish(str(source), agent=fake.agent())
+    assert result.verified is True
+
+
+# -- publish: outcomes that are not a clean success ---------------------------------
+
+
+async def test_an_allowed_publish_that_returns_no_url_has_an_unknown_outcome(
+    source: Path,
+) -> None:
+    def stream(path: Path) -> list[Message]:
+        return [
+            _init(["Read", "Artifact"]),
+            _use_id("pub", "Artifact", action="publish", file_path=str(path)),
+            _result_of("pub", "Publish refused: nope", is_error=True),
+            _end(),
+        ]
+
+    fake = FakeClaude(publish_stream=stream)
+    with pytest.raises(ToolError) as caught:
+        await publish(str(source), agent=fake.agent())
+    assert "UNKNOWN" in caught.value.message
+    detail = caught.value.detail
+    assert detail is not None
+    assert detail["publish_attempted"] is True and detail["publish_allowed"] is True
+    assert detail["retry_safe"] is False
+    assert len(fake.calls) == 1  # never retried: a retry could create a second one
+
+
+async def test_a_crash_before_the_result_reports_urls_seen(source: Path) -> None:
+    def stream(path: Path) -> list[Message]:
+        return [
+            _init(["Read", "Artifact"]),
+            _use_id("pub", "Artifact", action="publish", file_path=str(path)),
+            AssistantMessage(content=[TextBlock(text=f"I made {URL}")], model="haiku"),
+        ]
+
+    fake = FakeClaude(publish_stream=stream, fail_after_stream=True)
+    with pytest.raises(ToolError) as caught:
+        await publish(str(source), agent=fake.agent())
+    detail = caught.value.detail
+    assert detail is not None and detail["retry_safe"] is False
+    assert detail["urls_seen"] == [URL]
+    assert "UNKNOWN" in caught.value.message
+    assert "exited unexpectedly" in caught.value.message
+
+
+async def test_a_crash_after_the_publish_keeps_the_receipt(source: Path) -> None:
+    fake = FakeClaude(fail_after_stream=True)
+    # Both sessions end by raising after delivering their results.
+    result = await publish(str(source), agent=fake.agent())
+    assert result.url == URL and result.version_id == VERSION_ID
+    assert result.verified is False
+    assert any("ended abnormally after publishing" in p for p in result.problems)
+    assert result.readback.sha256 == result.source.sha256  # the readback survived too
+
+
+async def test_the_local_file_vanishing_keeps_the_receipt(source: Path) -> None:
+    fake = FakeClaude(on_publish=lambda: None)
+
+    def stream(path: Path) -> list[Message]:
+        path.unlink()
+        return FakeClaude._default_publish(path)
+
+    fake.publish_stream = stream
+    result = await publish(str(source), agent=fake.agent())
+    assert result.url == URL and result.verified is False
+    assert any("could not be re-read" in p for p in result.problems)
+
+
+async def test_an_expected_version_must_be_observed() -> None:
+    from jake_tools.artifacts.models import Readback
+    from jake_tools.artifacts.service import _compare, receipt
+
+    unseen = Readback(url=URL, shell_removed=True, private=True, sha256="x")
+    problems = _compare(
+        unseen, receipt(Path("/x.html"), b"x"), version_id="1794664145-2330"
+    )
+    assert any("live version is None" in p for p in problems)
+
+
+async def test_read_without_a_version_in_the_header_does_not_match() -> None:
+    headerless = READ_TEXT.replace("(version 1794664145-2330) ", "")
+    fake = FakeClaude(
+        read_stream=lambda: [
+            _init(["Artifact"]),
+            _use_id("rd", "Artifact", action="read", url=URL),
+            _result_of("rd", headerless),
+            _end(),
+        ]
+    )
+    result = await read(URL, expected_version_id=VERSION_ID, agent=fake.agent())
+    assert result.version_matches is False

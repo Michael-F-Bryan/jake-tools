@@ -30,7 +30,7 @@ from pydantic import BaseModel
 
 from ..config import Config
 
-Capability = Literal["claude", "clockify", "transcription"]
+Capability = Literal["artifact", "claude", "clockify", "transcription"]
 """What an agent can be granted. Each operation belongs to exactly one."""
 
 Handler = Callable[..., Awaitable[BaseModel]]
@@ -47,6 +47,11 @@ SKILL_GUIDES: dict[str, str] = {
     "clockify-jira-sync": (
         "The guide defines scope, conflict handling, partial-write semantics and "
         "recovery rules."
+    ),
+    "artifact-publishing": (
+        "The guide covers what a publish and a readback prove, the document shell "
+        "around hosted content, what visibility the readback does and does not "
+        "show, the undocumented mechanism, and how to handle each error."
     ),
     "transcription": (
         "The guide explains the transcript schema, what speaker and overlap fields "
