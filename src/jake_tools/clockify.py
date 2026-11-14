@@ -128,6 +128,29 @@ def project_note_for(key: str) -> str:
     return f"Jira: {normalise_jira_key(key)}"
 
 
+JIRA_REFERENCE_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
+
+
+def jira_key_of_task_name(name: str) -> str | None:
+    """The Jira key a task name leads with (``KEY summary``), if any.
+
+    The one definition of task ownership, shared by Jira sync and exact
+    lookup so they never disagree about which task a key belongs to. A key
+    mentioned later in the name does not make the task that key's owner.
+    """
+    match = JIRA_REFERENCE_PATTERN.match(name)
+    return match.group(1) if match else None
+
+
+def jira_key_of_project_note(note: str) -> str | None:
+    """The FIRST Jira key in a project note (``Jira: KEY``), if any.
+
+    Later keys in the same note own nothing.
+    """
+    match = JIRA_REFERENCE_PATTERN.search(note)
+    return match.group(1) if match else None
+
+
 class ClockifyUser(BaseModel):
     model_config = ConfigDict(frozen=True, populate_by_name=True)
 
@@ -217,6 +240,10 @@ class ClockifyClient:
         self._base_url = normalised_base_url
         self._session = session or requests.Session()
         self.pagination_reads: list[dict[str, object]] = []
+        # Every HTTP request attempted, whether or not it succeeded. Distinct
+        # from ``pagination_reads`` (one entry per completed list scan, however
+        # many pages it took) so a caller can report upstream cost honestly.
+        self.requests_made: int = 0
 
     def get_time_entries(
         self, workspace_id: str, user_id: str
@@ -502,6 +529,7 @@ class ClockifyClient:
         if params is not None:
             request_kwargs["params"] = params
 
+        self.requests_made += 1
         try:
             response = self._session.request(
                 method,
