@@ -200,6 +200,32 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   - (2.1.309) A refusal is reported as it happens (`system`
     `permission_denied`, with `decision_reason_type`); some calls are
     refused by the CLI's own guard with only `Blocked: …` error text.
+- A `sdk_error` carries a structured `failure` (`claude_runs/failures.py`):
+  `kind` (`usage_limit`, `authentication_or_access`, `sdk_transport`,
+  `unknown`), the original `evidence` (result `subtype`/`is_error`/text or
+  exception type), and `advice` marked `basis="inferred"`. It reads only the
+  runtime's own short report, which must open with the statement and not
+  also state the other kind, never the result `subtype` (the reported
+  failures arrived as `subtype="success"` with `is_error`); unrecognised or
+  conflicting text stays `unknown`. `sdk_transport` is only the SDK's exact
+  `CLIConnectionError`/`CLIJSONDecodeError`/`MessageParseError`/`ProcessError`
+  (matched by package, since only `claude.py` imports the SDK); a missing
+  executable or a `ResultError` is not transport. `resets_at` is set only
+  for a full date with year, time and explicit zone/offset; a bare time of
+  day is not a date, so it stays `reset_text`. `error`/`final_text` are never
+  replaced. It does not retry, resume, switch accounts or estimate allowance.
+  Cooldowns (`claude_runs/cooldowns.py`) are opt-in: the operator declares a
+  non-secret `claude.account_context` label (`JAKE_TOOLS_CLAUDE_ACCOUNT_CONTEXT`,
+  default unset), copied into `spec.json` at launch. Nothing infers, verifies
+  or hashes an account or credential, and equal labels are the operator's
+  statement of one shared quota. Only a `usage_limit` with a dated `resets_at`
+  is recorded, in `<runs_dir>/.cooldowns/<digest>.json` (atomic replace under a
+  leaf lock; the newer observation wins; expired or unreadable reads as
+  none). It is advisory: `claude_start` returns `cooldown` and still starts;
+  a failed limit task's result shows the one now on record; a model turn
+  answering a prompt sent after the observation clears it, and that prompt's
+  time stays as a per-context watermark (7 days) so a delayed older failure
+  write is dropped rather than resurrecting the cooldown.
 - After a `max_turns` stop the worker asks for one handoff
   (`claude_runs/handoff.py`): the same session resumed through
   `ClaudeAgent` with no tools, `max_turns=1`, capped output, inside the

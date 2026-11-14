@@ -39,6 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 
 from ..claude import EffortLevel, permission_rule_tool
 from ..config import Config
+from . import cooldowns
 from .events import EventLog
 from .inbox import Inbox
 from .models import (
@@ -160,6 +161,7 @@ class RunDefaults(BaseModel):
     max_turns: int = Field(ge=1)
     timeout_seconds: float = Field(gt=0)
     max_budget_usd: float = Field(gt=0)
+    account_context: str | None = None
 
     @classmethod
     def from_config(cls, config: Config) -> RunDefaults:
@@ -169,6 +171,7 @@ class RunDefaults(BaseModel):
             max_turns=config.claude_max_turns.value,
             timeout_seconds=config.claude_timeout_seconds.value,
             max_budget_usd=config.claude_max_budget_usd.value,
+            account_context=config.claude_account_context.value,
         )
 
 
@@ -310,6 +313,7 @@ class StartRequest(BaseModel):
             cost_baseline_usd=cost_baseline_usd,
             cost_baseline_exact=cost_baseline_exact,
             allow_questions=self.allow_questions,
+            account_context=defaults.account_context,
         )
 
 
@@ -397,6 +401,7 @@ def start_task(
         session_id=spec.session_id,
         resumed_from=spec.resume_task_id,
         request_id=spec.request_id,
+        cooldown=cooldowns.active(runs_dir, spec.account_context),
     )
 
 

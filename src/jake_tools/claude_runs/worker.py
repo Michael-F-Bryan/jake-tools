@@ -99,6 +99,7 @@ from ..claude import (
     message_to_json,
     unexposed_tools,
 )
+from . import cooldowns
 from .events import (
     STORED_TOOL_INPUT_CHARS,
     Event,
@@ -106,6 +107,12 @@ from .events import (
     events_from_view,
     progress_line,
     tool_input_summary,
+)
+from .failures import (
+    Failure,
+    classify_exception,
+    classify_result,
+    classify_stream_end,
 )
 from .handoff import write_handoff
 from .inbox import MAX_CHOICES, MAX_QUESTION_CHARS, Inbox
@@ -204,6 +211,7 @@ class Outcome:
     """Set only when a handoff call moved the session's running cost."""
     cost_complete: bool | None = None
     diagnostics: tuple[str, ...] = ()
+    failure: Failure | None = None
 
 
 def main(run_dir: Path) -> int:
@@ -294,7 +302,12 @@ async def run_worker(run_dir: Path) -> Outcome:
     except BaseException as exc:
         outcome = driver.settled(
             driver.resolved
-            or driver.partial("failed", "sdk_error", error=_describe(exc))
+            or driver.partial(
+                "failed",
+                "sdk_error",
+                error=_describe(exc),
+                failure=classify_exception(exc, observed_at=utc_now()),
+            )
         )
         _finish(run_dir, spec, outcome, transcript, inbox, events)
         raise
@@ -364,6 +377,7 @@ class Driver:
         self._recorded_exposure = False
         self.brief_uuid = str(uuid.uuid4())
         self.brief_seen = False
+        self.brief_sent_at: datetime | None = None
         """Whether the CLI echoed the brief into the conversation. A result
         before that, with no model turn, is not the brief's result."""
         self.tool_calls: dict[str, tuple[str, str]] = {}
@@ -451,7 +465,12 @@ class Driver:
         )
 
     def partial(
-        self, status: RunStatus, reason: TerminationReason, *, error: str | None = None
+        self,
+        status: RunStatus,
+        reason: TerminationReason,
+        *,
+        error: str | None = None,
+        failure: Failure | None = None,
     ) -> Outcome:
         """An outcome that keeps what the conversation produced so far."""
         last = self.last_result
@@ -461,6 +480,7 @@ class Driver:
             final_text=last.text if last is not None else None,
             usage=self.usage,
             error=error,
+            failure=failure,
         )
 
     def _failure(self, exc: BaseException) -> Outcome:
@@ -473,9 +493,15 @@ class Driver:
                     f"(it may have been deleted); see worker.stderr. {_describe(exc)}"
                 ),
             )
-        return self.partial("failed", "sdk_error", error=_describe_stream_failure(exc))
+        return self.partial(
+            "failed",
+            "sdk_error",
+            error=_describe_stream_failure(exc),
+            failure=classify_exception(exc, observed_at=utc_now()),
+        )
 
     async def _drive(self, conversation: Conversation) -> Outcome:
+        self.brief_sent_at = utc_now()
         await conversation.send(self.brief, uuid=self.brief_uuid)
         # A pump failure (the CLI's stdin gone) surfaces from the task group
         # as an exception group, which ``run`` turns into an outcome.
@@ -622,13 +648,29 @@ class Driver:
             self.progress.record_usage(self.usage, conversation.session_cost_usd)
             if result.is_error:
                 reason = _SUBTYPE_REASONS.get(result.subtype, "sdk_error")
+                failure = (
+                    classify_result(
+                        subtype=result.subtype,
+                        is_error=result.is_error,
+                        text=result.text,
+                        errors=result.errors,
+                        stop_reason=result.stop_reason,
+                        observed_at=utc_now(),
+                    )
+                    if reason == "sdk_error"
+                    else None
+                )
+                self._share_limit(failure)
                 return Outcome(
                     status="failed",
                     reason=reason,
                     final_text=result.text,
                     usage=self.usage,
                     error=_result_error(result),
+                    failure=failure,
                 )
+            if result.num_turns > 0 and self.brief_sent_at is not None:
+                self._clear_limit(self.brief_sent_at)
             async with self._send_lock:
                 if self.inbox.close_if_idle():
                     self._note_background()
@@ -642,7 +684,39 @@ class Driver:
             "failed",
             "sdk_error",
             error="the Claude stream ended without a final result",
+            failure=classify_stream_end(observed_at=utc_now()),
         )
+
+    def _share_limit(self, failure: Failure | None) -> None:
+        """Publish a dated usage limit to this run's declared account context."""
+        if (
+            failure is None
+            or failure.kind != "usage_limit"
+            or failure.resets_at is None
+            or self.spec.account_context is None
+        ):
+            return
+        try:
+            cooldowns.record(
+                self.run_dir.parent,
+                self.spec.account_context,
+                resets_at=failure.resets_at,
+                observed_at=failure.observed_at,
+                task_id=self.spec.task_id,
+            )
+        except Exception:  # advisory: never fail the task over it
+            log.exception("could not record the usage-limit cooldown")
+
+    def _clear_limit(self, prompt_sent_at: datetime) -> None:
+        """A model turn answered a prompt sent after any recorded limit."""
+        try:
+            cooldowns.clear(
+                self.run_dir.parent,
+                self.spec.account_context,
+                interaction_at=prompt_sent_at,
+            )
+        except Exception:
+            log.exception("could not clear the usage-limit cooldown")
 
     def _deny(
         self,
@@ -1002,6 +1076,7 @@ def _record(run_dir: Path, spec: RunSpec, outcome: Outcome, events: EventLog) ->
             invocation_cost_usd=cost,
             turns_used=outcome.turns_used,
             handoff=outcome.handoff,
+            failure=outcome.failure,
         ),
     )
     summary = _summary(outcome)
@@ -1022,6 +1097,7 @@ def _record(run_dir: Path, spec: RunSpec, outcome: Outcome, events: EventLog) ->
                 "handoff": outcome.handoff,
                 "cost_complete": outcome.cost_complete,
                 "diagnostics": list(outcome.diagnostics),
+                "failure": outcome.failure,
                 **(
                     {"session_cost_usd": outcome.session_cost_usd}
                     if outcome.session_cost_usd is not None
@@ -1057,6 +1133,11 @@ def _summary(outcome: Outcome) -> str:
         return f"Finished: {first[0][:200]}" if first else "Finished"
     if outcome.status == "cancelled":
         return "Cancelled"
+    if outcome.failure is not None and outcome.failure.kind in (
+        "usage_limit",
+        "authentication_or_access",
+    ):
+        return f"Failed ({outcome.reason}): {outcome.failure.summary}"
     return f"Failed ({outcome.reason}): {(outcome.error or '').splitlines()[0][:200]}"
 
 

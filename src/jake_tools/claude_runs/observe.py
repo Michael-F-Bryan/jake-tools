@@ -45,6 +45,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from .cooldowns import for_failed_run
 from .events import (
     ACTIVITY_KINDS,
     Cursor,
@@ -53,6 +54,7 @@ from .events import (
     InvalidCursorError,
     progress_line,
 )
+from .failures import Cooldown, Failure
 from .models import (
     DeliveryState,
     InputRequest,
@@ -252,6 +254,8 @@ class Outcome(BaseModel):
     resumable: bool = False
     invocation_cost_usd: float | None = None
     diagnostics: list[str] = Field(default_factory=list)
+    failure: Failure | None = None
+    cooldown: Cooldown | None = None
     retrieve: Retrieval | None = None
 
 
@@ -591,6 +595,8 @@ def outcome_of(
         resumable=resumable,
         invocation_cost_usd=state.invocation_cost_usd,
         diagnostics=diagnostics,
+        failure=state.failure,
+        cooldown=for_failed_run(run_dir, state.failure),
         retrieve=retrieve,
     )
 
