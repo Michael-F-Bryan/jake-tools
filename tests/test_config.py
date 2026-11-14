@@ -6,6 +6,7 @@ import pytest
 
 from jake_tools.config import (
     DEFAULT_CLAUDE_MAX_BUDGET_USD,
+    DEFAULT_CLAUDE_MAX_LIVE_TASKS,
     DEFAULT_CLAUDE_MAX_TURNS,
     DEFAULT_CLAUDE_TIMEOUT_SECONDS,
     DEFAULT_CLOCKIFY_CLIENT,
@@ -253,6 +254,7 @@ def test_settings_listing_is_complete_and_stable(tmp_path: Path) -> None:
         "claude.max_turns",
         "claude.timeout_seconds",
         "claude.max_budget_usd",
+        "claude.max_live_tasks",
         "claude.account_context",
         "transcription.api_base_url",
         "TRANSCRIPTION_API_TOKEN",
@@ -342,3 +344,63 @@ def test_an_unsafe_account_context_label_is_refused(tmp_path: Path, label: str) 
     with pytest.raises(ConfigError) as excinfo:
         load_config(env)
     assert "claude.account_context" in str(excinfo.value)
+
+
+# --- claude.max_live_tasks -----------------------------------------------------
+
+
+def test_max_live_tasks_defaults_to_two(tmp_path: Path) -> None:
+    config = load_config(_env(tmp_path))
+
+    assert DEFAULT_CLAUDE_MAX_LIVE_TASKS == 2
+    assert config.claude_max_live_tasks.value == 2
+    assert config.claude_max_live_tasks.source == "default"
+
+
+def test_max_live_tasks_resolves_flag_over_env_over_file(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".config" / "jake-tools"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.toml").write_text("[claude]\nmax_live_tasks = 5\n")
+
+    from_file = load_config(_env(tmp_path))
+    from_env = load_config(_env(tmp_path, JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS="3"))
+    from_flag = load_config(
+        _env(tmp_path, JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS="3"),
+        overrides={"claude.max_live_tasks": 4},
+    )
+
+    assert (
+        from_file.claude_max_live_tasks.value,
+        from_file.claude_max_live_tasks.source,
+    ) == (5, "config")
+    assert from_env.claude_max_live_tasks.value == 3
+    assert from_env.claude_max_live_tasks.origin == "JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS"
+    assert (
+        from_flag.claude_max_live_tasks.value,
+        from_flag.claude_max_live_tasks.source,
+    ) == (4, "flag")
+    assert from_env.claude_max_live_tasks in from_env.settings()  # doctor prints it
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "two", "2.5", "", "true", " "])
+def test_max_live_tasks_rejects_anything_but_a_positive_integer_from_env(
+    tmp_path: Path, raw: str
+) -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(_env(tmp_path, JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS=raw))
+
+    assert "claude.max_live_tasks" in str(excinfo.value)
+    assert "JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS" in str(excinfo.value)
+    assert "positive integer" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("raw", ["0", "-3", "2.5", "true", "false", '"3x"'])
+def test_max_live_tasks_rejects_a_bad_config_file_value(
+    tmp_path: Path, raw: str
+) -> None:
+    config_dir = tmp_path / ".config" / "jake-tools"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.toml").write_text(f"[claude]\nmax_live_tasks = {raw}\n")
+
+    with pytest.raises(ConfigError, match="claude.max_live_tasks"):
+        load_config(_env(tmp_path))

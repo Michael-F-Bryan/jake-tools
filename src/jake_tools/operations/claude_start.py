@@ -8,7 +8,7 @@ from anyio import to_thread
 
 from ..claude import EffortLevel
 from ..claude_runs import ClaudeStartResult
-from ..claude_runs.control import MAX_LIVE_TASKS, StartRequest
+from ..claude_runs.control import StartRequest
 from ..config import Config
 from . import Handler, Operation
 from ._claude import task_errors, task_service
@@ -28,9 +28,10 @@ DESCRIPTION = (
     f"{'|'.join(get_args(EffortLevel))}"
     "), max_turns, timeout_seconds (wall clock) and max_budget_usd default to "
     "the server's configuration and are hard limits; nothing is inherited on "
-    "resume. request_id makes retries safe (replayed=true). At most "
-    f"{MAX_LIVE_TASKS}"
-    " tasks run at once (capacity_exceeded)."
+    "resume. request_id makes retries safe (replayed=true). The number of "
+    "live tasks is operator-configured per server (claude.max_live_tasks, "
+    "default 2), not universal: a start is refused with capacity_exceeded "
+    "(detail live, limit; no queue) while live >= this server's limit."
 )
 
 
