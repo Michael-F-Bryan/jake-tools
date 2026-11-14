@@ -148,6 +148,62 @@ web app.
    API (list, get version, delete) is an admin surface, not the requested
    SDK integration. It does not show that no other read-back exists.
 
+### Re-checked 2026-11-14: SDK 0.2.182, CLI 2.1.325 and 2.1.318
+
+Issue #15 asks whether a newer or differently configured SDK session can
+publish. Same claude.ai Max login (`authMethod: claude.ai`,
+`apiProvider: firstParty`), parent-session `CLAUDE*` variables unset,
+haiku, `dontAsk`, a fresh working directory, no settings beyond the user's
+own, and no model tool call. Each probe read only the session's `init`
+`tools`:
+
+| Launch | CLI | `init.tools` has `Artifact` |
+| --- | --- | --- |
+| SDK 0.2.182, `tools=["Read","Artifact"]` | 2.1.325 (bundled) | no (`Read` only) |
+| the same, `cli_path` = installed CLI | 2.1.318 | no (`Read` only) |
+| SDK, `claude_code` preset, `setting_sources=["user"]` | 2.1.325 | no (25 tools) |
+| `claude -p`, `--tools Read,Artifact`, entrypoint unset | 2.1.325 | no (`Read` only) |
+
+So the older result holds on current versions for every documented launch
+option; this is still a version- and account-specific observation.
+
+The reason is readable in the shipped CLI (2.1.325) without running
+anything. Its Artifact availability check runs in this order, and the first
+failing step withholds the tool:
+
+1. switched off: `enableArtifact: false`, `CLAUDE_CODE_DISABLE_ARTIFACT`, or
+   an `Artifact` deny rule;
+2. surface excluded (Cowork or local-agent hosts);
+3. not first-party Anthropic API, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
+   or `CLAUDE_CODE_ARTIFACT` explicitly false;
+4. **`sdk_default_off`**: `CLAUDE_CODE_ENTRYPOINT` is `sdk-py`, `sdk-ts`,
+   `sdk-cli`, `mcp` or `claude-code-github-action` (the "off by default"
+   in the docs), unless `CLAUDE_CODE_ARTIFACT` is truthy or the Remote
+   Control bridge has granted `CLAUDE_CODE_BRIDGE_CHILD_ARTIFACT`;
+5. a server-side feature flag (`tengu_cobalt_plinth`), then the
+   organisation policy `allow_cobalt_plinth`.
+
+`CLAUDE_CODE_ARTIFACT` is therefore the override behind "off by default",
+but it appears in no official page and the `ClaudeAgentOptions` surface does
+not mention it. It was **not** set in any probe: it is an undocumented
+mechanism, so whether to depend on it is a product and support decision.
+Setting `CLAUDE_CODE_ENTRYPOINT` to another surface would be spoofing a
+launch identity and was not tried.
+
+The plain `claude -p` row shows a gate beyond step 4 (its entrypoint is not
+an SDK one). It is not known whether that is step 5 for this account or an
+interactive-only rule; telling them apart needs either an interactive
+session (not a substitute for the SDK) or Anthropic's answer.
+
+The Artifact tool's inputs, from the same binary, name publish operations
+(`publish_version`, `edit_version`, `publish_files`, `create_from_type`)
+and read operations (`get_artifact`, `read_artifact`, `list_artifacts`,
+`list_files`, `read_file`, `list_types`). No visibility operation appears
+in those lists; whether publish inputs carry one was not read.
+`claude.ai Claude Docs` is listed as a `claudeai` connector in SDK sessions
+(2.1.325). It creates new documents rather than publishing an existing file,
+and was not examined further.
+
 Per the task's constraints, nothing here uses private endpoints, TUI
 scraping, browser automation or spoofed interactive sessions. No artifact
 was created, and no existing artifact was touched.
