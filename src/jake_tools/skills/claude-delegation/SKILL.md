@@ -281,7 +281,7 @@ the task ended mid-prompt, so its cost was never reported), the full
 | --- | --- | --- |
 | `completed` | `finished` | Ended normally. **Not proof the work is right.** |
 | `failed` | `max_turns`, `budget`, `timeout` | Hit a limit; partial work stays on disk. |
-| `failed` | `sdk_error` | The CLI/SDK failed (auth problems show here); see `error`. |
+| `failed` | `sdk_error` | The CLI/SDK failed (auth problems show here); see `error`. `maximum buffer size of N bytes` means one CLI message (such as a huge inline image) passed the SDK's 16 MiB limit: the message was refused, not cut short. The recorded task, session and existing files stay available to inspect; check them before deciding whether to resume for the remainder. |
 | `failed` | `resume_failed` | Claude could not resume the session (it may have been deleted). Nothing ran. |
 | `failed` | `tools_unavailable` | The session lacked a tool in `tools`; `error` names it and what was exposed. Stopped at the start. Retry without it. |
 | `failed` | `worker_died` | The worker vanished without recording an outcome. |

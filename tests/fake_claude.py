@@ -437,6 +437,43 @@ class Session:
         self.tool_result(tool_id, "y" * 20000)
         self.result("z" * size)
 
+    def turn_image_result(self, text: str) -> None:
+        """A ``Read`` whose result is one base64 image block of ARG bytes.
+
+        The shape the CLI sends for a screenshot read: a ``tool_result``
+        whose content is an ``image`` block. Valid JSON, however large.
+        """
+        size = int(self.arg or 2_000_000)
+        tool_id = self.tool("Read", {"file_path": "shot.png"})
+        emit(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_id,
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/png",
+                                        "data": "A" * size,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "uuid": str(uuid.uuid4()),
+                "session_id": self.reported_id,
+                "parent_tool_use_id": None,
+            }
+        )
+        self.result(f"read an image of {size} bytes")
+
     def turn_slow_tool(self, text: str) -> None:
         """Narrate, run a 'tool' for ARG seconds, then report what arrived."""
         seconds = float(self.arg or 3)
