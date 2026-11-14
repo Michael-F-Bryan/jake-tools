@@ -134,7 +134,16 @@ request returns the original task (`replayed: true`, its current `status`),
 even when capacity is full. The same `request_id` with a different request
 is `request_conflict`.
 
-At most two tasks run at once (`capacity_exceeded`, no queue).
+How many tasks may run at once is operator policy, not a protocol constant:
+the server's `claude.max_live_tasks` (default 2; it is not a universal two).
+A start while the live tasks in the shared runs directory number at least that
+server's limit is `capacity_exceeded` (no queue); `detail.live` and
+`detail.limit` are the live count and that server's configured limit. Do not
+assume a number: read them from the error, and retry with the same `request_id`
+once a task ends. Servers sharing a runs directory share the live count, not the
+limit: each applies its own, so mixed settings give no common ceiling. Lowering
+the limit below the live count cancels nothing; starts are refused until fewer
+tasks than the limit are live. More local slots do not add provider quota.
 
 ## 4. Watch with `claude_poll`
 
@@ -361,7 +370,7 @@ repeats the message for the host. The codes and argument details are shared:
 | `code` | Cause |
 | --- | --- |
 | `invalid_argument` | `detail.argument` names it. Causes: bad path, empty brief, a malformed tool name, a rule in `tools`, an `allowed_tools` rule that is malformed or names a tool not in `tools`, bad limit, a value outside its schema bounds or enum, a bad transcript cursor, malformed response. (A bad poll token is not an error: it resynchronises.) |
-| `capacity_exceeded` | Two tasks are already running. |
+| `capacity_exceeded` | The live tasks have reached this server's configured limit (`detail.live`, `detail.limit`; default 2, not universal). No queue. |
 | `unknown_task` | No such task ID in this server's runs directory. |
 | `request_conflict` | `request_id`/`message_id` reused with a different payload. |
 | `session_busy` | The session to resume is being written by a live task. |

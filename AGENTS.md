@@ -226,6 +226,16 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   answering a prompt sent after the observation clears it, and that prompt's
   time stays as a per-context watermark (7 days) so a delayed older failure
   write is dropped rather than resurrecting the cooldown.
+- Local capacity is operator policy, `claude.max_live_tasks`
+  (`JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS`, a positive integer, default 2; never
+  document a universal two). `start_task` admits only while the shared live
+  count (workers alive in the runs directory, under `.runs.lock`) is below the
+  *admitting process's own* limit; `capacity_exceeded` reports `live` and
+  `limit`. Processes with different limits over one directory share the count,
+  not a ceiling (no coordination store; use one value). A limit lowered below
+  the live count cancels nothing and refuses starts until `live < limit`.
+  Replays of a `request_id` and the same-session exclusion are checked before
+  capacity. Local slots are not provider quota (see cooldowns above).
 - After a `max_turns` stop the worker asks for one handoff
   (`claude_runs/handoff.py`): the same session resumed through
   `ClaudeAgent` with no tools, `max_turns=1`, capped output, inside the

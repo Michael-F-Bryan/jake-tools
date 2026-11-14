@@ -247,7 +247,15 @@ so they survive server restarts:
   in chunks; `claude_cancel` stops the whole process tree and says whether
   termination was confirmed (never a rollback).
 
-At most two tasks run at once. The packaged
+How many tasks run at once is configurable: `claude.max_live_tasks` in
+`config.toml` or `JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS` (a positive integer;
+default 2; `doctor` prints it). A start while that many are live is refused
+with `capacity_exceeded` (`detail.live`, `detail.limit`; there is no queue).
+The live count is shared by every process using one runs directory but each
+process applies its *own* limit, so differently configured processes do not
+share a ceiling: give them all the same value. Lowering the limit below the
+live count cancels nothing; starts are refused until fewer are live. More
+local capacity does not add provider quota. The packaged
 [`claude-delegation` skill](src/jake_tools/skills/claude-delegation/SKILL.md)
 documents the contract, including retention, the local trust model and the
 upgrade note: restart every server sharing a runs directory together.
