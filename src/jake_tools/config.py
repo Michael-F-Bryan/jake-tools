@@ -27,9 +27,17 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import Annotated, Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    ValidationError,
+)
 
 from .claude import DEFAULT_MODEL, EffortLevel
 from .clockify import CLOCKIFY_API_ROOT
@@ -193,6 +201,11 @@ class Config(BaseModel):
     claude_max_turns: Resolved[int]
     claude_timeout_seconds: Resolved[float]
     claude_max_budget_usd: Resolved[float]
+    claude_account_context: Resolved[str | None]
+    """An operator-declared, non-secret label for the Claude account context
+    this installation runs under. Unset (the default) means no cooldown
+    sharing. Nothing infers or verifies it: equal labels are the operator's
+    statement that the runs share one quota."""
 
     transcription_api_base_url: Resolved[str | None]
     transcription_api_token: Resolved[str | None]
@@ -225,6 +238,7 @@ class Config(BaseModel):
             self.claude_max_turns,
             self.claude_timeout_seconds,
             self.claude_max_budget_usd,
+            self.claude_account_context,
             self.transcription_api_base_url,
             self.transcription_api_token,
             self.transcription_timeout_seconds,
@@ -271,6 +285,19 @@ class _Spec[T]:
 
 _STR = TypeAdapter(str)
 _OPTIONAL_STR = TypeAdapter(str | None)
+ACCOUNT_CONTEXT_PATTERN = r"^[A-Za-z0-9._:-]{1,64}$"
+"""What an operator-declared ``claude.account_context`` label may look like."""
+
+
+def _blank_is_unset(value: Any) -> Any:
+    return None if isinstance(value, str) and not value.strip() else value
+
+
+AccountContext = Annotated[
+    Annotated[str, StringConstraints(pattern=ACCOUNT_CONTEXT_PATTERN)] | None,
+    BeforeValidator(_blank_is_unset),
+]
+_ACCOUNT_CONTEXT = TypeAdapter(AccountContext)
 _STR_TUPLE = TypeAdapter(tuple[str, ...])
 _PATH = TypeAdapter(Path)
 _INT = TypeAdapter(int)
@@ -388,6 +415,16 @@ def load_config(
             _Spec("claude.max_budget_usd", None, "claude", "max_budget_usd", _FLOAT),
             DEFAULT_CLAUDE_MAX_BUDGET_USD,
         ),
+        claude_account_context=resolve(
+            _Spec(
+                "claude.account_context",
+                "JAKE_TOOLS_CLAUDE_ACCOUNT_CONTEXT",
+                "claude",
+                "account_context",
+                _ACCOUNT_CONTEXT,
+            ),
+            None,
+        ),
         transcription_api_base_url=resolve(
             _Spec(
                 "transcription.api_base_url",
@@ -477,6 +514,8 @@ def _describe_expected(spec: _Spec[Any]) -> str:
         return "a number"
     if spec.adapter is _PATH:
         return "a path"
+    if spec.adapter is _ACCOUNT_CONTEXT:
+        return "a label of letters, digits and . _ : - (at most 64)"
     return "a string"
 
 

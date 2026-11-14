@@ -281,11 +281,40 @@ the task ended mid-prompt, so its cost was never reported), the full
 | --- | --- | --- |
 | `completed` | `finished` | Ended normally. **Not proof the work is right.** |
 | `failed` | `max_turns`, `budget`, `timeout` | Hit a limit; partial work stays on disk. |
-| `failed` | `sdk_error` | The CLI/SDK failed (auth problems show here); see `error`. `maximum buffer size of N bytes` means one CLI message (such as a huge inline image) passed the SDK's 16 MiB limit: the message was refused, not cut short. The recorded task, session and existing files stay available to inspect; check them before deciding whether to resume for the remainder. |
+| `failed` | `sdk_error` | The CLI/SDK failed, or the provider reported a failure; read `result.failure` first, then `error` and `final_text` (the original evidence). `maximum buffer size of N bytes` means one CLI message (such as a huge inline image) passed the SDK's 16 MiB limit: the message was refused, not cut short. The recorded task, session and existing files stay available to inspect; check them before deciding whether to resume for the remainder. |
 | `failed` | `resume_failed` | Claude could not resume the session (it may have been deleted). Nothing ran. |
 | `failed` | `tools_unavailable` | The session lacked a tool in `tools`; `error` names it and what was exposed. Stopped at the start. Retry without it. |
 | `failed` | `worker_died` | The worker vanished without recording an outcome. |
 | `cancelled` | `cancelled` | You cancelled it. |
+
+`result.failure` (set for `sdk_error`; absent on older tasks and every other
+outcome) classifies what was reported and says what to do next, without
+acting. `kind`: `usage_limit` (the runtime said an account limit was
+reached; `reset_text` keeps its reset wording, and `resets_at` is set only
+when that wording gave a full date with year, a time and an explicit zone: a
+bare `5:30am (UTC)` does not say which day), `authentication_or_access` (the
+runtime reported it; a 403 page does not tell you whether credentials, the
+account, a firewall or the network is at fault), `sdk_transport` (the SDK
+reported that the CLI process or message stream failed; not why, or whether
+the work was affected) or `unknown` (not recognised, conflicting, or an SDK
+error such as a missing `claude` executable; nothing is claimed). `evidence` is the original
+`subtype`/`is_error`/`stop_reason`/text: a `subtype` of `success` with
+`is_error` true is still an error. `advice.next_step` is inferred, never done
+for you: `wait_for_reset`, `repair_authentication` (check the worker's Claude
+login and access), `inspect_then_resume` (read the task's work first) or
+`investigate`. No retry, resume, account or credential change happens, and
+the failure says nothing about remaining allowance. `claude_list` shows
+`failure_kind`.
+
+If the operator declared an account context (`config.account_context` in
+the start result), a `usage_limit` with a dated `resets_at` is shared with
+other runs of the same label: `claude_start` returns `cooldown`
+(`resets_at`, `observed_at`, `task_id`, `advisory`) beside the new task, and
+a failed limit task's result shows the cooldown now on record. It is
+advisory: the task was started anyway, nothing queues or retries, and it
+says nothing of remaining allowance. A model turn that answers a later
+prompt clears it. An undated reset is never turned into a cooldown. With no
+label declared, nothing is shared.
 
 `final_text` is the agent's claim, including any "tests pass". Before you
 report the work as done, read the changed files or `git diff` and re-run the
