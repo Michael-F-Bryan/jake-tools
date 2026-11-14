@@ -1,0 +1,47 @@
+"""Init-only Artifact exposure probe. Outside the repository on purpose.
+
+Usage: probe_exposure.py LABEL OUTDIR SPEC_JSON
+SPEC_JSON keys: cli_path?, tools (list | "preset"), setting_sources?, env? , allowed_tools?
+Starts a session, records the init message (sanitised) and result, makes no
+tool call (prompt forbids tools; Artifact never called). No hosted writes.
+"""
+import asyncio, json, sys, tempfile, os, pathlib
+import claude_agent_sdk as sdk
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+
+label, outdir, spec = sys.argv[1], pathlib.Path(sys.argv[2]), json.loads(sys.argv[3])
+
+async def main():
+    cwd = tempfile.mkdtemp(prefix="probe-cwd-")
+    kw = dict(model="haiku", max_turns=1, cwd=cwd, permission_mode="dontAsk")
+    tools = spec.get("tools")
+    kw["tools"] = {"type": "preset", "preset": "claude_code"} if tools == "preset" else tools
+    if "setting_sources" in spec: kw["setting_sources"] = spec["setting_sources"]
+    if "cli_path" in spec: kw["cli_path"] = spec["cli_path"]
+    if "env" in spec: kw["env"] = spec["env"]
+    if "allowed_tools" in spec: kw["allowed_tools"] = spec["allowed_tools"]
+    opts = ClaudeAgentOptions(**kw)
+    ev = {"label": label, "sdk_version": __import__("importlib.metadata").metadata.version("claude-agent-sdk"),
+          "options": {k: (v if k != "cwd" else "<tmp>") for k, v in kw.items()}, "spec": spec}
+    stderr_lines = []
+    opts.stderr = lambda l: stderr_lines.append(l[:300])
+    init = None; result = None; err = None
+    try:
+        async with ClaudeSDKClient(opts) as c:
+            await c.query("Reply with exactly: OK. Do not use any tools.")
+            async for m in c.receive_response():
+                n = type(m).__name__
+                if n == "SystemMessage" and m.subtype == "init": init = m.data
+                if n == "ResultMessage": result = {"subtype": m.subtype, "is_error": m.is_error, "num_turns": m.num_turns, "total_cost_usd": m.total_cost_usd, "result": (m.result or "")[:80], "permission_denials": m.permission_denials}
+    except Exception as e:
+        err = f"{type(e).__name__}: {str(e)[:400]}"
+    if init:
+        ev["init"] = {"claude_code_version": init.get("claude_code_version"), "tools": init.get("tools"),
+                      "model": init.get("model"), "permissionMode": init.get("permissionMode"),
+                      "apiKeySource": init.get("apiKeySource"), "mcp_servers": init.get("mcp_servers"),
+                      "keys": sorted(init.keys()), "has_Artifact": "Artifact" in (init.get("tools") or [])}
+    ev["result"] = result; ev["error"] = err; ev["stderr_tail"] = stderr_lines[-5:]
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / f"{label}.json").write_text(json.dumps(ev, indent=1, default=str))
+    print(label, "init.tools=", (ev.get("init") or {}).get("tools"), "Artifact=", (ev.get("init") or {}).get("has_Artifact"), "ver=", (ev.get("init") or {}).get("claude_code_version"), "err=", err)
+asyncio.run(main())

@@ -1,0 +1,21 @@
+{
+ "command": "claude -p --model haiku --max-turns 1 --tools Read,Artifact --permission-mode dontAsk --output-format stream-json --verbose PROMPT",
+ "init": {
+  "builtin_tools": [
+   "Read"
+  ],
+  "claude_code_version": "2.1.325",
+  "connector_server_count": 6,
+  "connector_tool_count": 0,
+  "has_Artifact": false,
+  "permissionMode": "dontAsk"
+ },
+ "label": "E-claude-p-bundled-2.1.325",
+ "note": "effective CLAUDE_CODE_ENTRYPOINT was not observed",
+ "result": {
+  "is_error": false,
+  "num_turns": 1,
+  "subtype": "success",
+  "total_cost_usd": 0.0006418000000000001
+ }
+}

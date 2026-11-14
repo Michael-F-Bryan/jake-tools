@@ -1,0 +1,33 @@
+{
+ "error": null,
+ "init": {
+  "apiKeySource": "none",
+  "builtin_tools": [
+   "Read"
+  ],
+  "claude_code_version": "2.1.325",
+  "connector_server_count": 6,
+  "connector_tool_count": 0,
+  "has_Artifact": false,
+  "permissionMode": "dontAsk"
+ },
+ "label": "A-bundled-2.1.325-tools-Artifact-Read",
+ "options": {
+  "cwd": "<tmp>",
+  "max_turns": 1,
+  "model": "haiku",
+  "permission_mode": "dontAsk",
+  "tools": [
+   "Read",
+   "Artifact"
+  ]
+ },
+ "result": {
+  "is_error": false,
+  "num_turns": 1,
+  "permission_denials": [],
+  "subtype": "success",
+  "total_cost_usd": 0.00046620000000000006
+ },
+ "sdk_version": "0.2.182"
+}
