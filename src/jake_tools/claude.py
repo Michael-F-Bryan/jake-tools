@@ -42,6 +42,8 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     EffortLevel,
+    HookJSONOutput,
+    HookMatcher,
     McpServerConfig,
     Message,
     PermissionMode,
@@ -245,6 +247,12 @@ def unexposed_tools(requested: Iterable[str], exposed: Iterable[str]) -> list[st
     return missing
 
 
+ToolGuard = Callable[[str, dict[str, Any]], str | None]
+"""Decides one tool call before it runs: ``None`` lets it continue to the
+normal permission rules, a string denies it with that reason. See
+:attr:`AgentSpec.tool_guard`."""
+
+
 class AgentSpec(BaseModel):
     """How one agent call is configured.
 
@@ -272,6 +280,14 @@ class AgentSpec(BaseModel):
     settings); ``()`` isolates the run from every settings file. ``cwd`` and
     ``env`` are the subprocess's working directory and extra environment.
 
+    ``tool_guard`` is a caller's in-process check that runs before *every*
+    tool call, ahead of the permission rules. It is wired as a ``PreToolUse``
+    hook, which the CLI runs for calls an allow rule would approve too (a
+    ``can_use_tool`` callback is only consulted for calls that would prompt),
+    and a deny from it cannot be overridden by those rules. A guard that raises
+    denies the call. It is for code that must not rely on a prompt to keep a
+    model inside its authority; it is not exposed to task callers.
+
     ``local_tools`` are served in-process and auto-approved like ``tools``.
     ``session_id`` names the Claude session a fresh conversation creates;
     ``resume`` continues an existing one instead (the CLI keeps its ID and
@@ -298,6 +314,7 @@ class AgentSpec(BaseModel):
     setting_sources: tuple[SettingSource, ...] | None = None
     permission_mode: PermissionMode | None = None
     local_tools: tuple[LocalTool, ...] = ()
+    tool_guard: ToolGuard | None = Field(default=None, exclude=True)
     session_id: str | None = None
     resume: str | None = None
     max_buffer_size: int = Field(default=DEFAULT_MAX_BUFFER_SIZE, gt=0)
@@ -356,11 +373,40 @@ class AgentSpec(BaseModel):
                 None if self.setting_sources is None else list(self.setting_sources)
             ),
             permission_mode=self.permission_mode,
+            hooks=_guard_hooks(self.tool_guard),
             session_id=self.session_id,
             resume=self.resume,
             max_buffer_size=self.max_buffer_size,
             extra_args=dict(extra_args or {}),
         )
+
+
+def _guard_hooks(guard: ToolGuard | None) -> dict[Any, list[HookMatcher]] | None:
+    """The ``PreToolUse`` hook that runs ``guard`` for every tool call."""
+    if guard is None:
+        return None
+
+    async def pre_tool_use(
+        input_data: Any, tool_use_id: str | None, context: Any
+    ) -> HookJSONOutput:
+        try:
+            reason = guard(
+                str(input_data.get("tool_name")),
+                dict(input_data.get("tool_input") or {}),
+            )
+        except Exception as exc:
+            reason = f"the tool guard failed ({type(exc).__name__}); call denied"
+        if reason is None:
+            return {}
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }
+
+    return {"PreToolUse": [HookMatcher(matcher=None, hooks=[pre_tool_use])]}
 
 
 def _sdk_tool(local: LocalTool) -> SdkMcpTool[Any]:

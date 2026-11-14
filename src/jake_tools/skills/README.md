@@ -12,6 +12,7 @@ judgement belongs here.
 | `clockify-time` | Read authenticated-user history; exact Jira-key work-item lookup (resolved/ambiguous/not found/incomplete) or the full catalogue, and when to reuse a persisted one; create one verified completed entry; uncertain-write recovery. |
 | `clockify-jira-sync` | Jira placement/naming, selection scope, read-only preview, digest-bound apply, conflicts and partial failure. |
 | `transcription` | Transcribe/diarise audio local to jake-tools with `transcribe`; what timestamps, file spans, anonymous speakers and `overlap` promise, and how to handle each error. |
+| `artifact-publishing` | Publish an existing HTML file as a new private Claude Artifact and read one back; what the readback proves (and the document shell), the undocumented mechanism, retry safety. |
 | `clockify-time/references/direct-api-workflows.md` | Separately authorised manual fallback for unsupported cleanup, duplicate migration and exact-ID entry edits. Not implemented MCP tools. |
 
 ## Migration from broad shared skills

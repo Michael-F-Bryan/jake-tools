@@ -1,0 +1,60 @@
+{
+ "error": null,
+ "init": {
+  "apiKeySource": "none",
+  "builtin_tools": [
+   "Task",
+   "Bash",
+   "CronCreate",
+   "CronDelete",
+   "CronList",
+   "DesignSync",
+   "Edit",
+   "EnterWorktree",
+   "ExitWorktree",
+   "ListAgents",
+   "Monitor",
+   "NotebookEdit",
+   "PushNotification",
+   "Read",
+   "RemoteTrigger",
+   "ReportFindings",
+   "ScheduleWakeup",
+   "SendMessage",
+   "Skill",
+   "TaskStop",
+   "ToolSearch",
+   "WebFetch",
+   "WebSearch",
+   "Workflow",
+   "Write"
+  ],
+  "claude_code_version": "2.1.325",
+  "connector_server_count": 0,
+  "connector_tool_count": 0,
+  "has_Artifact": false,
+  "permissionMode": "dontAsk"
+ },
+ "label": "C-bundled-2.1.325-claude_code-preset-user",
+ "options": {
+  "cwd": "<tmp>",
+  "max_turns": 1,
+  "model": "haiku",
+  "permission_mode": "dontAsk",
+  "setting_sources": [
+   "user"
+  ],
+  "tools": {
+   "preset": "claude_code",
+   "type": "preset"
+  }
+ },
+ "result": {
+  "is_error": false,
+  "num_turns": 1,
+  "permission_denials": [],
+  "subtype": "success",
+  "total_cost_usd": 0.0038429000000000002
+ },
+ "sdk_version": "0.2.182"
+}

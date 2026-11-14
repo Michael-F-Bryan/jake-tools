@@ -1,0 +1,41 @@
+"""Single discriminating probe: UNDOCUMENTED CLAUDE_CODE_ARTIFACT=1 via ClaudeAgentOptions.env (process-local).
+
+Read-only: records init.tools; if Artifact is exposed, asks the model to LIST
+(not publish/edit). Saves only sanitised metadata: tool_use name/input, result
+is_error and length. Never saves result content (may hold private titles/URLs).
+"""
+import asyncio, json, sys, tempfile, importlib.metadata as md
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+
+out = sys.argv[1]
+async def main():
+    kw = dict(model="haiku", max_turns=3, cwd=tempfile.mkdtemp(prefix="probe-cwd-"), permission_mode="dontAsk",
+              tools=["Read", "Artifact"], allowed_tools=["Artifact"], env={"CLAUDE_CODE_ARTIFACT": "1"})
+    opts = ClaudeAgentOptions(**kw)
+    errs = []; opts.stderr = lambda l: errs.append(l[:200])
+    ev = {"sdk_version": md.version("claude-agent-sdk"), "undocumented_override": "CLAUDE_CODE_ARTIFACT=1 (process-local, options.env)",
+          "options": {k: (v if k != "cwd" else "<tmp>") for k, v in kw.items()}, "tool_uses": [], "tool_results": []}
+    try:
+        async with ClaudeSDKClient(opts) as c:
+            await c.query("If you have an Artifact tool, call it once to LIST my artifacts (list only: no publish, no edit, no create). "
+                          "Then reply with only how many artifacts there are. Do not print titles or URLs. If you have no Artifact tool, reply: NO_ARTIFACT_TOOL.")
+            async for m in c.receive_response():
+                n = type(m).__name__
+                if n == "SystemMessage" and m.subtype == "init":
+                    ev["init"] = {"claude_code_version": m.data.get("claude_code_version"), "tools": m.data.get("tools"),
+                                  "permissionMode": m.data.get("permissionMode"), "has_Artifact": "Artifact" in (m.data.get("tools") or [])}
+                elif n == "AssistantMessage":
+                    for b in m.content:
+                        if type(b).__name__ == "ToolUseBlock": ev["tool_uses"].append({"name": b.name, "input": b.input})
+                elif n == "UserMessage" and isinstance(m.content, list):
+                    for b in m.content:
+                        if type(b).__name__ == "ToolResultBlock":
+                            ev["tool_results"].append({"is_error": b.is_error, "content_chars": len(json.dumps(b.content, default=str))})
+                elif n == "ResultMessage":
+                    ev["result"] = {"subtype": m.subtype, "is_error": m.is_error, "num_turns": m.num_turns, "total_cost_usd": m.total_cost_usd,
+                                    "final_text": (m.result or "")[:120], "permission_denials": [d.get("tool_name") for d in (m.permission_denials or [])]}
+    except Exception as e:
+        ev["error"] = f"{type(e).__name__}: {str(e)[:300]}"
+    ev["stderr_tail"] = [l for l in errs[-5:] if "enterprise policy" not in l]
+    json.dump(ev, open(out, "w"), indent=1, default=str); print(json.dumps(ev, default=str)[:2500])
+asyncio.run(main())

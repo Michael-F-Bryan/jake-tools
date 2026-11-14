@@ -122,7 +122,11 @@ def test_workers_inherit_only_the_allowlist_and_never_secrets(tmp_path: Path) ->
 
 def test_hermes_schemas_match_the_mcp_servers(tmp_path: Path) -> None:
     config = load_config(
-        environ(tmp_path, TRANSCRIPTION_API_BASE_URL="https://example.invalid")
+        environ(
+            tmp_path,
+            TRANSCRIPTION_API_BASE_URL="https://example.invalid",
+            JAKE_TOOLS_ARTIFACTS_ENABLED="true",
+        )
     )
     mcp_tools = {
         tool.name: tool for tool in asyncio.run(build_server(config).list_tools())
@@ -271,10 +275,18 @@ def test_transcription_needs_its_endpoint(tmp_path: Path) -> None:
 
 
 def test_registered_skills_are_the_packaged_sources(tmp_path: Path) -> None:
-    config = config_for(tmp_path, {}, TRANSCRIPTION_API_BASE_URL="https://x.invalid")
+    config = config_for(
+        tmp_path,
+        {},
+        TRANSCRIPTION_API_BASE_URL="https://x.invalid",
+        JAKE_TOOLS_ARTIFACTS_ENABLED="true",
+    )
     ctx = RecordingContext()
     register_operations(
-        ctx, ("claude", "clockify", "transcription"), config, lambda: config
+        ctx,
+        ("artifact", "claude", "clockify", "transcription"),
+        config,
+        lambda: config,
     )
     assert sorted(ctx.skills) == sorted(path.name for path in packaged_skills())
     for name, path in ctx.skills.items():
@@ -291,3 +303,23 @@ def test_capability_settings_are_validated() -> None:
         configured_capabilities(["everything"])
     with pytest.raises(ValueError, match="list of names"):
         configured_capabilities("claude")
+
+
+def test_artifact_tools_need_both_the_capability_and_the_setting(
+    tmp_path: Path,
+) -> None:
+    disabled = config_for(tmp_path, {})
+    enabled = config_for(tmp_path, {}, JAKE_TOOLS_ARTIFACTS_ENABLED="true")
+
+    ctx = RecordingContext()
+    register_operations(ctx, ("artifact",), disabled, lambda: disabled)
+    assert ctx.tools == {}  # capability alone: the setting is off
+
+    ctx = RecordingContext()
+    register_operations(ctx, ("claude", "clockify"), enabled, lambda: enabled)
+    assert "artifact_publish" not in ctx.tools  # setting alone: no capability
+
+    ctx = RecordingContext()
+    register_operations(ctx, ("artifact",), enabled, lambda: enabled)
+    assert set(ctx.tools) == {"artifact_publish", "artifact_read"}
+    assert set(ctx.skills) == {"artifact-publishing"}

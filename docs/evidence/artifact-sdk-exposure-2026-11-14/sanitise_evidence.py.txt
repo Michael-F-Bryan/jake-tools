@@ -1,0 +1,41 @@
+"""Reduce raw probe output to machine-readable, account-neutral evidence.
+
+Keeps versions, options, built-in tool names, counts and result status.
+Drops: connector (mcp__*) tool and server names, stderr, session ids, cwd,
+result text beyond a short status, and any artifact titles/URLs (never stored).
+Usage: sanitise_evidence.py RAW_DIR OUT_DIR
+"""
+import json, pathlib, sys
+
+raw, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+out.mkdir(parents=True, exist_ok=True)
+
+def tools(init_tools):
+    t = init_tools or []
+    return {"builtin_tools": [x for x in t if not x.startswith("mcp__")], "connector_tool_count": sum(x.startswith("mcp__") for x in t)}
+
+for f in sorted(raw.glob("*.json")):
+    d = json.loads(f.read_text())
+    if "init" not in d:
+        continue
+    i = d["init"]
+    clean = {k: d[k] for k in ("label", "sdk_version", "options", "undocumented_override", "tool_uses", "tool_results") if k in d}
+    clean["init"] = {"claude_code_version": i.get("claude_code_version"), **tools(i.get("tools")),
+                     "has_Artifact": "Artifact" in (i.get("tools") or []), "permissionMode": i.get("permissionMode"),
+                     "apiKeySource": i.get("apiKeySource"), "connector_server_count": len(i.get("mcp_servers") or [])}
+    r = d.get("result")
+    if r:
+        clean["result"] = {k: r.get(k) for k in ("subtype", "is_error", "num_turns", "total_cost_usd", "permission_denials") if k in r}
+    clean["error"] = d.get("error")
+    (out / f.name).write_text(json.dumps(clean, indent=1, sort_keys=True) + "\n")
+
+e = raw / "E-claude-p-bundled-2.1.325.jsonl"
+if e.exists():
+    rec = {"label": "E-claude-p-bundled-2.1.325", "command": "claude -p --model haiku --max-turns 1 --tools Read,Artifact --permission-mode dontAsk --output-format stream-json --verbose PROMPT", "note": "effective CLAUDE_CODE_ENTRYPOINT was not observed"}
+    for line in e.read_text().splitlines():
+        m = json.loads(line)
+        if m.get("type") == "system" and m.get("subtype") == "init":
+            rec["init"] = {"claude_code_version": m["claude_code_version"], **tools(m["tools"]), "has_Artifact": "Artifact" in m["tools"], "permissionMode": m.get("permissionMode"), "connector_server_count": len(m.get("mcp_servers") or [])}
+        if m.get("type") == "result":
+            rec["result"] = {"subtype": m["subtype"], "is_error": m["is_error"], "num_turns": m["num_turns"], "total_cost_usd": m.get("total_cost_usd")}
+    (out / "E-claude-p-bundled-2.1.325.json").write_text(json.dumps(rec, indent=1, sort_keys=True) + "\n")

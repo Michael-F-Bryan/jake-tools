@@ -1,0 +1,56 @@
+{
+ "error": null,
+ "init": {
+  "apiKeySource": null,
+  "builtin_tools": [
+   "Artifact",
+   "ArtifactComments",
+   "ArtifactData",
+   "Read"
+  ],
+  "claude_code_version": "2.1.325",
+  "connector_server_count": 0,
+  "connector_tool_count": 62,
+  "has_Artifact": true,
+  "permissionMode": "dontAsk"
+ },
+ "options": {
+  "allowed_tools": [
+   "Artifact"
+  ],
+  "cwd": "<tmp>",
+  "env": {
+   "CLAUDE_CODE_ARTIFACT": "1"
+  },
+  "max_turns": 3,
+  "model": "haiku",
+  "permission_mode": "dontAsk",
+  "tools": [
+   "Read",
+   "Artifact"
+  ]
+ },
+ "result": {
+  "is_error": false,
+  "num_turns": 2,
+  "permission_denials": [],
+  "subtype": "success",
+  "total_cost_usd": 0.0171017
+ },
+ "sdk_version": "0.2.182",
+ "tool_results": [
+  {
+   "content_chars": 3541,
+   "is_error": null
+  }
+ ],
+ "tool_uses": [
+  {
+   "input": {
+    "action": "list"
+   },
+   "name": "Artifact"
+  }
+ ],
+ "undocumented_override": "CLAUDE_CODE_ARTIFACT=1 (process-local, options.env)"
+}

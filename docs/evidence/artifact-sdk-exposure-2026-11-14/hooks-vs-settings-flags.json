@@ -1,0 +1,45 @@
+[
+ {
+  "variant": "none",
+  "settings": null,
+  "hook_consulted": 1,
+  "tool_results": [
+   "PreToolUse:Read hook error: guard: secret.txt denied"
+  ],
+  "canary_read_despite_guard": false
+ },
+ {
+  "variant": "disableAllHooks",
+  "settings": {
+   "disableAllHooks": true
+  },
+  "hook_consulted": 1,
+  "tool_results": [
+   "PreToolUse:Read hook error: guard: secret.txt denied"
+  ],
+  "canary_read_despite_guard": false
+ },
+ {
+  "variant": "allowManagedHooksOnly",
+  "settings": {
+   "allowManagedHooksOnly": true
+  },
+  "hook_consulted": 1,
+  "tool_results": [
+   "PreToolUse:Read hook error: guard: secret.txt denied"
+  ],
+  "canary_read_despite_guard": false
+ },
+ {
+  "variant": "both",
+  "settings": {
+   "disableAllHooks": true,
+   "allowManagedHooksOnly": true
+  },
+  "hook_consulted": 1,
+  "tool_results": [
+   "PreToolUse:Read hook error: guard: secret.txt denied"
+  ],
+  "canary_read_despite_guard": false
+ }
+]

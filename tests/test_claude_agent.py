@@ -1,6 +1,7 @@
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from claude_agent_sdk import (
@@ -808,3 +809,60 @@ def test_describe_drops_thinking_and_flattens_tool_activity() -> None:
     assert result.result is not None
     assert result.result.text == "done"
     assert result.result.usage.estimated_cost_usd == 0.02
+
+
+# -- AgentSpec.tool_guard ---------------------------------------------------------
+
+
+async def _run_hook(
+    spec: AgentSpec, tool: str, tool_input: dict[str, object]
+) -> dict[str, Any]:
+    options = spec.to_options()
+    assert options.hooks is not None
+    (matcher,) = options.hooks["PreToolUse"]
+    assert matcher.matcher is None  # every tool
+    (hook,) = matcher.hooks
+    event = cast(Any, {"tool_name": tool, "tool_input": tool_input})
+    return cast(dict[str, Any], await hook(event, "tu-1", cast(Any, None)))
+
+
+def test_no_guard_means_no_hooks() -> None:
+    assert AgentSpec().to_options().hooks is None
+
+
+async def test_a_guard_becomes_a_pre_tool_use_hook_that_can_only_deny() -> None:
+    seen: list[tuple[str, dict[str, object]]] = []
+
+    def guard(tool: str, tool_input: dict[str, object]) -> str | None:
+        seen.append((tool, tool_input))
+        return None if tool == "Read" else f"{tool} is not allowed"
+
+    spec = AgentSpec(
+        tools=("Read", "Bash"), allowed_tools=("Read", "Bash"), tool_guard=guard
+    )
+    assert await _run_hook(spec, "Read", {"file_path": "/a"}) == {}
+    denied = await _run_hook(spec, "Bash", {"command": "ls"})
+    assert denied == {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "Bash is not allowed",
+        }
+    }
+    assert seen == [("Read", {"file_path": "/a"}), ("Bash", {"command": "ls"})]
+
+
+async def test_a_guard_that_raises_denies() -> None:
+    def guard(tool: str, tool_input: dict[str, object]) -> str | None:
+        raise RuntimeError("boom")
+
+    out = await _run_hook(AgentSpec(tool_guard=guard), "Read", {})
+    decision = out["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert "RuntimeError" in decision["permissionDecisionReason"]
+
+
+def test_the_guard_is_never_serialised_with_the_spec() -> None:
+    spec = AgentSpec(tool_guard=lambda tool, tool_input: None)
+    assert "tool_guard" not in spec.model_dump()
+    assert AgentSpec().merge(spec).tool_guard is spec.tool_guard
