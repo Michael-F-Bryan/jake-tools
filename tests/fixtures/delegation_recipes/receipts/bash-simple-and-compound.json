@@ -1,0 +1,100 @@
+{
+  "cli_version": "2.1.318 (Claude Code)",
+  "effort": "low",
+  "model": "claude-haiku-4-5",
+  "outcome": {
+    "approval_rules": [
+      "Bash(touch approved-*)"
+    ],
+    "exposed_tools": [
+      "Bash"
+    ],
+    "files_changed": {
+      "approved-1": "",
+      "approved-3": "",
+      "approved-4": "",
+      "approved-6": ""
+    },
+    "files_removed": [],
+    "final_text": "DONE\n\nAll 6 bash commands have been executed in order as requested:\n\n1. ✓ `touch approved-1` - succeeded\n2. ✗ `cd sub && touch approved-2` - **permission denied**\n3. ✓ `touch approved-3 && touch approved-4` - succeeded\n4. ✗ `touch approved-5; touch denied-5` - **permission denied**\n5. ✓ `touch approved-6 | cat` - succeeded\n6. ✓ `ls` - succeeded\n\nThe final `ls` output shows the files that were created: `approved-1`, `approved-3`, `approved-4`, and `approved-6`.",
+    "handoff": null,
+    "invocation_cost_usd": 0.025768399999999997,
+    "permission_denials": [
+      {
+        "requested": "cd sub && touch approved-2",
+        "source": "runtime",
+        "tool": "Bash"
+      },
+      {
+        "requested": "touch approved-5; touch denied-5",
+        "source": "runtime",
+        "tool": "Bash"
+      }
+    ],
+    "status": "completed",
+    "termination_reason": "finished",
+    "tool_calls": [
+      {
+        "error": false,
+        "input": {
+          "command": "touch approved-1",
+          "description": "Create file approved-1"
+        },
+        "tool": "Bash"
+      },
+      {
+        "error": true,
+        "input": {
+          "command": "cd sub && touch approved-2",
+          "description": "Change to sub directory and create file approved-2"
+        },
+        "tool": "Bash"
+      },
+      {
+        "error": false,
+        "input": {
+          "command": "touch approved-3 && touch approved-4",
+          "description": "Create files approved-3 and approved-4"
+        },
+        "tool": "Bash"
+      },
+      {
+        "error": true,
+        "input": {
+          "command": "touch approved-5; touch denied-5",
+          "description": "Create files approved-5 and denied-5"
+        },
+        "tool": "Bash"
+      },
+      {
+        "error": false,
+        "input": {
+          "command": "touch approved-6 | cat",
+          "description": "Create file approved-6 and pipe to cat"
+        },
+        "tool": "Bash"
+      },
+      {
+        "error": false,
+        "input": {
+          "command": "ls",
+          "description": "List files in current directory"
+        },
+        "tool": "Bash"
+      }
+    ]
+  },
+  "request": {
+    "allowed_tools": [
+      "Bash(touch approved-*)"
+    ],
+    "brief": "Make each of these Bash tool calls exactly once, in this order, as written, even if one fails or is denied. Do not try any other command or tool. Then reply DONE.\n1. touch approved-1\n2. cd sub && touch approved-2\n3. touch approved-3 && touch approved-4\n4. touch approved-5; touch denied-5\n5. touch approved-6 | cat\n6. ls",
+    "max_budget_usd": 0.25,
+    "max_turns": 10,
+    "timeout_seconds": 300,
+    "tools": [
+      "Bash"
+    ],
+    "working_directory": "/abs/path/to/project"
+  }
+}

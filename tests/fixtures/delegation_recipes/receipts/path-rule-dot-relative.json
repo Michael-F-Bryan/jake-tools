@@ -1,0 +1,91 @@
+{
+  "cli_version": "2.1.318 (Claude Code)",
+  "effort": "low",
+  "model": "claude-haiku-4-5",
+  "outcome": {
+    "approval_rules": [
+      "Edit(./out/**)"
+    ],
+    "exposed_tools": [
+      "Edit",
+      "Read",
+      "Write"
+    ],
+    "files_changed": {
+      "out/abs.txt": "abs",
+      "out/existing.txt": "new",
+      "out/rel.txt": "rel"
+    },
+    "files_removed": [],
+    "final_text": "DONE",
+    "handoff": null,
+    "invocation_cost_usd": 0.027094800000000002,
+    "permission_denials": [
+      {
+        "requested": "/abs/path/to/project/outside/b.txt",
+        "source": "runtime",
+        "tool": "Write"
+      }
+    ],
+    "status": "completed",
+    "termination_reason": "finished",
+    "tool_calls": [
+      {
+        "error": false,
+        "input": {
+          "content": "rel",
+          "file_path": "/abs/path/to/project/out/rel.txt"
+        },
+        "tool": "Write"
+      },
+      {
+        "error": false,
+        "input": {
+          "content": "abs",
+          "file_path": "/abs/path/to/project/out/abs.txt"
+        },
+        "tool": "Write"
+      },
+      {
+        "error": true,
+        "input": {
+          "content": "b",
+          "file_path": "/abs/path/to/project/outside/b.txt"
+        },
+        "tool": "Write"
+      },
+      {
+        "error": false,
+        "input": {
+          "file_path": "/abs/path/to/project/out/existing.txt"
+        },
+        "tool": "Read"
+      },
+      {
+        "error": false,
+        "input": {
+          "file_path": "/abs/path/to/project/out/existing.txt",
+          "new_string": "new",
+          "old_string": "old",
+          "replace_all": false
+        },
+        "tool": "Edit"
+      }
+    ]
+  },
+  "request": {
+    "allowed_tools": [
+      "Edit(./out/**)"
+    ],
+    "brief": "Make each of these four tool calls exactly once, in this order, even if one fails or is denied. Do not try any other tool or any other way to write a file. Then reply DONE.\n1. Write the file out/rel.txt containing `rel`.\n2. Write the file /abs/path/to/project/out/abs.txt containing `abs` (absolute path).\n3. Write the file outside/b.txt containing `b`.\n4. Read out/existing.txt, then Edit it replacing `old` with `new`.",
+    "max_budget_usd": 0.25,
+    "max_turns": 10,
+    "timeout_seconds": 300,
+    "tools": [
+      "Read",
+      "Write",
+      "Edit"
+    ],
+    "working_directory": "/abs/path/to/project"
+  }
+}

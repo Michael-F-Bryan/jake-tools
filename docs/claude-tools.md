@@ -112,6 +112,34 @@ Haiku, `dontAsk`, no settings files, through the real server and worker
   record or system message. The worker records such a call from those
   exact error openings, labelled `source: inferred_from_tool_error`.
 
+### Re-checked on CLI 2.1.318 (2026-11-14): recipes and the rule matrix
+
+Haiku, `dontAsk`, no settings files, through the real server and worker, on
+synthetic local files. `tests/test_delegation_recipes_live.py` (`--slow`) runs
+the copyable recipes in the packaged skill reference
+`claude-delegation/references/recipes.md` verbatim and the matrix below; the
+sanitised briefs, grants, tool calls, denials and files are kept in
+`tests/fixtures/delegation_recipes/receipts/`.
+
+- `Edit(./out/**)`, `Edit(out/**)`, `Edit(/out/**)` and
+  `Edit(//abs/path/out/**)` approved `Write` and `Edit` under `out/`, whether
+  the call named the path relative or absolute, and denied `outside/b.txt`.
+  `Edit(/abs/path/out/**)` (one slash: relative to the project) and
+  `Write(./out/**)` approved nothing.
+- With `Bash(touch approved-*)`: `touch approved-1`,
+  `touch approved-3 && touch approved-4` and `touch approved-6 | cat` ran;
+  `cd sub && touch approved-2` and `touch approved-5; touch denied-5` were
+  denied as a whole (nothing ran, including the matching `touch`).
+- A task whose grant was `Write(./reports/**)` drafted a memo, had its save
+  denied and ended `completed` with no handoff; resuming it with
+  `tools: [Write, Edit]` and `Edit(./reports/**)` made one `Write` of the same
+  text and nothing else (hermetically pinned against the receipts). With the
+  checkpoint first, the same wrong grant stopped the worker after one denied
+  call, before it read anything.
+
+These are a few small runs of one model: they establish what the runtime did
+here, not a general rule.
+
 ## Artifact publishing: off by default in SDK sessions; an experimental route
 
 The first useful slice (issue #15) is to publish an existing self-contained

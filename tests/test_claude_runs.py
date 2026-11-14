@@ -27,7 +27,6 @@ from mcp.types import TextContent
 from pydantic import ValidationError
 
 from jake_tools.claude_runs import (
-    MAX_LIVE_TASKS,
     CapacityExceededError,
     RunDefaults,
     RunSpec,
@@ -495,7 +494,7 @@ def test_start_task_refuses_a_third_live_task_without_creating_anything(
     tmp_path: Path, live_group: Callable[[], int]
 ) -> None:
     runs_dir = tmp_path / "runs"
-    for _ in range(MAX_LIVE_TASKS):
+    for _ in range(DEFAULTS.max_live_tasks):
         _working(runs_dir, tmp_path, live_group())
     before = sorted(p.name for p in runs_dir.iterdir() if not p.name.startswith("."))
     request = StartRequest(brief="x", working_directory=tmp_path)
@@ -503,7 +502,7 @@ def test_start_task_refuses_a_third_live_task_without_creating_anything(
     with pytest.raises(CapacityExceededError) as info:
         start_task(runs_dir, request, DEFAULTS)
 
-    assert info.value.live == MAX_LIVE_TASKS
+    assert info.value.live == DEFAULTS.max_live_tasks
     after = sorted(p.name for p in runs_dir.iterdir() if not p.name.startswith("."))
     assert after == before  # only the runs lock file may have appeared
 
@@ -1089,7 +1088,7 @@ async def test_stdio_capacity_exceeded_with_two_live_groups(
     live_group: Callable[[], int],
 ) -> None:
     runs_dir = mcp_home / ".local" / "state" / "jake-tools" / "runs"
-    for _ in range(MAX_LIVE_TASKS):
+    for _ in range(DEFAULTS.max_live_tasks):
         _working(runs_dir, mcp_home, live_group())
 
     async with mcp_server(mcp_env) as session:
@@ -1101,11 +1100,13 @@ async def test_stdio_capacity_exceeded_with_two_live_groups(
     assert result.structured_content is not None
     assert result.structured_content["code"] == "capacity_exceeded"
     assert result.structured_content["detail"] == {
-        "live": MAX_LIVE_TASKS,
-        "limit": MAX_LIVE_TASKS,
+        "live": DEFAULTS.max_live_tasks,
+        "limit": DEFAULTS.max_live_tasks,
     }
     task_dirs = [p for p in runs_dir.iterdir() if not p.name.startswith(".")]
-    assert len(task_dirs) == MAX_LIVE_TASKS  # nothing created; only the lock file
+    assert (
+        len(task_dirs) == DEFAULTS.max_live_tasks
+    )  # nothing created; only the lock file
 
 
 @pytest.fixture

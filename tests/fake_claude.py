@@ -55,6 +55,7 @@ import sys
 import threading
 import time
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -292,6 +293,7 @@ class Session:
         denials: list[dict[str, Any]] | None = None,
         turns: int | None = None,
         cost: float = 0.01,
+        envelope: dict[str, Any] | None = None,
     ) -> None:
         self.data["cost"] = round(self.data["cost"] + cost, 6)
         self.save()
@@ -316,6 +318,7 @@ class Session:
                 "errors": [] if subtype == "success" else [f"fake {subtype}"],
                 "permission_denials": denials or [],
                 "uuid": str(uuid.uuid4()),
+                **(envelope or {}),
             }
         )
 
@@ -649,12 +652,57 @@ class Session:
         self.say({"type": "text", "text": "Partial progress before the limit."})
         self.result("partial answer", subtype="error_max_turns")
 
+    def turn_reported_failure(self, text: str) -> None:
+        """The error envelopes reported in jake-tools#14, as the CLI sent them:
+        ``subtype`` ``success`` with ``is_error`` true, the provider's words in
+        ``result`` and no ``errors``. ``ARG`` picks the words; no model turn."""
+        words, errors = REPORTED_FAILURES[self.arg or "limit"]
+        if self.arg == "limit_full_date":  # a date that is always in the future
+            then = datetime.now(UTC) + timedelta(days=2)
+            words = (
+                f"You've hit your weekly limit · resets {then:%b} {then.day}, "
+                f"{then:%Y}, 5:30am (UTC)"
+            )
+        self.result(
+            words,
+            turns=0,
+            envelope={
+                "is_error": True,
+                "stop_reason": "stop_sequence",
+                "errors": errors,
+            },
+        )
+
     def turn_remember(self, text: str) -> None:
         if "[[hold]]" in text:
             self.turn_hang(text)
         first = self.data["user_messages"][0]
         self.say({"type": "text", "text": f"REMEMBERED: {first}"})
         self.result(f"REMEMBERED: {first}")
+
+
+REPORTED_FAILURES: dict[str, tuple[str, list[str]]] = {
+    # jake-tools#14: task 20261110T023018Z-caee655b… and the three after it.
+    "limit": ("You've hit your 5-hour limit · resets 5:30am (UTC)", []),
+    # Task 20261113T094814Z-c619028d…: the text alone does not say why.
+    "auth": (
+        "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare",
+        [],
+    ),
+    # Limits whose reset cannot be read as one instant.
+    "limit_pst": ("You've hit your 5-hour limit · resets 5:30am (PST)", []),
+    "limit_dated": ("You've hit your weekly limit · resets Nov 17, 5am (UTC)", []),
+    "limit_full_date": ("", []),  # filled in when sent
+    "limit_no_reset": ("You've hit your limit", []),
+    "unknown": ("Something went wrong that no one has seen before", ["boom"]),
+    # Prose that merely quotes a limit message is not a report of one.
+    "quoted": ("I could not finish. The log said: You've hit your 5-hour limit", []),
+    # Two different reports in one envelope stay unclassified.
+    "conflict": (
+        "You've hit your limit",
+        ["Failed to authenticate. API Error: 401"],
+    ),
+}
 
 
 def parse_args(argv: list[str]) -> dict[str, str | None]:

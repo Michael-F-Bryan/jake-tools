@@ -56,6 +56,13 @@ files. Put in the brief: the goal; context it can't discover; exact paths
 check itself; and what its final message must contain (that comes back as
 `final_text`).
 
+Copyable, runtime-tested starting points (read-only review, scoped output
+with a tiny checkpoint, completion-only continuation) and what the runtime
+did with each path and Bash rule form are in `references/recipes.md`
+(`skill://claude-delegation/references/recipes.md` over MCP,
+`skill_view("jake-tools:claude-delegation", file_path="references/recipes.md")`
+in Hermes). Always give `working_directory` yourself; never guess it.
+
 ## 2. Grant the smallest set of tools
 
 Two separate lists:
@@ -75,7 +82,11 @@ Two separate lists:
   - `"Read"` approves every `Read` call.
   - `"Bash(git status)"` approves only that command.
   - `"Bash(uv run pytest *)"` approves that command with any arguments.
-  - `"Edit(/src/**)"` approves edits to paths matching the pattern.
+  - `"Edit(./src/**)"` approves edits to paths under `src/` in the working
+    directory. Path rules for writes are `Edit(...)`, which covers `Write`
+    too: `Write(./src/**)` approved nothing. `/src/**` is also relative to the
+    working directory; an absolute path is `//abs/path/**`. Details and
+    compound Bash behaviour: `references/recipes.md`.
   - `"WebFetch(domain:example.com)"` approves fetches from that domain.
 
   If you omit `allowed_tools`, every tool in `tools` is approved outright.
@@ -134,7 +145,16 @@ request returns the original task (`replayed: true`, its current `status`),
 even when capacity is full. The same `request_id` with a different request
 is `request_conflict`.
 
-At most two tasks run at once (`capacity_exceeded`, no queue).
+How many tasks may run at once is operator policy, not a protocol constant:
+the server's `claude.max_live_tasks` (default 2; it is not a universal two).
+A start while the live tasks in the shared runs directory number at least that
+server's limit is `capacity_exceeded` (no queue); `detail.live` and
+`detail.limit` are the live count and that server's configured limit. Do not
+assume a number: read them from the error, and retry with the same `request_id`
+once a task ends. Servers sharing a runs directory share the live count, not the
+limit: each applies its own, so mixed settings give no common ceiling. Lowering
+the limit below the live count cancels nothing; starts are refused until fewer
+tasks than the limit are live. More local slots do not add provider quota.
 
 ## 4. Watch with `claude_poll`
 
@@ -281,11 +301,40 @@ the task ended mid-prompt, so its cost was never reported), the full
 | --- | --- | --- |
 | `completed` | `finished` | Ended normally. **Not proof the work is right.** |
 | `failed` | `max_turns`, `budget`, `timeout` | Hit a limit; partial work stays on disk. |
-| `failed` | `sdk_error` | The CLI/SDK failed (auth problems show here); see `error`. `maximum buffer size of N bytes` means one CLI message (such as a huge inline image) passed the SDK's 16 MiB limit: the message was refused, not cut short. The recorded task, session and existing files stay available to inspect; check them before deciding whether to resume for the remainder. |
+| `failed` | `sdk_error` | The CLI/SDK failed, or the provider reported a failure; read `result.failure` first, then `error` and `final_text` (the original evidence). `maximum buffer size of N bytes` means one CLI message (such as a huge inline image) passed the SDK's 16 MiB limit: the message was refused, not cut short. The recorded task, session and existing files stay available to inspect; check them before deciding whether to resume for the remainder. |
 | `failed` | `resume_failed` | Claude could not resume the session (it may have been deleted). Nothing ran. |
 | `failed` | `tools_unavailable` | The session lacked a tool in `tools`; `error` names it and what was exposed. Stopped at the start. Retry without it. |
 | `failed` | `worker_died` | The worker vanished without recording an outcome. |
 | `cancelled` | `cancelled` | You cancelled it. |
+
+`result.failure` (set for `sdk_error`; absent on older tasks and every other
+outcome) classifies what was reported and says what to do next, without
+acting. `kind`: `usage_limit` (the runtime said an account limit was
+reached; `reset_text` keeps its reset wording, and `resets_at` is set only
+when that wording gave a full date with year, a time and an explicit zone: a
+bare `5:30am (UTC)` does not say which day), `authentication_or_access` (the
+runtime reported it; a 403 page does not tell you whether credentials, the
+account, a firewall or the network is at fault), `sdk_transport` (the SDK
+reported that the CLI process or message stream failed; not why, or whether
+the work was affected) or `unknown` (not recognised, conflicting, or an SDK
+error such as a missing `claude` executable; nothing is claimed). `evidence` is the original
+`subtype`/`is_error`/`stop_reason`/text: a `subtype` of `success` with
+`is_error` true is still an error. `advice.next_step` is inferred, never done
+for you: `wait_for_reset`, `repair_authentication` (check the worker's Claude
+login and access), `inspect_then_resume` (read the task's work first) or
+`investigate`. No retry, resume, account or credential change happens, and
+the failure says nothing about remaining allowance. `claude_list` shows
+`failure_kind`.
+
+If the operator declared an account context (`config.account_context` in
+the start result), a `usage_limit` with a dated `resets_at` is shared with
+other runs of the same label: `claude_start` returns `cooldown`
+(`resets_at`, `observed_at`, `task_id`, `advisory`) beside the new task, and
+a failed limit task's result shows the cooldown now on record. It is
+advisory: the task was started anyway, nothing queues or retries, and it
+says nothing of remaining allowance. A model turn that answers a later
+prompt clears it. An undated reset is never turned into a cooldown. With no
+label declared, nothing is shared.
 
 `final_text` is the agent's claim, including any "tests pass". Before you
 report the work as done, read the changed files or `git diff` and re-run the
@@ -301,6 +350,8 @@ that task's Claude conversation as a **new** task, with the same
 - Nothing is inherited except the conversation. `tools`,
   `allowed_tools`, limits and `allow_questions` are this call's own.
 - `working_directory` must be the parent's (omit it to use the parent's).
+- To save work a task drafted but could not save, resume with the corrected
+  grant and only the save as the delta (`references/recipes.md`, recipe 3).
 - Only the session's latest task can be resumed. An older one returns
   `resume_unavailable` with `detail.latest_task_id`.
 - A still-running parent, or another live task on the session, returns
@@ -332,7 +383,7 @@ repeats the message for the host. The codes and argument details are shared:
 | `code` | Cause |
 | --- | --- |
 | `invalid_argument` | `detail.argument` names it. Causes: bad path, empty brief, a malformed tool name, a rule in `tools`, an `allowed_tools` rule that is malformed or names a tool not in `tools`, bad limit, a value outside its schema bounds or enum, a bad transcript cursor, malformed response. (A bad poll token is not an error: it resynchronises.) |
-| `capacity_exceeded` | Two tasks are already running. |
+| `capacity_exceeded` | The live tasks have reached this server's configured limit (`detail.live`, `detail.limit`; default 2, not universal). No queue. |
 | `unknown_task` | No such task ID in this server's runs directory. |
 | `request_conflict` | `request_id`/`message_id` reused with a different payload. |
 | `session_busy` | The session to resume is being written by a live task. |

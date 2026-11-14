@@ -38,7 +38,8 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from ..claude import EffortLevel, permission_rule_tool
-from ..config import Config
+from ..config import DEFAULT_CLAUDE_MAX_LIVE_TASKS, Config
+from . import cooldowns
 from .events import EventLog
 from .inbox import Inbox
 from .models import (
@@ -80,8 +81,24 @@ from .spawn import (
     worker_alive,
 )
 
-MAX_LIVE_TASKS = 2
-"""At most this many run directories may have a live worker."""
+DEFAULT_MAX_LIVE_TASKS = DEFAULT_CLAUDE_MAX_LIVE_TASKS
+"""The limit when nothing configures ``claude.max_live_tasks``: two.
+
+Capacity semantics, which are exactly what :func:`start_task` does:
+
+* The live count is shared: every run directory in ``<runs_dir>`` whose worker
+  is alive, whichever process started it and under whatever limit.
+* The limit is the *admitting* process's own :attr:`RunDefaults.max_live_tasks`.
+  A start is admitted only if ``live < limit`` under ``.runs.lock``. So servers
+  configured differently over one runs directory do not share a ceiling: the
+  limit-2 server refuses at two live tasks while a limit-3 server admits a
+  third, after which the limit-2 server refuses until fewer than two are live.
+  Nothing records or negotiates a directory-wide limit, by design (no
+  coordination store); keep one value for every process sharing a directory.
+* Lowering the limit below the live count never cancels or otherwise touches
+  a live task. New starts are refused (``live`` > ``limit`` is reported as it
+  is) until enough tasks end for ``live < limit``.
+"""
 
 STARTUP_GRACE = timedelta(seconds=60)
 """How long a task may exist without ``process.json`` before it reads as dead.
@@ -93,9 +110,17 @@ spawning, and then the task must not hold a capacity slot forever.
 
 
 class CapacityExceededError(RuntimeError):
+    """The admitting process's configured limit is reached.
+
+    ``limit`` is that process's ``claude.max_live_tasks``, ``live`` the tasks
+    with a live worker in the shared runs directory (possibly more than the
+    limit after it was lowered). Not a queue: retry once a task has ended.
+    """
+
     def __init__(self, live: int, limit: int) -> None:
         super().__init__(
-            f"{live} delegated task(s) already running; the limit is {limit}"
+            f"{live} delegated task(s) already running; this server's "
+            f"configured limit is {limit} (claude.max_live_tasks)"
         )
         self.live = live
         self.limit = limit
@@ -160,6 +185,9 @@ class RunDefaults(BaseModel):
     max_turns: int = Field(ge=1)
     timeout_seconds: float = Field(gt=0)
     max_budget_usd: float = Field(gt=0)
+    account_context: str | None = None
+    max_live_tasks: int = Field(default=DEFAULT_MAX_LIVE_TASKS, ge=1)
+    """Admission limit applied by the process holding these defaults."""
 
     @classmethod
     def from_config(cls, config: Config) -> RunDefaults:
@@ -169,6 +197,8 @@ class RunDefaults(BaseModel):
             max_turns=config.claude_max_turns.value,
             timeout_seconds=config.claude_timeout_seconds.value,
             max_budget_usd=config.claude_max_budget_usd.value,
+            account_context=config.claude_account_context.value,
+            max_live_tasks=config.claude_max_live_tasks.value,
         )
 
 
@@ -310,6 +340,7 @@ class StartRequest(BaseModel):
             cost_baseline_usd=cost_baseline_usd,
             cost_baseline_exact=cost_baseline_exact,
             allow_questions=self.allow_questions,
+            account_context=defaults.account_context,
         )
 
 
@@ -332,7 +363,8 @@ def start_task(
     session or the working directory differs, :class:`SessionBusyError`
     when it is still running or another live task writes its session,
     :class:`CapacityExceededError` before anything is created when
-    :data:`MAX_LIVE_TASKS` tasks already have a live worker, and
+    ``defaults.max_live_tasks`` tasks already have a live worker (the
+    admitting process's own limit; see :data:`DEFAULT_MAX_LIVE_TASKS`), and
     :class:`WorkerSpawnError` (after recording ``failed`` / ``worker_died``
     in the new directory) when the worker cannot start.
     """
@@ -346,8 +378,8 @@ def start_task(
         working_directory, session_id, baseline, exact = _session_for_locked(
             runs_dir, request, live
         )
-        if len(live) >= MAX_LIVE_TASKS:
-            raise CapacityExceededError(len(live), MAX_LIVE_TASKS)
+        if len(live) >= defaults.max_live_tasks:
+            raise CapacityExceededError(len(live), defaults.max_live_tasks)
 
         spec = request.to_spec(
             new_task_id(),
@@ -397,6 +429,7 @@ def start_task(
         session_id=spec.session_id,
         resumed_from=spec.resume_task_id,
         request_id=spec.request_id,
+        cooldown=cooldowns.active(runs_dir, spec.account_context),
     )
 
 

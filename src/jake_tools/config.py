@@ -27,9 +27,17 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import Annotated, Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    ValidationError,
+)
 
 from .claude import DEFAULT_MODEL, EffortLevel
 from .clockify import CLOCKIFY_API_ROOT
@@ -63,6 +71,13 @@ DEFAULT_CLOCKIFY_CLIENT = "Sunfish Robotics"
 DEFAULT_CLAUDE_MAX_TURNS = 20
 DEFAULT_CLAUDE_TIMEOUT_SECONDS = 900.0
 DEFAULT_CLAUDE_MAX_BUDGET_USD = 5.0
+DEFAULT_CLAUDE_MAX_LIVE_TASKS = 2
+"""Delegated tasks one admitting process lets run at once, unless configured.
+
+Jake policy, not an MCP or Claude constraint. The default is the original
+fixed two. See :class:`~jake_tools.claude_runs.control.CapacityExceededError`
+and ``claude_runs/control.py`` for the exact (per-admitting-process) semantics.
+"""
 DEFAULT_TRANSCRIPTION_TIMEOUT_SECONDS = 1800.0
 """How long one transcription call may take, including inference.
 
@@ -193,6 +208,17 @@ class Config(BaseModel):
     claude_max_turns: Resolved[int]
     claude_timeout_seconds: Resolved[float]
     claude_max_budget_usd: Resolved[float]
+    claude_max_live_tasks: Resolved[int]
+    """The most delegated tasks *this process* admits while they are live in
+    the shared runs directory (``claude.max_live_tasks``, a positive
+    integer). Every process applies its own value to the one shared live
+    count, so processes configured differently do not share a ceiling; see
+    ``claude_runs/control.py``."""
+    claude_account_context: Resolved[str | None]
+    """An operator-declared, non-secret label for the Claude account context
+    this installation runs under. Unset (the default) means no cooldown
+    sharing. Nothing infers or verifies it: equal labels are the operator's
+    statement that the runs share one quota."""
 
     transcription_api_base_url: Resolved[str | None]
     transcription_api_token: Resolved[str | None]
@@ -229,6 +255,8 @@ class Config(BaseModel):
             self.claude_max_turns,
             self.claude_timeout_seconds,
             self.claude_max_budget_usd,
+            self.claude_max_live_tasks,
+            self.claude_account_context,
             self.transcription_api_base_url,
             self.transcription_api_token,
             self.transcription_timeout_seconds,
@@ -276,9 +304,31 @@ class _Spec[T]:
 
 _STR = TypeAdapter(str)
 _OPTIONAL_STR = TypeAdapter(str | None)
+ACCOUNT_CONTEXT_PATTERN = r"^[A-Za-z0-9._:-]{1,64}$"
+"""What an operator-declared ``claude.account_context`` label may look like."""
+
+
+def _blank_is_unset(value: Any) -> Any:
+    return None if isinstance(value, str) and not value.strip() else value
+
+
+AccountContext = Annotated[
+    Annotated[str, StringConstraints(pattern=ACCOUNT_CONTEXT_PATTERN)] | None,
+    BeforeValidator(_blank_is_unset),
+]
+_ACCOUNT_CONTEXT = TypeAdapter(AccountContext)
 _STR_TUPLE = TypeAdapter(tuple[str, ...])
 _PATH = TypeAdapter(Path)
 _INT = TypeAdapter(int)
+
+
+def _not_a_bool(value: Any) -> Any:
+    if isinstance(value, bool):
+        raise ValueError("a boolean is not a count")
+    return value
+
+
+_POSITIVE_INT = TypeAdapter(Annotated[int, Field(ge=1), BeforeValidator(_not_a_bool)])
 _FLOAT = TypeAdapter(float)
 _BOOL = TypeAdapter(bool)
 _EFFORT = TypeAdapter(EffortLevel | None)
@@ -394,6 +444,26 @@ def load_config(
             _Spec("claude.max_budget_usd", None, "claude", "max_budget_usd", _FLOAT),
             DEFAULT_CLAUDE_MAX_BUDGET_USD,
         ),
+        claude_max_live_tasks=resolve(
+            _Spec(
+                "claude.max_live_tasks",
+                "JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS",
+                "claude",
+                "max_live_tasks",
+                _POSITIVE_INT,
+            ),
+            DEFAULT_CLAUDE_MAX_LIVE_TASKS,
+        ),
+        claude_account_context=resolve(
+            _Spec(
+                "claude.account_context",
+                "JAKE_TOOLS_CLAUDE_ACCOUNT_CONTEXT",
+                "claude",
+                "account_context",
+                _ACCOUNT_CONTEXT,
+            ),
+            None,
+        ),
         transcription_api_base_url=resolve(
             _Spec(
                 "transcription.api_base_url",
@@ -489,10 +559,14 @@ def _describe_expected(spec: _Spec[Any]) -> str:
         return f"one of {', '.join(get_args(EffortLevel))}"
     if spec.adapter is _INT:
         return "an integer"
+    if spec.adapter is _POSITIVE_INT:
+        return "a positive integer"
     if spec.adapter is _FLOAT:
         return "a number"
     if spec.adapter is _PATH:
         return "a path"
+    if spec.adapter is _ACCOUNT_CONTEXT:
+        return "a label of letters, digits and . _ : - (at most 64)"
     return "a string"
 
 
