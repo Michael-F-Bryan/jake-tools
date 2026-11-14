@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -15,11 +16,17 @@ from .clockify import (
     ClockifyClient,
     ClockifyClientRecord,
     ClockifyError,
+    ClockifyPaginationError,
     ClockifyProject,
     ClockifyTask,
     ClockifyTimeEntry,
+    PaginationFailure,
+    TaskStatus,
+    jira_key_of_project_note,
+    jira_key_of_task_name,
     validate_clockify_id,
 )
+from .jira import JiraError, normalise_jira_key
 
 
 class Coverage(BaseModel):
@@ -77,6 +84,325 @@ def workspace_catalogue(
         coverage=Coverage(
             reads=client.pagination_reads[first_read:],
             strategy="All archived/active clients and projects, and ACTIVE/DONE tasks; bounded upstream pagination, never truncated.",
+        ),
+    )
+
+
+MAX_LOOKUP_KEYS = 50
+MAX_LOOKUP_SCOPE_IDS = 50
+# A key that many records claim is ambiguous long before this; the cap only
+# bounds the answer, and the count and ``truncated`` say what was cut.
+MAX_CANDIDATES_PER_KEY = 10
+# Stop reading after this many projects fail: the rest are reported as
+# unattempted, so a down upstream costs neither requests nor response size
+# proportional to the workspace.
+MAX_UNREAD_PROJECTS = 20
+
+LookupOutcome = Literal["resolved", "ambiguous", "not_found", "incomplete"]
+
+
+class ClientRef(BaseModel):
+    id: str
+    name: str
+    archived: bool
+
+
+class ProjectRef(BaseModel):
+    id: str
+    name: str
+    archived: bool
+
+
+class TaskRef(BaseModel):
+    id: str
+    name: str
+    status: TaskStatus
+    completed: bool
+
+
+class WorkItemCandidate(BaseModel):
+    """One Clockify record that claims a key, with everything that owns it.
+
+    ``kind`` says how the key is claimed: a task whose name leads with the
+    key (from its first character), or a project whose note's first Jira key it is (the Jira sync conventions).
+    ``client`` is null only for a project with no client.
+    """
+
+    kind: Literal["task", "project"]
+    project: ProjectRef
+    client: ClientRef | None
+    task: TaskRef | None = None
+
+
+class KeyResult(BaseModel):
+    """``resolved``: exactly one candidate and the scope was read in full.
+    ``ambiguous``: more than one; none is preferred. ``not_found``: none, and
+    the declared scope was read in full. ``incomplete``: part of the scope
+    could not be read, so absence or uniqueness is unproven; any candidates
+    seen are kept as evidence, never as an answer.
+    """
+
+    key: str
+    outcome: LookupOutcome
+    # At most MAX_CANDIDATES_PER_KEY, in project/task ID order.
+    candidates: list[WorkItemCandidate]
+    # Candidates found in total; ``truncated`` when ``candidates`` holds fewer.
+    candidate_count: int
+    truncated: bool = False
+
+
+class LookupScope(BaseModel):
+    client_ids: list[str] | None
+    project_ids: list[str] | None
+    # True only when no client/project scope narrowed the search.
+    workspace_wide: bool
+
+
+class UnreadProject(BaseModel):
+    project_id: str
+    # Set when the failure was a pagination fault; otherwise ``error`` carries
+    # the host-free summary. Never upstream content.
+    failure: PaginationFailure | None = None
+    error: str | None = None
+
+
+class LookupCoverage(BaseModel):
+    complete: bool
+    scope: LookupScope
+    projects_total: int
+    projects_in_scope: int
+    projects_read: int
+    # At most MAX_UNREAD_PROJECTS failed projects; reading stops there.
+    unread: list[UnreadProject]
+    # In-scope projects never read because reading stopped.
+    unattempted: int = 0
+    # HTTP requests this lookup made, counted at the client. Not response size.
+    upstream_requests: int
+    strategy: str
+    limitations: str = "Upstream pagination is not an atomic snapshot; concurrent changes may affect coverage."
+
+
+class WorkItemLookup(BaseModel):
+    workspace_id: str
+    results: list[KeyResult]
+    coverage: LookupCoverage
+
+
+class ContradictionError(ClockifyError):
+    """Two reads of one record disagree: neither is an answer."""
+
+
+def _observed_once[RecordT: BaseModel](
+    label: str,
+    records: Iterable[RecordT],
+    *,
+    contradiction: type[ClockifyError] = ClockifyError,
+) -> dict[str, RecordT]:
+    """Index records by ID across overlapping scans.
+
+    The same record read twice and identical is one record. Read twice with
+    different content (for example a task whose status changed between the
+    ACTIVE and DONE scans) is a contradiction: raised, never resolved by
+    taking whichever scan came last.
+    """
+    seen: dict[str, RecordT] = {}
+    for record in records:
+        record_id = str(record.model_dump()["id"])
+        if record_id in seen and seen[record_id] != record:
+            raise contradiction(
+                f"Clockify returned contradictory observations of a {label}; "
+                "it changed between reads",
+                safe_summary=f"a {label} was observed with contradictory content "
+                "in overlapping scans",
+            )
+        seen[record_id] = record
+    return seen
+
+
+def _scope_ids(label: str, ids: list[str] | None) -> list[str] | None:
+    if ids is None:
+        return None
+    if not 1 <= len(ids) <= MAX_LOOKUP_SCOPE_IDS:
+        raise ValueError(
+            f"{label} must hold 1..{MAX_LOOKUP_SCOPE_IDS} IDs (omit it for no scope)"
+        )
+    return list(dict.fromkeys(validate_clockify_id(i) for i in ids))
+
+
+def lookup_work_items(
+    client: ClockifyClient,
+    workspace_id: str,
+    *,
+    keys: list[str],
+    client_ids: list[str] | None = None,
+    project_ids: list[str] | None = None,
+) -> WorkItemLookup:
+    """Resolve exact Jira work-item keys to Clockify IDs, per key.
+
+    A key is claimed by a task whose name leads with it or a project whose
+    note's first Jira key it is (the Jira sync's ownership conventions, never a
+    substring or similar-name match). Archived and completed records are
+    included and flagged. ``client_ids``/``project_ids`` declare where to
+    look; together they intersect. They are what removes upstream requests:
+    clients and projects are always listed (at least two paginated scans each,
+    archived and not), but tasks are read per in-scope project. Without a scope this
+    reads exactly what the full catalogue reads and only the answer is smaller.
+    """
+    validate_clockify_id(workspace_id)
+    try:
+        wanted = list(dict.fromkeys(normalise_jira_key(key) for key in keys))
+    except JiraError as exc:
+        raise ValueError(str(exc)) from exc
+    if not 1 <= len(wanted) <= MAX_LOOKUP_KEYS:
+        raise ValueError(
+            f"keys must hold 1..{MAX_LOOKUP_KEYS} distinct Jira keys "
+            "(omit keys for the full catalogue)"
+        )
+    scope_clients = _scope_ids("client_ids", client_ids)
+    scope_projects = _scope_ids("project_ids", project_ids)
+
+    first_request = client.requests_made
+    clients = _observed_once(
+        "client",
+        (
+            c
+            for archived in (False, True)
+            for c in client.get_clients(workspace_id, archived=archived)
+        ),
+    )
+    projects = _observed_once(
+        "project",
+        (
+            p
+            for archived in (False, True)
+            for p in client.get_projects(workspace_id, archived=archived)
+        ),
+    )
+    for label, scoped, known in (
+        ("client", scope_clients, clients),
+        ("project", scope_projects, projects),
+    ):
+        missing = [i for i in scoped or [] if i not in known]
+        if missing:
+            raise ValueError(f"Unknown {label} ID in this workspace: {missing[0]}")
+    in_scope = [
+        p
+        for p in sorted(projects.values(), key=lambda p: p.id)
+        if (scope_projects is None or p.id in scope_projects)
+        and (scope_clients is None or p.client_id in scope_clients)
+    ]
+
+    claims: dict[str, list[tuple[ClockifyProject, ClockifyTask | None]]] = {}
+    for project in in_scope:
+        key = jira_key_of_project_note(project.note)
+        if key:
+            claims.setdefault(key, []).append((project, None))
+    unread: list[UnreadProject] = []
+    unattempted = 0
+    for project in in_scope:
+        if len(unread) >= MAX_UNREAD_PROJECTS:
+            unattempted += 1
+            continue
+        try:
+            scans: list[ClockifyTask] = []
+            for active in (False, True):
+                scans += client.get_tasks(workspace_id, project.id, active=active)
+            tasks = _observed_once("task", scans, contradiction=ContradictionError)
+        except ClockifyPaginationError as exc:
+            unread.append(UnreadProject(project_id=project.id, failure=exc.failure))
+            continue
+        except ContradictionError as exc:
+            # A task changed between the two reads: no answer about it is
+            # trustworthy, so this project's tasks contribute nothing.
+            unread.append(UnreadProject(project_id=project.id, error=str(exc)))
+            continue
+        except ClockifyError as exc:
+            if exc.safe_summary is None:
+                raise  # not an upstream read failure: never guess a summary
+            unread.append(UnreadProject(project_id=project.id, error=exc.safe_summary))
+            continue
+        for task in tasks.values():
+            if task.project_id != project.id:
+                raise ClockifyError(
+                    "Clockify returned a task belonging to another project"
+                )
+            key = jira_key_of_task_name(task.name)
+            if key:
+                claims.setdefault(key, []).append((project, task))
+
+    def candidate(
+        project: ClockifyProject, task: ClockifyTask | None
+    ) -> WorkItemCandidate:
+        owner: ClockifyClientRecord | None = None
+        if project.client_id:
+            owner = clients.get(project.client_id)
+            if owner is None:
+                raise ClockifyError(
+                    "Clockify returned a project with an unknown client"
+                )
+        return WorkItemCandidate(
+            kind="task" if task else "project",
+            project=ProjectRef(
+                id=project.id, name=project.name, archived=project.archived
+            ),
+            client=ClientRef(id=owner.id, name=owner.name, archived=owner.archived)
+            if owner
+            else None,
+            task=TaskRef(
+                id=task.id,
+                name=task.name,
+                status=task.status,
+                completed=task.status == "DONE",
+            )
+            if task
+            else None,
+        )
+
+    results: list[KeyResult] = []
+    for key in wanted:
+        found = [
+            candidate(project, task)
+            for project, task in sorted(
+                claims.get(key, []), key=lambda c: (c[0].id, c[1].id if c[1] else "")
+            )
+        ]
+        outcome: LookupOutcome
+        total = len(found)
+        if total > 1:
+            outcome = "ambiguous"
+        elif unread:
+            outcome = "incomplete"
+        else:
+            outcome = "resolved" if found else "not_found"
+        results.append(
+            KeyResult(
+                key=key,
+                outcome=outcome,
+                candidates=found[:MAX_CANDIDATES_PER_KEY],
+                candidate_count=total,
+                truncated=total > MAX_CANDIDATES_PER_KEY,
+            )
+        )
+    workspace_wide = scope_clients is None and scope_projects is None
+    return WorkItemLookup(
+        workspace_id=workspace_id,
+        results=results,
+        coverage=LookupCoverage(
+            complete=not unread and not unattempted,
+            scope=LookupScope(
+                client_ids=scope_clients,
+                project_ids=scope_projects,
+                workspace_wide=workspace_wide,
+            ),
+            projects_total=len(projects),
+            projects_in_scope=len(in_scope),
+            projects_read=len(in_scope) - len(unread) - unattempted,
+            unread=unread,
+            unattempted=unattempted,
+            upstream_requests=client.requests_made - first_request,
+            strategy="Exact key match only: a task name starting with the key at its first character, or a project note whose first Jira key it is. "
+            "All archived/active clients and projects are listed, then ACTIVE/DONE tasks of each in-scope project; "
+            "never a similar-name match. not_found means absent from the stated scope only.",
         ),
     )
 

@@ -27,7 +27,7 @@ local secret stores or switching accounts.
 | Tool | Effect |
 | --- | --- |
 | `clockify_time_entries` | Read-only authenticated-user overlap history; page to completion. |
-| `clockify_workspace_catalogue` | Read-only clients, projects and tasks; no Jira access needed. |
+| `clockify_workspace_catalogue` | Read-only. With `keys`: exact work-item lookup (compact, per-key outcome). Without: the full clients/projects/tasks catalogue. No Jira access needed. |
 | `clockify_create_time_entry` | Real write: one completed entry, no preview/apply parameter. |
 
 Unsupported entry edits/deletes, timer changes, project/client cleanup and
@@ -67,9 +67,40 @@ active workspace. IDs must contain only letters, digits, `_` and `-`.
    `count` is this page; `total` is the complete selected count. `observed_at`
    fixes running-entry evaluation across pages. If selected history changes,
    restart without the cursor instead of combining incompatible pages.
-4. Read `clockify_workspace_catalogue` before choosing project/task IDs. Clients
-   and projects include `archived`; tasks include `status` and `completed` plus
-   `project_id`. Do not guess IDs or silently substitute a similarly named task.
+4. Find project/task IDs for known Jira keys with `clockify_workspace_catalogue`
+   and `keys` (1..50, e.g. `["SF-304", "SF-310"]`). Do not fetch the full
+   catalogue for a handful of keys. Each distinct key gets one result, in
+   request order:
+   - `resolved`: exactly one candidate. A `task` candidate is a task whose
+     name starts with the key at its first character, no leading whitespace
+     (`SF-304 Summary`), with its `project` and `client`; a `project` candidate
+     is a project whose note's FIRST Jira key is the key (`Jira: SF-304`; a
+     second key in the same note owns nothing) and has no task. Use `project.id` and `task.id` for
+     `clockify_create_time_entry`.
+   - `ambiguous`: several candidates, none preferred. Show them (IDs, names,
+     client, archived/completed) and ask which; never take the first. At most
+     10 are listed: `candidate_count` is the total and `truncated` says some
+     were left out. This bounds the answer; it does not guarantee it fits a
+     host's inline result limit.
+   - `not_found`: absent from the declared scope, definitively.
+   - `incomplete`: part of the scope could not be read (`coverage.unread`
+     names each project and why: a read failure, a pagination fault, or a task
+     whose status changed between the ACTIVE and DONE reads, which is never
+     resolved by picking one. After 20 failed projects reading stops and the
+     rest are `coverage.unattempted`). Absence and uniqueness are unproven: any
+     `candidates` are evidence only. Retry, or report that the key is unknown.
+   Matching is exact, never fuzzy: `SF-10` does not match `SF-101`, and a key
+   mentioned mid-name does not claim the task. Work that does not follow the
+   Jira naming convention (a hand-made task) is not found by key; use the full
+   catalogue for it. Archived projects/clients and `DONE` tasks are included and
+   flagged (`archived`, `completed`/`status`): a resolved key can still be
+   archived or completed, so check the flags before logging time.
+   Check `coverage` before trusting `not_found`: `scope.workspace_wide` is
+   false when `client_ids`/`project_ids` narrowed it, and then absence means
+   only absent from that scope. Call without `keys` for the full catalogue
+   (all clients, archived/active projects, `ACTIVE`/`DONE` tasks with
+   `completed`); it is large and may be persisted to a file by the host.
+   Never guess IDs or silently substitute a similarly named task.
 5. For a user-approved completed log, call `clockify_create_time_entry` with aware
    `start`, `end > start`, `description`, explicit `billable`, and optional
    `project_id`/`task_id`. A task requires its owning project. This is a real
@@ -78,6 +109,31 @@ active workspace. IDs must contain only letters, digits, `_` and `-`.
    all relevant fields. On error inspect `detail.outcome`, `created_entry_id`
    and `retry_safe`. Never automatically retry; even `post_uncertain` can mean
    the entry was created. Check history or the known entry in Clockify first.
+
+## Reusing a catalogue
+
+A persisted full catalogue (a result the host spilled to a file) is reusable
+without another call while all of these hold: same workspace; its `coverage`
+was complete; and nothing has created, renamed, archived or completed projects
+or tasks since it was read (for example a `clockify_jira_sync` apply, or the
+user saying so). Read the file selectively (search it for the keys; do not load
+all of it) rather than refetching only because the first result spilled. If a
+needed key is absent from it, or any condition fails, look the keys up with
+`keys` instead of re-fetching everything.
+
+## Cost: response size is not upstream work
+
+`keys` makes the answer small; it does not by itself make the lookup cheap.
+Clients and projects are always listed (archived and not, each paginated), and
+tasks are read per project, so an
+unscoped lookup makes the same upstream requests as the full catalogue
+(`coverage.upstream_requests` counts them). Pass `project_ids` and/or
+`client_ids` (IDs from an earlier result; both must exist in the workspace, and
+they intersect) when the keys are known to live there: only in-scope projects'
+tasks are read, which cuts requests. Fixture measurement, 60 filler projects:
+full catalogue 130 requests, unscoped lookup 130 requests with a ~25x smaller
+result, two-project lookup 8 requests. There is no cache: each call reads
+upstream afresh, and a live-account measurement has not been made.
 
 ## Pitfalls
 
