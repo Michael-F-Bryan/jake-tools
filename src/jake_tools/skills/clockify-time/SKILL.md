@@ -77,10 +77,15 @@ active workspace. IDs must contain only letters, digits, `_` and `-`.
      (`Jira: SF-304`) and has no task. Use `project.id` and `task.id` for
      `clockify_create_time_entry`.
    - `ambiguous`: several candidates, none preferred. Show them (IDs, names,
-     client, archived/completed) and ask which; never take the first.
+     client, archived/completed) and ask which; never take the first. At most
+     10 are listed: `candidate_count` is the total and `truncated` says some
+     were left out.
    - `not_found`: absent from the declared scope, definitively.
    - `incomplete`: part of the scope could not be read (`coverage.unread`
-     names each project and why). Absence and uniqueness are unproven: any
+     names each project and why: a read failure, a pagination fault, or a task
+     whose status changed between the ACTIVE and DONE reads, which is never
+     resolved by picking one. After 20 failed projects reading stops and the
+     rest are `coverage.unattempted`). Absence and uniqueness are unproven: any
      `candidates` are evidence only. Retry, or report that the key is unknown.
    Matching is exact, never fuzzy: `SF-10` does not match `SF-101`, and a key
    mentioned mid-name does not claim the task. Work that does not follow the
@@ -117,7 +122,8 @@ needed key is absent from it, or any condition fails, look the keys up with
 ## Cost: response size is not upstream work
 
 `keys` makes the answer small; it does not by itself make the lookup cheap.
-Clients and projects are always listed, and tasks are read per project, so an
+Clients and projects are always listed (archived and not, each paginated), and
+tasks are read per project, so an
 unscoped lookup makes the same upstream requests as the full catalogue
 (`coverage.upstream_requests` counts them). Pass `project_ids` and/or
 `client_ids` (IDs from an earlier result; both must exist in the workspace, and

@@ -22,11 +22,14 @@ KEYS = ["SF-101", "SF-301", "SF-999", "SF-77", "SF-102"]
 def workspace() -> Iterator[tuple[Workspace, dict[str, str]]]:
     ws = sunfish_workspace(60)
     with serve(ws) as url:
-        yield ws, {
-            "CLOCKIFY_API_KEY": API_KEY,
-            "CLOCKIFY_API_BASE_URL": url,
-            "JAKE_TOOLS_CLOCKIFY_WORKSPACES": "ws-1",
-        }
+        yield (
+            ws,
+            {
+                "CLOCKIFY_API_KEY": API_KEY,
+                "CLOCKIFY_API_BASE_URL": url,
+                "JAKE_TOOLS_CLOCKIFY_WORKSPACES": "ws-1",
+            },
+        )
 
 
 @pytest.fixture
@@ -82,9 +85,9 @@ async def test_lookup_answers_several_keys_and_measures_both_costs(
     assert len(by_key["SF-301"]["candidates"]) == 2
     assert by_key["SF-77"]["candidates"][0]["project"]["archived"] is True
     assert by_key["SF-102"]["candidates"][0]["task"]["completed"] is True
-    assert lookup["coverage"]["complete"] and lookup["coverage"]["scope"][
-        "workspace_wide"
-    ]
+    assert (
+        lookup["coverage"]["complete"] and lookup["coverage"]["scope"]["workspace_wide"]
+    )
     # Volume and upstream cost are separate facts.
     assert unscoped_chars * 10 < full_chars
     assert unscoped_requests == full_requests

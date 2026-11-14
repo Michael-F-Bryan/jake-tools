@@ -33,6 +33,12 @@ class Workspace:
     failing: set[str] = field(default_factory=set)
     # Task lists that repeat page 1 forever (a real pagination fault).
     unstable: set[str] = field(default_factory=set)
+    # Task IDs the tasks route returns in BOTH the ACTIVE and DONE scans, as
+    # stored (a record that did not move) or with the scan's own status (one
+    # whose status changed between the two reads). Same for client IDs.
+    echoed_tasks: set[str] = field(default_factory=set)
+    flipping_tasks: set[str] = field(default_factory=set)
+    flipping_clients: set[str] = field(default_factory=set)
     requests: list[tuple[str, dict[str, str]]] = field(default_factory=list)
     response_bytes: int = 0
 
@@ -75,10 +81,13 @@ class Workspace:
             return 503, {"message": "upstream body that must not leak"}
         archived = params.get("archived")
         if path == base + "/clients":
-            return 200, self._page(
-                [c for c in self.clients if str(c["archived"]).lower() == archived],
-                params,
-            )
+            rows = [c for c in self.clients if str(c["archived"]).lower() == archived]
+            rows += [
+                {**c, "archived": archived == "true"}
+                for c in self.clients
+                if c["id"] in self.flipping_clients and c not in rows
+            ]
+            return 200, self._page(rows, params)
         if path == base + "/projects":
             return 200, self._page(
                 [p for p in self.projects if str(p["archived"]).lower() == archived],
@@ -90,7 +99,15 @@ class Workspace:
             rows = [
                 t
                 for t in self.tasks
-                if t["projectId"] == project and t["status"] == wanted
+                if t["projectId"] == project
+                and (t["status"] == wanted or t["id"] in self.echoed_tasks)
+            ]
+            rows += [
+                {**t, "status": wanted}
+                for t in self.tasks
+                if t["projectId"] == project
+                and t["id"] in self.flipping_tasks
+                and t["status"] != wanted
             ]
             if path in self.unstable:
                 params = {**params, "page": "1"}

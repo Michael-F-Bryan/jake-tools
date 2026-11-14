@@ -8,7 +8,12 @@ import pytest
 from clockify_fixtures import API_KEY, RoutingSession, Workspace, sunfish_workspace
 
 from jake_tools.clockify import ClockifyClient, ClockifyError
-from jake_tools.clockify_time import lookup_work_items, workspace_catalogue
+from jake_tools.clockify_time import (
+    MAX_CANDIDATES_PER_KEY,
+    MAX_UNREAD_PROJECTS,
+    lookup_work_items,
+    workspace_catalogue,
+)
 
 
 def client_for(ws: Workspace, page_size: int | None = None) -> ClockifyClient:
@@ -267,3 +272,68 @@ def test_full_catalogue_is_unchanged_by_the_lookup_feature() -> None:
     assert len(full.projects) == 5 and len(full.tasks) == 8 + 8
     assert {t.status for t in full.tasks} == {"ACTIVE", "DONE"}
     assert "results" not in full.model_dump()
+
+
+def test_same_task_seen_in_both_status_scans_is_not_false_ambiguity() -> None:
+    ws = sunfish_workspace(0)
+    ws.echoed_tasks.add("t-101")  # identical record in the ACTIVE and DONE scans
+    result = lookup_work_items(client_for(ws), "ws-1", keys=["SF-101"])
+    (found,) = result.results
+    assert found.outcome == "resolved" and len(found.candidates) == 1
+    assert result.coverage.complete
+
+
+def test_contradictory_status_observations_are_incomplete_not_a_silent_pick() -> None:
+    ws = sunfish_workspace(0)
+    # SF-101 reads ACTIVE in one scan and DONE in the other: its status moved
+    # mid-read. Neither is a trustworthy answer, and neither may be chosen.
+    ws.flipping_tasks.add("t-101")
+    result = lookup_work_items(client_for(ws), "ws-1", keys=["SF-101", "SF-201"])
+    by_key = {r.key: r for r in result.results}
+    assert by_key["SF-101"].outcome == "incomplete"
+    assert by_key["SF-101"].candidates == []
+    assert by_key["SF-201"].outcome == "incomplete"  # unproven: p-acme unread
+    assert not result.coverage.complete
+    (unread,) = result.coverage.unread
+    assert unread.project_id == "p-acme"
+    assert unread.error is not None and "contradict" in unread.error
+
+
+def test_contradictory_client_observations_fail_rather_than_pick_one() -> None:
+    ws = sunfish_workspace(0)
+    ws.flipping_clients.add("c-acme")
+    with pytest.raises(ClockifyError, match="contradictory"):
+        lookup_work_items(client_for(ws), "ws-1", keys=["SF-101"])
+
+
+def test_candidates_per_key_are_bounded_and_say_so() -> None:
+    ws = sunfish_workspace(0)
+    for n in range(14):
+        ws.add_task(f"t-400-{n}", f"SF-400 Copy {n}", "p-acme")
+    result = lookup_work_items(client_for(ws), "ws-1", keys=["SF-400", "SF-101"])
+    many, one = result.results
+    assert many.outcome == "ambiguous"
+    assert len(many.candidates) == MAX_CANDIDATES_PER_KEY
+    assert many.candidate_count == 14 and many.truncated
+    assert (one.candidate_count, one.truncated) == (1, False)
+
+
+def test_a_failing_upstream_stops_after_a_bounded_number_of_unread_projects() -> None:
+    ws = sunfish_workspace(0)
+    for n in range(MAX_UNREAD_PROJECTS + 15):
+        ws.add_project(f"p-down-{n}", f"Down {n}", "c-acme")
+    ws.failing.add("/workspaces/ws-1/projects/p-down-")
+    result = lookup_work_items(client_for(ws), "ws-1", keys=["SF-101", "SF-999"])
+    coverage = result.coverage
+    assert len(coverage.unread) == MAX_UNREAD_PROJECTS
+    # p-acme reads, 20 down projects fail, then 15 more down plus p-globex
+    # and p-old (ID order) are never attempted.
+    assert (coverage.projects_read, coverage.unattempted) == (1, 17)
+    assert (
+        coverage.projects_read + len(coverage.unread) + coverage.unattempted
+        == coverage.projects_in_scope
+    )
+    assert {r.outcome for r in result.results} == {"incomplete"}
+    # 4 list scans, 2 task reads for p-acme, then one failed request per unread
+    # project and nothing for the unattempted.
+    assert coverage.upstream_requests == 4 + 2 + MAX_UNREAD_PROJECTS
