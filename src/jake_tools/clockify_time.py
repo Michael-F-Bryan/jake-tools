@@ -124,7 +124,7 @@ class WorkItemCandidate(BaseModel):
     """One Clockify record that claims a key, with everything that owns it.
 
     ``kind`` says how the key is claimed: a task whose name leads with the
-    key, or a project whose note references it (the Jira sync conventions).
+    key (from its first character), or a project whose note's first Jira key it is (the Jira sync conventions).
     ``client`` is null only for a project with no client.
     """
 
@@ -240,7 +240,7 @@ def lookup_work_items(
     """Resolve exact Jira work-item keys to Clockify IDs, per key.
 
     A key is claimed by a task whose name leads with it or a project whose
-    note references it (the Jira sync's ownership conventions, never a
+    note's first Jira key it is (the Jira sync's ownership conventions, never a
     substring or similar-name match). Archived and completed records are
     included and flagged. ``client_ids``/``project_ids`` declare where to
     look; together they intersect. They are what removes upstream requests:
@@ -400,7 +400,7 @@ def lookup_work_items(
             unread=unread,
             unattempted=unattempted,
             upstream_requests=client.requests_made - first_request,
-            strategy="Exact key match only: a task name leading with the key, or a project note referencing it. "
+            strategy="Exact key match only: a task name starting with the key at its first character, or a project note whose first Jira key it is. "
             "All archived/active clients and projects are listed, then ACTIVE/DONE tasks of each in-scope project; "
             "never a similar-name match. not_found means absent from the stated scope only.",
         ),

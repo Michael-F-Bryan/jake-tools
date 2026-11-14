@@ -143,7 +143,10 @@ def jira_key_of_task_name(name: str) -> str | None:
 
 
 def jira_key_of_project_note(note: str) -> str | None:
-    """The first Jira key a project note references (``Jira: KEY``), if any."""
+    """The FIRST Jira key in a project note (``Jira: KEY``), if any.
+
+    Later keys in the same note own nothing.
+    """
     match = JIRA_REFERENCE_PATTERN.search(note)
     return match.group(1) if match else None
 

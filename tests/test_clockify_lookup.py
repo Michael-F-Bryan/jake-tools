@@ -337,3 +337,17 @@ def test_a_failing_upstream_stops_after_a_bounded_number_of_unread_projects() ->
     # 4 list scans, 2 task reads for p-acme, then one failed request per unread
     # project and nothing for the unattempted.
     assert coverage.upstream_requests == 4 + 2 + MAX_UNREAD_PROJECTS
+
+
+def test_project_note_owns_only_its_first_key_and_task_key_must_lead() -> None:
+    ws = sunfish_workspace(0)
+    ws.add_project("p-multi", "Multi", "c-acme", "Jira: SF-500 and also SF-501")
+    ws.add_task("t-ws", " SF-600 leading space", "p-multi")
+    result = lookup_work_items(
+        client_for(ws), "ws-1", keys=["SF-500", "SF-501", "SF-600"]
+    )
+    by_key = {r.key: r for r in result.results}
+    assert by_key["SF-500"].outcome == "resolved"
+    assert by_key["SF-500"].candidates[0].project.id == "p-multi"
+    assert by_key["SF-501"].outcome == "not_found"
+    assert by_key["SF-600"].outcome == "not_found"

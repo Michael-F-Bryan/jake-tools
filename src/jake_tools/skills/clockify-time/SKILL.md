@@ -72,14 +72,16 @@ active workspace. IDs must contain only letters, digits, `_` and `-`.
    catalogue for a handful of keys. Each distinct key gets one result, in
    request order:
    - `resolved`: exactly one candidate. A `task` candidate is a task whose
-     name leads with the key (`SF-304 Summary`), with its `project` and
-     `client`; a `project` candidate is a project whose note references the key
-     (`Jira: SF-304`) and has no task. Use `project.id` and `task.id` for
+     name starts with the key at its first character, no leading whitespace
+     (`SF-304 Summary`), with its `project` and `client`; a `project` candidate
+     is a project whose note's FIRST Jira key is the key (`Jira: SF-304`; a
+     second key in the same note owns nothing) and has no task. Use `project.id` and `task.id` for
      `clockify_create_time_entry`.
    - `ambiguous`: several candidates, none preferred. Show them (IDs, names,
      client, archived/completed) and ask which; never take the first. At most
      10 are listed: `candidate_count` is the total and `truncated` says some
-     were left out.
+     were left out. This bounds the answer; it does not guarantee it fits a
+     host's inline result limit.
    - `not_found`: absent from the declared scope, definitively.
    - `incomplete`: part of the scope could not be read (`coverage.unread`
      names each project and why: a read failure, a pagination fault, or a task

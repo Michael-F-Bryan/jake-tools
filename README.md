@@ -169,7 +169,7 @@ The stdio server (`jake-tools-mcp`) also provides:
 - `clockify_workspace_catalogue(workspace_id?, keys?, client_ids?, project_ids?)`:
   without `keys`, all active/archived clients and projects, and ACTIVE/DONE tasks
   with an explicit `completed` flag (large). With `keys` (1..50 Jira keys), an
-  exact work-item lookup: one result per key, `resolved` (one task or project
+  exact work-item lookup (a task name must start with the key; a project owns only the first Jira key in its note): one result per key, `resolved` (one task or project
   with its project/client and archived/completed flags), `ambiguous` (all
   candidates, none preferred), `not_found` or `incomplete` (part of the scope
   could not be read). Never a similar-name match. `client_ids`/`project_ids`
