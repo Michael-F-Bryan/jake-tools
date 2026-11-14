@@ -336,9 +336,15 @@ everything else. User, project and managed settings stay in force, so
 publish only a new artifact, never update, share, list or delete, and never
 retry. Read their `verified`, `private_confirmed` and `problems` fields, not a
 URL alone. The mechanism is undocumented and may change without notice; whether
-to depend on it is a support decision. The shipped `artifact_publish` itself
-has been exercised only against the recorded results above until a further
-disposable publication is authorised.
+to depend on it is a support decision. The shipped `artifact_publish` was run
+once live on a synthetic 383-byte file (head `4b41207`, CLI 2.1.318):
+`https://claude.ai/artifact/DsCmww9ENTTTXhzK6t2yqZ`, artifact id
+`68301be6-d480-4f3e-8417-f9d137223e58`, version `1794671223-9c52`, `verified: true`,
+readback `private`, no denied calls, no problems. A separate `artifact read`
+saved the hosted file (pinned shell removed) and `cmp` found it byte-identical to
+the source (sha256 `e5411532...5161`). Receipts:
+`docs/evidence/artifact-sdk-exposure-2026-11-14/final-acceptance/`. Updates are
+not shipped.
 
 Per the task's constraints, nothing here uses private endpoints, TUI
 scraping, browser automation or spoofed interactive sessions. One disposable

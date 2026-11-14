@@ -1,0 +1,27 @@
+{
+ "command": "jake-tools artifact read <url> --file <fixture>/final-probe.html --expected-version-id 1794671223-9c52 --output <fixture>/hosted.html --json",
+ "exit": 0,
+ "byte_compare": "cmp hosted.html final-probe.html: identical (383 bytes, sha256 e5411532...5161)",
+ "result": {
+  "url": "https://claude.ai/artifact/DsCmww9ENTTTXhzK6t2yqZ",
+  "artifact_id": "68301be6-d480-4f3e-8417-f9d137223e58",
+  "version_id": "1794671223-9c52",
+  "owned_by_you": true,
+  "visibility": "private",
+  "private": true,
+  "header": "[Artifact 68301be6-d480-4f3e-8417-f9d137223e58 (version 1794671223-9c52) \u2014 owned by you, private (from the page's Share menu the user's plan and organization allow: anyone with the link \u2014 a public link can still be unavailable for what this page uses; the menu says why; email invites to people outside the organization are available); may include content not published from this session; raw HTML follows]",
+  "shell_removed": true,
+  "bytes": 383,
+  "sha256": "e5411532b9dfa4a6212662d8d70f19c0c27259d3632ea7aba064767229195161",
+  "matches_file": true,
+  "version_matches": true,
+  "file": {
+   "path": "<fixture>/final-probe.html",
+   "bytes": 383,
+   "sha256": "e5411532b9dfa4a6212662d8d70f19c0c27259d3632ea7aba064767229195161"
+  },
+  "saved_to": "<fixture>/hosted.html",
+  "cost_usd": 0.00099931,
+  "mechanism": "Claude Code's Artifact tool, enabled for this session only by the undocumented CLAUDE_CODE_ARTIFACT environment variable. Not a documented or supported Anthropic option; it may change without notice."
+ }
+}
