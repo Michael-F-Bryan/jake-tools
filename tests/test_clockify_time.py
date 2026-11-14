@@ -6,7 +6,7 @@ import pytest
 import requests
 from test_clockify import FakeResponse, FakeSession
 
-from jake_tools.clockify import ClockifyClient, ClockifyError
+from jake_tools.clockify import ClockifyClient, ClockifyError, ClockifyPaginationError
 from jake_tools.clockify_time import (
     CreateTimeEntryError,
     create_time_entry,
@@ -124,15 +124,72 @@ def test_ids_cannot_interpolate_paths(id: str) -> None:
     assert session.requests == []
 
 
-def test_pagination_bounds_and_repeated_pages_fail_not_truncate() -> None:
-    api, _ = client([entry()], [entry()])
-    api._PAGE_SIZE = 1
-    with pytest.raises(ClockifyError, match="repeated"):
-        api.get_time_entries("ws-1", "u-1")
-    api, _ = client([entry()])
+def test_page_bound_and_oversized_page_are_incomplete_not_truncated() -> None:
+    api, session = client([entry()])
     api._PAGE_SIZE = api._MAX_PAGES = 1
-    with pytest.raises(ClockifyError, match="page bound"):
+    with pytest.raises(ClockifyPaginationError, match="page bound") as bound:
         api.get_time_entries("ws-1", "u-1")
+    assert (bound.value.failure.reason, bound.value.failure.page) == ("page_bound", 1)
+    assert bound.value.failure.records_seen == 1
+    api, session = client([entry("a"), entry("b")])
+    api._PAGE_SIZE = 1
+    with pytest.raises(ClockifyPaginationError, match="oversized") as oversized:
+        api.get_time_entries("ws-1", "u-1")
+    assert oversized.value.failure.page_records == 2
+    assert api.pagination_reads == []
+
+
+def test_duplicate_within_page_reports_evidence_and_claims_no_coverage() -> None:
+    rows = [entry("a", description="PRIVATE"), entry("a", description="PRIVATE")]
+    api, session = client({"id": "u-1"}, rows)
+    api._PAGE_SIZE = 3
+    with pytest.raises(ClockifyPaginationError) as caught:
+        time_entries(api, "ws-1", start=START, end=END)
+    error = caught.value
+    assert (
+        str(error) == "Clockify pagination repeated record IDs; coverage is incomplete"
+    )
+    assert error.failure.model_dump() == {
+        "reason": "duplicate_within_page",
+        "resource": "time-entries",
+        "page": 1,
+        "page_size": 3,
+        "page_records": 2,
+        "records_seen": 0,
+        "duplicate_count": 1,
+    }
+    assert error.detail()["complete"] is False
+    # Counts only: no record IDs, entry content or credentials.
+    assert "PRIVATE" not in str(error.detail()) + str(error)
+    assert "secret" not in str(error.detail()) + str(error)
+    assert len(session.requests) == 2  # /user and one scan: no automatic retry
+    assert api.pagination_reads == []
+
+
+def test_ids_repeated_across_pages_are_not_deduplicated() -> None:
+    api, session = client([entry("a"), entry("b")], [entry("b"), entry("c")])
+    api._PAGE_SIZE = 2
+    with pytest.raises(ClockifyPaginationError) as caught:
+        api.get_time_entries("ws-1", "u-1")
+    failure = caught.value.failure
+    assert (failure.reason, failure.page, failure.page_records) == (
+        "repeated_across_pages",
+        2,
+        2,
+    )
+    assert (failure.records_seen, failure.duplicate_count) == (2, 1)
+    assert len(session.requests) == 2
+    assert api.pagination_reads == []
+
+
+def test_repeated_page_is_classified() -> None:
+    api, _ = client([entry("a")], [entry("a")])
+    api._PAGE_SIZE = 1
+    with pytest.raises(ClockifyPaginationError, match="repeated") as caught:
+        api.get_time_entries("ws-1", "u-1")
+    failure = caught.value.failure
+    assert (failure.reason, failure.page) == ("repeated_page", 2)
+    assert (failure.records_seen, failure.duplicate_count) == (1, 1)
 
 
 def test_catalogue_includes_archived_and_completed_records() -> None:
