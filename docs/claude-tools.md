@@ -114,13 +114,15 @@ Haiku, `dontAsk`, no settings files, through the real server and worker
 
 ## Artifact publishing: off by default in SDK sessions, no tool shipped
 
-The requested tool would publish a local HTML file as a claude.ai artifact,
-update it in place, and set and verify public or private visibility. It
-needs every one of those operations to work through the normal Agent SDK
-path. None of them could be exposed or verified through the SDK launches
-inspected under the documented options. These findings cover only that path, under the versions and
-login above. They do not cover interactive Claude Code or the claude.ai
-web app.
+The first useful slice (issue #15) is to publish an existing self-contained
+HTML file as a private claude.ai artifact, return its identity and URL, and
+read back the exact hosted content; updating the same identity follows.
+Programmatic public/private sharing is a separate question and not a
+prerequisite: new artifacts are private, and sharing can stay manual. The
+slice needs the publish and read operations to work through the normal Agent
+SDK path. Under the documented options inspected, none could be exposed or
+verified. These findings cover only that path, under the versions and login
+above. They do not cover interactive Claude Code or the claude.ai web app.
 
 1. **Publish/update: not exposed in the inspected SDK sessions.** The
    [artifacts page](https://code.claude.com/docs/en/artifacts#availability)
@@ -138,7 +140,7 @@ web app.
    - `tools=["Artifact", ...]`
    - the full `claude_code` preset, with `setting_sources=[]`
    - the full `claude_code` preset, with `["user"]`
-2. **Visibility: no documented SDK operation found.** The docs describe
+2. **Visibility (separate from the first slice): no documented SDK operation found.** The docs describe
    sharing as a viewer operation: "A new artifact is visible only to you.
    To share it, open the artifact in your browser and use the **Share**
    control in the page header." We found no documented SDK option or tool
@@ -188,8 +190,12 @@ step withholds the tool:
 `ClaudeAgentOptions.env`, for that one process only, was enough on this
 account for the session to list `Artifact`, `ArtifactComments` and
 `ArtifactData`, and for one `{"action": "list"}` call to return without
-error. So for this account, version and launch, step 4 was the blocker and
-steps 1 to 3 and 5 were not. Nothing was published, edited or shared.
+error. Inspected privately (not stored), that result was a real listing of
+the account's artifacts, not operation help: a header with the total, 25
+entries of the form `(kind) title: claude.ai/code/artifact/<id>: date`, and a
+trailing note that more exist and mentioning a `limit` input. So for this
+account, version and launch, step 4 was the blocker and steps 1 to 3 and 5
+were not. Nothing was published, edited or shared.
 
 That variable appears in no official page and not in the
 `ClaudeAgentOptions` documentation. It is an implementation detail that can

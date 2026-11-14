@@ -36,11 +36,19 @@ only built-in tool names, counts, versions and result status remain.
 from the CLI's source. It is not a supported route and not an accepted
 dependency. Its list result is stored only as a size (`content_chars`).
 
-## Reproduce
+## Archived probe source (research receipts)
 
-Scripts are `.txt` so lint, pyright and the "only `claude.py` imports the
-SDK" convention do not treat them as repository code. Copy them out, then
-(shape of the commands; `PY` is a venv with `claude-agent-sdk`):
+`probe_exposure.py.txt`, `probe_override_list.py.txt` and
+`sanitise_evidence.py.txt` are the exact source of the one-off probes that
+produced these files, archived as receipts. They are not repository code:
+they are not maintained, linted or type-checked, and they call
+`claude_agent_sdk` directly only because they were throwaway research
+probes, which `AGENTS.md` reserves for `claude.py` in anything that ships.
+Any shipped Artifact integration must go through `ClaudeAgent`. The `.txt`
+suffix marks them as archived text; it is not a way around that rule.
+
+To re-run one, copy it out of the repository (shape of the commands; `PY` is
+a venv with `claude-agent-sdk`):
 
 ```text
 env -u CLAUDECODE -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID \
@@ -53,6 +61,11 @@ env -u CLAUDECODE -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID \
 # F: $PY -I probe_override_list.py OUT.json        (the undocumented override)
 python3 -I sanitise_evidence.py RAW_DIR OUT_DIR
 ```
+
+Probe F's raw list result was inspected privately and is not stored. It
+was an account artifact listing (header with total, 25 entries with kind,
+title, URL and date, a note about a `limit` input), not operation help. Its
+saved record keeps only `content_chars`.
 
 Source reading (gate order, `isArtifactSdkDefaultOff`, tool operations) was
 done on the bundled binary with plain text search; search for
