@@ -91,6 +91,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from ..ai_usage import AICallTelemetry, Usage
 from ..claude import EffortLevel, check_tool_name, permission_rule_tool
+from .failures import Failure
 
 RunStatus = Literal["working", "input_required", "completed", "failed", "cancelled"]
 TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
@@ -241,6 +242,11 @@ class RunState(BaseModel):
     cost was never reported and ``usage`` understates it."""
     diagnostics: list[str] = Field(default_factory=list)
     """Inconsistencies the worker detected mechanically (stable codes)."""
+    failure: Failure | None = None
+    """The classified provider/SDK failure behind a ``sdk_error`` (see
+    :mod:`.failures`); ``None`` for every other outcome and for runs
+    written before it was recorded. ``error`` and ``final_text`` keep the
+    original evidence either way."""
 
     @property
     def is_terminal(self) -> bool:
@@ -327,6 +333,7 @@ class RunResult(BaseModel):
     invocation_cost_usd: float | None = None
     turns_used: int | None = None
     handoff: Handoff | None = None
+    failure: Failure | None = None
 
 
 class ClaudeStartResult(BaseModel):

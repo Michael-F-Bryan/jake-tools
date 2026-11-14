@@ -107,6 +107,12 @@ from .events import (
     progress_line,
     tool_input_summary,
 )
+from .failures import (
+    Failure,
+    classify_exception,
+    classify_result,
+    classify_stream_end,
+)
 from .handoff import write_handoff
 from .inbox import MAX_CHOICES, MAX_QUESTION_CHARS, Inbox
 from .models import (
@@ -204,6 +210,7 @@ class Outcome:
     """Set only when a handoff call moved the session's running cost."""
     cost_complete: bool | None = None
     diagnostics: tuple[str, ...] = ()
+    failure: Failure | None = None
 
 
 def main(run_dir: Path) -> int:
@@ -294,7 +301,12 @@ async def run_worker(run_dir: Path) -> Outcome:
     except BaseException as exc:
         outcome = driver.settled(
             driver.resolved
-            or driver.partial("failed", "sdk_error", error=_describe(exc))
+            or driver.partial(
+                "failed",
+                "sdk_error",
+                error=_describe(exc),
+                failure=classify_exception(exc, observed_at=utc_now()),
+            )
         )
         _finish(run_dir, spec, outcome, transcript, inbox, events)
         raise
@@ -451,7 +463,12 @@ class Driver:
         )
 
     def partial(
-        self, status: RunStatus, reason: TerminationReason, *, error: str | None = None
+        self,
+        status: RunStatus,
+        reason: TerminationReason,
+        *,
+        error: str | None = None,
+        failure: Failure | None = None,
     ) -> Outcome:
         """An outcome that keeps what the conversation produced so far."""
         last = self.last_result
@@ -461,6 +478,7 @@ class Driver:
             final_text=last.text if last is not None else None,
             usage=self.usage,
             error=error,
+            failure=failure,
         )
 
     def _failure(self, exc: BaseException) -> Outcome:
@@ -473,7 +491,12 @@ class Driver:
                     f"(it may have been deleted); see worker.stderr. {_describe(exc)}"
                 ),
             )
-        return self.partial("failed", "sdk_error", error=_describe_stream_failure(exc))
+        return self.partial(
+            "failed",
+            "sdk_error",
+            error=_describe_stream_failure(exc),
+            failure=classify_exception(exc, observed_at=utc_now()),
+        )
 
     async def _drive(self, conversation: Conversation) -> Outcome:
         await conversation.send(self.brief, uuid=self.brief_uuid)
@@ -628,6 +651,18 @@ class Driver:
                     final_text=result.text,
                     usage=self.usage,
                     error=_result_error(result),
+                    failure=(
+                        classify_result(
+                            subtype=result.subtype,
+                            is_error=result.is_error,
+                            text=result.text,
+                            errors=result.errors,
+                            stop_reason=result.stop_reason,
+                            observed_at=utc_now(),
+                        )
+                        if reason == "sdk_error"
+                        else None
+                    ),
                 )
             async with self._send_lock:
                 if self.inbox.close_if_idle():
@@ -642,6 +677,7 @@ class Driver:
             "failed",
             "sdk_error",
             error="the Claude stream ended without a final result",
+            failure=classify_stream_end(observed_at=utc_now()),
         )
 
     def _deny(
@@ -1002,6 +1038,7 @@ def _record(run_dir: Path, spec: RunSpec, outcome: Outcome, events: EventLog) ->
             invocation_cost_usd=cost,
             turns_used=outcome.turns_used,
             handoff=outcome.handoff,
+            failure=outcome.failure,
         ),
     )
     summary = _summary(outcome)
@@ -1022,6 +1059,7 @@ def _record(run_dir: Path, spec: RunSpec, outcome: Outcome, events: EventLog) ->
                 "handoff": outcome.handoff,
                 "cost_complete": outcome.cost_complete,
                 "diagnostics": list(outcome.diagnostics),
+                "failure": outcome.failure,
                 **(
                     {"session_cost_usd": outcome.session_cost_usd}
                     if outcome.session_cost_usd is not None
@@ -1057,6 +1095,11 @@ def _summary(outcome: Outcome) -> str:
         return f"Finished: {first[0][:200]}" if first else "Finished"
     if outcome.status == "cancelled":
         return "Cancelled"
+    if outcome.failure is not None and outcome.failure.kind in (
+        "usage_limit",
+        "authentication_or_access",
+    ):
+        return f"Failed ({outcome.reason}): {outcome.failure.summary}"
     return f"Failed ({outcome.reason}): {(outcome.error or '').splitlines()[0][:200]}"
 
 

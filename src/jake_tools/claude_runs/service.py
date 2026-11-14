@@ -38,6 +38,7 @@ from .control import (
     start_task,
 )
 from .events import Cursor, Event, EventLog, InvalidCursorError
+from .failures import Failure, FailureKind
 from .inbox import (
     AnswerResult,
     Inbox,
@@ -209,6 +210,7 @@ class TaskResult(BaseModel):
     cost_complete: bool | None = None
     handoff: Handoff | None = None
     diagnostics: list[str] = Field(default_factory=list)
+    failure: Failure | None = None
     retrieve: Retrieval | None = None
     transcript_path: Path
     events_path: Path | None = None
@@ -392,6 +394,7 @@ class TaskSummary(BaseModel):
     resumed_from: str | None = None
     resumable: bool = False
     handoff_status: str | None = None
+    failure_kind: FailureKind | None = None
     legacy_run: bool = False
 
 
@@ -934,6 +937,7 @@ def _result(
         cost_complete=state.cost_complete,
         handoff=state.handoff,
         diagnostics=diagnostics_of(state, text),
+        failure=state.failure,
         retrieve=result_route(state.task_id, "final_text") if truncated else None,
         transcript_path=run_dir / TRANSCRIPT_FILE,
         events_path=events_path if events_path.exists() else None,
@@ -963,6 +967,7 @@ def _summary(run_dir: Path) -> TaskSummary:
         resumed_from=state.resumed_from or spec.resume_task_id,
         resumable=state.is_terminal and _resumable(state, session_id),
         handoff_status=state.handoff.status if state.handoff else None,
+        failure_kind=state.failure.kind if state.failure else None,
         legacy_run=_is_legacy(spec),
     )
 

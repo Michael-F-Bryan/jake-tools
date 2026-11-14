@@ -200,6 +200,22 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   - (2.1.309) A refusal is reported as it happens (`system`
     `permission_denied`, with `decision_reason_type`); some calls are
     refused by the CLI's own guard with only `Blocked: …` error text.
+- A `sdk_error` carries a structured `failure` (`claude_runs/failures.py`):
+  `kind` (`usage_limit`, `authentication_or_access`, `sdk_transport`,
+  `unknown`), the original `evidence` (result `subtype`/`is_error`/text or
+  exception type), and `advice` marked `basis="inferred"`. It reads only the
+  runtime's own short report, which must open with the statement and not
+  also state the other kind, never the result `subtype` (the reported
+  failures arrived as `subtype="success"` with `is_error`); unrecognised or
+  conflicting text stays `unknown`. `sdk_transport` is only the SDK's exact
+  `CLIConnectionError`/`CLIJSONDecodeError`/`MessageParseError`/`ProcessError`
+  (matched by package, since only `claude.py` imports the SDK); a missing
+  executable or a `ResultError` is not transport. `resets_at` is set only
+  for a full date with year, time and explicit zone/offset; a bare time of
+  day is not a date, so it stays `reset_text`. `error`/`final_text` are never
+  replaced. It does not retry, resume, switch accounts or estimate allowance.
+  Account-scoped cooldowns are not implemented: no stable non-secret account
+  identity exists in the config model (jake-tools#14).
 - After a `max_turns` stop the worker asks for one handoff
   (`claude_runs/handoff.py`): the same session resumed through
   `ClaudeAgent` with no tools, `max_turns=1`, capped output, inside the

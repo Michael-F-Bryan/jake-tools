@@ -53,6 +53,7 @@ from .events import (
     InvalidCursorError,
     progress_line,
 )
+from .failures import Failure
 from .models import (
     DeliveryState,
     InputRequest,
@@ -252,6 +253,7 @@ class Outcome(BaseModel):
     resumable: bool = False
     invocation_cost_usd: float | None = None
     diagnostics: list[str] = Field(default_factory=list)
+    failure: Failure | None = None
     retrieve: Retrieval | None = None
 
 
@@ -591,6 +593,7 @@ def outcome_of(
         resumable=resumable,
         invocation_cost_usd=state.invocation_cost_usd,
         diagnostics=diagnostics,
+        failure=state.failure,
         retrieve=retrieve,
     )
 
