@@ -44,7 +44,7 @@ repeats. No dollar cost is turned into an allowance.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -155,7 +155,7 @@ _USAGE_LIMIT = (
 )
 _AUTHENTICATION = (
     re.compile(r"failed to authenticate\b", re.IGNORECASE),
-    re.compile(r"(?:401|403)\b"),
+    re.compile(r"api error: (?:401|403)\b", re.IGNORECASE),
     re.compile(r"invalid api key\b", re.IGNORECASE),
     re.compile(r"oauth token has expired\b", re.IGNORECASE),
 )
@@ -293,9 +293,9 @@ def _instant(wording: str) -> datetime | None:
     return local
 
 
-def _zone(name: str) -> ZoneInfo | None:
+def _zone(name: str) -> tzinfo | None:
     if name.upper() in ("UTC", "GMT"):
-        return ZoneInfo("UTC")
+        return UTC  # no tz database needed: a missing one must not hide a limit
     if "/" not in name or not re.fullmatch(r"[A-Za-z]+(?:/[A-Za-z0-9_+-]+)+", name):
         return None  # an abbreviation (PST, CST, IST) names no one zone
     try:

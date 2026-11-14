@@ -453,3 +453,48 @@ def test_a_naive_observation_time_gives_no_instant() -> None:
 
 def test_text_without_a_reset_phrase_has_neither_words_nor_time() -> None:
     assert parse_reset("You've hit your limit", OBSERVED) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "403 items were processed",
+        "401k contributions: 403 rows",
+        "Error 403 while parsing the report",
+        "Something failed with 401",
+    ],
+)
+def test_a_bare_status_number_is_not_an_authentication_report(text: str) -> None:
+    assert classify_text(text).kind == "unknown"
+
+
+def test_an_explicit_api_error_status_is_an_access_report() -> None:
+    failure = classify_text("API Error: 403 Forbidden")
+    assert failure.kind == "authentication_or_access" and failure.http_status == 403
+
+
+def test_a_missing_tz_database_does_not_hide_the_reported_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zoneinfo import ZoneInfoNotFoundError
+
+    from jake_tools.claude_runs import failures
+
+    def no_tzdata(key: str) -> Any:
+        raise ZoneInfoNotFoundError(key)
+
+    monkeypatch.setattr(failures, "ZoneInfo", no_tzdata)
+    # UTC/GMT need no database: the dated reset is still read.
+    utc = classify_text(
+        "You've hit your weekly limit · resets Nov 17, 2026, 5:30am (UTC)"
+    )
+    assert utc.kind == "usage_limit"
+    assert utc.resets_at == datetime(2026, 11, 17, 5, 30, tzinfo=UTC)
+    # An IANA name cannot be resolved here: the limit is kept, the time is not.
+    iana = classify_text(
+        "You've hit your weekly limit · resets Nov 17, 2026, 5:30am (Europe/London)"
+    )
+    assert iana.kind == "usage_limit"
+    assert iana.resets_at is None
+    assert iana.reset_text == "Nov 17, 2026, 5:30am (Europe/London)"
+    assert iana.evidence.matched == "You've hit your weekly limit"

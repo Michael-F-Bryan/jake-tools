@@ -23,7 +23,9 @@ Narrow by design:
   limit is no longer in force. The context's file keeps that prompt's time as
   a watermark (``answered_after``), so an observation made before it that is
   written late (a slow worker) is stale and dropped, not resurrected. A
-  record newer than the prompt is left alone. A watermark is kept for
+  record newer than the prompt is left alone. A tie is conservative and
+  order-independent: a failure observed at exactly the answered prompt's
+  time survives, whether it is written before or after the clear. A watermark is kept for
   :data:`WATERMARK_RETENTION` and then purged with its file.
 
 Files live in ``<runs_dir>/.cooldowns/<sha256(label)[:32]>.json`` (the label
@@ -136,7 +138,7 @@ def record(
         _purge_locked(directory, moment)
         path = _path(runs_dir, context)
         state = _read(path, context) or _State(account_context=context)
-        if state.answered_after is not None and observed_at <= state.answered_after:
+        if state.answered_after is not None and observed_at < state.answered_after:
             return None  # a later success already showed this limit is over
         current = active(runs_dir, context, now=moment)
         if current is not None and current.observed_at >= observed_at:

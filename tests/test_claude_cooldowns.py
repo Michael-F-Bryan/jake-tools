@@ -203,7 +203,12 @@ def test_purging_expired_files_keeps_a_recent_watermark_and_drops_old_ones(
     assert len(list((tmp_path / ".cooldowns").glob("*.json"))) == 2
     assert (
         cooldowns.record(
-            tmp_path, "acct-a", resets_at=LATER, observed_at=t, task_id="a", now=t
+            tmp_path,
+            "acct-a",
+            resets_at=LATER,
+            observed_at=t - timedelta(seconds=1),
+            task_id="a",
+            now=t,
         )
         is None
     )
@@ -438,3 +443,40 @@ async def test_runs_written_before_the_label_still_read_back(
     assert "cooldown" not in old["result"]  # no label on record: no context
     assert old["result"]["failure"]["kind"] == "usage_limit"
     assert any(t["task_id"] == info["task_id"] for t in listed["tasks"])
+
+
+def test_an_exact_tie_keeps_the_failure_whichever_order_it_arrives_in(
+    tmp_path: Path,
+) -> None:
+    tie = NOW + timedelta(hours=1)
+    # Failure first, then the answered prompt sent at the same instant.
+    first = tmp_path / "failure-first"
+    first.mkdir()
+    cooldowns.record(
+        first, "acct-a", resets_at=LATER, observed_at=tie, task_id="f", now=NOW
+    )
+    assert not cooldowns.clear(first, "acct-a", interaction_at=tie, now=NOW)
+    assert cooldowns.active(first, "acct-a", now=NOW) is not None
+    # The answered prompt first, then the failure observed at the same instant.
+    second = tmp_path / "success-first"
+    second.mkdir()
+    assert not cooldowns.clear(second, "acct-a", interaction_at=tie, now=NOW)
+    kept = cooldowns.record(
+        second, "acct-a", resets_at=LATER, observed_at=tie, task_id="f", now=NOW
+    )
+    assert kept is not None
+    assert cooldowns.active(second, "acct-a", now=NOW) == kept
+    # One tick older than the prompt is stale in both orders.
+    assert (
+        cooldowns.record(
+            second,
+            "acct-b",
+            resets_at=LATER,
+            observed_at=tie - timedelta(microseconds=1),
+            task_id="g",
+            now=NOW,
+        )
+        is not None
+    )
+    cooldowns.clear(second, "acct-b", interaction_at=tie, now=NOW)
+    assert cooldowns.active(second, "acct-b", now=NOW) is None
