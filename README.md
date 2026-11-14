@@ -166,9 +166,15 @@ The stdio server (`jake-tools-mcp`) also provides:
   IDs and resolved names. Results sort by start then ID; cursors are query-bound
   and reject changed selected history. Running entries use a fixed `observed_at`
   across continuation pages.
-- `clockify_workspace_catalogue(workspace_id?)`: all active/archived clients and
-  projects, and ACTIVE/DONE tasks with an explicit `completed` flag. IDs remain
-  available for creating entries.
+- `clockify_workspace_catalogue(workspace_id?, keys?, client_ids?, project_ids?)`:
+  without `keys`, all active/archived clients and projects, and ACTIVE/DONE tasks
+  with an explicit `completed` flag (large). With `keys` (1..50 Jira keys), an
+  exact work-item lookup: one result per key, `resolved` (one task or project
+  with its project/client and archived/completed flags), `ambiguous` (all
+  candidates, none preferred), `not_found` or `incomplete` (part of the scope
+  could not be read). Never a similar-name match. `client_ids`/`project_ids`
+  declare the scope; `coverage` reports it, unread projects and the number of
+  upstream requests. Scope, not `keys`, is what reduces upstream requests.
 - `clockify_create_time_entry(start, end, description, billable, workspace_id?,
   project_id?, task_id?)`: creates a completed entry, requires aware timestamps
   and `end > start`, and validates task/project ownership. Makes one POST, then

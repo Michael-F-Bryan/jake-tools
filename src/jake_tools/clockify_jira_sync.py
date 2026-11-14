@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from enum import StrEnum
@@ -19,11 +18,11 @@ from .clockify import (
     TaskStatus,
     clockify_project_name_for_jira,
     clockify_task_name_for_jira,
+    jira_key_of_project_note,
+    jira_key_of_task_name,
     project_note_for,
 )
 from .jira import JiraIssue, normalise_jira_key
-
-JIRA_REFERENCE_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
 
 # Sunfish's Jira convention: a "Project / Phase" issue becomes a Clockify
 # project; every other issue type becomes a task under its ancestor phase.
@@ -880,9 +879,9 @@ def _projects_by_jira_key(
 ) -> dict[str, list[ClockifyProject]]:
     grouped: defaultdict[str, list[ClockifyProject]] = defaultdict(list)
     for project in projects:
-        match = JIRA_REFERENCE_PATTERN.search(project.note)
-        if match:
-            grouped[match.group(1)].append(project)
+        key = jira_key_of_project_note(project.note)
+        if key:
+            grouped[key].append(project)
     return dict(grouped)
 
 
@@ -891,9 +890,9 @@ def _tasks_by_jira_key(
 ) -> dict[str, list[ClockifyTask]]:
     grouped: defaultdict[str, list[ClockifyTask]] = defaultdict(list)
     for task in tasks:
-        match = JIRA_REFERENCE_PATTERN.match(task.name)
-        if match:
-            grouped[match.group(1)].append(task)
+        key = jira_key_of_task_name(task.name)
+        if key:
+            grouped[key].append(task)
     return dict(grouped)
 
 
