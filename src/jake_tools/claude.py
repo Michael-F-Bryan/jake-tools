@@ -62,6 +62,7 @@ from .ai_usage import AICallTelemetry, TelemetrySink, Usage
 from .prompting import Prompt, StructuredPrompt
 
 __all__ = [
+    "DEFAULT_MAX_BUFFER_SIZE",
     "DEFAULT_MODEL",
     "LOCAL_MCP_SERVER",
     "AgentSpec",
@@ -89,6 +90,15 @@ __all__ = [
 ]
 
 DEFAULT_MODEL = "claude-sonnet-5"
+
+DEFAULT_MAX_BUFFER_SIZE = 16 * 1024 * 1024
+"""Largest single CLI stdout message, in characters, the SDK transport accepts.
+
+The SDK's own default is 1 MiB, which one ``Read`` of a screenshot (a base64
+image inside a tool result) can exceed. This budget is finite and was chosen,
+not derived: tests show the real SDK parser accepts a valid image-result
+message above 1 MiB and refuses one over the limit, whole, never truncated.
+"""
 
 LOCAL_MCP_SERVER = "jake"
 """The name of the in-process MCP server that serves :class:`LocalTool` s."""
@@ -266,6 +276,10 @@ class AgentSpec(BaseModel):
     ``session_id`` names the Claude session a fresh conversation creates;
     ``resume`` continues an existing one instead (the CLI keeps its ID and
     fails, rather than starting afresh, when it cannot find it).
+
+    ``max_buffer_size`` bounds one CLI stdout message (the SDK's
+    ``max_buffer_size``); it is always finite, see
+    :data:`DEFAULT_MAX_BUFFER_SIZE`.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -286,6 +300,7 @@ class AgentSpec(BaseModel):
     local_tools: tuple[LocalTool, ...] = ()
     session_id: str | None = None
     resume: str | None = None
+    max_buffer_size: int = Field(default=DEFAULT_MAX_BUFFER_SIZE, gt=0)
 
     def merge(self, override: AgentSpec | None) -> AgentSpec:
         """Layer the fields ``override`` actually set on top of this spec.
@@ -343,6 +358,7 @@ class AgentSpec(BaseModel):
             permission_mode=self.permission_mode,
             session_id=self.session_id,
             resume=self.resume,
+            max_buffer_size=self.max_buffer_size,
             extra_args=dict(extra_args or {}),
         )
 

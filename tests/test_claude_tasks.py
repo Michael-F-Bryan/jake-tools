@@ -24,7 +24,9 @@ import anyio
 import pytest
 from mcp import ClientSession
 
+from jake_tools.claude import DEFAULT_MAX_BUFFER_SIZE
 from jake_tools.claude_runs.procs import process_table
+from jake_tools.claude_runs.worker import MAX_ERROR_CHARS
 
 ServerFactory = Callable[..., AbstractAsyncContextManager[ClientSession]]
 
@@ -526,6 +528,37 @@ async def test_long_text_is_clipped_with_coverage_and_full_text_stays_reachable(
     assert missing["available"] is False and "text" not in missing
     assert len(Path(info["result"]["final_text_path"]).read_text()) == 30000
     assert "y" * 20000 in Path(wide["raw_transcript_path"]).read_text()
+
+
+async def test_an_oversized_sdk_message_fails_the_task_but_keeps_its_evidence(
+    mcp_server: ServerFactory, fake_env: dict[str, str], workdir: Path
+) -> None:
+    over = DEFAULT_MAX_BUFFER_SIZE + 1
+    async with mcp_server(fake_env) as session:
+        started = await start(
+            session, workdir, f"[[scenario:image_result:{over}]] look at it"
+        )
+        task_id = started["task_id"]
+        final, events, _ = await poll_until(session, task_id, terminal)
+        info = await detail(session, task_id)
+        listed = await read_transcript(session, task_id)
+
+    assert final["status"] == "failed"
+    assert final["termination_reason"] == "sdk_error"
+    result = info["result"]
+    # The original failure, with the limit it hit, survives: nothing was
+    # truncated into a parseable-looking message.
+    assert f"maximum buffer size of {DEFAULT_MAX_BUFFER_SIZE} bytes" in result["error"]
+    assert "claude_start(resume_task_id=" in result["error"]
+    assert len(result["error"]) <= MAX_ERROR_CHARS
+    # Identity and the routes to existing evidence survive too.
+    assert info["task_id"] == task_id
+    assert result["session_id"]
+    assert result["resumable"] is True
+    assert Path(result["transcript_path"]).is_file()
+    assert Path(result["events_path"]).is_file()
+    assert "tool_use" in kinds(events)  # the Read that preceded the failure
+    assert listed[0] == events
 
 
 async def test_thinking_never_reaches_events_or_transcript_pages(

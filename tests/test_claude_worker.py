@@ -15,7 +15,13 @@ from jake_tools.claude_runs.events import EventLog
 from jake_tools.claude_runs.inbox import Inbox
 from jake_tools.claude_runs.models import RunSpec
 from jake_tools.claude_runs.rundir import create_run_dir, new_task_id
-from jake_tools.claude_runs.worker import Driver, Progress
+from jake_tools.claude_runs.worker import (
+    MAX_ERROR_CHARS,
+    STREAM_LIMIT_ADVICE,
+    Driver,
+    Progress,
+    _describe_stream_failure,
+)
 
 
 class SlowToCloseClient:
@@ -128,3 +134,18 @@ def test_add_usage_sums_tokens_and_cost_but_keeps_the_latest_model_breakdown() -
     assert total.model_usage == {"m": {"inputTokens": 13}}
     assert add_usage(None, later) is later
     assert add_usage(first, None) is first
+
+
+def test_a_stream_limit_error_stays_bounded_with_its_advice_intact() -> None:
+    class Oversized(Exception):
+        pass
+
+    long = Oversized(
+        "JSON message exceeded maximum buffer size of 9 bytes " + "x" * 5000
+    )
+    described = _describe_stream_failure(long)
+    assert len(described) <= MAX_ERROR_CHARS
+    assert described.startswith("Oversized: JSON message exceeded maximum buffer")
+    assert described.endswith(STREAM_LIMIT_ADVICE)
+    # Other failures are described as before, with no advice.
+    assert _describe_stream_failure(ValueError("boom")) == "ValueError: boom"
