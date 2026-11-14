@@ -226,6 +226,14 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   answering a prompt sent after the observation clears it, and that prompt's
   time stays as a per-context watermark (7 days) so a delayed older failure
   write is dropped rather than resurrecting the cooldown.
+- Delegation recipes (`skills/claude-delegation/references/recipes.md`) are
+  JSON fences the live tests run verbatim
+  (`tests/test_delegation_recipes_live.py`, `--slow`); receipts under
+  `tests/fixtures/delegation_recipes/receipts/` keep their sanitised
+  outcomes, and `tests/test_delegation_recipes.py` pins them to the documented
+  text. Change a fence's brief or grants, and rerun and re-save that recipe's
+  receipt (`JAKE_RECIPE_RECEIPT_DIR`). The CLI decides what a rule approves;
+  never document a rule form the matrix did not run.
 - Local capacity is operator policy, `claude.max_live_tasks`
   (`JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS`, a positive integer, default 2; never
   document a universal two). `start_task` admits only while the shared live

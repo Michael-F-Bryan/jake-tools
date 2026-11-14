@@ -56,6 +56,13 @@ files. Put in the brief: the goal; context it can't discover; exact paths
 check itself; and what its final message must contain (that comes back as
 `final_text`).
 
+Copyable, runtime-tested starting points (read-only review, scoped output
+with a tiny checkpoint, completion-only continuation) and what the runtime
+did with each path and Bash rule form are in `references/recipes.md`
+(`skill://claude-delegation/references/recipes.md` over MCP,
+`skill_view("jake-tools:claude-delegation", file_path="references/recipes.md")`
+in Hermes). Always give `working_directory` yourself; never guess it.
+
 ## 2. Grant the smallest set of tools
 
 Two separate lists:
@@ -75,7 +82,11 @@ Two separate lists:
   - `"Read"` approves every `Read` call.
   - `"Bash(git status)"` approves only that command.
   - `"Bash(uv run pytest *)"` approves that command with any arguments.
-  - `"Edit(/src/**)"` approves edits to paths matching the pattern.
+  - `"Edit(./src/**)"` approves edits to paths under `src/` in the working
+    directory. Path rules for writes are `Edit(...)`, which covers `Write`
+    too: `Write(./src/**)` approved nothing. `/src/**` is also relative to the
+    working directory; an absolute path is `//abs/path/**`. Details and
+    compound Bash behaviour: `references/recipes.md`.
   - `"WebFetch(domain:example.com)"` approves fetches from that domain.
 
   If you omit `allowed_tools`, every tool in `tools` is approved outright.
@@ -339,6 +350,8 @@ that task's Claude conversation as a **new** task, with the same
 - Nothing is inherited except the conversation. `tools`,
   `allowed_tools`, limits and `allow_questions` are this call's own.
 - `working_directory` must be the parent's (omit it to use the parent's).
+- To save work a task drafted but could not save, resume with the corrected
+  grant and only the save as the delta (`references/recipes.md`, recipe 3).
 - Only the session's latest task can be resumed. An older one returns
   `resume_unavailable` with `detail.latest_task_id`.
 - A still-running parent, or another live task on the session, returns

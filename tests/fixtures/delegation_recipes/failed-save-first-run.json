@@ -1,0 +1,9 @@
+{
+ "brief": "Input: data/inventory.csv (columns sku,qty,price_cents). Read it and write a memo of exactly four short lines, in your own words, on stock health; name every out-of-stock SKU (qty 0) by id. Save it to reports/memo.md with the Write tool.\nIf the save is denied, do not try another tool, path or command. Reply with the complete memo between a line `BEGIN MEMO` and a line `END MEMO`, then the line `SAVE FAILED`.",
+ "tools": ["Read", "Write"],
+ "allowed_tools": ["Write(./reports/**)"],
+ "max_turns": 10,
+ "timeout_seconds": 300,
+ "max_budget_usd": 0.25,
+ "request_id": "memo-1"
+}
