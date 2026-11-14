@@ -15,7 +15,7 @@
     "files_removed": [],
     "final_text": "SAVE DENIED: /abs/path/to/project/reports/summary.md",
     "handoff": null,
-    "invocation_cost_usd": 0.0084925,
+    "invocation_cost_usd": 0.0081634,
     "permission_denials": [
       {
         "requested": "/abs/path/to/project/reports/summary.md",
@@ -40,7 +40,7 @@
     "allowed_tools": [
       "Write(./reports/**)"
     ],
-    "brief": "Input: data/inventory.csv (columns sku,qty,price_cents). Output: reports/summary.md, the only file you may create or change.\n1. FIRST, before reading anything: Write reports/summary.md containing exactly `PENDING`. If that call is denied, stop at once: reply `SAVE DENIED: <path>` and do nothing else. Do not try another tool, path or command.\n2. Read data/inventory.csv. Count total units (sum of qty) and out-of-stock SKUs (qty 0).\n3. Read reports/summary.md, then Write it again as two lines: `total_units: <n>` and `out_of_stock: <n>`.\nAcceptance: the file has exactly those two lines. Final message: the path and the two numbers.",
+    "brief": "Input: data/inventory.csv (columns sku,qty,price_cents). Output: reports/summary.md, a new file and the only file you may create or change.\n1. FIRST, before reading anything: Write reports/summary.md containing exactly `PENDING`. If that call is denied, stop at once: reply `SAVE DENIED: <path>` and do nothing else. Do not try another tool, path or command.\n2. Read data/inventory.csv. Count total units (sum of qty) and out-of-stock SKUs (qty 0).\n3. Read reports/summary.md, then Write it again as two lines: `total_units: <n>` and `out_of_stock: <n>`.\nAcceptance: the file has exactly those two lines. Final message: the path and the two numbers.",
     "max_budget_usd": 0.25,
     "max_turns": 10,
     "request_id": "summary-1",

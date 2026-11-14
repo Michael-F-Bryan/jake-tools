@@ -94,3 +94,16 @@ def write_receipt(
     (directory / f"{name}.json").write_text(
         json.dumps(clean, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     )
+
+
+# What the path-rule matrix (test_delegation_recipes_live.py) establishes.
+IN_SCOPE = {"out/rel.txt": "rel", "out/abs.txt": "abs", "out/existing.txt": "new"}
+# spelling -> (rule template, are the three in-scope calls approved?)
+RULE_SPELLINGS = {
+    "dot-relative": ("Edit(./out/**)", True),
+    "bare-relative": ("Edit(out/**)", True),
+    "root-relative": ("Edit(/out/**)", True),
+    "double-slash-absolute": ("Edit(/{workdir}/out/**)", True),
+    "single-slash-absolute": ("Edit({workdir}/out/**)", False),
+    "write-spelling": ("Write(./out/**)", False),
+}

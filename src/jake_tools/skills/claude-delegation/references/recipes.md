@@ -3,9 +3,9 @@
 Copyable `claude_start` arguments, each run as written against the real
 runtime (see "Evidence"). Copy one, replace `/abs/path/to/project` and the
 file names, keep the shape. The caller supplies the working directory:
-never guess it, and never let the brief stand in for one. Anything the task
-needs that you do not know is a question for the user, not something to
-discover through the worker.
+never guess it. If the working directory, the authority to write, or the
+destination is unknown, ask the user. Facts about the project and its files
+are the worker's to find out in the ordinary way.
 
 Every recipe states the same six things, because a missing one is where
 tasks went wrong:
@@ -15,7 +15,7 @@ tasks went wrong:
 | Working directory | `working_directory`, absolute; paths in the brief are relative to it. A resume reuses its parent's. |
 | Exposed tools | `tools`: only what the job needs. |
 | Explicit grants | `allowed_tools`: written out, never omitted (omitting approves every exposed tool). |
-| Inputs and output path | named in the brief; one output location, nothing else writable. |
+| Inputs and output path | named in the brief. The grant is a directory (`Edit(./reports/**)`), so the brief, not the grant, limits the worker to the one output file: grant a directory that holds only outputs. |
 | Acceptance | what the final message and the files must show, checkable by the worker. |
 | Stopping conditions | the limits, plus "if a call is denied, stop and report it". |
 
@@ -54,15 +54,18 @@ add `Write` to a review.
 
 ## 2. Scoped output with a tiny checkpoint
 
-Only for work that produces a file. Grant writes to one directory with
-`Edit(...)` (see the rules below: it covers `Write` too), and have the worker
-save a placeholder **first**. A wrong grant then costs one denied call, before
-any drafting, and the worker stops with nothing to recover.
+Only for work that produces a **new** file at an authorised path. Grant writes
+to one directory with `Edit(...)` (see the rules below: it covers `Write`
+too), and have the worker save a placeholder **first**. A wrong grant then
+costs one denied call, before any drafting, and the worker stops with nothing
+to recover. If the deliverable already exists, do not overwrite it with a
+placeholder: use a new path for the checkpoint (or none) and let the final
+save replace the file.
 
 <!-- recipe: scoped-output -->
 ```json
 {
- "brief": "Input: data/inventory.csv (columns sku,qty,price_cents). Output: reports/summary.md, the only file you may create or change.\n1. FIRST, before reading anything: Write reports/summary.md containing exactly `PENDING`. If that call is denied, stop at once: reply `SAVE DENIED: <path>` and do nothing else. Do not try another tool, path or command.\n2. Read data/inventory.csv. Count total units (sum of qty) and out-of-stock SKUs (qty 0).\n3. Read reports/summary.md, then Write it again as two lines: `total_units: <n>` and `out_of_stock: <n>`.\nAcceptance: the file has exactly those two lines. Final message: the path and the two numbers.",
+ "brief": "Input: data/inventory.csv (columns sku,qty,price_cents). Output: reports/summary.md, a new file and the only file you may create or change.\n1. FIRST, before reading anything: Write reports/summary.md containing exactly `PENDING`. If that call is denied, stop at once: reply `SAVE DENIED: <path>` and do nothing else. Do not try another tool, path or command.\n2. Read data/inventory.csv. Count total units (sum of qty) and out-of-stock SKUs (qty 0).\n3. Read reports/summary.md, then Write it again as two lines: `total_units: <n>` and `out_of_stock: <n>`.\nAcceptance: the file has exactly those two lines. Final message: the path and the two numbers.",
  "working_directory": "/abs/path/to/project",
  "tools": [
   "Read",
@@ -102,11 +105,13 @@ conversation, so resume the same session and save it; do not rerun the job.
    re-derive the content from the sources, and it is told to save what it has.
 4. Check the file yourself against what the first task produced.
 
-There is no handoff to read unless the first task stopped on `max_turns`
-(`result.handoff_status` and `handoff_text` are absent otherwise): use the
-denials, `final_text` and `last_narration`, and do not ask for or invent a
-handoff. After a `max_turns` stop, read its `handoff_text` first; the remaining
-delta still goes in the brief.
+A handoff is attempted only after a `max_turns` stop, and may be `written`,
+`failed` or `skipped` (`claude_status`'s `result.handoff`; the poll's
+`handoff_status`/`handoff_text`). After `max_turns`, read the handoff if there
+is one; otherwise inspect the existing `final_text`, denials and
+`last_narration`. Do not ask for or invent a handoff. Either way it is the
+worker's claim: check the files yourself, and put the remaining delta in the
+brief.
 
 <!-- recipe: completion-only-continuation -->
 ```json

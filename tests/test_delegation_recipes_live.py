@@ -26,6 +26,8 @@ import pytest
 from mcp import ClientSession
 from recipe_fixtures import (
     FIXTURES,
+    IN_SCOPE,
+    RULE_SPELLINGS,
     recipe_request,
     stage_project,
     tree,
@@ -157,16 +159,6 @@ MATRIX_BRIEF = (
     "3. Write the file outside/b.txt containing `b`.\n"
     "4. Read out/existing.txt, then Edit it replacing `old` with `new`."
 )
-IN_SCOPE = {"out/rel.txt": "rel", "out/abs.txt": "abs", "out/existing.txt": "new"}
-# spelling -> (rule template, are the three in-scope calls approved?)
-RULE_SPELLINGS = {
-    "dot-relative": ("Edit(./out/**)", True),
-    "bare-relative": ("Edit(out/**)", True),
-    "root-relative": ("Edit(/out/**)", True),
-    "double-slash-absolute": ("Edit(/{workdir}/out/**)", True),
-    "single-slash-absolute": ("Edit({workdir}/out/**)", False),
-    "write-spelling": ("Write(./out/**)", False),
-}
 
 
 @pytest.mark.parametrize("spelling", sorted(RULE_SPELLINGS))
