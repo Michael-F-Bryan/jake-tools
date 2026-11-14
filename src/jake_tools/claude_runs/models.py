@@ -61,6 +61,8 @@ renamed):
 ``<runs_dir>/.runs.lock`` serialises capacity check, creation and spawn
 across every server sharing the directory. ``<runs_dir>/.requests/`` maps a
 caller's ``request_id`` (by digest) to the task it started.
+``<runs_dir>/.cooldowns/`` holds the advisory usage-limit cooldown per declared
+account context (:mod:`.cooldowns`), under its own leaf lock.
 
 Lock order, outermost first: ``.runs.lock``, ``.inbox.lock``,
 ``.status.lock``, ``.events.lock``. Nothing takes an outer lock while
@@ -91,7 +93,8 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from ..ai_usage import AICallTelemetry, Usage
 from ..claude import EffortLevel, check_tool_name, permission_rule_tool
-from .failures import Failure
+from ..config import ACCOUNT_CONTEXT_PATTERN
+from .failures import Cooldown, Failure
 
 RunStatus = Literal["working", "input_required", "completed", "failed", "cancelled"]
 TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
@@ -161,7 +164,13 @@ class RunSpec(BaseModel):
     cost_baseline_usd: float | None = None
     cost_baseline_exact: bool = True
     allow_questions: bool = False
-    """``session_id`` is the Claude session this invocation writes: a fresh
+    account_context: Annotated[str, Field(pattern=ACCOUNT_CONTEXT_PATTERN)] | None = (
+        None
+    )
+    """The operator-declared account-context label (``claude.account_context``)
+    at launch, fixed for the run; ``None`` when unset or for older runs, which
+    take part in no cooldown sharing (see :mod:`.cooldowns`).
+    ``session_id`` is the Claude session this invocation writes: a fresh
     UUID for a new conversation, the parent's for a resume (the CLI keeps it).
     ``cost_baseline_usd`` is the session's cumulative cost when this
     invocation began, because the CLI carries it across a resume.
@@ -358,6 +367,10 @@ class ClaudeStartResult(BaseModel):
     observation_token: str | None = None
     """Pass to ``claude_poll``: changes are reported from the task's start."""
     config: RunConfig | None = None
+    cooldown: Cooldown | None = None
+    """A usage-limit cooldown already known for this task's declared account
+    context (``config.account_context``), advisory only: the task was started
+    regardless. ``None`` when none is known, none is declared, or it expired."""
 
 
 class RunConfig(BaseModel):
@@ -379,6 +392,7 @@ class RunConfig(BaseModel):
     allowed_tools: tuple[str, ...] | None = None
     approval_rules: tuple[str, ...]
     permission_mode: Literal["dontAsk"] = "dontAsk"
+    account_context: str | None = None
     max_turns: int
     timeout_seconds: float
     max_budget_usd: float
@@ -392,6 +406,7 @@ class RunConfig(BaseModel):
             tools=spec.tools,
             allowed_tools=spec.allowed_tools,
             approval_rules=spec.approval_rules,
+            account_context=spec.account_context,
             max_turns=spec.max_turns,
             timeout_seconds=spec.timeout_seconds,
             max_budget_usd=spec.max_budget_usd,

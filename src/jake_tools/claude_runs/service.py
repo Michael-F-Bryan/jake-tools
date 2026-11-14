@@ -37,8 +37,9 @@ from .control import (
     reconcile,
     start_task,
 )
+from .cooldowns import for_failed_run
 from .events import Cursor, Event, EventLog, InvalidCursorError
-from .failures import Failure, FailureKind
+from .failures import Cooldown, Failure, FailureKind
 from .inbox import (
     AnswerResult,
     Inbox,
@@ -211,6 +212,7 @@ class TaskResult(BaseModel):
     handoff: Handoff | None = None
     diagnostics: list[str] = Field(default_factory=list)
     failure: Failure | None = None
+    cooldown: Cooldown | None = None
     retrieve: Retrieval | None = None
     transcript_path: Path
     events_path: Path | None = None
@@ -938,6 +940,7 @@ def _result(
         handoff=state.handoff,
         diagnostics=diagnostics_of(state, text),
         failure=state.failure,
+        cooldown=for_failed_run(run_dir, state.failure),
         retrieve=result_route(state.task_id, "final_text") if truncated else None,
         transcript_path=run_dir / TRANSCRIPT_FILE,
         events_path=events_path if events_path.exists() else None,

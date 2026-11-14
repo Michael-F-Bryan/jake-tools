@@ -129,6 +129,24 @@ class Failure(BaseModel):
     advice: Advice
 
 
+class Cooldown(BaseModel):
+    """A reported usage limit for one account context, as last observed.
+
+    ``resets_at`` is the instant the report named; ``observed_at`` is when a
+    worker saw it, and ``task_id`` the task that saw it. This is a report,
+    not a measurement: it says nothing of remaining allowance, and a caller
+    may still start work.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    account_context: str
+    resets_at: datetime
+    observed_at: datetime
+    task_id: str
+    advisory: bool = True
+
+
 # --- recognising reports ---------------------------------------------------------
 
 _USAGE_LIMIT = (

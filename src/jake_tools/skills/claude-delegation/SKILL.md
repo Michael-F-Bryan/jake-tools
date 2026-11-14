@@ -306,6 +306,16 @@ login and access), `inspect_then_resume` (read the task's work first) or
 the failure says nothing about remaining allowance. `claude_list` shows
 `failure_kind`.
 
+If the operator declared an account context (`config.account_context` in
+the start result), a `usage_limit` with a dated `resets_at` is shared with
+other runs of the same label: `claude_start` returns `cooldown`
+(`resets_at`, `observed_at`, `task_id`, `advisory`) beside the new task, and
+a failed limit task's result shows the cooldown now on record. It is
+advisory: the task was started anyway, nothing queues or retries, and it
+says nothing of remaining allowance. A model turn that answers a later
+prompt clears it. An undated reset is never turned into a cooldown. With no
+label declared, nothing is shared.
+
 `final_text` is the agent's claim, including any "tests pass". Before you
 report the work as done, read the changed files or `git diff` and re-run the
 acceptance checks yourself. Report what you verified separately from what the

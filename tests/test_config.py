@@ -253,6 +253,7 @@ def test_settings_listing_is_complete_and_stable(tmp_path: Path) -> None:
         "claude.max_turns",
         "claude.timeout_seconds",
         "claude.max_budget_usd",
+        "claude.account_context",
         "transcription.api_base_url",
         "TRANSCRIPTION_API_TOKEN",
         "transcription.timeout_seconds",
@@ -308,3 +309,36 @@ def test_transcription_settings_follow_env_then_config_and_the_token_is_a_secret
         '[transcription]\napi_token = "from-config"\n'
     )
     assert load_config(_env(tmp_path)).transcription_api_token.value is None
+
+
+def test_the_account_context_label_is_optional_and_unset_by_default(
+    tmp_path: Path,
+) -> None:
+    assert load_config(_env(tmp_path)).claude_account_context.value is None
+    blank = load_config({**_env(tmp_path), "JAKE_TOOLS_CLAUDE_ACCOUNT_CONTEXT": " "})
+    assert blank.claude_account_context.value is None
+
+
+def test_the_account_context_label_comes_from_env_or_the_config_file(
+    tmp_path: Path,
+) -> None:
+    config_home = tmp_path / ".config" / "jake-tools"
+    config_home.mkdir(parents=True)
+    (config_home / "config.toml").write_text(
+        '[claude]\naccount_context = "from-file"\n'
+    )
+
+    assert load_config(_env(tmp_path)).claude_account_context.value == "from-file"
+    env = {**_env(tmp_path), "JAKE_TOOLS_CLAUDE_ACCOUNT_CONTEXT": "work.max:1"}
+    config = load_config(env)
+    assert config.claude_account_context.value == "work.max:1"
+    assert config.claude_account_context.origin == "JAKE_TOOLS_CLAUDE_ACCOUNT_CONTEXT"
+    assert not config.claude_account_context.secret
+
+
+@pytest.mark.parametrize("label", ["has space", "a/b", "x" * 65, "über", "a@b.com "])
+def test_an_unsafe_account_context_label_is_refused(tmp_path: Path, label: str) -> None:
+    env = {**_env(tmp_path), "JAKE_TOOLS_CLAUDE_ACCOUNT_CONTEXT": label}
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(env)
+    assert "claude.account_context" in str(excinfo.value)

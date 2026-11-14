@@ -214,8 +214,18 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   for a full date with year, time and explicit zone/offset; a bare time of
   day is not a date, so it stays `reset_text`. `error`/`final_text` are never
   replaced. It does not retry, resume, switch accounts or estimate allowance.
-  Account-scoped cooldowns are not implemented: no stable non-secret account
-  identity exists in the config model (jake-tools#14).
+  Cooldowns (`claude_runs/cooldowns.py`) are opt-in: the operator declares a
+  non-secret `claude.account_context` label (`JAKE_TOOLS_CLAUDE_ACCOUNT_CONTEXT`,
+  default unset), copied into `spec.json` at launch. Nothing infers, verifies
+  or hashes an account or credential, and equal labels are the operator's
+  statement of one shared quota. Only a `usage_limit` with a dated `resets_at`
+  is recorded, in `<runs_dir>/.cooldowns/<digest>.json` (atomic replace under a
+  leaf lock; the newer observation wins; expired or unreadable reads as
+  none). It is advisory: `claude_start` returns `cooldown` and still starts;
+  a failed limit task's result shows the one now on record; a model turn
+  answering a prompt sent after the observation clears it, and that prompt's
+  time stays as a per-context watermark (7 days) so a delayed older failure
+  write is dropped rather than resurrecting the cooldown.
 - After a `max_turns` stop the worker asks for one handoff
   (`claude_runs/handoff.py`): the same session resumed through
   `ClaudeAgent` with no tools, `max_turns=1`, capped output, inside the
