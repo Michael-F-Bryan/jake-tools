@@ -259,6 +259,15 @@ def test_settings_listing_is_complete_and_stable(tmp_path: Path) -> None:
         "transcription.api_base_url",
         "TRANSCRIPTION_API_TOKEN",
         "transcription.timeout_seconds",
+        "microsoft.tenant_id",
+        "microsoft.client_id",
+        "microsoft.account",
+        "microsoft.account_object_id",
+        "microsoft.authority_url",
+        "MICROSOFT_REFRESH_TOKEN",
+        "MICROSOFT_CLIENT_SECRET",
+        "newsletters.graph_root",
+        "newsletters.sharepoint_root",
         "artifacts.enabled",
     ]
     assert config.runs_dir.display_value().startswith(str(tmp_path))
@@ -421,3 +430,41 @@ def test_max_live_tasks_rejects_a_bad_config_file_value(
 
     with pytest.raises(ConfigError, match="claude.max_live_tasks"):
         load_config(_env(tmp_path))
+
+
+def test_microsoft_settings_are_explicit_and_secrets_are_environment_only(
+    tmp_path: Path,
+) -> None:
+    unset = load_config(_env(tmp_path))
+    assert unset.microsoft_tenant_id.value is None
+    assert unset.microsoft_account.value is None  # no default account, ever
+    assert unset.microsoft_authority_url.value == "https://login.microsoftonline.com"
+    assert unset.newsletters_graph_root.value == "https://graph.microsoft.com/v1.0"
+
+    config_dir = tmp_path / ".config" / "jake-tools"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.toml").write_text(
+        '[microsoft]\ntenant_id = "t-from-config"\naccount = "a@example.test"\n'
+        'refresh_token = "must-be-ignored"\nclient_secret = "must-be-ignored"\n'
+    )
+    from_config = load_config(_env(tmp_path))
+    assert from_config.microsoft_tenant_id.value == "t-from-config"
+    assert from_config.microsoft_tenant_id.source == "config"
+    assert from_config.microsoft_refresh_token.value is None
+    assert from_config.microsoft_client_secret.value is None
+
+    secret_file = tmp_path / "rt"
+    secret_file.write_text("from-file\n")
+    from_env = load_config(
+        _env(
+            tmp_path,
+            JAKE_TOOLS_MICROSOFT_ACCOUNT="env@example.test",
+            MICROSOFT_REFRESH_TOKEN_FILE=str(secret_file),
+            MICROSOFT_CLIENT_SECRET="s3cret",
+        )
+    )
+    assert from_env.microsoft_account.value == "env@example.test"
+    assert from_env.microsoft_refresh_token.value == "from-file"
+    assert from_env.microsoft_refresh_token.display_value() == "set"
+    assert from_env.microsoft_client_secret.display_value() == "set"
+    assert "from-file" not in repr(from_env.microsoft_refresh_token.display_value())

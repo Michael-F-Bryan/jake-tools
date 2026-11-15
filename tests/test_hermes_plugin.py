@@ -284,7 +284,7 @@ def test_registered_skills_are_the_packaged_sources(tmp_path: Path) -> None:
     ctx = RecordingContext()
     register_operations(
         ctx,
-        ("artifact", "claude", "clockify", "transcription"),
+        ("artifact", "claude", "clockify", "newsletter", "transcription"),
         config,
         lambda: config,
     )
@@ -331,3 +331,82 @@ def test_artifact_tools_need_both_the_capability_and_the_setting(
     ctx = RecordingContext()
     register_operations(ctx, ("artifact_update",), disabled, lambda: disabled)
     assert ctx.tools == {}
+
+
+def test_newsletter_reads_and_publication_are_separate_grants(tmp_path: Path) -> None:
+    config = config_for(tmp_path, {})
+
+    reads = RecordingContext()
+    register_operations(reads, ("newsletter",), config, lambda: config)
+    assert set(reads.tools) == {"newsletter_list", "newsletter_get"}
+    assert set(reads.skills) == {"newsletters"}
+
+    writes = RecordingContext()
+    register_operations(writes, ("newsletter_publish",), config, lambda: config)
+    assert set(writes.tools) == {"newsletter_create", "newsletter_update"}
+    assert {t["toolset"] for t in writes.tools.values()} == {
+        "jake_tools_newsletter_publish"
+    }
+    description = writes.tools["newsletter_create"]["schema"]["description"]
+    assert "PUBLICATION ACTION" in description
+    assert "jake-tools:newsletters" in description
+
+    # Not granted unless named: an unconfigured profile gets neither.
+    nothing = RecordingContext()
+    register_operations(nothing, (), config, lambda: config)
+    assert nothing.tools == {}
+
+
+def test_microsoft_secrets_come_from_the_profile_not_the_process(
+    tmp_path: Path,
+) -> None:
+    config = profile_config(
+        {"MICROSOFT_REFRESH_TOKEN": "profile-token"}.get,
+        environ(
+            tmp_path,
+            MICROSOFT_REFRESH_TOKEN="process-token",
+            MICROSOFT_CLIENT_SECRET="process-secret",
+        ),
+    )
+    assert config.microsoft_refresh_token.value == "profile-token"
+    assert config.microsoft_client_secret.value is None
+    assert {"MICROSOFT_REFRESH_TOKEN", "MICROSOFT_CLIENT_SECRET_FILE"} <= SECRET_NAMES
+
+
+def test_native_newsletter_tools_read_and_publish_against_a_fake_upstream(
+    tmp_path: Path,
+) -> None:
+    """The native handlers, run for real, end to end (list, create, get)."""
+    from fake_microsoft import REFRESH_TOKEN, FakeMicrosoft
+
+    fake = FakeMicrosoft().start()
+    try:
+        secrets = {"MICROSOFT_REFRESH_TOKEN": REFRESH_TOKEN}
+        config = config_for(tmp_path, secrets, **fake.env())
+        ctx = RecordingContext()
+        register_operations(
+            ctx, ("newsletter", "newsletter_publish"), config, lambda: config
+        )
+        file = tmp_path / "note.txt"
+        file.write_bytes(b"attached")
+
+        created = json.loads(
+            ctx.tools["newsletter_create"]["handler"](
+                {"title": "Hello", "body": "World", "attachments": [str(file)]}
+            )
+        )
+        listed = json.loads(ctx.tools["newsletter_list"]["handler"]({"limit": 5}))
+        missing = json.loads(ctx.tools["newsletter_get"]["handler"]({"entry_id": "99"}))
+        bad_id = json.loads(
+            ctx.tools["newsletter_get"]["handler"]({"entry_id": "../x"})
+        )
+    finally:
+        fake.stop()
+
+    assert created["verified"] is True
+    assert created["entry"]["attachments"][0]["size_bytes"] == 8
+    assert [e["title"] for e in listed["entries"]] == ["Hello"]
+    assert listed["complete"] is True
+    assert missing["code"] == "invalid_argument" and "99" in missing["error"]
+    assert bad_id["code"] == "invalid_argument"
+    assert REFRESH_TOKEN not in json.dumps([created, listed, missing, bad_id])

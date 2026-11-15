@@ -14,6 +14,7 @@ import sys
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
+from typing import TextIO
 
 import pytest
 from mcp import ClientSession, StdioServerParameters
@@ -45,14 +46,20 @@ def isolated_mcp_env(home: Path, **extra: str) -> dict[str, str]:
 
 @asynccontextmanager
 async def start_mcp_server(
-    env: Mapping[str, str], *, args: tuple[str, ...] = MCP_SERVE_ARGS
+    env: Mapping[str, str],
+    *,
+    args: tuple[str, ...] = MCP_SERVE_ARGS,
+    errlog: TextIO | None = None,
 ) -> AsyncIterator[ClientSession]:
     """Spawn the real server over stdio and yield an initialised client session."""
     params = StdioServerParameters(
         command=sys.executable, args=list(args), env=dict(env)
     )
     async with (
-        stdio_client(params, errlog=sys.stderr) as (read_stream, write_stream),
+        stdio_client(params, errlog=errlog or sys.stderr) as (
+            read_stream,
+            write_stream,
+        ),
         ClientSession(read_stream, write_stream) as session,
     ):
         await session.initialize()

@@ -1,9 +1,15 @@
+import json
+
+import pytest
+from pydantic import ValidationError
+
 from jake_tools import newsletters
 from jake_tools.newsletters import (
     AzureCliTokenProvider,
     GraphListItem,
     GraphListItemsResponse,
     NewsletterItem,
+    SharePointAttachmentsResponse,
 )
 
 
@@ -31,8 +37,10 @@ def test_graph_list_item_parses_all_fields() -> None:
     )
 
 
-def test_graph_list_item_uses_defaults_for_missing_fields() -> None:
-    item = GraphListItem.model_validate({"id": "295"}).to_newsletter_item()
+def test_graph_list_item_uses_defaults_for_blank_fields() -> None:
+    item = GraphListItem.model_validate(
+        {"id": "295", "fields": {}}
+    ).to_newsletter_item()
 
     assert item == NewsletterItem(
         id="295",
@@ -42,6 +50,25 @@ def test_graph_list_item_uses_defaults_for_missing_fields() -> None:
         modified="",
         url="",
     )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{}, {"id": "295"}, {"fields": {"Title": "x"}}, {"id": "", "fields": {}}],
+)
+def test_a_list_item_without_fields_or_identity_is_not_an_entry(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        GraphListItem.model_validate(payload)
+
+
+def test_collection_replies_need_their_collection_but_empty_ones_are_valid() -> None:
+    assert GraphListItemsResponse.model_validate({"value": []}).value == []
+    assert SharePointAttachmentsResponse.model_validate({"value": []}).value == []
+    for model in (GraphListItemsResponse, SharePointAttachmentsResponse):
+        with pytest.raises(ValidationError):
+            model.model_validate({})
 
 
 def test_graph_list_response_parses_items() -> None:
@@ -70,38 +97,73 @@ def test_graph_list_response_parses_items() -> None:
     ]
 
 
-def test_azure_cli_token_provider_caches_token_for_the_process_lifetime(
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1_000_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _az_output(token: str, expires_on: float | None) -> str:
+    payload: dict[str, object] = {"accessToken": token, "tokenType": "Bearer"}
+    if expires_on is not None:
+        payload["expires_on"] = int(expires_on)
+    return json.dumps(payload)
+
+
+def test_azure_cli_token_provider_reuses_a_token_only_until_it_expires(
     monkeypatch,
 ) -> None:
-    # `az account get-access-token` spawns a subprocess (~1s). A single
-    # command (e.g. create_item with attachments) can ask for the same
-    # resource's token several times; only the first ask should shell out.
+    # `az account get-access-token` spawns a subprocess (~1s) and one command
+    # asks for the same resource's token repeatedly, so a live token is
+    # reused; but never past the expiry the CLI reports.
+    clock = _Clock()
     calls: list[list[str]] = []
 
     def fake_check_output(command: list[str], **kwargs: object) -> str:
         calls.append(command)
-        return "token-value\n"
+        return _az_output(f"token-{len(calls)}", clock.now + 3600)
+
+    monkeypatch.setattr(newsletters.subprocess, "check_output", fake_check_output)
+    provider = AzureCliTokenProvider(clock=clock)
+
+    assert provider("https://graph.microsoft.com") == "token-1"
+    assert provider("https://graph.microsoft.com") == "token-1"
+    assert len(calls) == 1
+
+    clock.now += 3600  # a long-running process must not keep the expired token
+    assert provider("https://graph.microsoft.com") == "token-2"
+    assert len(calls) == 2
+
+
+def test_azure_cli_token_without_a_usable_expiry_is_never_reused(
+    monkeypatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_check_output(command: list[str], **kwargs: object) -> str:
+        calls.append(command)
+        return _az_output(f"token-{len(calls)}", None)
 
     monkeypatch.setattr(newsletters.subprocess, "check_output", fake_check_output)
     provider = AzureCliTokenProvider()
 
-    first = provider("https://graph.microsoft.com")
-    second = provider("https://graph.microsoft.com")
-
-    assert first == "token-value"
-    assert second == "token-value"
-    assert len(calls) == 1
+    assert provider("https://graph.microsoft.com") == "token-1"
+    assert provider("https://graph.microsoft.com") == "token-2"
 
 
 def test_azure_cli_token_provider_fetches_each_resource_separately(
     monkeypatch,
 ) -> None:
+    clock = _Clock()
+
     def fake_check_output(command: list[str], **kwargs: object) -> str:
         resource = command[command.index("--resource") + 1]
-        return f"token-for-{resource}\n"
+        return _az_output(f"token-for-{resource}", clock.now + 3600)
 
     monkeypatch.setattr(newsletters.subprocess, "check_output", fake_check_output)
-    provider = AzureCliTokenProvider()
+    provider = AzureCliTokenProvider(clock=clock)
 
     graph_token = provider("https://graph.microsoft.com")
     sharepoint_token = provider("https://csuses.sharepoint.com")
