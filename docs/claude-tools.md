@@ -344,7 +344,7 @@ readback `private`, no denied calls, no problems. A separate `artifact read`
 saved the hosted file (pinned shell removed) and `cmp` found it byte-identical to
 the source (sha256 `e5411532...5161`). Receipts:
 `docs/evidence/artifact-sdk-exposure-2026-11-14/final-acceptance/`. Updates are
-not shipped.
+shipped separately (below).
 
 Per the task's constraints, nothing here uses private endpoints, TUI
 scraping, browser automation or spoofed interactive sessions. One disposable
@@ -353,3 +353,26 @@ no sharing was changed.
 `test_live_unavailable_tool_fails_the_task_by_name` still gates delegated
 tasks: the override is set only for the artifact sessions, never for
 `claude_start`, so those still lack `Artifact`.
+
+### Same-identity update (`artifact_update`), demonstrated 2026-11-15
+
+The update uses the same route: the tool refuses a publish onto an existing URL
+until the session has read the live version (seen in the first session), so the
+guarded write session reads exactly that artifact, `Read`s exactly the file and
+publishes once with `url`. Around it, separate sessions read before (owner,
+private, expected version) and after (same id, unchanged visibility, new
+version, byte-identical file with the pinned shell removed). Native read and
+write are separate calls, so this is **not** an atomic compare-and-swap; an edit
+landing between them is reported afterwards. Private-only is an explicit limit.
+
+Live, through the shipped CLI on the disposable synthetic target
+`https://claude.ai/artifact/DsCmww9ENTTTXhzK6t2yqZ` (id
+`68301be6-d480-4f3e-8417-f9d137223e58`; receipt
+`docs/evidence/artifact-sdk-exposure-2026-11-14/update-acceptance/`): a fresh
+read (v`1794671223-9c52`, sha `e5411532...`); an update with a **stale** expected
+version failed with `plan_stale` before any write, and a read after it was
+unchanged; the update with the right version gave v`1794708816-61ab`,
+`verified: true`, still `private`, same id; an independent read matched and
+`cmp` found the hosted file identical to the 429-byte source (sha `7bf2622a...`);
+re-using the old version then failed `plan_stale` again.
+
