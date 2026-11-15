@@ -10,6 +10,20 @@ These resources replace the retired shared `jake-tools` and `clockify-api`
 skills; no profile skill installation is needed. Supporting references are
 separate resources and are not inlined into routine skill reads.
 
+## Issue preparation prompts
+
+The MCP server exposes three prompts, each with one required `issue_url` argument:
+
+- `issue_discovery`: establish the problem, existing behaviour and remaining uncertainties.
+- `issue_planning`: propose the architecture, implementation sequence and evidence needed.
+- `issue_maintainer_review`: challenge the plan for maintainability and incidental complexity.
+
+Use them in that order through your client's MCP prompt picker, or via
+`prompts/get` (for example, `{"name":"issue_discovery","arguments":{"issue_url":"https://github.com/owner/repo/issues/42"}}`).
+Each asks the receiving agent to post its findings to the issue and verify the
+comment. Retrieving a prompt only returns text: it does not launch an agent,
+access the issue or post a comment. These are MCP prompts, not native Hermes tools.
+
 ## Installation
 
 ```bash

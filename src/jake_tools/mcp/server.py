@@ -39,6 +39,7 @@ log = logging.getLogger(__name__)
 def build_server(config: Config) -> MCPServer:
     """Assemble the server for one process. Tools read ``config`` by closure."""
     from ..operations._claude import task_service
+    from .prompts import register_prompts
     from .tasks import TasksExtension
     from .tools import register_all
 
@@ -49,6 +50,7 @@ def build_server(config: Config) -> MCPServer:
         extensions=[TasksExtension(task_service(config))],
     )
     register_all(app, config)
+    register_prompts(app)
     for skill_dir in packaged_skills():
         app.add_resource(
             FileResource(
