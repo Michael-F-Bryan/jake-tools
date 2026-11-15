@@ -59,6 +59,9 @@ def test_all_history_overlap_running_boundaries_and_original_offsets() -> None:
     assert result.entries[1].display_start == "2026-01-02T07:00:00+08:00"
     assert session.requests[1]["params"] == {"page": 1, "page-size": 5000}
     assert result.coverage.reads[0]["pages"] == 1
+    assert result.coverage.reads[0]["completion"] == "short_page_assumed_last"
+    assert "no header" not in result.coverage.limitations
+    assert "Last-Page" in result.coverage.limitations
     assert result.total == result.count == 3
 
 
@@ -157,6 +160,7 @@ def test_duplicate_within_page_reports_evidence_and_claims_no_coverage() -> None
         "page_records": 2,
         "records_seen": 0,
         "duplicate_count": 1,
+        "last_page": "absent",
     }
     assert error.detail()["complete"] is False
     # Counts only: no record IDs, entry content or credentials.

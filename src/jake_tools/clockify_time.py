@@ -33,7 +33,11 @@ class Coverage(BaseModel):
     complete: bool = True
     reads: list[dict[str, object]]
     strategy: str
-    limitations: str = "Upstream pagination is not an atomic snapshot; concurrent changes may affect coverage."
+    limitations: str = (
+        "Upstream pagination is not an atomic snapshot; concurrent changes may affect coverage. "
+        "A scan ends on an explicit Last-Page header; a response without one is assumed to end at "
+        "the first page shorter than the requested page-size (reads[].completion says which)."
+    )
 
 
 class CatalogueTask(ClockifyTask):
@@ -179,7 +183,11 @@ class LookupCoverage(BaseModel):
     # HTTP requests this lookup made, counted at the client. Not response size.
     upstream_requests: int
     strategy: str
-    limitations: str = "Upstream pagination is not an atomic snapshot; concurrent changes may affect coverage."
+    limitations: str = (
+        "Upstream pagination is not an atomic snapshot; concurrent changes may affect coverage. "
+        "A scan ends on an explicit Last-Page header; a response without one is assumed to end at "
+        "the first page shorter than the requested page-size (reads[].completion says which)."
+    )
 
 
 class WorkItemLookup(BaseModel):
