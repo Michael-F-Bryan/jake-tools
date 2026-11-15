@@ -4,11 +4,13 @@ import json
 from typing import Any
 
 import pytest
+import requests
 
 from jake_tools.clockify import (
     ClockifyClient,
     ClockifyClientRecord,
     ClockifyError,
+    ClockifyPaginationError,
     ClockifyProject,
     ClockifyTask,
     ClockifyUser,
@@ -20,8 +22,15 @@ from jake_tools.jira import JiraError
 
 
 class FakeResponse:
-    def __init__(self, status_code: int, payload: object) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        payload: object,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.status_code = status_code
+        if headers is not None:
+            self.headers = headers
         self.text = json.dumps(payload)
         self.content = self.text.encode()
         self._payload = payload
@@ -519,3 +528,135 @@ def test_clockify_update_task_aborts_when_remote_record_has_drifted() -> None:
 
     # No write was attempted once drift was detected.
     assert len(session.requests) == 1
+
+
+def _project(index: int) -> dict[str, object]:
+    return {
+        "id": f"project-{index}",
+        "name": f"Project {index}",
+        "note": "",
+        "archived": False,
+        "billable": False,
+        "color": "#689F38",
+        "public": True,
+        "clientId": "client-1",
+    }
+
+
+def _scan(
+    *pages: FakeResponse, page_size: int = 2, max_pages: int | None = None
+) -> tuple[ClockifyClient, FakeSession, list[ClockifyProject]]:
+    session = FakeSession(*pages)
+    client = ClockifyClient(api_key="secret-key", session=session)
+    client._PAGE_SIZE = page_size
+    if max_pages is not None:
+        client._MAX_PAGES = max_pages
+    return client, session, client.get_projects("workspace-1", archived=False)
+
+
+def _last(flag: str) -> dict[str, str]:
+    return {"Last-Page": flag}
+
+
+def test_short_page_with_last_page_false_continues() -> None:
+    # Regression: a short page used to end the scan and silently truncate it.
+    client, session, projects = _scan(
+        FakeResponse(200, [_project(1)], _last("false")),
+        FakeResponse(200, [_project(2)], _last("true")),
+    )
+    assert [p.id for p in projects] == ["project-1", "project-2"]
+    assert [r["params"]["page"] for r in session.requests] == [1, 2]
+    (read,) = client.pagination_reads
+    assert (read["pages"], read["records"]) == (2, 2)
+    assert read["completion"] == "last_page_header"
+
+
+def test_full_page_with_last_page_true_ends_without_another_request() -> None:
+    client, session, projects = _scan(
+        FakeResponse(200, [_project(1), _project(2)], _last("true"))
+    )
+    assert len(projects) == 2
+    assert len(session.requests) == 1
+    assert client.pagination_reads[0]["completion"] == "last_page_header"
+
+
+def test_last_page_header_is_case_insensitive_on_a_real_requests_response() -> None:
+    response = requests.Response()
+    response.status_code = 200
+    response._content = json.dumps([_project(1)]).encode()
+    response.headers["last-page"] = " FALSE "
+    second = FakeResponse(200, [_project(2)], _last("true"))
+    _, session, projects = _scan(response, second)  # type: ignore[arg-type]
+    assert [p.id for p in projects] == ["project-1", "project-2"]
+    assert len(session.requests) == 2
+
+
+def test_absent_header_keeps_the_short_page_assumption_and_says_so() -> None:
+    client, session, projects = _scan(
+        FakeResponse(200, [_project(1), _project(2)]),
+        FakeResponse(200, [_project(3)]),
+    )
+    assert len(projects) == 3
+    assert len(session.requests) == 2
+    assert client.pagination_reads[0]["completion"] == "short_page_assumed_last"
+
+
+@pytest.mark.parametrize("value", ["", "yes-please", "1", "null", "true, false"])
+def test_malformed_last_page_fails_closed(value: str) -> None:
+    with pytest.raises(ClockifyPaginationError) as caught:
+        _scan(FakeResponse(200, [_project(1)], _last(value)))
+    failure = caught.value.failure
+    assert failure.reason == "invalid_last_page"
+    assert failure.last_page == "invalid"
+    assert "yes-please" not in json.dumps(caught.value.detail())
+
+
+def test_empty_page_with_last_page_false_fails_closed() -> None:
+    with pytest.raises(ClockifyPaginationError) as caught:
+        _scan(
+            FakeResponse(200, [_project(1)], _last("false")),
+            FakeResponse(200, [], _last("false")),
+        )
+    failure = caught.value.failure
+    assert failure.reason == "empty_page_not_last"
+    assert (failure.page, failure.records_seen, failure.last_page) == (2, 1, "false")
+
+
+def test_empty_page_with_last_page_true_or_absent_ends() -> None:
+    client, _, projects = _scan(FakeResponse(200, [], _last("true")))
+    assert projects == []
+    client, _, projects = _scan(FakeResponse(200, []))
+    assert projects == []
+    assert client.pagination_reads[0]["completion"] == "short_page_assumed_last"
+
+
+def test_last_page_false_still_hits_the_page_bound() -> None:
+    with pytest.raises(ClockifyPaginationError) as caught:
+        _scan(
+            FakeResponse(200, [_project(1)], _last("false")),
+            FakeResponse(200, [_project(2)], _last("false")),
+            max_pages=2,
+        )
+    assert caught.value.failure.reason == "page_bound"
+
+
+def test_last_page_false_still_reports_duplicates_without_deduplicating() -> None:
+    with pytest.raises(ClockifyPaginationError) as caught:
+        _scan(
+            FakeResponse(200, [_project(1)], _last("false")),
+            FakeResponse(200, [_project(1)], _last("false")),
+        )
+    assert caught.value.failure.reason == "repeated_page"
+    with pytest.raises(ClockifyPaginationError) as caught:
+        _scan(
+            FakeResponse(200, [_project(1)], _last("false")),
+            FakeResponse(200, [_project(2), _project(1)], _last("true")),
+        )
+    assert caught.value.failure.reason == "repeated_across_pages"
+    assert caught.value.failure.duplicate_count == 1
+
+
+def test_non_paginated_callers_ignore_headers_and_keep_their_contract() -> None:
+    session = FakeSession(FakeResponse(200, _project(1), _last("false")))
+    client = ClockifyClient(api_key="secret-key", session=session)
+    assert client.get_project("workspace-1", "project-1").id == "project-1"

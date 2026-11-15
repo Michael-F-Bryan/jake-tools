@@ -277,6 +277,7 @@ async def test_unstable_pagination_reports_scan_evidence_not_coverage(
         "page_records": 2,
         "records_seen": 0,
         "duplicate_count": 1,
+        "last_page": "absent",
     }
     assert "PRIVATE" not in json.dumps(content)
     assert "coverage" not in content

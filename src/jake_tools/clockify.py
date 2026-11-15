@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Literal, TypeVar
 
@@ -28,7 +29,13 @@ PaginationReason = Literal[
     "repeated_page",
     "oversized_page",
     "page_bound",
+    "invalid_last_page",
+    "empty_page_not_last",
 ]
+
+# What the response's ``Last-Page`` header said. ``absent`` is not an error:
+# the legacy short-page rule applies. ``invalid`` is any other value.
+LastPageSignal = Literal["true", "false", "absent", "invalid"]
 
 
 class PaginationFailure(BaseModel):
@@ -51,6 +58,9 @@ class PaginationFailure(BaseModel):
     # Occurrences on this page of an ID already seen within the page or on an
     # earlier page.
     duplicate_count: int
+    # The ``Last-Page`` header on the failing page (the value itself is never
+    # echoed).
+    last_page: LastPageSignal = "absent"
 
 
 class ClockifyPaginationError(ClockifyError):
@@ -66,6 +76,19 @@ class ClockifyPaginationError(ClockifyError):
             "strategy": "single page-number scan from page 1; no retry, deduplication or merge",
             "failure": self.failure.model_dump(mode="json"),
         }
+
+
+def _last_page_signal(headers: Mapping[str, str] | None) -> LastPageSignal:
+    """Read the documented ``Last-Page`` header (name case-insensitive)."""
+    if headers is None:
+        return "absent"
+    values = [v for k, v in headers.items() if str(k).lower() == "last-page"]
+    if not values:
+        return "absent"
+    if len(values) > 1:
+        return "invalid"
+    value = str(values[0]).strip().lower()
+    return "true" if value == "true" else "false" if value == "false" else "invalid"
 
 
 def validate_clockify_id(value: str) -> str:
@@ -217,10 +240,12 @@ class JiraIssueRef(BaseModel):
 
 
 class ClockifyClient:
-    # Clockify caps each list response at this many records; a page shorter
-    # than this is the last one. A private class attribute (rather than a
-    # bare literal at each call site) so tests can shrink it to exercise the
-    # continuation logic without building a 5000-record fixture.
+    # The page size we request, not a documented provider maximum. A page
+    # shorter than this is assumed to be the last only when the response has
+    # no ``Last-Page`` header; an explicit ``Last-Page`` always wins. A private
+    # class attribute (rather than a bare literal at each call site) so tests
+    # can shrink it to exercise the continuation logic without building a
+    # 5000-record fixture.
     _PAGE_SIZE: int = 5000
     _MAX_PAGES: int = 1000
 
@@ -458,14 +483,20 @@ class ClockifyClient:
                     page_records=len(ids),
                     records_seen=len(seen),
                     duplicate_count=duplicates,
+                    last_page=signal,
                 ),
             )
 
         while page <= self._MAX_PAGES:
             page_params = {**params, "page-size": self._PAGE_SIZE, "page": page}
-            data = self._request_json("GET", path, params=page_params)
+            data, headers = self._send_json("GET", path, params=page_params)
+            signal = _last_page_signal(headers)
             items = self._validate_list(model, data, path)
             ids = [str(item.model_dump()["id"]) for item in items]
+            if signal == "invalid":
+                raise incomplete(
+                    "invalid_last_page", "returned an invalid Last-Page header", ids, 0
+                )
             if len(items) > self._PAGE_SIZE:
                 raise incomplete("oversized_page", "returned an oversized page", ids, 0)
             # Offset pagination is not a snapshot: a repeat means records
@@ -487,10 +518,22 @@ class ClockifyClient:
                     else "repeated_across_pages"
                 )
                 raise incomplete(reason, "repeated record IDs", ids, repeats)
+            if signal == "false" and not ids:
+                # Promised more data but gave none: no progress is possible.
+                raise incomplete(
+                    "empty_page_not_last",
+                    "returned an empty page that is not the last",
+                    ids,
+                    0,
+                )
             seen.update(ids)
             previous_pages.append(ids)
             results.extend(items)
-            if len(items) < self._PAGE_SIZE:
+            # An explicit Last-Page decides; only a response without the header
+            # falls back to "a short page is the last" (legacy assumption).
+            if signal == "true" or (
+                signal == "absent" and len(items) < self._PAGE_SIZE
+            ):
                 self.pagination_reads.append(
                     {
                         "path": path,
@@ -498,6 +541,11 @@ class ClockifyClient:
                         "pages": page,
                         "records": len(results),
                         "page_size": self._PAGE_SIZE,
+                        "completion": (
+                            "last_page_header"
+                            if signal == "true"
+                            else "short_page_assumed_last"
+                        ),
                     }
                 )
                 return results
@@ -514,6 +562,24 @@ class ClockifyClient:
         params: dict[str, object] | None = None,
         follow_redirects: bool = True,
     ) -> JsonValue:
+        return self._send_json(
+            method,
+            path,
+            payload=payload,
+            params=params,
+            follow_redirects=follow_redirects,
+        )[0]
+
+    def _send_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: JsonObject | None = None,
+        params: dict[str, object] | None = None,
+        follow_redirects: bool = True,
+    ) -> tuple[JsonValue, Mapping[str, str] | None]:
+        """One request: the decoded body and that response's own headers."""
         for segment in path.strip("/").split("/"):
             validate_clockify_id(segment)
         request_kwargs: dict[str, Any] = {
@@ -552,11 +618,12 @@ class ClockifyClient:
                 safe_summary=f"{method} {path} returned HTTP {response.status_code}",
             )
 
+        headers = getattr(response, "headers", None)
         if not response.content:
-            return None
+            return None, headers
 
         try:
-            return response.json()
+            return response.json(), headers
         except ValueError as exc:
             body = str(response.text)[:500]
             raise ClockifyError(

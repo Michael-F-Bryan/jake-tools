@@ -141,7 +141,14 @@ History scans ALL authenticated-user entries without date filtering on every
 call, including arbitrarily old straddling entries. It can be expensive for a
 large account. Coverage reports list paths, filters, pages, records and strategy.
 Names must resolve or the call fails; no silent name gaps. Each upstream list is
-bounded at 1,000 pages of 5,000 records and errors rather than truncating. A scan
+bounded at 1,000 pages of the requested 5,000 records (a requested page-size, not
+a documented provider maximum) and errors rather than truncating. A scan ends on
+Clockify's documented `Last-Page` header (`true` ends, `false` continues, even after
+a short page). Only when a response has no `Last-Page` header is the first short
+page assumed to be the last; each `coverage.reads[]` entry's `completion` says
+which basis applied (`last_page_header` or `short_page_assumed_last`). An invalid
+`Last-Page` value, or an empty page with `Last-Page: false`, fails as incomplete.
+Whether live endpoints always send the header has not been verified. A scan
 that repeats record IDs fails as `upstream_error` with `detail.complete: false` and
 `detail.failure` (reason, page, records seen, duplicate count; no IDs or content).
 That history is NOT covered: never build a timesheet from it, and never treat a
