@@ -79,9 +79,12 @@ grant because it overwrites live content.
   `live_version_id`, `write_attempted: false`); read it, reconcile, and call again with the live
   version. A shared artifact or one you do not own fails with `access_denied`; updates are
   private-only.
-- It is **not atomic**. The native read and write are separate calls, so another editor could land
-  a version in between. That is reported afterwards (`problems`, `verified: false`), not prevented.
-  Do not describe it as compare-and-swap.
+- The write session can publish only after its own read of the target was **observed** as yours,
+  private and at your expected version; otherwise the publish is denied before it runs (nothing
+  changed, a retry is safe).
+- It is **not atomic**. The native read and write are separate calls, and an edit that lands between
+  that last observed read and the publish cannot be detected by Jake. Claude Code's own refusal of a
+  stale copy is the only protection there, and it is untested. Do not describe it as compare-and-swap.
 - `verified: true` needs a third, separate read to show the same artifact id, unchanged visibility
   (private), the published version, and the hosted file (shell removed) equal to your file. The
   result's `before` is the pre-write read and `readback` the post-write read.

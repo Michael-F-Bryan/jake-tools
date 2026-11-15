@@ -1125,26 +1125,49 @@ async def test_update_denies_other_targets_actions_and_inputs_before_they_run(
     assert "EXECUTED" not in str(result.model_dump())
 
 
-async def test_an_edit_landing_between_read_and_write_is_reported_not_prevented(
-    new_source: Path,
-) -> None:
+def _update_stream_with_read(result: str | None) -> Callable[[Path], list[Message]]:
     def stream(path: Path) -> list[Message]:
-        base = FakeClaude._default_update(path)
-        return [
-            m
-            if not isinstance(m, UserMessage) or m.content[0].tool_use_id != "r"  # type: ignore[union-attr,index]
-            else _result_of("r", read_text_for(SOURCE, "1794664555-other-editor"))
-            for m in base
+        messages: list[Message] = [_init(["Read", "Artifact"])]
+        if result is not None:
+            messages += [
+                _use_id("r", "Artifact", action="read", url=URL),
+                _result_of("r", result),
+            ]
+        messages += [
+            _use_id("u", "Artifact", action="publish", file_path=str(path), url=URL),
+            _result_of("u", UPDATE_TEXT + " (EXECUTED)"),
+            _end(),
         ]
+        return messages
 
+    return stream
+
+
+@pytest.mark.parametrize(
+    "session_read",
+    [
+        None,  # the write session never read the target
+        "not an artifact header",  # unparseable
+        read_text_for(SOURCE, "1794664555-other-editor"),  # a different version
+        read_text_for(SOURCE, VERSION_ID, "shared with your organization"),
+    ],
+    ids=["no-read", "unparseable", "different-version", "shared"],
+)
+async def test_the_write_session_cannot_publish_without_an_observed_expected_read(
+    new_source: Path, session_read: str | None
+) -> None:
     fake = FakeClaude(
-        update_stream=stream,
+        update_stream=_update_stream_with_read(session_read),
         read_texts=_reads((SOURCE, VERSION_ID), (NEW_SOURCE, NEW_VERSION_ID)),
     )
-    result = await update(URL, str(new_source), VERSION_ID, agent=fake.agent())
-    assert result.verified is False
-    assert any("not atomic" in p for p in result.problems)
-    assert result.version_id == NEW_VERSION_ID  # the write happened; we say so
+    with pytest.raises(ToolError) as caught:
+        await update(URL, str(new_source), VERSION_ID, agent=fake.agent())
+    detail = caught.value.detail
+    assert detail is not None
+    # Denied BEFORE the write: nothing changed, a retry is safe, no readback ran.
+    assert detail["publish_allowed"] is False and detail["retry_safe"] is True
+    assert "nothing was changed" in caught.value.message
+    assert len(fake.calls) == 2  # the pre-read and the (denied) write session
 
 
 async def test_update_flags_a_hosted_difference_visibility_change_or_other_artifact(

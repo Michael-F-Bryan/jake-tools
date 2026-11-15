@@ -99,11 +99,12 @@ class ArtifactUpdateResult(BaseModel):
     separate read *after*. ``verified`` is true only when the artifact is the
     same one, still reported with the same visibility (private), now at the
     published version, its hosted file (pinned shell removed) equals the local
-    file byte for byte, the update session viewed the expected version, and
-    nothing unexpected was refused or escaped. This is **not** an atomic
-    compare-and-swap: the native read and write are separate calls, so a
-    concurrent edit between them is detected afterwards (``problems``), not
-    prevented. Updating never retries; ``problems`` says what to look at.
+    file byte for byte, and nothing unexpected escaped. The write is denied
+    before it runs unless the update session's own read of the target was
+    observed as yours, private and at the expected version. This is **not** an
+    atomic compare-and-swap: an edit landing between that last observed read
+    and the publish is not detectable. Updating never retries; ``problems``
+    says what to look at.
     """
 
     url: str

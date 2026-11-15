@@ -334,9 +334,11 @@ a separate `artifact_update` grant (it overwrites live content). A separate read
 first checks the artifact is yours, private and at the version you expect; a
 stale version fails with `plan_stale` and writes nothing. Afterwards another
 read checks the same artifact, unchanged visibility, the new version and the
-byte-identical file. It is **not** an atomic compare-and-swap (native read and
-write are separate calls), so a concurrent edit between them is reported, not
-prevented. Only private artifacts are updated; no sharing/ACL, no general CRUD. Evidence and caveats: `docs/claude-tools.md`; usage:
+byte-identical file. The write session may publish only after its own read of
+the target was observed as yours, private and at the expected version. It is
+**not** an atomic compare-and-swap (native read and write are separate calls):
+an edit landing between that read and the publish is not detectable, and Claude
+Code's own stale-copy refusal (untested here) is the only protection. Only private artifacts are updated; no sharing/ACL, no general CRUD. Evidence and caveats: `docs/claude-tools.md`; usage:
 `skill://artifact-publishing`; code: `src/jake_tools/artifacts/`;
 `tests/test_artifacts_live.py` (`--slow`, `live`) needs an existing target for
 readback and refuses to create an artifact unless explicitly told to.

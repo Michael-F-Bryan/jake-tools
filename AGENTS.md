@@ -392,10 +392,14 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
   `expected_version_id` (a stale version fails with `plan_stale` before any write
   session starts). Its guard allows one `read` of that URL (the tool refuses an
   update until the live version was viewed), the `Read` of the file and one
-  `publish` carrying that `url`; nothing else. The `url`-in-publish restriction
+  `publish` carrying that `url`; nothing else, and the publish is denied until
+  the session's own read result was *observed* (fed to the guard as it streams)
+  as owned, private and at the expected version. The `url`-in-publish restriction
   above is unchanged for new publishes. The native read and write are separate
   calls: never describe an update as an atomic compare-and-swap, and do not add
-  locks or private endpoints. Visibility and artifact id must be unchanged on the
+  locks or private endpoints. A write landing between the last observed read and
+  the publish is undetectable without a native CAS; the tool's own stale-copy
+  refusal is the only (untested) protection. Visibility and artifact id must be unchanged on the
   readback; private-only is an explicit limit.
 - No call is retried (a repeat creates a second artifact, or a second version); an unknown outcome
   says `retry_safe: false` and the URLs seen. A receipt survives failures after

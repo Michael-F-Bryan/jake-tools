@@ -361,9 +361,18 @@ until the session has read the live version (seen in the first session), so the
 guarded write session reads exactly that artifact, `Read`s exactly the file and
 publishes once with `url`. Around it, separate sessions read before (owner,
 private, expected version) and after (same id, unchanged visibility, new
-version, byte-identical file with the pinned shell removed). Native read and
-write are separate calls, so this is **not** an atomic compare-and-swap; an edit
-landing between them is reported afterwards. Private-only is an explicit limit.
+version, byte-identical file with the pinned shell removed). The guard denies the
+`publish` unless this session's own `read` of the target was **observed** (its tool
+result streamed to the guard before the publish decision) as owned by you,
+`private` and at the expected version; a missing, unparseable, shared, foreign
+or different-version read is refused before the write, and a result that arrived
+late would also only deny (fail closed). Two live samples showed no spurious
+denial. Native read and write are separate calls, so this is **not** an atomic
+compare-and-swap: a write that lands between the write session's last *observed*
+valid read and its publish is not detectable by Jake without a native
+compare-and-swap. Claude Code's own refusal of a publish built on a stale copy is
+the only protection there, and it was not tested here. Private-only is an
+explicit limit.
 
 Live, through the shipped CLI on the disposable synthetic target
 `https://claude.ai/artifact/DsCmww9ENTTTXhzK6t2yqZ` (id
@@ -376,3 +385,4 @@ unchanged; the update with the right version gave v`1794708816-61ab`,
 `cmp` found the hosted file identical to the 429-byte source (sha `7bf2622a...`);
 re-using the old version then failed `plan_stale` again.
 
+After review the gate above was added and re-sampled live twice more (v3 `1794709299-cca6`, then v4 `1794709319-8728`, both `verified: true`, no denials; final independent read and `cmp` identical). Receipt: `update-acceptance/update-receipt.json`.

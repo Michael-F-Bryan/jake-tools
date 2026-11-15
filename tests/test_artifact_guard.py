@@ -10,6 +10,11 @@ from jake_tools.artifacts.guard import ArtifactGuard
 
 FILE = Path("/work/report.html")
 URL = "https://claude.ai/artifact/V4iHumJLsDrW9EBEtZfqZj"
+EXPECTED = "1794664145-2330"
+GOOD_READ = (
+    "[Artifact e3448f84-1ca6-4757-9dd4-3bb5616d043a (version 1794664145-2330) \u2014 "
+    "owned by you, private (x); raw HTML follows]\n..."
+)
 
 
 def publish_guard() -> ArtifactGuard:
@@ -159,7 +164,7 @@ def test_unexpected_keys_are_denied_including_private_looking_ones(
 
 
 def update_guard() -> ArtifactGuard:
-    return ArtifactGuard.for_update(FILE, URL)
+    return ArtifactGuard.for_update(FILE, URL, EXPECTED)
 
 
 def test_update_allows_one_read_of_the_target_the_file_and_one_publish_onto_it() -> (
@@ -167,6 +172,7 @@ def test_update_allows_one_read_of_the_target_the_file_and_one_publish_onto_it()
 ):
     guard = update_guard()
     assert guard("Artifact", {"action": "read", "url": URL}) is None
+    guard.observe_read({"action": "read", "url": URL}, GOOD_READ, False)
     assert guard("Read", {"file_path": str(FILE)}) is None
     call = {"action": "publish", "file_path": str(FILE), "url": URL}
     assert guard("Artifact", call) is None
@@ -233,4 +239,58 @@ def test_a_new_publish_and_a_read_session_still_cannot_update_or_read_via_publis
     assert publish("Artifact", {"action": "read", "url": URL})
     assert ArtifactGuard.for_read(URL)(
         "Artifact", {"action": "publish", "file_path": str(FILE), "url": URL}
+    )
+
+
+@pytest.mark.parametrize(
+    ("result", "is_error", "fragment"),
+    [
+        (None, False, "was observed"),  # the read result never arrived
+        ("not a header", False, "no recognisable header"),
+        (GOOD_READ, True, "no recognisable header"),  # an error result
+        (
+            GOOD_READ.replace("1794664145-2330", "1794999999-live"),
+            False,
+            "not the expected",
+        ),
+        (
+            GOOD_READ.replace("owned by you, private", "owned by you, shared"),
+            False,
+            "not a private",
+        ),
+        (
+            GOOD_READ.replace("owned by you, private", "owned by someone else"),
+            False,
+            "not a private",
+        ),
+    ],
+)
+def test_an_update_publish_is_denied_until_the_target_read_is_observed_as_expected(
+    result: str | None, is_error: bool, fragment: str
+) -> None:
+    guard = update_guard()
+    guard("Artifact", {"action": "read", "url": URL})
+    if result is not None:
+        guard.observe_read({"action": "read", "url": URL}, result, is_error)
+    reason = guard(
+        "Artifact", {"action": "publish", "file_path": str(FILE), "url": URL}
+    )
+    assert reason is not None and fragment in reason
+    assert guard.publishes_allowed == 0
+
+
+def test_a_read_of_another_artifact_never_satisfies_the_precondition() -> None:
+    guard = update_guard()
+    guard.observe_read(
+        {"action": "read", "url": "https://claude.ai/artifact/Qm3Kz7Tn5Rv9Wx2YbDfGhj"},
+        GOOD_READ,
+        False,
+    )
+    assert guard.observed_ok is False
+
+
+def test_the_precondition_is_not_needed_for_new_publishes() -> None:
+    assert (
+        publish_guard()("Artifact", {"action": "publish", "file_path": str(FILE)})
+        is None
     )

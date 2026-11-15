@@ -110,5 +110,36 @@
    "error": "plan_stale: live version is '1794708816-61ab'; nothing was changed",
    "write_attempted": false
   }
- ]
+ ],
+ "after_observed_read_gate": {
+  "note": "After the review: the update publish is denied unless the write session's own read of the target was observed as owned/private/expected version. Two live samples through the shipped CLI: no spurious denial (denied_before_running empty), both verified.",
+  "updates": [
+   {
+    "previous_version_id": "1794708816-61ab",
+    "version": 3,
+    "version_id": "1794709299-cca6",
+    "verified": true,
+    "private_confirmed": true,
+    "problems": [],
+    "denied_before_running": [],
+    "source_sha256": "dbeed26d181fbd604cfe7d80bca3f9b9713152c24df2a14f80c33071a7e14bc6"
+   },
+   {
+    "previous_version_id": "1794709299-cca6",
+    "version": 4,
+    "version_id": "1794709319-8728",
+    "verified": true,
+    "private_confirmed": true,
+    "problems": [],
+    "denied_before_running": [],
+    "source_sha256": "11962b0164a95b771a3ad6a945eab4477b08e651417d6073d8854a8a7049ac75"
+   }
+  ],
+  "final_independent_read": {
+   "version_id": "1794709319-8728",
+   "matches_file": true,
+   "version_matches": true,
+   "cmp": "hosted == update-v4.html, identical"
+  }
+ }
 }

@@ -162,6 +162,11 @@ class _Session:
         self.texts.extend(view.texts)
         for result in view.tool_results:
             self.results[result.tool_use_id] = result
+            # Feed the guard each result as it streams in, so an update can be
+            # gated on its own observed read (fail closed if it arrives late).
+            use = next((u for u in self.uses if u.id == result.tool_use_id), None)
+            if use is not None and use.name == "Artifact":
+                self.guard.observe_read(use.input, result.text, result.is_error)
         if view.denial is not None:
             self.denials.append(view.denial)
         if view.result is not None:
@@ -639,7 +644,7 @@ async def update(
             },
         )
 
-    guard = ArtifactGuard.for_update(path, url)
+    guard = ArtifactGuard.for_update(path, url, expected_version_id)
     session = await _run(
         agent,
         prompt=_update_prompt(path, url),
@@ -694,10 +699,12 @@ async def update(
         and not result.is_error
         and (header := parse_header(result.text)) is not None
     ]
-    if viewed and viewed[-1] != expected_version_id:
+    if not guard.observed_ok or viewed[-1:] != [expected_version_id]:
+        # The guard denies the publish unless the read was observed first, so
+        # this is defence in depth, never the control.
         problems.append(
-            f"the update session viewed version {viewed[-1]!r}, not the expected "
-            f"{expected_version_id!r}: another edit landed in between (not atomic)"
+            "the update session's read of the target was not observed at the "
+            f"expected version {expected_version_id!r} (saw {viewed or 'nothing'})"
         )
     read_failed = False
     try:
