@@ -469,6 +469,7 @@ class ClockifyClient:
         page = 1
         seen: set[str] = set()
         previous_pages: list[list[str]] = []
+        signal: LastPageSignal = "absent"
 
         def incomplete(
             reason: PaginationReason, what: str, ids: list[str], duplicates: int
