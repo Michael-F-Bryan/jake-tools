@@ -131,6 +131,7 @@ async def test_stdio_tool_descriptions_point_to_readable_relevant_skills(
         "transcribe": "transcription",
         "artifact_publish": "artifact-publishing",
         "artifact_read": "artifact-publishing",
+        "artifact_update": "artifact-publishing",
     }
     async with mcp_server(mcp_env) as session:
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
@@ -402,4 +403,4 @@ async def test_artifact_tools_are_absent_unless_enabled(
 ) -> None:
     async with mcp_server(mcp_env) as session:
         names = {tool.name for tool in (await session.list_tools()).tools}
-    assert "artifact_publish" not in names and "artifact_read" not in names
+    assert not {"artifact_publish", "artifact_read", "artifact_update"} & names

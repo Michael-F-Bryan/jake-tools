@@ -89,3 +89,38 @@ class ArtifactPublishResult(BaseModel):
     readback: Readback
     cost_usd: float | None = None
     mechanism: str = MECHANISM
+
+
+class ArtifactUpdateResult(BaseModel):
+    """``artifact_update``: a new version of an existing private artifact.
+
+    ``before`` is what a separate read session saw *before* any write (owner,
+    private, the live version the caller expected); ``readback`` is another
+    separate read *after*. ``verified`` is true only when the artifact is the
+    same one, still reported with the same visibility (private), now at the
+    published version, its hosted file (pinned shell removed) equals the local
+    file byte for byte, and nothing unexpected escaped. The write is denied
+    before it runs unless the update session's own read of the target was
+    observed as yours, private and at the expected version. This is **not** an
+    atomic compare-and-swap: an edit landing between that last observed read
+    and the publish is not detectable. Updating never retries; ``problems``
+    says what to look at.
+    """
+
+    url: str
+    artifact_id: str | None = None
+    previous_version_id: str
+    version: int
+    version_id: str
+    verified: bool
+    retry_safe: bool = False
+    """Always false: the artifact changed. Read it (``artifact_read``) and
+    decide from its live version; do not repeat the update blindly."""
+    private_confirmed: bool
+    problems: list[str] = Field(default_factory=list)
+    denied_before_running: list[str] = Field(default_factory=list)
+    source: SourceReceipt
+    before: Readback
+    readback: Readback
+    cost_usd: float | None = None
+    mechanism: str = MECHANISM

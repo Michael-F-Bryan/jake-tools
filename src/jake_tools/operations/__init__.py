@@ -30,7 +30,9 @@ from pydantic import BaseModel
 
 from ..config import Config
 
-Capability = Literal["artifact", "claude", "clockify", "transcription"]
+Capability = Literal[
+    "artifact", "artifact_update", "claude", "clockify", "transcription"
+]
 """What an agent can be granted. Each operation belongs to exactly one."""
 
 Handler = Callable[..., Awaitable[BaseModel]]

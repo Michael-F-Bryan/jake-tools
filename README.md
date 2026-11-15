@@ -26,8 +26,8 @@ Hermes' own Python environment (nixfiles does this with the flake's
 `plugins.enabled`, and registers:
 
 - **Tools**, for the capabilities in
-  `plugins.entries.jake-tools.settings.capabilities` (`artifact`, `claude`,
-  `clockify`, `transcription`; unset means none). They have the MCP tools' names,
+  `plugins.entries.jake-tools.settings.capabilities` (`artifact`, `artifact_update`,
+  `claude`, `clockify`, `transcription`; unset means none). They have the MCP tools' names,
   schemas, results and error codes; failures are
   `{"error", "code", "message", "detail"}`. `transcribe` also needs
   `transcription.api_base_url`. `ping` stays MCP-only.
@@ -325,8 +325,20 @@ tool call by a `PreToolUse` hook that judges the raw model input, so it can only
 read the one file and publish it once (or read the one URL); a prompt is not what
 keeps it there. `verified` means the hosted file,
 with Claude Code's fixed document shell removed, equals the local file and the
-readback reported `private`. Updates, sharing, listing and deleting are not
-supported. Evidence and caveats: `docs/claude-tools.md`; usage:
+readback reported `private`. Sharing, listing and deleting are not supported.
+
+`artifact_update(url, file_path, expected_version_id)` (`jake-tools artifact
+update URL FILE --expected-version-id V`) publishes a file as the **next
+version of an existing private artifact you own**, keeping its URL and id, under
+a separate `artifact_update` grant (it overwrites live content). A separate read
+first checks the artifact is yours, private and at the version you expect; a
+stale version fails with `plan_stale` and writes nothing. Afterwards another
+read checks the same artifact, unchanged visibility, the new version and the
+byte-identical file. The write session may publish only after its own read of
+the target was observed as yours, private and at the expected version. It is
+**not** an atomic compare-and-swap (native read and write are separate calls):
+an edit landing between that read and the publish is not detectable, and Claude
+Code's own stale-copy refusal (untested here) is the only protection. Only private artifacts are updated; no sharing/ACL, no general CRUD. Evidence and caveats: `docs/claude-tools.md`; usage:
 `skill://artifact-publishing`; code: `src/jake_tools/artifacts/`;
 `tests/test_artifacts_live.py` (`--slow`, `live`) needs an existing target for
 readback and refuses to create an artifact unless explicitly told to.

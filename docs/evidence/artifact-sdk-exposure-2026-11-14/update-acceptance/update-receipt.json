@@ -1,0 +1,145 @@
+{
+ "head_at_run": "70969dd3faab85e221f57b2db56d4edaeae310f5",
+ "cli": "2.1.318",
+ "target": "https://claude.ai/artifact/DsCmww9ENTTTXhzK6t2yqZ",
+ "steps": [
+  {
+   "step": "fresh read-only before",
+   "version_id": "1794671223-9c52",
+   "visibility": "private",
+   "sha256": "e5411532b9dfa4a6212662d8d70f19c0c27259d3632ea7aba064767229195161"
+  },
+  {
+   "step": "update with STALE expected version 1794000000-stale",
+   "exit": 1,
+   "error": {
+    "code": "plan_stale",
+    "message": "the live version is '1794671223-9c52', not the expected '1794000000-stale'; nothing was changed. Read the artifact, reconcile, and update with the live version.",
+    "detail": {
+     "integration": "claude_artifact",
+     "write_attempted": false,
+     "live_version_id": "1794671223-9c52",
+     "expected_version_id": "1794000000-stale"
+    }
+   },
+   "write_attempted": false
+  },
+  {
+   "step": "read after the stale attempt",
+   "version_id": "1794671223-9c52",
+   "sha256": "e5411532b9dfa4a6212662d8d70f19c0c27259d3632ea7aba064767229195161",
+   "unchanged": true
+  },
+  {
+   "step": "update with the correct expected version 1794671223-9c52",
+   "exit": 0,
+   "result": {
+    "url": "https://claude.ai/artifact/DsCmww9ENTTTXhzK6t2yqZ",
+    "artifact_id": "68301be6-d480-4f3e-8417-f9d137223e58",
+    "previous_version_id": "1794671223-9c52",
+    "version": 2,
+    "version_id": "1794708816-61ab",
+    "verified": true,
+    "retry_safe": false,
+    "private_confirmed": true,
+    "problems": [],
+    "denied_before_running": [],
+    "source": {
+     "path": "<fixture>/update-probe.html",
+     "bytes": 429,
+     "sha256": "7bf2622a87ee42463b33e41b75c9e80cadd53955c5ec417c9490c9f198fd0ac7"
+    },
+    "before": {
+     "url": "https://claude.ai/artifact/DsCmww9ENTTTXhzK6t2yqZ",
+     "artifact_id": "68301be6-d480-4f3e-8417-f9d137223e58",
+     "version_id": "1794671223-9c52",
+     "owned_by_you": true,
+     "visibility": "private",
+     "private": true,
+     "header": "[Artifact 68301be6-d480-4f3e-8417-f9d137223e58 (version 1794671223-9c52) \u2014 owned by you, private (from the page's Share menu the user's plan and organization allow: anyone with the link \u2014 a public link can still be unavailable for what this page uses; the menu says why; email invites to people outside the organization are available); may include content not published from this session; raw HTML follows]",
+     "shell_removed": true,
+     "bytes": 383,
+     "sha256": "e5411532b9dfa4a6212662d8d70f19c0c27259d3632ea7aba064767229195161"
+    },
+    "readback": {
+     "url": "https://claude.ai/artifact/DsCmww9ENTTTXhzK6t2yqZ",
+     "artifact_id": "68301be6-d480-4f3e-8417-f9d137223e58",
+     "version_id": "1794708816-61ab",
+     "owned_by_you": true,
+     "visibility": "private",
+     "private": true,
+     "header": "[Artifact 68301be6-d480-4f3e-8417-f9d137223e58 (version 1794708816-61ab) \u2014 owned by you, private (from the page's Share menu the user's plan and organization allow: anyone with the link \u2014 a public link can still be unavailable for what this page uses; the menu says why; email invites to people outside the organization are available); may include content not published from this session; raw HTML follows]",
+     "shell_removed": true,
+     "bytes": 429,
+     "sha256": "7bf2622a87ee42463b33e41b75c9e80cadd53955c5ec417c9490c9f198fd0ac7"
+    },
+    "cost_usd": 0.00839496,
+    "mechanism": "Claude Code's Artifact tool, enabled for this session only by the undocumented CLAUDE_CODE_ARTIFACT environment variable. Not a documented or supported Anthropic option; it may change without notice."
+   }
+  },
+  {
+   "step": "independent read + byte compare",
+   "exit": 0,
+   "cmp": "hosted-v2.html == update-probe.html (identical, 429 bytes)",
+   "result": {
+    "url": "https://claude.ai/artifact/DsCmww9ENTTTXhzK6t2yqZ",
+    "artifact_id": "68301be6-d480-4f3e-8417-f9d137223e58",
+    "version_id": "1794708816-61ab",
+    "owned_by_you": true,
+    "visibility": "private",
+    "private": true,
+    "header": "[Artifact 68301be6-d480-4f3e-8417-f9d137223e58 (version 1794708816-61ab) \u2014 owned by you, private (from the page's Share menu the user's plan and organization allow: anyone with the link \u2014 a public link can still be unavailable for what this page uses; the menu says why; email invites to people outside the organization are available); may include content not published from this session; raw HTML follows]",
+    "shell_removed": true,
+    "bytes": 429,
+    "sha256": "7bf2622a87ee42463b33e41b75c9e80cadd53955c5ec417c9490c9f198fd0ac7",
+    "matches_file": true,
+    "version_matches": true,
+    "file": {
+     "path": "<fixture>/update-probe.html",
+     "bytes": 429,
+     "sha256": "7bf2622a87ee42463b33e41b75c9e80cadd53955c5ec417c9490c9f198fd0ac7"
+    },
+    "saved_to": "<fixture>/hosted-v2.html",
+    "cost_usd": 0.00100495,
+    "mechanism": "Claude Code's Artifact tool, enabled for this session only by the undocumented CLAUDE_CODE_ARTIFACT environment variable. Not a documented or supported Anthropic option; it may change without notice."
+   }
+  },
+  {
+   "step": "update with the now-old version 1794671223-9c52 again",
+   "exit": 1,
+   "error": "plan_stale: live version is '1794708816-61ab'; nothing was changed",
+   "write_attempted": false
+  }
+ ],
+ "after_observed_read_gate": {
+  "note": "After the review: the update publish is denied unless the write session's own read of the target was observed as owned/private/expected version. Two live samples through the shipped CLI: no spurious denial (denied_before_running empty), both verified.",
+  "updates": [
+   {
+    "previous_version_id": "1794708816-61ab",
+    "version": 3,
+    "version_id": "1794709299-cca6",
+    "verified": true,
+    "private_confirmed": true,
+    "problems": [],
+    "denied_before_running": [],
+    "source_sha256": "dbeed26d181fbd604cfe7d80bca3f9b9713152c24df2a14f80c33071a7e14bc6"
+   },
+   {
+    "previous_version_id": "1794709299-cca6",
+    "version": 4,
+    "version_id": "1794709319-8728",
+    "verified": true,
+    "private_confirmed": true,
+    "problems": [],
+    "denied_before_running": [],
+    "source_sha256": "11962b0164a95b771a3ad6a945eab4477b08e651417d6073d8854a8a7049ac75"
+   }
+  ],
+  "final_independent_read": {
+   "version_id": "1794709319-8728",
+   "matches_file": true,
+   "version_matches": true,
+   "cmp": "hosted == update-v4.html, identical"
+  }
+ }
+}

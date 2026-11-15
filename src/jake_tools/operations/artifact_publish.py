@@ -24,8 +24,8 @@ DESCRIPTION = (
     "hosted file equals the local file byte for byte and the readback "
     "reported the artifact as private; otherwise `problems` says why and the "
     "artifact still exists. New artifacts start private and this tool never "
-    "shares one or changes sharing. It creates a new artifact every call (no "
-    "updates) and never retries. Uses an undocumented Claude Code mechanism "
+    "shares one or changes sharing. It creates a new artifact every call (use "
+    "artifact_update for a new version of an existing one) and never retries. Uses an undocumented Claude Code mechanism "
     "that can change without notice."
 )
 

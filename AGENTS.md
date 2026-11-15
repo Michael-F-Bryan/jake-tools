@@ -361,8 +361,8 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
 
 ## Claude Artifacts (`jake_tools.artifacts`, experimental)
 
-`artifact_publish` / `artifact_read` drive Claude Code's `Artifact` tool through
-`ClaudeAgent`. Rules that keep them honest:
+`artifact_publish` / `artifact_read` / `artifact_update` drive Claude Code's
+`Artifact` tool through `ClaudeAgent`. Rules that keep them honest:
 
 - The tool is hidden from SDK sessions unless the **undocumented**
   `CLAUDE_CODE_ARTIFACT` is set; it is set only through `AgentSpec.env` for
@@ -378,14 +378,30 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
   saw" check is detection, not enforcement. A managed policy that disables
   the hook is untested; a CLI upgrade needs `tests/test_artifacts_live.py`
   re-run. A read session has no write authority. Never loosen `ArtifactGuard`,
-  add `url`/`edits`/`share`/`delete`/`list` permission, or suppress
+  add `url`/`edits`/`share`/`delete`/`list` permission to the NEW-publish or read
+  guards, or suppress
   `setting_sources` (user/project/managed `enableArtifact`/deny rules apply).
 - The model is a conduit: outcomes come from the tool's own results, and
   `verified` is a byte comparison in code of a *separate* readback with the
   pinned document shell (`parse.SHELL_PREFIX`) removed. A different shell is
   an unverified result, not an approximate pass. Re-record
   `tests/artifact_fixtures/` if Claude Code changes its wording.
-- No call is retried (a repeat creates a second artifact); an unknown outcome
+- **Update is a separate, narrow grant** (`artifact_update` capability,
+  `ArtifactGuard.for_update`): the one exact file onto the one exact existing URL,
+  after a separate read session proved it is yours, private and at the caller's
+  `expected_version_id` (a stale version fails with `plan_stale` before any write
+  session starts). Its guard allows one `read` of that URL (the tool refuses an
+  update until the live version was viewed), the `Read` of the file and one
+  `publish` carrying that `url`; nothing else, and the publish is denied until
+  the session's own read result was *observed* (fed to the guard as it streams)
+  as owned, private and at the expected version. The `url`-in-publish restriction
+  above is unchanged for new publishes. The native read and write are separate
+  calls: never describe an update as an atomic compare-and-swap, and do not add
+  locks or private endpoints. A write landing between the last observed read and
+  the publish is undetectable without a native CAS; the tool's own stale-copy
+  refusal is the only (untested) protection. Visibility and artifact id must be unchanged on the
+  readback; private-only is an explicit limit.
+- No call is retried (a repeat creates a second artifact, or a second version); an unknown outcome
   says `retry_safe: false` and the URLs seen. A receipt survives failures after
   a publish.
 - Tests that publish are gated behind an explicit environment value and must

@@ -30,7 +30,7 @@ from claude_agent_sdk import (
 )
 from click.testing import CliRunner
 
-from jake_tools.artifacts import SourceError, publish, read
+from jake_tools.artifacts import SourceError, publish, read, update
 from jake_tools.artifacts.parse import (
     hosted_html,
     parse_header,
@@ -46,6 +46,18 @@ PUBLISH_TEXT = (FIXTURES / "publish_result.txt").read_text()
 READ_TEXT = (FIXTURES / "read_result.txt").read_text()
 URL = "https://claude.ai/artifact/V4iHumJLsDrW9EBEtZfqZj"
 VERSION_ID = "1794664145-2330"
+NEW_VERSION_ID = "1794664211-53ee"
+NEW_SOURCE = SOURCE.replace(b"Version 1.", b"Version 2 (updated).")
+UPDATE_TEXT = PUBLISH_TEXT.replace(
+    "(Version 1, version id 1794664145-2330)", "(Version 2, version id 1794664211-53ee)"
+)
+
+
+def read_text_for(content: bytes, version_id: str, visibility: str = "private") -> str:
+    """The recorded ``read`` result, with another file, version and visibility."""
+    text = READ_TEXT.replace(SOURCE.decode(), content.decode())
+    text = text.replace(VERSION_ID, version_id)
+    return text.replace("owned by you, private", f"owned by you, {visibility}")
 
 
 def _use(name: str, **input: Any) -> AssistantMessage:
@@ -107,8 +119,13 @@ class FakeClaude:
         permission_layer: bool = True,
         rewrite_for_permission: Callable[[dict[str, Any]], dict[str, Any]]
         | None = None,
+        update_stream: Callable[[Path], list[Message]] | None = None,
+        read_texts: list[str] | None = None,
         fail_after_stream: bool = False,
     ) -> None:
+        self.update_stream = update_stream or self._default_update
+        self.read_texts = read_texts
+        self.reads = 0
         self.publish_stream = publish_stream or self._default_publish
         self.read_stream = read_stream or self._default_read
         self.on_publish = on_publish
@@ -122,6 +139,17 @@ class FakeClaude:
             _init(["Read", "Artifact"]),
             _use_id("pub", "Artifact", action="publish", file_path=str(path)),
             _result_of("pub", PUBLISH_TEXT),
+            _end(),
+        ]
+
+    @staticmethod
+    def _default_update(path: Path) -> list[Message]:
+        return [
+            _init(["Read", "Artifact"]),
+            _use_id("r", "Artifact", action="read", url=URL),
+            _result_of("r", read_text_for(SOURCE, VERSION_ID)),
+            _use_id("u", "Artifact", action="publish", file_path=str(path), url=URL),
+            _result_of("u", UPDATE_TEXT),
             _end(),
         ]
 
@@ -165,11 +193,23 @@ class FakeClaude:
         if not isinstance(prompt, str):  # can_use_tool needs streaming input
             prompt = "".join([m["message"]["content"] async for m in prompt])
         self.calls.append((prompt, options))
-        if prompt.startswith("Publish"):
+        if prompt.startswith("Publish a new version"):
+            path = Path(prompt.split("Read tool: ", 1)[1].split("\n", 1)[0])
+            messages = self.update_stream(path)
+        elif prompt.startswith("Publish"):
             path = Path(prompt.split("Read tool: ", 1)[1].split("\n", 1)[0])
             if self.on_publish is not None:
                 self.on_publish()
             messages = self.publish_stream(path)
+        elif self.read_texts is not None:
+            text = self.read_texts[min(self.reads, len(self.read_texts) - 1)]
+            self.reads += 1
+            messages = [
+                _init(["Artifact"]),
+                _use_id("rd", "Artifact", action="read", url=URL),
+                _result_of("rd", text),
+                _end(),
+            ]
         else:
             messages = self.read_stream()
         invalid = {
@@ -943,3 +983,283 @@ async def test_a_model_supplied_private_key_is_denied_before_it_runs(
         await publish(str(source), agent=fake.agent())
     assert "denied before it ran" in caught.value.message
     assert caught.value.detail is not None and caught.value.detail["retry_safe"] is True
+
+
+# -- update: a guarded new version of an existing private artifact ----------------------
+
+
+@pytest.fixture
+def new_source(tmp_path: Path) -> Path:
+    path = tmp_path / "report-v2.html"
+    path.write_bytes(NEW_SOURCE)
+    return path
+
+
+def _reads(*versions: tuple[bytes, str]) -> list[str]:
+    return [read_text_for(content, vid) for content, vid in versions]
+
+
+async def test_update_reads_first_writes_once_and_verifies_a_separate_readback(
+    new_source: Path,
+) -> None:
+    fake = FakeClaude(
+        read_texts=_reads((SOURCE, VERSION_ID), (NEW_SOURCE, NEW_VERSION_ID))
+    )
+    result = await update(URL, str(new_source), VERSION_ID, agent=fake.agent())
+
+    assert result.verified is True and result.problems == []
+    assert result.url == URL and result.artifact_id == result.before.artifact_id
+    assert result.previous_version_id == VERSION_ID
+    assert (result.version, result.version_id) == (2, NEW_VERSION_ID)
+    assert result.before.version_id == VERSION_ID  # read before any write
+    assert result.readback.sha256 == hashlib.sha256(NEW_SOURCE).hexdigest()
+    assert result.private_confirmed and result.retry_safe is False
+    # read session, ONE write session, read session: no retries, no preflight
+    prompts = [c[0] for c in fake.calls]
+    assert [p.split(" ")[0] for p in prompts] == ["Call", "Publish", "Call"]
+    assert "Publish a new version" in prompts[1] and URL in prompts[1]
+    assert fake.calls[1][1].tools == ["Read", "Artifact"]
+
+
+async def test_a_stale_expected_version_fails_before_any_write(
+    new_source: Path,
+) -> None:
+    fake = FakeClaude(read_texts=_reads((SOURCE, "1794664999-live")))
+    with pytest.raises(ToolError) as caught:
+        await update(URL, str(new_source), VERSION_ID, agent=fake.agent())
+    assert caught.value.code == "plan_stale"
+    detail = caught.value.detail
+    assert detail is not None and detail["write_attempted"] is False
+    assert detail["live_version_id"] == "1794664999-live"
+    assert len(fake.calls) == 1  # only the read: no write session ever started
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        read_text_for(SOURCE, VERSION_ID, "shared with your organization"),
+        read_text_for(SOURCE, VERSION_ID).replace(
+            "owned by you, private", "owned by someone else"
+        ),
+    ],
+    ids=["shared", "not-owned"],
+)
+async def test_only_a_private_artifact_you_own_is_updated(
+    new_source: Path, text: str
+) -> None:
+    fake = FakeClaude(read_texts=[text])
+    with pytest.raises(ToolError) as caught:
+        await update(URL, str(new_source), VERSION_ID, agent=fake.agent())
+    assert caught.value.code == "access_denied"
+    assert len(fake.calls) == 1
+
+
+async def test_update_arguments_are_validated_before_any_session(
+    new_source: Path,
+) -> None:
+    fake = FakeClaude()
+    with pytest.raises(SourceError, match="expected_version_id"):
+        await update(URL, str(new_source), " ", agent=fake.agent())
+    with pytest.raises(SourceError, match="url must look like"):
+        await update("https://example.com/x", str(new_source), "v", agent=fake.agent())
+    with pytest.raises(SourceError, match="absolute"):
+        await update(URL, "x.html", "v", agent=fake.agent())
+    assert fake.calls == []
+
+
+async def test_update_denies_other_targets_actions_and_inputs_before_they_run(
+    new_source: Path,
+) -> None:
+    other = "https://claude.ai/artifact/Qm3Kz7Tn5Rv9Wx2YbDfGhj"
+
+    def stream(path: Path) -> list[Message]:
+        return [
+            _init(["Read", "Artifact"]),
+            _use_id("a", "Artifact", action="share", url=URL),
+            _result_of("a", "shared (EXECUTED)"),
+            _use_id("b", "Artifact", action="delete", url=URL),
+            _result_of("b", "deleted (EXECUTED)"),
+            _use_id("c", "Artifact", action="read", url=other),
+            _result_of("c", "read other (EXECUTED)"),
+            _use_id("d", "Artifact", action="publish", file_path=str(path), url=other),
+            _result_of("d", "updated other (EXECUTED)"),
+            _use_id("e", "Artifact", action="publish", file_path=str(path)),
+            _result_of("e", "published NEW (EXECUTED)"),
+            _use_id(
+                "f",
+                "Artifact",
+                action="publish",
+                file_path=str(path),
+                url=URL,
+                edits=[],
+            ),
+            _result_of("f", "edited (EXECUTED)"),
+            _use_id(
+                "g", "Artifact", action="publish", file_path="/etc/o.html", url=URL
+            ),
+            _result_of("g", "other file (EXECUTED)"),
+            _use_id("r", "Artifact", action="read", url=URL),
+            _result_of("r", read_text_for(SOURCE, VERSION_ID)),
+            _use_id("u", "Artifact", action="publish", file_path=str(path), url=URL),
+            _result_of("u", UPDATE_TEXT),
+            _use_id("v", "Artifact", action="publish", file_path=str(path), url=URL),
+            _result_of("v", UPDATE_TEXT.replace("Version 2", "Version 3")),
+            _end(),
+        ]
+
+    fake = FakeClaude(
+        update_stream=stream,
+        read_texts=_reads((SOURCE, VERSION_ID), (NEW_SOURCE, NEW_VERSION_ID)),
+    )
+    result = await update(URL, str(new_source), VERSION_ID, agent=fake.agent())
+    assert result.verified is True and result.version == 2
+    joined = " ".join(result.denied_before_running)
+    for fragment in (
+        "'share'",
+        "'delete'",
+        "may be updated",
+        "edits",
+        "only one publish",
+    ):
+        assert fragment in joined, fragment
+    assert "EXECUTED" not in str(result.model_dump())
+
+
+def _update_stream_with_read(result: str | None) -> Callable[[Path], list[Message]]:
+    def stream(path: Path) -> list[Message]:
+        messages: list[Message] = [_init(["Read", "Artifact"])]
+        if result is not None:
+            messages += [
+                _use_id("r", "Artifact", action="read", url=URL),
+                _result_of("r", result),
+            ]
+        messages += [
+            _use_id("u", "Artifact", action="publish", file_path=str(path), url=URL),
+            _result_of("u", UPDATE_TEXT + " (EXECUTED)"),
+            _end(),
+        ]
+        return messages
+
+    return stream
+
+
+@pytest.mark.parametrize(
+    "session_read",
+    [
+        None,  # the write session never read the target
+        "not an artifact header",  # unparseable
+        read_text_for(SOURCE, "1794664555-other-editor"),  # a different version
+        read_text_for(SOURCE, VERSION_ID, "shared with your organization"),
+    ],
+    ids=["no-read", "unparseable", "different-version", "shared"],
+)
+async def test_the_write_session_cannot_publish_without_an_observed_expected_read(
+    new_source: Path, session_read: str | None
+) -> None:
+    fake = FakeClaude(
+        update_stream=_update_stream_with_read(session_read),
+        read_texts=_reads((SOURCE, VERSION_ID), (NEW_SOURCE, NEW_VERSION_ID)),
+    )
+    with pytest.raises(ToolError) as caught:
+        await update(URL, str(new_source), VERSION_ID, agent=fake.agent())
+    detail = caught.value.detail
+    assert detail is not None
+    # Denied BEFORE the write: nothing changed, a retry is safe, no readback ran.
+    assert detail["publish_allowed"] is False and detail["retry_safe"] is True
+    assert "nothing was changed" in caught.value.message
+    assert len(fake.calls) == 2  # the pre-read and the (denied) write session
+
+
+async def test_update_flags_a_hosted_difference_visibility_change_or_other_artifact(
+    new_source: Path,
+) -> None:
+    different = read_text_for(NEW_SOURCE + b"<!-- x -->", NEW_VERSION_ID)
+    shared = read_text_for(NEW_SOURCE, NEW_VERSION_ID, "shared with your organization")
+    other = read_text_for(NEW_SOURCE, NEW_VERSION_ID).replace(
+        "e3448f84-1ca6-4757-9dd4-3bb5616d043a", "11111111-1111-4111-8111-111111111111"
+    )
+    for after, expected in (
+        (different, "differs from the local file"),
+        (shared, "visibility changed"),
+        (other, "different artifact"),
+    ):
+        fake = FakeClaude(read_texts=[read_text_for(SOURCE, VERSION_ID), after])
+        result = await update(URL, str(new_source), VERSION_ID, agent=fake.agent())
+        assert result.verified is False and result.retry_safe is False
+        assert any(expected in p for p in result.problems), (expected, result.problems)
+
+
+async def test_an_unknown_update_outcome_is_reported_and_never_retried(
+    new_source: Path,
+) -> None:
+    def stream(path: Path) -> list[Message]:
+        return [
+            _init(["Read", "Artifact"]),
+            _use_id("r", "Artifact", action="read", url=URL),
+            _result_of("r", read_text_for(SOURCE, VERSION_ID)),
+            _use_id("u", "Artifact", action="publish", file_path=str(path), url=URL),
+            AssistantMessage(content=[TextBlock(text=f"done {URL}")], model="haiku"),
+        ]
+
+    fake = FakeClaude(
+        update_stream=stream,
+        read_texts=_reads((SOURCE, VERSION_ID)),
+        fail_after_stream=True,
+    )
+    with pytest.raises(ToolError) as caught:
+        await update(URL, str(new_source), VERSION_ID, agent=fake.agent())
+    detail = caught.value.detail
+    assert "UNKNOWN" in caught.value.message and "artifact_read" in caught.value.message
+    assert detail is not None and detail["retry_safe"] is False
+    assert detail["urls_seen"] == [URL]
+    assert len(fake.calls) == 2  # the pre-read and one write attempt; no retry
+
+
+async def test_a_crash_after_the_update_keeps_the_receipt(new_source: Path) -> None:
+    fake = FakeClaude(
+        read_texts=_reads((SOURCE, VERSION_ID), (NEW_SOURCE, NEW_VERSION_ID)),
+        fail_after_stream=True,
+    )
+    result = await update(URL, str(new_source), VERSION_ID, agent=fake.agent())
+    assert result.version_id == NEW_VERSION_ID and result.verified is False
+    assert any("ended abnormally after publishing" in p for p in result.problems)
+
+
+def test_cli_update_reports_stale_versions_without_writing(
+    new_source: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeClaude(read_texts=_reads((SOURCE, "1794664999-live")))
+    result = _cli(
+        monkeypatch,
+        fake,
+        "update",
+        URL,
+        str(new_source),
+        "--expected-version-id",
+        VERSION_ID,
+        "--json",
+    )
+    assert result.exit_code != 0
+    assert "plan_stale" in result.output and "1794664999-live" in result.output
+    assert len(fake.calls) == 1
+
+
+def test_cli_update_succeeds_and_prints_the_receipt(
+    new_source: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeClaude(
+        read_texts=_reads((SOURCE, VERSION_ID), (NEW_SOURCE, NEW_VERSION_ID))
+    )
+    result = _cli(
+        monkeypatch,
+        fake,
+        "update",
+        URL,
+        str(new_source),
+        "--expected-version-id",
+        VERSION_ID,
+        "--json",
+    )
+    assert result.exit_code == 0, result.output
+    body = json.loads(result.output)
+    assert body["verified"] is True and body["version_id"] == NEW_VERSION_ID

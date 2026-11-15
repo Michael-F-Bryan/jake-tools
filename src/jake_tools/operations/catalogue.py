@@ -6,6 +6,7 @@ from . import (
     Operation,
     artifact_publish,
     artifact_read,
+    artifact_update,
     claude_cancel,
     claude_list,
     claude_poll,
@@ -42,4 +43,6 @@ OPERATIONS: tuple[Operation, ...] = (
     # Unavailable unless artifacts.enabled: an undocumented Claude Code mechanism.
     artifact_publish.OPERATION,
     artifact_read.OPERATION,
+    # A separate grant: overwrites an existing artifact's live content.
+    artifact_update.OPERATION,
 )
