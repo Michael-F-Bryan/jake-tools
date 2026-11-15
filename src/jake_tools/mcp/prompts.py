@@ -13,11 +13,11 @@ def issue_discovery(issue_url: str) -> str:
     """Ground an issue in the project and post the findings as an issue comment."""
     return f"""Investigate {issue_url} so we have a shared understanding of the problem and our starting point before planning implementation.
 
-Read the issue and discussion, relevant project decisions, and the current code and tests. Establish the intended user outcome, scope boundaries, what already works, and the actual gaps. Follow the evidence where it matters; don't repeat discovery already adequately documented.
+Read the issue and discussion, relevant project decisions, and current code and tests. Establish the intended user outcome, scope boundaries, existing behaviour and actual gaps. Trace important workflows through their owners, consumers and external dependencies. Reuse applicable evidence; identify what changed or still needs verification rather than repeating discovery.
 
-Distinguish verified facts from assumptions and unresolved questions. Identify the uncertainties that could materially change the implementation, resolving what you can without changing application behaviour or live data.
+Focus on uncertainties that could change scope, architecture, integration or acceptance. Explain which decision each affects and resolve it with the smallest useful check that does not change application behaviour or live data. Distinguish verified facts, assumptions, decisions needed from the user and details an implementer can reasonably settle. Stop when the next design decision is supported; do not exhaustively map the codebase.
 
-Post a concise comment on the issue explaining your understanding, the relevant existing code and contracts, and what still needs deciding or verifying. Link the important evidence and identify the inspected revision. Read the comment back to verify it was published correctly, then return its URL.
+Post a concise comment on the issue. Lead with the conclusion, then existing contracts, gaps and remaining decisions or checks. Link important evidence and identify the inspected revision. Make the handoff understandable without your local checkout. On subsequent passes, explain what changed and what remains valid rather than repeating the analysis; identify superseded guidance. Read the comment back to verify it was published correctly, then return its URL.
 
 This is discovery, not implementation. Don't change code or turn tentative findings into agreed requirements."""
 
@@ -26,11 +26,13 @@ def issue_planning(issue_url: str) -> str:
     """Propose an implementation architecture and post it as an issue comment."""
     return f"""Plan the implementation of {issue_url}, using the discovery comment, issue discussion and current code as your starting point.
 
-Recommend the smallest coherent design that delivers the intended outcome. Explain the important responsibilities and boundaries, what existing code or libraries we should reuse, and which domain guarantees must survive the change. Give abstractions a concrete reason to exist; don't build a framework for hypothetical future requirements.
+Recommend the smallest coherent design that delivers the full intended outcome. Explain responsibilities, boundaries, existing code or libraries to reuse, and domain guarantees that must survive. Give abstractions a present reason to exist; don't build a framework for hypothetical requirements. Preserve settled decisions unless new evidence warrants revisiting them, and distinguish them from recommendations and unresolved questions.
 
-Describe how we'll establish that the implementation works: the user-visible claims, useful test boundaries, and any real-system acceptance needed. Prefer tests that catch plausible regressions and survive sensible refactoring over mocks of our own implementation.
+For larger work, propose coherent, verifiable delivery slices that together achieve the outcome. Identify the first end-to-end slice, dependencies and evidence needed before proceeding. Detail near-term work; leave later mechanics open where early results may change them. Where parallel work would help, identify independent workstreams, shared contracts and integration points; keep tightly coupled design, implementation and testing together. Do not add stages or agents merely because the task is large. Where existing consumers or persistent state are affected, account for compatibility, transition and recovery, not just the final design.
 
-Post a concise architecture proposal on the issue, including the consequential trade-offs, a practical implementation sequence, and any decisions that remain open. Make a recommendation rather than presenting an unranked menu. Read it back and return the comment URL.
+Explain how we will establish that it works. For consequential guarantees, identify evidence at the useful consumer boundary and plausible counterexamples that could disprove them. Address missing, malformed, stale or contradictory evidence where it affects those guarantees. Prefer behavioural tests that survive sensible refactoring over mocks of our own implementation. Identify the real-system acceptance path and access or environment prerequisites: local substitutes cannot establish real-system compatibility, and unavailable acceptance remains unverified.
+
+Post a concise architecture proposal on the issue, leading with the recommendation and consequential trade-offs, followed by delivery sequence, verification and decisions still needed. Link evidence rather than reproducing it; make the handoff usable without your local checkout. Build on prior discussion and identify what changed or is superseded. Leave routine engineering choices to the implementer. Read it back and return the comment URL.
 
 This is a proposal for discussion, not permission to implement. Don't change code or silently expand the ticket."""
 
@@ -39,12 +41,14 @@ def issue_maintainer_review(issue_url: str) -> str:
     """Challenge an issue's architecture for maintainability and post the review."""
     return f"""Review the proposed architecture for {issue_url} from the perspective of the primary maintainer who will have to understand, debug and extend this code.
 
-Read the issue, discovery and planning comments, then inspect enough of the actual code to challenge their assumptions. Treat the plan as a proposal, not authority.
+Read the issue, discovery and planning comments, then inspect enough actual code to challenge their assumptions. Treat the plan as a proposal, not authority. Reuse applicable evidence and focus on consequential uncertainties rather than repeating discovery.
 
-Look for misplaced responsibilities, unnecessary abstractions, duplicated mechanisms, hidden state, misleading failure semantics and tests that freeze implementation details rather than protect behaviour. Challenge both overengineering and shortcuts that merely move complexity onto callers or future maintainers.
+Look for misplaced responsibilities, unnecessary abstractions, duplicated mechanisms, hidden state, misleading failure semantics and tests that freeze implementation details. Challenge both overengineering and shortcuts that move complexity onto callers or future maintainers. For larger work, examine whether slices expose integration risks early, dependencies and shared contracts permit the proposed parallelism, and compatibility or state transitions are accounted for where needed.
 
-For each material concern, explain the concrete consequence and recommend a simpler or more maintainable alternative. Tie criticism to evidence and likely changes, not personal taste. Don't manufacture objections: say which parts of the plan should stand.
+Challenge the strongest promises, especially completeness, uniqueness, atomicity and successful delivery. Look for plausible cases where proposed checks pass while the user-visible promise is false, including missing or contradictory evidence. Check whether real-system acceptance can be reached rather than replaced by a local substitute. Distinguish demonstrated defects, unresolved risks and optional preferences; do not present hypothetical counterexamples as observed failures.
 
-Post a concise review on the issue with your judgement—ready to implement, needs revision, or blocked on evidence—and the changes needed to reach an implementable plan. Distinguish necessary corrections from optional improvements. Read it back and return the comment URL.
+For each material concern, explain the concrete consequence and recommend a simpler or more maintainable alternative tied to evidence and likely changes, not taste. Don't manufacture objections: say which parts should stand. Keep depth proportionate to risk; a small sound change does not need extra stages or a redesign.
+
+Post a concise review on the issue, leading with your judgement: ready to implement, implementable with specific corrections, or blocked on a decision or missing evidence. Separate necessary corrections from optional improvements. Say which corrections can be incorporated during implementation and which need a decision or bounded investigation first; don't require a rewritten plan just to restate settled corrections. Readiness is not implementation approval. Link evidence, identify the inspected revision and superseded guidance, and make the handoff understandable without your local checkout. On repeat reviews, focus on changes and unresolved concerns. Read it back and return the comment URL.
 
 Review only. Don't implement changes, rewrite the issue's scope, or claim to speak on behalf of the human maintainer."""

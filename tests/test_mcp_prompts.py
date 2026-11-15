@@ -11,8 +11,16 @@ from mcp.types import TextContent
 ServerFactory = Callable[..., AbstractAsyncContextManager[ClientSession]]
 
 
-async def test_issue_prompts(mcp_server: ServerFactory, mcp_env: dict[str, str]):
-    issue_url = "https://github.com/example/project/issues/42?context={literal}"
+@pytest.mark.parametrize(
+    "issue_url",
+    [
+        "https://github.com/example/project/issues/42?context={literal}",
+        "https://example.atlassian.net/browse/PROJECT-42",
+    ],
+)
+async def test_issue_prompts(
+    mcp_server: ServerFactory, mcp_env: dict[str, str], issue_url: str
+):
     boundaries = {
         "issue_discovery": "This is discovery, not implementation.",
         "issue_planning": "This is a proposal for discussion, not permission to implement.",
