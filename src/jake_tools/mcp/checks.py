@@ -25,6 +25,12 @@ from pydantic import BaseModel, ConfigDict
 from ..clockify import ClockifyClient, ClockifyError
 from ..config import Config, XdgPaths
 from ..jira import JiraClient, JiraError
+from ..microsoft_auth import (
+    MicrosoftAuthError,
+    MicrosoftSettings,
+    MicrosoftTokenProvider,
+)
+from ..newsletters import GRAPH_RESOURCE, SHAREPOINT_RESOURCE
 from ..transcription import TranscriptionClient, TranscriptionError
 
 CheckStatus = Literal["ok", "warn", "fail", "skip"]
@@ -402,6 +408,76 @@ def check_transcription(config: Config) -> Check:
     )
 
 
+def check_microsoft(config: Config) -> Check:
+    """The newsletter's delegated Microsoft grant: configured, and refreshable.
+
+    Skipped when nothing is configured (the tools are listed but answer
+    ``missing_credentials``). Once any value is set, an incomplete or unusable
+    grant is a failure. It redeems the refresh token once per audience (Graph
+    and SharePoint), which reads nothing and writes nothing.
+    """
+    values = (
+        ("microsoft.tenant_id", config.microsoft_tenant_id),
+        ("microsoft.client_id", config.microsoft_client_id),
+        ("microsoft.account", config.microsoft_account),
+        ("MICROSOFT_REFRESH_TOKEN", config.microsoft_refresh_token),
+    )
+    missing = [name for name, setting in values if not setting.value]
+    if len(missing) == len(values):
+        return Check(
+            name="microsoft",
+            status="skip",
+            detail="not configured; newsletter tools answer missing_credentials",
+        )
+    if missing:
+        return Check(
+            name="microsoft",
+            status="fail",
+            detail="partially configured; unset: " + ", ".join(missing),
+            required=True,
+        )
+    secrets = _sensitive_values(config)
+    try:
+        settings = MicrosoftSettings(
+            tenant_id=str(config.microsoft_tenant_id.value),
+            client_id=str(config.microsoft_client_id.value),
+            account=str(config.microsoft_account.value),
+            refresh_token=str(config.microsoft_refresh_token.value),
+            client_secret=config.microsoft_client_secret.value or None,
+            authority_url=config.microsoft_authority_url.value,
+            account_object_id=config.microsoft_account_object_id.value or None,
+        )
+    except ValueError as exc:
+        return Check(
+            name="microsoft",
+            status="fail",
+            detail=f"invalid configuration: {scrub(str(exc), secrets)}",
+            required=True,
+        )
+    provider = MicrosoftTokenProvider(settings)
+    for audience, resource in (
+        ("Graph", GRAPH_RESOURCE),
+        ("SharePoint", SHAREPOINT_RESOURCE),
+    ):
+        try:
+            provider(resource)
+        except MicrosoftAuthError as exc:
+            return Check(
+                name="microsoft",
+                status="fail",
+                detail=f"{audience} token refused ({exc.kind}"
+                + (f", {exc.aadsts}" if exc.aadsts else "")
+                + f"): {exc.action}",
+                required=True,
+            )
+    return Check(
+        name="microsoft",
+        status="ok",
+        detail=f"grant for {settings.account} refreshed for Graph and SharePoint",
+        required=True,
+    )
+
+
 def run_checks(
     config: Config, files: list[ConfigFileStatus], environ: Mapping[str, str]
 ) -> list[Check]:
@@ -413,4 +489,5 @@ def run_checks(
         check_jira(config),
         check_session_store(config),
         check_transcription(config),
+        check_microsoft(config),
     ]

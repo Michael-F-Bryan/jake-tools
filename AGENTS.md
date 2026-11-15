@@ -18,7 +18,9 @@ src/jake_tools/
   polishing/      # polish_transcript: guarded clean-verbatim drafts via Claude
   artifacts/      # experimental: publish an HTML file as a private Claude Artifact, read back
   prompting.py    # typed Jinja prompts bound to a response model
-  newsletters.py  # SharePoint Graph client
+  newsletters.py  # SharePoint Graph client (list paging, attachments, request/outcome classification)
+  newsletter_entries.py # verified list/get/create/update workflows over the client; partial-outcome effects
+  microsoft_auth.py # refresh-aware delegated tokens per resource audience; identity check
   transcription.py # HTTP client + transcript contract for transcription-service
 tests/            # mirrors packages above
 transcription-service/  # native Swift HTTP service (FluidAudio); see its README
@@ -407,13 +409,59 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
 - Tests that publish are gated behind an explicit environment value and must
   never run without authority for that exact synthetic fixture.
 
+## Microsoft newsletters (`microsoft_auth`, `newsletter_entries`)
+
+`newsletter_list`/`newsletter_get` (`newsletter` capability) and
+`newsletter_create`/`newsletter_update` (`newsletter_publish`, a separate
+grant: it changes a list its readers can see). Operator docs:
+`docs/microsoft-auth.md`; agent guidance: `skills/newsletters`.
+
+- Identity is configuration, never a tool argument or a fallback:
+  `microsoft.tenant_id`, `microsoft.client_id`, `microsoft.account` and the
+  secret `MICROSOFT_REFRESH_TOKEN` (optional `MICROSOFT_CLIENT_SECRET`), both
+  environment-only and in `SECRET_VARIABLES` (so scrubbed from workers and read
+  from the Hermes profile). The tools are always listed;
+  unconfigured calls are `missing_credentials` naming variables/settings.
+- `MicrosoftTokenProvider` is the refresh-token grant over `requests` (no new
+  dependency; MSAL documents its refresh-token method as migration-only and
+  `azure-identity` has no equivalent). One token per resource audience (Graph,
+  SharePoint), refreshed in the last fifth of its life (max 5 min) under one
+  lock so concurrent callers refresh once. Operations build their client per
+  call, so the provider is shared per exact settings (`shared_provider`). A
+  rotated refresh token lives in memory only: nothing is persisted. Every
+  refresh checks the ID token's `tid`/account against the configuration
+  (a guard against mis-provisioning, not an authorisation boundary).
+  Failures are `MicrosoftAuthError.kind`s mapped to `access_denied`
+  (`grant_invalid`, `interaction_required`, `client_rejected`,
+  `resource_not_granted`, `identity_mismatch`, `identity_unverified`) or
+  `upstream_error` (`unavailable`); messages carry codes and an operator
+  action, never a token, secret, host or free upstream text.
+- `NewsletterClient` stays the one HTTP client; `AzureCliTokenProvider` now
+  honours the CLI's reported expiry and is for the interactive command only.
+  Tokens are never cached for the process lifetime.
+- Writes: `create_entry`/`update_entry` read back and compare (title, body,
+  untouched fields, every supplied attachment by downloaded bytes). A step is
+  `applied`, `failed` (a 4xx the upstream refused, or no token, so nothing was
+  sent), `uncertain` (transport error, timeout, 5xx, unreadable 2xx) or
+  `not_attempted`. Never retry a write or recreate an entry; recovery is
+  `newsletter_update` on the known ID, which skips an attachment already
+  present with identical bytes and refuses a same-name different-bytes one.
+  Attachments are only added. A field PATCH is not a compare-and-swap.
+- Tests (`tests/fake_microsoft.py`) run the real stdio server, real clients and
+  provider against a local fake of the token endpoint, Graph and SharePoint
+  (audience- and expiry-enforcing, with failure injection). That proves
+  mechanics only: nothing here establishes live Microsoft compatibility
+  (SharePoint rich-text normalisation, throttling, tenant policy).
+- Attachment paths are read with the server's own permissions: a granted
+  `newsletter_publish` agent can upload any readable file it names.
+
 ## External dependencies
 
 | Tool               | Used by                                               |
 | ------------------ | ----------------------------------------------------- |
 | `uv`                | dependency management and script runner                |
 | `claude-agent-sdk`  | LLM calls; drives the local `claude` CLI               |
-| `az` (Azure CLI)    | `newsletter` commands (Microsoft Graph token)          |
+| `az` (Azure CLI)    | `jake-tools newsletter` commands only (the caller's own Graph token) |
 | `nix`               | building and testing `transcription-service/` (Swift and SDK from nixpkgs); `nix develop` for the dev tools above |
 If a required external tool is missing, report the blocker. Do not mock
 preflight checks or skip them silently.
@@ -458,7 +506,9 @@ jake-tools newsletter edit ITEM_ID --title "New title" < body.txt
 SharePoint list via Microsoft Graph. Body text is read from stdin for `add`
 (required) and `edit` (optional). `--attach` can be supplied multiple times.
 
-Requires `az login` to the CSU tenant for a Graph access token.
+Requires `az login` to the CSU tenant for a Graph access token. That is the
+interactive command line's own identity. The MCP/native `newsletter_*` tools
+never use it (see "Microsoft newsletters" below).
 
 ## Boundaries
 

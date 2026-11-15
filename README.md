@@ -41,7 +41,7 @@ Hermes' own Python environment (nixfiles does this with the flake's
 
 - **Tools**, for the capabilities in
   `plugins.entries.jake-tools.settings.capabilities` (`artifact`, `artifact_update`,
-  `claude`, `clockify`, `transcription`; unset means none). They have the MCP tools' names,
+  `claude`, `clockify`, `newsletter`, `newsletter_publish`, `transcription`; unset means none). They have the MCP tools' names,
   schemas, results and error codes; failures are
   `{"error", "code", "message", "detail"}`. `transcribe` also needs
   `transcription.api_base_url`. `ping` stays MCP-only.
@@ -68,7 +68,7 @@ Pinned Hermes (`5b32cfc`) scrubs its own provider and platform credentials
 from terminal commands, but a plugin can add names to that scrub only as a
 terminal backend's `strip_env_keys`, and even then not for foreground `local`
 commands. Jake's variables (`CLOCKIFY_API_KEY`, `JIRA_*`,
-`TRANSCRIPTION_API_TOKEN` and their `_FILE` forms) are on neither list. So a
+`TRANSCRIPTION_API_TOKEN`, `MICROSOFT_REFRESH_TOKEN`, `MICROSOFT_CLIENT_SECRET` and their `_FILE` forms) are on neither list. So a
 Jake secret that sits in Hermes' process environment (the launch profile's
 `.env` and secret sources are published there) is visible to the agent's
 terminal commands, foreground and background, exactly as it would be without
@@ -280,6 +280,27 @@ capabilities: it then gets a `CreateTaskResult` and polls with `tasks/get`,
 answers questions with `tasks/update` and cancels with `tasks/cancel`. Every
 other client, including Hermes on its `initialize` connection, gets the
 ordinary tools unchanged. Both are views of the same task.
+
+## Newsletter MCP tools (Microsoft)
+
+`newsletter_list`, `newsletter_get`, `newsletter_create` and `newsletter_update`
+read and change the CSU Weekly Newsletter SharePoint list, including
+attachment-only updates, as **one explicitly configured Microsoft account**
+through a delegated, refresh-aware grant (tenant, application and account are
+configuration; a grant for any other account is refused, and there is no
+fallback to `az login`). Reads and publication are separate Hermes grants
+(`newsletter`, `newsletter_publish`). Lists are one bounded page with explicit
+coverage (`complete`, `next_cursor`). Every write reads the entry back and
+downloads each attachment to compare bytes; a failure after the entry exists
+returns its ID and an applied/failed/uncertain/not-attempted effect per step,
+is never retried, and is recovered with `newsletter_update`, never a second
+create. Secrets are environment-only (`MICROSOFT_REFRESH_TOKEN[_FILE]`,
+optional `MICROSOFT_CLIENT_SECRET[_FILE]`). Provisioning, reauthorisation and
+the identity each call uses: [`docs/microsoft-auth.md`](docs/microsoft-auth.md);
+agent guidance: `skill://newsletters`. The tests run the real server and clients
+against a local fake of the token endpoint, Graph and SharePoint; they do not
+establish live Microsoft compatibility. The `jake-tools newsletter` command
+is separate and still uses the caller's own `az login`.
 
 ## Transcription MCP tool
 

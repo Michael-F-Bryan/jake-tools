@@ -84,8 +84,11 @@ _ACTIONS: dict[AuthErrorKind, str] = {
         "client needs a current one)."
     ),
     "resource_not_granted": (
-        "The application has no delegated consent for this resource. A tenant "
-        "administrator must grant it; Jake never changes grants."
+        "Microsoft rejected the requested scope: the application has no delegated "
+        "consent for this resource, or the original sign-in did not include "
+        "`openid profile offline_access`. Reauthorise with those scopes; if the "
+        "resource itself is not consented, a tenant administrator must grant it. "
+        "Jake never changes grants."
     ),
     "identity_mismatch": (
         "The grant belongs to a different tenant or account than configured. No "
@@ -93,8 +96,9 @@ _ACTIONS: dict[AuthErrorKind, str] = {
         "microsoft.tenant_id / microsoft.account if the configuration is wrong."
     ),
     "identity_unverified": (
-        "The token response did not say which account it belongs to, so it was not "
-        "used. Reauthorise requesting the scopes `openid profile offline_access`."
+        "The token response did not identify the account (tid plus preferred_username"
+        "/oid), so it was not used. The grant must have been authorised with the "
+        "scopes `openid profile offline_access`; reauthorise with them."
     ),
     "unavailable": "The Microsoft sign-in service could not be reached; retry later.",
     "rejected": "Microsoft refused the token request; see the error code.",
@@ -162,6 +166,7 @@ class MicrosoftSettings:
     refresh_token: str = field(repr=False)
     client_secret: str | None = field(default=None, repr=False)
     authority_url: str = DEFAULT_AUTHORITY_URL
+    account_object_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("tenant_id", "client_id"):
@@ -169,6 +174,10 @@ class MicrosoftSettings:
                 raise ValueError(f"microsoft.{name} must be a GUID")
         if "@" not in self.account:
             raise ValueError("microsoft.account must be the account's sign-in name")
+        if self.account_object_id is not None and not GUID_PATTERN.match(
+            self.account_object_id
+        ):
+            raise ValueError("microsoft.account_object_id must be a GUID")
         require_secure_url(self.authority_url, "microsoft.authority_url")
 
     @property
@@ -235,12 +244,14 @@ class MicrosoftTokenProvider:
                 data=form,
                 headers={"Accept": "application/json"},
                 timeout=REQUEST_TIMEOUT_SECONDS,
+                # The form carries the refresh token: never re-send it elsewhere.
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
             # The exception text can carry the URL; the class name is enough.
             raise MicrosoftAuthError("unavailable", resource) from exc
         body = _json_object(response)
-        if response.status_code >= 400:
+        if response.status_code >= 300:
             raise _failure(resource, response.status_code, body)
         access_token = body.get("access_token")
         if not isinstance(access_token, str) or not access_token:
@@ -256,9 +267,20 @@ class MicrosoftTokenProvider:
     def _check_identity(self, resource: str, id_token: object) -> None:
         """Refuse a grant for another tenant or account.
 
-        The ID token comes straight from the token endpoint over TLS and is
-        read, not signature-checked: this guards against a mis-provisioned
-        grant (wrong person signed in), it is not an authorisation boundary.
+        Microsoft's contract (https://learn.microsoft.com/entra/identity-platform/
+        v2-oauth2-auth-code-flow, "Refresh the access token"): the refresh
+        response's ``id_token`` is "only provided if ``openid`` scope was
+        requested", is unsigned, and must not be relied on for authorisation or
+        security boundaries. Every request here asks for ``openid profile
+        offline_access``, and a response without an identity is refused
+        (``identity_unverified``), never assumed. Claims
+        (https://learn.microsoft.com/entra/identity-platform/id-token-claims-reference):
+        ``tid`` is a default claim; ``preferred_username`` needs the ``profile``
+        scope and is mutable ("can't be used to make authorization decisions");
+        ``oid`` needs ``profile`` and is immutable, so ``account_object_id``
+        pins it when configured. This is a guard against a mis-provisioned
+        grant (the wrong person signed in), not an authorisation boundary:
+        what the account may do is decided by Microsoft when a resource is called.
         """
         claims = _claims(id_token)
         if claims is None:
@@ -279,6 +301,13 @@ class MicrosoftTokenProvider:
             or account.casefold() != self._settings.account.casefold()
         ):
             raise MicrosoftAuthError("identity_mismatch", resource)
+        pinned = self._settings.account_object_id
+        if pinned is not None:
+            object_id = claims.get("oid")
+            if not isinstance(object_id, str):
+                raise MicrosoftAuthError("identity_unverified", resource)
+            if object_id.lower() != pinned.lower():
+                raise MicrosoftAuthError("identity_mismatch", resource)
 
 
 _providers: dict[MicrosoftSettings, MicrosoftTokenProvider] = {}

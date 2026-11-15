@@ -239,6 +239,8 @@ class Config(BaseModel):
     microsoft_account: Resolved[str | None]
     """The sign-in name (UPN) the delegated grant MUST belong to. Explicit on
     purpose: a grant for any other account is refused, never used."""
+    microsoft_account_object_id: Resolved[str | None]
+    """Optional immutable pin (the account's ``oid``): sign-in names can change."""
     microsoft_authority_url: Resolved[str]
     microsoft_refresh_token: Resolved[str | None]
     microsoft_client_secret: Resolved[str | None]
@@ -284,6 +286,7 @@ class Config(BaseModel):
             self.microsoft_tenant_id,
             self.microsoft_client_id,
             self.microsoft_account,
+            self.microsoft_account_object_id,
             self.microsoft_authority_url,
             self.microsoft_refresh_token,
             self.microsoft_client_secret,
@@ -540,6 +543,16 @@ def load_config(
                 "JAKE_TOOLS_MICROSOFT_ACCOUNT",
                 "microsoft",
                 "account",
+                _OPTIONAL_STR,
+            ),
+            None,
+        ),
+        microsoft_account_object_id=resolve(
+            _Spec(
+                "microsoft.account_object_id",
+                "JAKE_TOOLS_MICROSOFT_ACCOUNT_OBJECT_ID",
+                "microsoft",
+                "account_object_id",
                 _OPTIONAL_STR,
             ),
             None,

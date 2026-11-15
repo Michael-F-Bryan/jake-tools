@@ -1,11 +1,15 @@
 import json
 
+import pytest
+from pydantic import ValidationError
+
 from jake_tools import newsletters
 from jake_tools.newsletters import (
     AzureCliTokenProvider,
     GraphListItem,
     GraphListItemsResponse,
     NewsletterItem,
+    SharePointAttachmentsResponse,
 )
 
 
@@ -33,8 +37,10 @@ def test_graph_list_item_parses_all_fields() -> None:
     )
 
 
-def test_graph_list_item_uses_defaults_for_missing_fields() -> None:
-    item = GraphListItem.model_validate({"id": "295"}).to_newsletter_item()
+def test_graph_list_item_uses_defaults_for_blank_fields() -> None:
+    item = GraphListItem.model_validate(
+        {"id": "295", "fields": {}}
+    ).to_newsletter_item()
 
     assert item == NewsletterItem(
         id="295",
@@ -44,6 +50,25 @@ def test_graph_list_item_uses_defaults_for_missing_fields() -> None:
         modified="",
         url="",
     )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{}, {"id": "295"}, {"fields": {"Title": "x"}}, {"id": "", "fields": {}}],
+)
+def test_a_list_item_without_fields_or_identity_is_not_an_entry(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        GraphListItem.model_validate(payload)
+
+
+def test_collection_replies_need_their_collection_but_empty_ones_are_valid() -> None:
+    assert GraphListItemsResponse.model_validate({"value": []}).value == []
+    assert SharePointAttachmentsResponse.model_validate({"value": []}).value == []
+    for model in (GraphListItemsResponse, SharePointAttachmentsResponse):
+        with pytest.raises(ValidationError):
+            model.model_validate({})
 
 
 def test_graph_list_response_parses_items() -> None:

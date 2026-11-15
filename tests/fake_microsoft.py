@@ -13,7 +13,9 @@ Graph and SharePoint each refuse a token issued for the other's audience, an
 expired token, or an unknown one (401), so audience separation and refresh are
 exercised through the real clients rather than asserted. Scripted failures
 (``script``) let a test make one specific call fail, drop the connection, or
-reply 500 *after* applying the write. It proves the client's and tools'
+reply 500 *after* applying the write. The ID-token claims it emits
+(``tid``, ``preferred_username``, ``oid``) are the documented claim names, not
+evidence of what Microsoft returns on every refresh. It proves the client's and tools'
 mechanics only: it is not Microsoft, and says nothing about live compatibility
 (SharePoint's real HTML normalisation, throttling, tenant policy, ...).
 """
@@ -83,6 +85,7 @@ class FakeMicrosoft:
         self.token_delay = 0.0
         self.token_error: dict[str, Any] | None = None
         self.token_status = 400
+        self.token_redirect = 0
         self.id_claims: dict[str, Any] = {
             "tid": TENANT,
             "preferred_username": ACCOUNT,
@@ -91,7 +94,9 @@ class FakeMicrosoft:
         self.script: dict[str, list[str]] = {}
         """``"<METHOD> <route>"`` -> queue of one-shot actions: a status code
         as a string (``"403"``), ``"drop"`` (close without answering) or
-        ``"apply-then-500"`` (do the write, then answer 500)."""
+        ``"apply-then-500"`` (do the write, then answer 500),
+        ``"apply-then-json:<json>"`` (do it, answer 200 with that body), or
+        ``"redirect:<status>"`` (answer with a redirect to ``/redirected``)."""
         self.page_size_cap: int | None = None
         self.corrupt_downloads: set[str] = set()
         self.mangle_body = False
@@ -226,6 +231,12 @@ class FakeMicrosoft:
         if action is not None and action.isdigit():
             self._reply(request, int(action), {"error": {"code": "scripted"}})
             return
+        if action is not None and action.startswith("redirect:"):
+            request.send_response(int(action.removeprefix("redirect:")))
+            request.send_header("Location", f"{self.base_url}/redirected")
+            request.send_header("Content-Length", "0")
+            request.end_headers()
+            return
         try:
             status, payload, raw = self._dispatch(request.command, path, query, body)
         except KeyError:
@@ -233,6 +244,12 @@ class FakeMicrosoft:
             return
         if action == "apply-then-500":
             self._reply(request, 500, {"error": {"code": "generalException"}})
+            return
+        if action is not None and action.startswith("apply-then-json:"):
+            # The write (or read) happened, but the reply has the wrong shape.
+            self._reply(
+                request, 200, json.loads(action.removeprefix("apply-then-json:"))
+            )
             return
         self._reply(request, status, payload, raw=raw)
 
@@ -266,6 +283,12 @@ class FakeMicrosoft:
             self.token_requests.append(form)
         if self.token_delay:
             time.sleep(self.token_delay)
+        if self.token_redirect:
+            request.send_response(self.token_redirect)
+            request.send_header("Location", f"{self.base_url}/redirected")
+            request.send_header("Content-Length", "0")
+            request.end_headers()
+            return
         if self.token_error is not None:
             self._reply(request, self.token_status, self.token_error)
             return
@@ -316,6 +339,8 @@ class FakeMicrosoft:
                 data = json.loads(body)["fields"]
                 entry = self.add_entry(data["Title"], data["Body"])
                 return 201, self._graph_item(entry, with_fields=False), None
+            if item_id is None:
+                return 405, {"error": "method not allowed"}, None
             entry = self._entry(int(item_id))
             if fields and method == "PATCH":
                 data = json.loads(body)

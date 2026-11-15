@@ -31,7 +31,13 @@ from pydantic import BaseModel
 from ..config import Config
 
 Capability = Literal[
-    "artifact", "artifact_update", "claude", "clockify", "transcription"
+    "artifact",
+    "artifact_update",
+    "claude",
+    "clockify",
+    "newsletter",
+    "newsletter_publish",
+    "transcription",
 ]
 """What an agent can be granted. Each operation belongs to exactly one."""
 
@@ -54,6 +60,11 @@ SKILL_GUIDES: dict[str, str] = {
         "The guide covers what a publish and a readback prove, the document shell "
         "around hosted content, what visibility the readback does and does not "
         "show, the undocumented mechanism, and how to handle each error."
+    ),
+    "newsletters": (
+        "The guide defines the Microsoft identity and authority used, list coverage, "
+        "the publication boundary, write verification, partial-outcome recovery and "
+        "how to handle each error."
     ),
     "transcription": (
         "The guide explains the transcript schema, what speaker and overlap fields "

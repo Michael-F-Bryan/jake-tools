@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import requests
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .http import HttpSession, UpstreamError
 
@@ -89,12 +89,13 @@ class NewsletterAttachmentRef(BaseModel):
 
     model_config = ConfigDict(frozen=True, populate_by_name=True)
 
-    name: str = Field(alias="FileName")
+    name: str = Field(min_length=1, alias="FileName")
     server_relative_url: str = Field(default="", alias="ServerRelativeUrl")
 
 
 class SharePointAttachmentsResponse(BaseModel):
-    value: list[NewsletterAttachmentRef] = Field(default_factory=list)
+    value: list[NewsletterAttachmentRef]
+    """Required: a reply without the collection is not an empty inventory."""
 
 
 class NewsletterPage(BaseModel):
@@ -115,9 +116,19 @@ class GraphListItemFields(BaseModel):
 
 
 class GraphListItem(BaseModel):
+    """One list item. ``fields`` and an identity are required: a reply that has
+    neither is not an entry, so it is never turned into a blank one. Blank
+    ``Body``/``Title`` inside ``fields`` remain valid."""
+
     id: str = ""
     web_url: str = Field(default="", alias="webUrl")
-    fields: GraphListItemFields = Field(default_factory=GraphListItemFields)
+    fields: GraphListItemFields
+
+    @model_validator(mode="after")
+    def _has_identity(self) -> GraphListItem:
+        if not (self.id or self.fields.id):
+            raise ValueError("list item has no id")
+        return self
 
     def to_newsletter_item(self) -> NewsletterItem:
         return NewsletterItem(
@@ -133,14 +144,15 @@ class GraphListItem(BaseModel):
 class GraphListItemsResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    value: list[GraphListItem] = Field(default_factory=list)
+    value: list[GraphListItem]
+    """Required: a reply without the collection is not an empty list."""
     next_link: str | None = Field(default=None, alias="@odata.nextLink")
 
 
 class GraphCreatedListItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    id: str
+    id: str = Field(min_length=1)
     web_url: str = Field(default="", alias="webUrl")
 
 
@@ -257,7 +269,7 @@ class NewsletterClient:
             params["$skiptoken"] = cursor
         query = urllib.parse.urlencode(params, safe="(),")
         data = self._graph("GET", self._list_path(f"/items?{query}"))
-        response = GraphListItemsResponse.model_validate(data)
+        response = _parse(GraphListItemsResponse, data, "list items")
         return NewsletterPage(
             items=[item.to_newsletter_item() for item in response.value],
             next_cursor=_next_cursor(response.next_link),
@@ -265,7 +277,7 @@ class NewsletterClient:
 
     def get_item(self, item_id: str) -> NewsletterItem:
         data = self._graph("GET", self._list_path(f"/items/{item_id}?$expand=fields"))
-        return GraphListItem.model_validate(data).to_newsletter_item()
+        return _parse(GraphListItem, data, "get item").to_newsletter_item()
 
     def create_item(
         self,
@@ -283,15 +295,8 @@ class NewsletterClient:
         """POST the entry and nothing else: the one step that creates it."""
         payload = {"fields": {"Title": title, "Body": body_to_html(body)}}
         data = self._graph("POST", self._list_path("/items"), payload)
-        try:
-            return GraphCreatedListItem.model_validate(data)
-        except ValidationError as exc:
-            # The POST was sent; its reply gave no entry ID.
-            raise NewsletterError(
-                "newsletter create returned no entry id",
-                status=200,
-                safe_summary="POST items: reply had no entry id",
-            ) from exc
+        # The POST was sent: a reply without a usable ID leaves it uncertain.
+        return _parse(GraphCreatedListItem, data, "create item")
 
     def update_item(
         self,
@@ -331,7 +336,7 @@ class NewsletterClient:
 
     def list_attachments(self, item_id: str) -> list[NewsletterAttachmentRef]:
         data = self._sharepoint("GET", self._attachments_path(item_id))
-        return SharePointAttachmentsResponse.model_validate(data).value
+        return _parse(SharePointAttachmentsResponse, data, "list attachments").value
 
     def download_attachment(self, item_id: str, filename: str) -> bytes:
         response = self._send(
@@ -440,6 +445,9 @@ class NewsletterClient:
                 json=body if isinstance(body, Mapping) else None,
                 data=body if isinstance(body, bytes) else None,
                 timeout=30,
+                # A 307/308 would re-send a write to another URL on its own;
+                # a redirect is reported, never followed.
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
             raise NewsletterError(
@@ -447,7 +455,7 @@ class NewsletterClient:
                 safe_summary=f"{method} {_safe_path(url)}: {type(exc).__name__}",
             ) from exc
 
-        if response.status_code >= 400:
+        if response.status_code >= 300:
             error_body = str(response.text)[:500]
             raise NewsletterError(
                 f"newsletter request failed for {method} {url}: "
@@ -456,6 +464,24 @@ class NewsletterClient:
                 safe_summary=f"{method} {_safe_path(url)}: HTTP {response.status_code}",
             )
         return response
+
+
+def _parse[ModelT: BaseModel](
+    model: type[ModelT], data: JsonObject, what: str
+) -> ModelT:
+    """Validate an upstream payload; a wrong shape is an upstream failure.
+
+    The error carries no payload text, so it cannot leak upstream content, and
+    callers that already hold partial evidence (an entry ID) keep it.
+    """
+    try:
+        return model.model_validate(data)
+    except ValidationError as exc:
+        raise NewsletterError(
+            f"newsletter returned an unexpected {what} response shape",
+            status=200,
+            safe_summary=f"{what}: unexpected response shape",
+        ) from exc
 
 
 def _safe_path(url: str) -> str:

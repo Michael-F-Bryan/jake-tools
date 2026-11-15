@@ -118,6 +118,7 @@ def test_defaults_pass_and_secrets_are_skipped(
     assert check_line(result.stdout, "jira").startswith("SKIP")
     assert check_line(result.stdout, "session_store").startswith("SKIP")
     assert check_line(result.stdout, "transcription").startswith("SKIP")
+    assert check_line(result.stdout, "microsoft").startswith("SKIP")
     # The runs dir was created for real, owner-only.
     runs = home / ".local" / "state" / "jake-tools" / "runs"
     assert runs.is_dir()
@@ -546,3 +547,41 @@ def test_transcription_check_fails_without_a_token_and_passes_against_a_ready_se
         assert "starting" in starting.stdout
     finally:
         service.stop()
+
+
+def test_microsoft_check_reports_partial_revoked_and_working_grants(
+    run_doctor: RunDoctor, home: Path, claude_bin: Path
+) -> None:
+    from fake_microsoft import CLIENT_SECRET, REFRESH_TOKEN, FakeMicrosoft
+
+    partial = run_doctor(home, claude_bin, MICROSOFT_REFRESH_TOKEN=REFRESH_TOKEN)
+    assert partial.returncode == 1
+    line = check_line(partial.stdout, "microsoft")
+    assert line.startswith("FAIL") and "microsoft.account" in line
+    assert REFRESH_TOKEN not in partial.stdout
+
+    fake = FakeMicrosoft().start()
+    try:
+        env = fake.env(MICROSOFT_CLIENT_SECRET=CLIENT_SECRET)
+        ok = run_doctor(home, claude_bin, **env)
+        assert ok.returncode == 0, ok.stdout
+        assert check_line(ok.stdout, "microsoft").startswith("OK")
+        assert "refreshed for Graph and SharePoint" in ok.stdout
+        assert len(fake.refreshes()) == 2  # one per audience, nothing else called
+        assert not [r for r in fake.requests if r.path.startswith(("/graph", "/sp"))]
+
+        fake.token_error = {
+            "error": "invalid_grant",
+            "error_description": "AADSTS70043",
+        }
+        revoked = run_doctor(home, claude_bin, **env)
+        assert revoked.returncode == 1
+        failing = check_line(revoked.stdout, "microsoft")
+        assert failing.startswith("FAIL") and "grant_invalid" in failing
+        assert "AADSTS70043" in failing and "Reauthorise" in failing
+    finally:
+        fake.stop()
+    for output in (ok.stdout, revoked.stdout):
+        assert REFRESH_TOKEN not in output and CLIENT_SECRET not in output
+        assert "microsoft.account = editor@example.test" in output
+        assert "MICROSOFT_REFRESH_TOKEN = set" in output

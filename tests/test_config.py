@@ -262,6 +262,7 @@ def test_settings_listing_is_complete_and_stable(tmp_path: Path) -> None:
         "microsoft.tenant_id",
         "microsoft.client_id",
         "microsoft.account",
+        "microsoft.account_object_id",
         "microsoft.authority_url",
         "MICROSOFT_REFRESH_TOKEN",
         "MICROSOFT_CLIENT_SECRET",

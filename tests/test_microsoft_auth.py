@@ -285,3 +285,31 @@ def test_equal_settings_share_a_provider_and_different_grants_do_not(
     first = shared_provider(settings(fake))
     assert shared_provider(settings(fake)) is first
     assert shared_provider(settings(fake, refresh_token="another-grant")) is not first
+
+
+OBJECT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+
+def test_an_object_id_pin_is_the_immutable_identity_check(fake: FakeMicrosoft) -> None:
+    pinned = settings(fake, account_object_id=OBJECT_ID)
+
+    fake.id_claims = {**fake.id_claims, "oid": OBJECT_ID.upper()}
+    assert MicrosoftTokenProvider(pinned)(GRAPH_RESOURCE)  # case-insensitive GUID
+
+    fake.id_claims = {**fake.id_claims, "oid": "11111111-1111-1111-1111-111111111111"}
+    with pytest.raises(MicrosoftAuthError) as other:
+        MicrosoftTokenProvider(pinned)(GRAPH_RESOURCE)
+    assert other.value.kind == "identity_mismatch"  # even with a matching sign-in name
+
+    fake.id_claims = {"tid": TENANT, "preferred_username": ACCOUNT}  # no oid at all
+    with pytest.raises(MicrosoftAuthError) as absent:
+        MicrosoftTokenProvider(pinned)(GRAPH_RESOURCE)
+    assert absent.value.kind == "identity_unverified"
+
+    with pytest.raises(ValueError, match="account_object_id"):
+        settings(fake, account_object_id="not-a-guid")
+
+
+def test_without_a_pin_the_sign_in_name_alone_is_checked(fake: FakeMicrosoft) -> None:
+    fake.id_claims = {**fake.id_claims, "oid": OBJECT_ID}
+    assert MicrosoftTokenProvider(settings(fake))(GRAPH_RESOURCE)

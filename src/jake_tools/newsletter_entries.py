@@ -246,8 +246,8 @@ def list_entries(
 ) -> NewsletterListResult:
     page = client.list_page(limit=limit, cursor=cursor)
     entries = [
-        NewsletterEntry(
-            **(item.model_dump() if include_body else item.model_dump() | {"body": ""})
+        NewsletterEntry.model_validate(
+            item.model_dump() if include_body else item.model_dump() | {"body": ""}
         )
         for item in page.items
     ]
@@ -510,9 +510,7 @@ def _entry(
                 sha256=None if known is None else known.sha256,
             )
         )
-    return NewsletterEntry.model_validate(
-        {**item.model_dump(), "attachments": infos}
-    )
+    return NewsletterEntry.model_validate({**item.model_dump(), "attachments": infos})
 
 
 def _pending(attachment: PreparedAttachment) -> Effect:
