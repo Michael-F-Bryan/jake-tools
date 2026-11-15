@@ -11,7 +11,13 @@ import anyio
 import click
 from pydantic import BaseModel
 
-from jake_tools.artifacts import ArtifactReadResult, SourceError, publish, read
+from jake_tools.artifacts import (
+    ArtifactReadResult,
+    SourceError,
+    publish,
+    read,
+    update,
+)
 from jake_tools.operations.errors import ToolError
 
 
@@ -119,3 +125,29 @@ def read_command(
         )
     if failed:
         raise click.ClickException("; ".join(failed))
+
+
+@artifact.command("update")
+@click.argument("url")
+@click.argument("file_path", type=click.Path(dir_okay=False))
+@click.option(
+    "--expected-version-id",
+    required=True,
+    help="The live version you believe it is at; a stale one writes nothing.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+def update_command(
+    url: str, file_path: str, expected_version_id: str, as_json: bool
+) -> None:
+    """Publish FILE_PATH as the next version of private artifact URL, then verify it."""
+
+    async def run() -> BaseModel:
+        return await update(url, file_path, expected_version_id)
+
+    try:
+        result = anyio.run(run)
+    except (SourceError, ToolError) as exc:
+        raise _fail(exc, as_json) from exc
+    _emit(result, as_json)
+    if not getattr(result, "verified", False):
+        raise click.ClickException("updated but NOT verified; see problems")

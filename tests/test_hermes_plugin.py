@@ -323,3 +323,11 @@ def test_artifact_tools_need_both_the_capability_and_the_setting(
     register_operations(ctx, ("artifact",), enabled, lambda: enabled)
     assert set(ctx.tools) == {"artifact_publish", "artifact_read"}
     assert set(ctx.skills) == {"artifact-publishing"}
+
+    # Overwriting an existing artifact is its own grant, never implied.
+    ctx = RecordingContext()
+    register_operations(ctx, ("artifact_update",), enabled, lambda: enabled)
+    assert set(ctx.tools) == {"artifact_update"}
+    ctx = RecordingContext()
+    register_operations(ctx, ("artifact_update",), disabled, lambda: disabled)
+    assert ctx.tools == {}

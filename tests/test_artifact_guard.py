@@ -156,3 +156,81 @@ def test_unexpected_keys_are_denied_including_private_looking_ones(
     read = ArtifactGuard.for_read(URL)
     assert read("Artifact", {"action": "read", "url": URL, **extra})
     assert publish.publishes_allowed == 0 and read.reads_allowed == 0
+
+
+def update_guard() -> ArtifactGuard:
+    return ArtifactGuard.for_update(FILE, URL)
+
+
+def test_update_allows_one_read_of_the_target_the_file_and_one_publish_onto_it() -> (
+    None
+):
+    guard = update_guard()
+    assert guard("Artifact", {"action": "read", "url": URL}) is None
+    assert guard("Read", {"file_path": str(FILE)}) is None
+    call = {"action": "publish", "file_path": str(FILE), "url": URL}
+    assert guard("Artifact", call) is None
+    assert guard("Artifact", call) is not None  # never twice
+    assert guard.publishes_allowed == 1
+
+
+@pytest.mark.parametrize(
+    ("tool", "tool_input"),
+    [
+        ("Artifact", {"action": "publish", "file_path": str(FILE)}),  # a NEW one
+        (
+            "Artifact",
+            {
+                "action": "publish",
+                "file_path": str(FILE),
+                "url": "https://claude.ai/artifact/Qm3Kz7Tn5Rv9Wx2YbDfGhj",
+            },
+        ),
+        (
+            "Artifact",
+            {"action": "publish", "file_path": "/work/other.html", "url": URL},
+        ),
+        (
+            "Artifact",
+            {"action": "publish", "file_path": str(FILE), "url": URL, "edits": []},
+        ),
+        (
+            "Artifact",
+            {"action": "publish", "file_path": str(FILE), "url": URL, "__x": 1},
+        ),
+        (
+            "Artifact",
+            {
+                "action": "read",
+                "url": "https://claude.ai/artifact/Qm3Kz7Tn5Rv9Wx2YbDfGhj",
+            },
+        ),
+        ("Artifact", {"action": "read", "url": URL, "extra": 1}),
+        ("Artifact", {"action": "share", "url": URL}),
+        ("Artifact", {"action": "delete", "url": URL}),
+        ("Artifact", {"action": "list"}),
+        ("Read", {"file_path": "/etc/passwd"}),
+        ("Bash", {"command": "ls"}),
+    ],
+)
+def test_update_denies_everything_else(
+    tool: str, tool_input: dict[str, object]
+) -> None:
+    guard = update_guard()
+    assert guard(tool, tool_input) is not None
+    assert guard.publishes_allowed == 0 and guard.reads_allowed == 0
+
+
+def test_a_new_publish_and_a_read_session_still_cannot_update_or_read_via_publish() -> (
+    None
+):
+    # The no-url rule of a NEW publish is unchanged, and a publish session has
+    # no `read` action at all.
+    publish = publish_guard()
+    assert publish(
+        "Artifact", {"action": "publish", "file_path": str(FILE), "url": URL}
+    )
+    assert publish("Artifact", {"action": "read", "url": URL})
+    assert ArtifactGuard.for_read(URL)(
+        "Artifact", {"action": "publish", "file_path": str(FILE), "url": URL}
+    )

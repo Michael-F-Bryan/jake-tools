@@ -40,6 +40,9 @@ class ArtifactGuard:
     file_path: Path | None = None
     """The one file, already resolved to its canonical absolute path."""
     read_url: str | None = None
+    update_url: str | None = None
+    """For an update session only: the one existing artifact it may read and
+    then publish a new version of. Never set for a new publish."""
     consulted: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     denied: list[tuple[str, str]] = field(default_factory=list)
     """``(tool, reason)`` for every call refused before it ran."""
@@ -50,6 +53,13 @@ class ArtifactGuard:
     @classmethod
     def for_publish(cls, file_path: Path) -> ArtifactGuard:
         return cls(file_path=file_path)
+
+    @classmethod
+    def for_update(cls, file_path: Path, url: str) -> ArtifactGuard:
+        """A separate, narrower-than-it-sounds grant: the exact file onto the
+        exact existing artifact. It can read that artifact (the tool refuses an
+        update until the live version has been viewed) and publish once."""
+        return cls(file_path=file_path, update_url=url)
 
     @classmethod
     def for_read(cls, url: str) -> ArtifactGuard:
@@ -84,16 +94,34 @@ class ArtifactGuard:
         if tool != "Artifact":
             return f"{tool} is not permitted in an artifact publish session"
         action = tool_input.get("action", "publish")
+        if self.update_url is not None and action == "read":
+            return self._update_read(tool_input, self.update_url)
         if action != "publish":
-            return f"Artifact action {action!r} is not permitted: only one new publish"
-        extra = sorted(set(tool_input) - PUBLISH_KEYS)
+            what = "one update" if self.update_url else "one new publish"
+            return f"Artifact action {action!r} is not permitted: only {what}"
+        allowed_keys = PUBLISH_KEYS | ({"url"} if self.update_url else frozenset())
+        extra = sorted(set(tool_input) - allowed_keys)
         if extra:
             return f"Artifact publish input {', '.join(extra)} is not permitted"
+        if self.update_url is not None and not _same_artifact(
+            tool_input.get("url"), self.update_url
+        ):
+            return f"only {self.update_url} may be updated"
         if not _same_path(tool_input.get("file_path"), path):
             return f"only {path} may be published"
         if self.publishes_allowed >= 1:
             return "only one publish is permitted; it is never retried"
         self.publishes_allowed += 1
+        return None
+
+    def _update_read(self, tool_input: dict[str, Any], url: str) -> str | None:
+        if set(tool_input) != {"action", "url"} or not _same_artifact(
+            tool_input.get("url"), url
+        ):
+            return f"only Artifact action 'read' of {url} is permitted"
+        if self.reads_allowed >= 1:
+            return "the artifact has already been read in this session"
+        self.reads_allowed += 1
         return None
 
     def _read_session(
@@ -103,13 +131,7 @@ class ArtifactGuard:
             return f"{tool} is not permitted in an artifact read session"
         if tool_input.get("action") != "read" or set(tool_input) != {"action", "url"}:
             return "only Artifact action 'read' of the one URL is permitted"
-        given = tool_input.get("url")
-        wanted = artifact_short_id(url)
-        if (
-            not isinstance(given, str)
-            or wanted is None
-            or artifact_short_id(given) != wanted
-        ):
+        if not _same_artifact(tool_input.get("url"), url):
             return f"only {url} may be read"
         if self.reads_allowed >= 1:
             return "the artifact has already been read in this session"
@@ -125,3 +147,13 @@ def _same_path(value: Any, path: Path) -> bool:
     The caller resolves ``path`` once, hands the model that exact string, and
     anything else is refused."""
     return isinstance(value, str) and value == str(path)
+
+
+def _same_artifact(given: Any, url: str) -> bool:
+    """Whether ``given`` is a link to the same artifact (same short id)."""
+    wanted = artifact_short_id(url)
+    return (
+        isinstance(given, str)
+        and wanted is not None
+        and artifact_short_id(given) == wanted
+    )

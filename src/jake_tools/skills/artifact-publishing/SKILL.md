@@ -1,6 +1,6 @@
 ---
 name: artifact-publishing
-description: Publish an existing self-contained HTML file as a NEW private Claude Artifact with `artifact_publish`, and read an artifact back read-only with `artifact_read`; what a publish and a readback do and do not prove, what visibility they report, the undocumented mechanism behind them, and how to handle each error.
+description: Publish an existing self-contained HTML file as a NEW private Claude Artifact with `artifact_publish`, read an artifact back read-only with `artifact_read`, and publish its next version with `artifact_update` (private, expected version required); what a publish and a readback do and do not prove, what visibility they report, the undocumented mechanism behind them, and how to handle each error.
 ---
 
 # Artifact publishing
@@ -67,9 +67,31 @@ be seen), and `output_path` to save the hosted file, shell removed, to a new pat
 - `upstream_error` with `publish_attempted`/`publish_allowed`/`retry_safe`/`urls_seen`: the
   Artifact tool returned no published URL, the session failed, or more than one publish happened.
 
+## Updating an existing artifact
+
+`artifact_update(url, file_path, expected_version_id)` publishes the file as the **next version of
+an existing private artifact you own**, same URL and id. It needs the separate `artifact_update`
+grant because it overwrites live content.
+
+- Pass the version you believe is live (`version_id` from `artifact_read`/`artifact_publish`/a
+  previous update). A separate read checks, **before anything is written**, that the artifact is
+  yours, private and at that version. A different live version fails with `plan_stale` (detail:
+  `live_version_id`, `write_attempted: false`); read it, reconcile, and call again with the live
+  version. A shared artifact or one you do not own fails with `access_denied`; updates are
+  private-only.
+- It is **not atomic**. The native read and write are separate calls, so another editor could land
+  a version in between. That is reported afterwards (`problems`, `verified: false`), not prevented.
+  Do not describe it as compare-and-swap.
+- `verified: true` needs a third, separate read to show the same artifact id, unchanged visibility
+  (private), the published version, and the hosted file (shell removed) equal to your file. The
+  result's `before` is the pre-write read and `readback` the post-write read.
+- Never retried. After an `UNKNOWN` error, or any `verified: false`, read the artifact with
+  `artifact_read` and decide from its live version before doing anything; a blind repeat could write
+  another version.
+
 ## What it does not do
 
-No updates, no listing, no sharing or visibility changes, no deleting, no packaging of
-dependencies (publish a self-contained file), no authoring of HTML. Updates need the current
-version viewed first and a conflict policy, and are a later, separate slice. Use it for a file you
-are willing to send to Anthropic; its contents leave this machine.
+No sharing or visibility changes, no listing, no deleting, no partial edits (an update replaces the
+whole file), no updating of shared artifacts, no packaging of dependencies (publish a
+self-contained file), no authoring of HTML. Use it for a file you are willing to send to Anthropic;
+its contents leave this machine.
