@@ -58,6 +58,8 @@ SECRET_VARIABLES: tuple[str, ...] = (
     "JIRA_EMAIL",
     "JIRA_API_TOKEN",
     "TRANSCRIPTION_API_TOKEN",
+    "MICROSOFT_REFRESH_TOKEN",
+    "MICROSOFT_CLIENT_SECRET",
 )
 """Every environment-only secret, by variable name.
 
@@ -85,6 +87,14 @@ The service runs one job at a time with a bounded queue, so a long recording
 behind other work can legitimately take many minutes. A timeout is reported,
 never retried: the service may still be processing the original request.
 """
+
+
+DEFAULT_MICROSOFT_AUTHORITY_URL = "https://login.microsoftonline.com"
+DEFAULT_GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
+DEFAULT_SHAREPOINT_ROOT = "https://csuses.sharepoint.com/sites/leadershipteam/_api"
+"""Where the newsletter operations talk by default. Overridable only so a
+fixture upstream can stand in; a non-HTTPS value is refused unless it is a
+loopback address (see ``microsoft_auth.require_secure_url``)."""
 
 
 class ConfigError(RuntimeError):
@@ -224,6 +234,17 @@ class Config(BaseModel):
     transcription_api_token: Resolved[str | None]
     transcription_timeout_seconds: Resolved[float]
 
+    microsoft_tenant_id: Resolved[str | None]
+    microsoft_client_id: Resolved[str | None]
+    microsoft_account: Resolved[str | None]
+    """The sign-in name (UPN) the delegated grant MUST belong to. Explicit on
+    purpose: a grant for any other account is refused, never used."""
+    microsoft_authority_url: Resolved[str]
+    microsoft_refresh_token: Resolved[str | None]
+    microsoft_client_secret: Resolved[str | None]
+    newsletters_graph_root: Resolved[str]
+    newsletters_sharepoint_root: Resolved[str]
+
     artifacts_enabled: Resolved[bool]
     """Whether ``artifact_publish`` and ``artifact_read`` are exposed. Off by
     default: they depend on an undocumented Claude Code mechanism."""
@@ -260,6 +281,14 @@ class Config(BaseModel):
             self.transcription_api_base_url,
             self.transcription_api_token,
             self.transcription_timeout_seconds,
+            self.microsoft_tenant_id,
+            self.microsoft_client_id,
+            self.microsoft_account,
+            self.microsoft_authority_url,
+            self.microsoft_refresh_token,
+            self.microsoft_client_secret,
+            self.newsletters_graph_root,
+            self.newsletters_sharepoint_root,
             self.artifacts_enabled,
         )
 
@@ -484,6 +513,68 @@ def load_config(
                 _FLOAT,
             ),
             DEFAULT_TRANSCRIPTION_TIMEOUT_SECONDS,
+        ),
+        microsoft_tenant_id=resolve(
+            _Spec(
+                "microsoft.tenant_id",
+                "JAKE_TOOLS_MICROSOFT_TENANT_ID",
+                "microsoft",
+                "tenant_id",
+                _OPTIONAL_STR,
+            ),
+            None,
+        ),
+        microsoft_client_id=resolve(
+            _Spec(
+                "microsoft.client_id",
+                "JAKE_TOOLS_MICROSOFT_CLIENT_ID",
+                "microsoft",
+                "client_id",
+                _OPTIONAL_STR,
+            ),
+            None,
+        ),
+        microsoft_account=resolve(
+            _Spec(
+                "microsoft.account",
+                "JAKE_TOOLS_MICROSOFT_ACCOUNT",
+                "microsoft",
+                "account",
+                _OPTIONAL_STR,
+            ),
+            None,
+        ),
+        microsoft_authority_url=resolve(
+            _Spec(
+                "microsoft.authority_url",
+                "JAKE_TOOLS_MICROSOFT_AUTHORITY_URL",
+                "microsoft",
+                "authority_url",
+                _STR,
+            ),
+            DEFAULT_MICROSOFT_AUTHORITY_URL,
+        ),
+        microsoft_refresh_token=secrets["MICROSOFT_REFRESH_TOKEN"],
+        microsoft_client_secret=secrets["MICROSOFT_CLIENT_SECRET"],
+        newsletters_graph_root=resolve(
+            _Spec(
+                "newsletters.graph_root",
+                "JAKE_TOOLS_NEWSLETTERS_GRAPH_ROOT",
+                "newsletters",
+                "graph_root",
+                _STR,
+            ),
+            DEFAULT_GRAPH_ROOT,
+        ),
+        newsletters_sharepoint_root=resolve(
+            _Spec(
+                "newsletters.sharepoint_root",
+                "JAKE_TOOLS_NEWSLETTERS_SHAREPOINT_ROOT",
+                "newsletters",
+                "sharepoint_root",
+                _STR,
+            ),
+            DEFAULT_SHAREPOINT_ROOT,
         ),
         artifacts_enabled=resolve(
             _Spec(
