@@ -9,8 +9,9 @@ Hermes (`e96221f`, read from its installed source) or a live deployment.
 
 ## 1. What a connected Hermes gets
 
-- Tools: 18 in the verified Nix build (`ping`, the Claude delegation tools,
-  Clockify, Jira sync, newsletters, transcription, Artifacts). Hermes names
+- Tools: 18 by default (17 operations plus `ping`). `transcribe` appears only
+  with a transcription endpoint and the three `artifact_*` tools only with
+  `artifacts.enabled`, for 22 in total. Hermes names
   them `mcp__<server>__<tool>`, replacing characters outside `[A-Za-z0-9_]`
   with `_` (`tools/mcp_tool_schema.py`, `mcp_prefixed_tool_name`). Server
   `jake-tools` therefore gives `mcp__jake_tools__ping` and so on.

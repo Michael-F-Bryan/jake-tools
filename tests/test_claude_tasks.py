@@ -213,7 +213,7 @@ async def test_worker_and_its_cli_never_inherit_the_servers_secrets(
         **fake_env,
         **secrets,
         "JAKE_TEST_MARKER": "1",
-        "FAKE_CLAUDE_ENV_NAMES_FILE": str(seen),
+        "FAKE_CLAUDE_ENV_FILE": str(seen),
     }
     async with mcp_server(env) as session:
         started = await start(session, workdir, "[[scenario:echo]] hello")
@@ -259,6 +259,8 @@ async def test_claude_results_omit_null_fields_over_stdio(
             until="terminal",
             wait_seconds=30,
         )
+    assert polled["status"] == "completed"
+    assert polled["wake_reason"] == "terminal"
     assert _null_values(started) == []
     assert _null_values(polled) == []
 
