@@ -5,7 +5,7 @@ ordinary stdio MCP server, `jake-tools-mcp`. Nothing from this repository is
 imported into Hermes.
 
 Statements marked **(unverified)** were not confirmed against the pinned
-Hermes (`e96221f`) or a live deployment.
+Hermes (`e96221f`, read from its installed source) or a live deployment.
 
 ## 1. What a connected Hermes gets
 
@@ -62,14 +62,19 @@ in the entry, not secret values.
 source; and the entry's own `env`. A secret that exists only in Hermes' own
 process environment does not reach the server (checked by a probe).
 
-`${VAR}` inside `env` values is substituted by `_interpolate_env_vars` from
-Hermes' secret scope (`agent.secret_scope.get_secret`). `_load_mcp_config`
-loads the profile `.env` first. Whether a given variable then resolves from
-the process environment, the profile `.env` or both is decided by
-`get_secret` and was **not** read to the end **(unverified)**. If the variable
-is unset or empty, the placeholder is kept and, when the value is a single
-`${VAR}`, the key is omitted rather than passed literally (probe-confirmed;
-`_build_safe_env`, `unset_ref`).
+`${VAR}` inside `env` values is substituted by `_interpolate_env_vars`
+through `agent.secret_scope.get_secret` (verified). `get_secret` reads the
+active profile's secret scope first, then, for a single-profile process,
+falls through to the process environment (its docstring: the scope is a
+`.env` overlay, not a blindfold). `_load_mcp_config` also calls
+`load_hermes_dotenv` before interpolating. Under profile multiplexing a scope
+miss does not fall back to `os.environ`. That the scope holds the profile
+`.env` and the managed `/etc/hermes/.env` was taken from the docstring and the
+consumer's comments, not traced to the loader **(unverified)**; check it live
+before relying on `${VAR}` for a secret kept in a profile `.env`. An unset or
+empty variable keeps the placeholder and, when the value is a single `${VAR}`,
+the key is omitted rather than passed literally (`_build_safe_env`,
+`unset_ref`; probe-confirmed).
 
 ### Jake's secret variables
 
@@ -79,12 +84,9 @@ names are `CLOCKIFY_API_KEY`, `JIRA_BASE_URL`, `JIRA_EMAIL`,
 `JIRA_API_TOKEN`, `TRANSCRIPTION_API_TOKEN`, `MICROSOFT_REFRESH_TOKEN` and
 `MICROSOFT_CLIENT_SECRET`.
 
-### Per-environment credentials
-
-Run one server entry, hence one process, per agent environment, and give each
-only its own variables. A separate process is a dependency and lifecycle
-boundary, not a sandbox: values in `env` or a profile `.env` remain readable
-by the agent's own terminal.
+Use one server entry (one process) per agent environment with only its own
+variables. That is a lifecycle boundary, not a sandbox: values in `env` or a
+profile `.env` remain readable by the agent's terminal.
 
 ## 4. Availability
 
@@ -97,14 +99,12 @@ transcription endpoint is configured; Artifact tools only when
 
 Code and guidance ship in one package, so tools, prompts and guides change
 together. A running session sees a new catalogue or new guides only after its
-MCP connection restarts. Hermes has a `/reload-mcp` command ("Reload MCP
-servers from config", `hermes_cli/commands.py`) and `hermes mcp test`; whether
-`/reload-mcp` respawns an unchanged entry that now points at a new store path
-was not checked **(unverified)**. A gateway restart is the sure route.
-
-`load_config()` runs once at server start (`mcp/__main__.py`), so
-environment variables and the contents of `*_FILE` files are read at spawn.
-Changing a credential needs a reconnect.
+MCP connection restarts. In the CLI, `/reload-mcp` (`cli_info_mixin.py`, `_reload_mcp`) calls
+`shutdown_mcp_servers()` for all servers, then `discover_mcp_tools()` re-reads
+the config and respawns them, so a changed `command` store path is picked up
+(verified). The gateway path (`_reload_gateway_mcp`) and the multiplexed
+per-scope path were not read **(unverified)**. A gateway restart is the sure
+route. `hermes mcp test` also exists.
 
 To tell the packages apart:
 
@@ -136,10 +136,11 @@ profiles use different `env` was not tested **(unverified)**.
 ### Managed scope
 
 Hermes has a managed overlay (`hermes_cli/managed_scope.py`, default
-`/etc/hermes/config.yaml`, deep-merged over user config by
-`apply_managed_overlay`). Whether `mcp_servers` set there reaches
-`_load_mcp_config` was not confirmed **(unverified)**. Put the entry in
-`$HERMES_HOME/config.yaml` unless that is tested.
+`/etc/hermes/config.yaml`). `load_config` (`hermes_cli/config.py`) returns the
+user config merged with the managed scope, and `_load_mcp_config` takes
+`mcp_servers` from `load_config()`, so a managed `mcp_servers` entry reaches
+discovery (verified by reading both; not run live). Put the entry in
+`$HERMES_HOME/config.yaml` anyway until the managed route is tested.
 
 ## 6. Delegated Claude tasks across a cutover
 
@@ -149,30 +150,48 @@ path under the new server.
 
 ## 7. Pending nixfiles changes (not part of this repository's change)
 
-The consumer is `/workspace/Michael-F-Bryan/nixfiles` (HEAD `4b56e42`, which
-pins jake-tools `5b9d694`). Nothing there has been edited.
+The consumer is `/workspace/Michael-F-Bryan/nixfiles` (HEAD `4b56e42`, whose
+`flake.lock` pins jake-tools `5b9d694`). Nothing there has been edited. Items
+1 to 3 must land in one commit: `lib.mkHermesPlugin` no longer exists after
+this change, so a bumped pin with the old wiring (or the reverse) fails to
+evaluate.
 
-1. `flake.lock`: bump the jake-tools pin. `lib.mkHermesPlugin` no longer
-   exists, so the bump and the wiring below must land in one commit.
-2. `hermes/image.nix`: drop `jakePlugin`/`mkHermesPlugin` from
-   `extraPythonPackages`; add the standalone package to the runtime; drop
-   `HERMES_START_PLUGIN_PYTHONPATH`.
-3. `hermes/config.nix`: remove `jake-tools` from `plugins.enabled` (keep
-   `hermes-memory-ui` and `claude-subscription-directsdk`); turn
-   `jakePluginEnv` into the `mcp_servers.jake-tools` `env`.
-4. Credentials: Clockify, Jira and Microsoft values currently live in each
-   profile's `.env`, which the plugin read through Hermes' secret scope. A
-   stdio server does not get the profile `.env` wholesale. The mechanism
-   verified above is the entry's `env`, either `*_FILE` paths or `${VAR}`
-   references. Which source `${VAR}` reads for a profile `.env` value needs
-   verification before relying on it **(unverified)**.
+1. `flake.lock` and the `flake.nix` comment on the `jake-tools` input (which
+   still says "native Hermes plugin (`lib.mkHermesPlugin`)"): bump the pin.
+2. `hermes/image.nix`: delete `jakePlugin`; `extraPythonPackages` keeps only
+   `hindsightPlugin`; delete `pluginPythonPath` and the
+   `HERMES_START_PLUGIN_PYTHONPATH=` prefix in `agentStart`; update the
+   comment about retiring the MCP server. Add the standalone package
+   (`jake-tools.packages.<system>.jake-tools`) to the image and use its
+   store path as `command`.
+3. `hermes/config.nix`: `jakePluginConfig` becomes the `mcp_servers.jake-tools`
+   entry (or is replaced by one). `managedConfig` for `personal` keeps
+   `plugins.enabled = [ "hermes-memory-ui" "claude-subscription-directsdk" ]`
+   and `infin` has no plugin list, so remove `jake-tools` from `enabled`.
+   `jakePluginEnv` (`TRANSCRIPTION_API_BASE_URL`,
+   `TRANSCRIPTION_API_TOKEN_FILE`, `JAKE_TOOLS_TRANSCRIPTION_TIMEOUT_SECONDS`)
+   is currently `managedEnv`, i.e. `/etc/hermes/.env`, read by the plugin
+   through the secret scope. Put those names into the entry's `env`. The managed overlay route is
+   verified from source only (section 5).
+4. Credentials. A stdio server gets only the safe environment plus the entry's
+   `env`. Two routes: `*_FILE` paths (verified to be forwarded as given; the
+   file must be readable inside the container) and `${VAR}` references, which
+   `get_secret` resolves from the secret scope then the process environment
+   (source verified; whether the profile `.env` is in that scope is
+   **unverified**, check it during the nixfiles change). Clockify, Jira and
+   Microsoft values currently sit in each profile's `.env`.
 5. `hermes/project-env-start.py`: delete `retire_jake_tools_mcp`,
-   `PLUGIN_PROBE` and `PLUGIN_PYTHONPATH` handling. Left in place they would
-   remove the entry this design needs.
-6. `hermes/README.md`: rewrite "Jake's tools (native plugin)".
-7. `hosts/studio/transcription.nix`: unchanged;
-   `packages.aarch64-darwin.transcription-service` and `transcription-models`
-   are still exported.
+   `PLUGIN_PROBE`, `PLUGIN_PYTHONPATH`, `LOADER_ENV`, `JAKE_TOOLS` and the
+   call in `main()`. Left in place, `retire_jake_tools_mcp` would remove an
+   entry whose `args` contain `jake-tools-mcp`. `configure_mcp_launchers` (the
+   `uv`/`uvx` launcher rewrite) and the project-env shell hook are unrelated
+   and stay.
+6. `hermes/README.md`: rewrite "Jake's tools (native plugin)", which describes
+   `mkHermesPlugin`, `plugins.enabled`, profile `.env` credentials and the
+   cutover removal of the MCP server. Keep the "Transcription service" text.
+7. `hosts/studio/transcription.nix`: unchanged; it imports
+   `transcription-service` and `transcription-models` from
+   `jake-tools.packages.aarch64-darwin`, which are still exported.
 
 Cutover order:
 
@@ -182,14 +201,14 @@ Cutover order:
 4. After an authorised rollout, check: tool discovery, a harmless `ping`, no
    native duplicate tools, and a guide read that matches the deployed package.
 
-Rollback: restore the previous nixfiles commit and the jake-tools pin
-together. This repository no longer contains the plugin, so an old pin cannot
-be mixed with new source. Run directories are untouched either way.
+Rollback: restore the previous nixfiles commit and pin together. Run
+directories are untouched either way.
 
 ## 8. Not done here
 
-No nixfiles edits, image build, deployment, service restart or live-session
-verification, and no Mac-native transcription acceptance through the
-container-to-Mac path. Those need separate authority. This change delivers
-source and isolated acceptance only: `tests/test_hermes_mcp.py`, the `--slow`
-option, `JAKE_TOOLS_HERMES` and the optional `JAKE_TOOLS_MCP_BIN`.
+Not done, and each needs separate authority: nixfiles edits, image build,
+deployment, service restarts, live-session verification, and Mac-native
+transcription acceptance through the container-to-Mac path. This change
+delivers source and isolated acceptance only: `tests/test_hermes_mcp.py`, run
+with `--slow`, `JAKE_TOOLS_HERMES` (a Hermes launcher) and the optional
+`JAKE_TOOLS_MCP_BIN`.
