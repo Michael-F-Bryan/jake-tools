@@ -14,7 +14,7 @@ a general sign-in service: Jake never obtains a grant itself.
 | With what authority? | The delegated permissions that application was consented for, limited by what that person can do in SharePoint. Not application-wide access. |
 | Where is the grant kept? | In the operator-provisioned secret `MICROSOFT_REFRESH_TOKEN` (and `MICROSOFT_CLIENT_SECRET` if the application is a confidential client). Never in `config.toml`, tool arguments, results or logs. |
 | Which resources? | Two token audiences: Microsoft Graph (`https://graph.microsoft.com`, list items) and SharePoint (`https://<tenant>.sharepoint.com`, attachments). Each is requested and cached separately; a Graph token is not accepted by SharePoint REST. |
-| Which agents? | Every Hermes profile with the plugin enabled and every MCP client of a server with the configuration has all four tools (list/get read; create/update publish). |
+| Which agents? | Every MCP client (Hermes included) of a server started with the configuration has all four tools (list/get read; create/update publish). |
 | Fallback? | None. There is no Azure CLI fallback and no other account. The `jake-tools newsletter` command is separate: it uses the person's own `az login`. |
 
 Jake never changes tenant grants, never consents on anyone's behalf and never
@@ -40,7 +40,7 @@ Environment equivalents: `JAKE_TOOLS_MICROSOFT_TENANT_ID`,
 `JAKE_TOOLS_MICROSOFT_ACCOUNT_OBJECT_ID`,
 `JAKE_TOOLS_MICROSOFT_AUTHORITY_URL`.
 
-Secrets (environment only, each also as `<NAME>_FILE`; for Hermes, profile secrets):
+Secrets (environment only, each also as `<NAME>_FILE`; set them in the MCP server process's environment):
 
 - `MICROSOFT_REFRESH_TOKEN` — required.
 - `MICROSOFT_CLIENT_SECRET` — only if the application is a confidential client.
@@ -86,8 +86,8 @@ Then:
 
 4. Write the refresh token to a file readable only by the service user
    (`umask 077`), never to shell history, a ticket, chat or the repository,
-   and point `MICROSOFT_REFRESH_TOKEN_FILE` at it (or set the Hermes profile
-   secret `MICROSOFT_REFRESH_TOKEN`).
+   and point `MICROSOFT_REFRESH_TOKEN_FILE` at it (or set `MICROSOFT_REFRESH_TOKEN`
+   in the server's environment).
 5. Set `microsoft.tenant_id`, `microsoft.client_id`, `microsoft.account` (and, recommended, `microsoft.account_object_id`).
 6. Restart the service so it reads them (Jake does not hot-reload; changing
    configuration or deploying is a separate, authorised step).
@@ -169,7 +169,7 @@ reported as an error (a write's outcome is then `uncertain`).
 ## Reauthorisation
 
 Repeat provisioning as the same account and replace the secret's value (the
-file's contents or the profile secret), then restart the service. No tool
+file's contents or the environment variable), then restart the service. No tool
 argument ever carries it. If the account itself must change, change
 `microsoft.account` **and** the grant together; a mismatch is refused, never
 used.

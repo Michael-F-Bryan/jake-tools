@@ -13,8 +13,8 @@ src/jake_tools/
   cli/            # Click commands (keep thin)
   claude.py       # Claude Agent SDK wrapper — the only LLM seam
   claude_runs/    # delegated tasks: run dirs, worker, events, inbox, service
-  operations/     # agent-facing tool operations shared by every adapter
-  mcp/            # stdio MCP adapter (other clients)
+  operations/     # agent-facing tool operations shared by the MCP adapter and the CLI
+  mcp/            # the stdio MCP adapter: the one agent interface, for every client including Hermes
   polishing/      # polish_transcript: guarded clean-verbatim drafts via Claude
   artifacts/      # experimental: publish an HTML file as a private Claude Artifact, read back
   prompting.py    # typed Jinja prompts bound to a response model
@@ -129,12 +129,13 @@ instructions, or that generated output meets a semantic quality bar.
 ## MCP server (`jake_tools.mcp`)
 
 `python -m jake_tools.mcp` (also the `jake-tools-mcp` console script) is the
-stdio MCP server Hermes runs; design in `_working/mcp-server/README.md`.
-Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
-`worker RUN_DIR`. It is a separate entrypoint from `jake-tools` on purpose:
+portable stdio MCP server and the only agent-facing interface; Hermes
+connects through its built-in MCP client (`docs/hermes-mcp.md`), with no Hermes
+plugin and no Hermes import anywhere in this package. Sub-commands: `serve`
+(default), `doctor`, and the hidden `worker RUN_DIR`. It is a separate entrypoint from `jake-tools` on purpose:
 
 - Nothing on this path imports `jake_tools.__main__`, or `dotenv`, and nothing calls `load_dotenv()`. The process
-  environment Hermes passes is the only environment. A test pins this.
+  environment the MCP client passes is the only environment. A test pins this.
 - Stdout is the transport. Log to stderr only, never print.
 - Configuration comes from `config.load_config()`: XDG paths, then flag >
   env > `$XDG_CONFIG_HOME/jake-tools/config.toml` > `$XDG_CONFIG_DIRS` >
@@ -146,8 +147,9 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   the tool that needs them and raise `ToolError("missing_credentials", ...)`
   naming the variable, never the value.
 - `operations/<tool>.py` holds one thin handler each as an `Operation`
-  (name, capability (its Hermes toolset group), description, skill, `build(config)`), listed in
-  `operations/catalogue.py`; adapters never duplicate an operation's logic,
+  (name, description, skill, `build(config)`, optional `available`), listed in
+  `operations/catalogue.py`; there is no capability allowlist or grouping, so
+  adding an operation there exposes it. The adapter never duplicates an operation's logic,
   schema or description. `mcp/server.py` registers them (plus the MCP-only
   `ping`) through `structured_tool`, which sends the handler's
   Pydantic result as structured content and turns a raised
@@ -285,40 +287,14 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   two zombie-only group assertions in `test_claude_runs_live.py` fail
   there. They pass under a reaping init.
 - Packaged skills live in `src/jake_tools/skills/<name>/SKILL.md`, are served
-  as `skill://<name>` resources, and are installed by `install-skills`. They
-  describe what the tools actually return.
-
-## Hermes plugin (`jake_tools.hermes`)
-
-The native Hermes adapter over the same operations; user-facing description in
-the README's "Native Hermes plugin" section.
-
-- Only the small accessors in `hermes/plugin.py` import Hermes
-  (`agent.*`, `hermes_constants`, and `hermes_cli.plugins.PluginContext`
-  for typing), lazily or under `# pyright: ignore[reportMissingImports]`;
-  everything else is plain and tested hermetically in
-  `tests/test_hermes_plugin.py`. Use documented plugin APIs
-  (`ctx.register_tool`, `ctx.register_skill`, `ctx.get_config`,
-  `agent.secret_scope.get_secret`).
-- The plugin registers no terminal backend and must not depend on one:
-  native tools and skills work under the installer's own backend (`local`).
-  Jake's credential names are therefore not on Hermes' subprocess scrub
-  list (README "Credentials and terminal commands"). Do not add a terminal
-  provider just for `strip_env_keys` or patch Hermes internals; the
-  follow-up is jake-tools#4.
-- Never read Jake's secrets from `os.environ` in the plugin: resolve them per
-  call through `hermes.profile.profile_config` with Hermes' `get_secret`.
-  Registration reads no secrets.
-- Handlers are synchronous (Hermes' async bridge has a fixed wait) and return
-  JSON strings; errors are `{"error", "code", "message", "detail"}` from the
-  same `ToolError`s.
-- Delegated workers get `hermes.profile.worker_base_environ` (an allowlist),
-  carried as `Config.worker_environ`; never Hermes' environment.
-- `tests/test_hermes_runtime.py` (`--slow`) is the acceptance test in a real
-  installation (`JAKE_TOOLS_HERMES`). Without it it is blocked, not passed.
-- `nix/hermes-plugin.nix` (flake `lib.mkHermesPlugin`) builds the package for
-  an installer's interpreter, propagating only the uv.lock wheels the host
-  lacks.
+  as `skill://<name>` resources (references as
+  `skill://<name>/references/<file>.md`); that is the only delivery route, and
+  guidance must work through MCP alone (no `skill_view`, plugin skill ids or
+  profile secrets). They describe what the tools actually return.
+- `tests/test_hermes_mcp.py` (`--slow`) is the real-Hermes acceptance test
+  (discovery, resources, prompts, one call through Hermes' MCP dispatch). It
+  needs `JAKE_TOOLS_HERMES`, a Hermes launcher path; without it, it is
+  blocked, not passed.
 
 ## Transcription service (`transcription-service/`)
 
@@ -419,7 +395,7 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
   `microsoft.tenant_id`, `microsoft.client_id`, `microsoft.account` and the
   secret `MICROSOFT_REFRESH_TOKEN` (optional `MICROSOFT_CLIENT_SECRET`), both
   environment-only and in `SECRET_VARIABLES` (so scrubbed from workers and read
-  from the Hermes profile). The tools are always listed;
+  from the server environment). The tools are always listed;
   unconfigured calls are `missing_credentials` naming variables/settings.
 - `MicrosoftTokenProvider` is the refresh-token grant over `requests` (no new
   dependency; MSAL documents its refresh-token method as migration-only and
@@ -506,7 +482,7 @@ SharePoint list via Microsoft Graph. Body text is read from stdin for `add`
 (required) and `edit` (optional). `--attach` can be supplied multiple times.
 
 Requires `az login` to the CSU tenant for a Graph access token. That is the
-interactive command line's own identity. The MCP/native `newsletter_*` tools
+interactive command line's own identity. The MCP `newsletter_*` tools
 never use it (see "Microsoft newsletters" below).
 
 ## Boundaries
