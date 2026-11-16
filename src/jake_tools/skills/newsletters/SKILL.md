@@ -10,9 +10,9 @@ platforms: [linux, macos, windows]
 # CSU Weekly Newsletter entries
 
 Use jake-tools to list and read newsletter list entries and to
-create or update them with attachments. The tools are native Hermes tools from
-the `jake-tools` plugin, or the `jake-tools` MCP server's (Hermes prefixes those
-with `mcp_<server>_`); names below are bare names. Inspect the live input schema
+create or update them with attachments. The tools are served by the
+`jake-tools` MCP server; names below are bare names (an MCP client may prefix
+them, as Hermes does with `mcp__<server>__`). Inspect the live input schema
 before calling.
 
 | Tool | Effect |
@@ -62,7 +62,7 @@ the live list.
 
 `body` is plain text: blank lines separate paragraphs, a single newline is a
 line break, HTML is escaped (not rendered). `attachments` are ABSOLUTE paths on
-the machine running jake-tools (the MCP server, or Hermes itself), up to 10
+the machine running the jake-tools MCP server, up to 10
 files of at most 25 MiB, with unique names; a name SharePoint cannot hold is
 refused before anything is written. The tool reads those files with the server's
 own permissions: attach only files the user named.

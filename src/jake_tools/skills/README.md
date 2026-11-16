@@ -39,19 +39,21 @@ Retired shared/profile copies can still shadow current guidance. Remove stale
 authorisation. Do not modify another profile or runtime configuration as part
 of a documentation migration.
 
-## Delivery: MCP resources or Hermes plugin skills
+## Delivery: MCP resources
 
 Each `src/jake_tools/skills/<name>/` contains a `SKILL.md` and, when needed,
-`references/`. Package builds include these data files; no profile installer or
-installer replacement is provided. The same files reach agents two ways.
+`references/`. Package builds include these data files; nothing is installed or
+copied into an agent profile. They reach agents only as resources of the
+`jake-tools` MCP server, so guidance always matches the running code. The
+canonical source is these files; there are no per-host copies.
 
-The native Hermes plugin registers each skill whose tools a profile is granted
-as the read-only plugin skill `jake-tools:<name>`, served from the installed
-package: load it with `skill_view("jake-tools:<name>")`, and a supporting
-reference with `skill_view("jake-tools:<name>", file_path="references/<path>.md")`.
-Nothing is copied into the profile's skills directory.
-
-Over MCP, consume them through the connected server:
+Consume them through the connected server, with your client's MCP resource
+interface. Hermes' built-in client exposes it as per-server utility tools,
+`mcp__<server>__list_resources` and `mcp__<server>__read_resource` (argument
+`uri`), and, for prompts, `mcp__<server>__list_prompts` and
+`mcp__<server>__get_prompt` (arguments `name`, `arguments`); the names were
+checked against Hermes revision `e96221f` (`tools/mcp_tool_schema.py`). Other
+clients differ.
 
 1. Use `resources/list` to discover `skill://<name>`. Each main resource's
    description is the skill's YAML frontmatter `description`, not generic

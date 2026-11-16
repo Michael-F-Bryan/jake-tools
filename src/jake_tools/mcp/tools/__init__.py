@@ -30,7 +30,8 @@ def register_all(app: MCPServer, config: Config) -> None:
 def mcp_description(operation: Operation) -> str:
     return (
         f"{operation.description.rstrip()}\n\nBefore using this tool, read "
-        f"`skill://{operation.skill}` via this server's `read_resource` capability, "
+        f"the MCP resource `skill://{operation.skill}` from this server (use your "
+        "client's MCP resource-read interface for this server), "
         "unless its contents are already loaded in the current context. "
         f"{operation.skill_guide} Reuse the loaded guide for subsequent calls."
     )
