@@ -30,7 +30,6 @@ def build(config: Config) -> Handler:
 
 OPERATION = Operation(
     name="claude_cancel",
-    capability="claude",
     skill="claude-delegation",
     description=DESCRIPTION,
     build=build,

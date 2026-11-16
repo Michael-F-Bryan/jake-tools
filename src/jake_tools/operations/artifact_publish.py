@@ -1,7 +1,6 @@
 """``artifact_publish``: publish an existing HTML file as a NEW private Claude Artifact.
 
-A separate ``artifact`` capability and an off-by-default ``artifacts.enabled``
-setting: it sends the file's contents to claude.ai and relies on an
+An off-by-default ``artifacts.enabled`` setting gates it: it sends the file's contents to claude.ai and relies on an
 undocumented Claude Code mechanism. :mod:`jake_tools.artifacts` does the work.
 """
 
@@ -44,7 +43,6 @@ def build(config: Config) -> Handler:
 
 OPERATION = Operation(
     name="artifact_publish",
-    capability="artifact",
     skill="artifact-publishing",
     description=DESCRIPTION,
     build=build,

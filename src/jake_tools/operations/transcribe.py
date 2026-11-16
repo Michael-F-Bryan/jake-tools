@@ -1,7 +1,7 @@
 """``transcribe``: upload client-local audio to the native transcription service.
 
 Registered only when ``transcription.api_base_url`` is configured; an agent
-that cannot see the tool has no transcription capability, by design. The
+that cannot see the tool has no transcription available, by design. The
 handler is a thin adapter: it checks the files exist here, hands them to
 :class:`~jake_tools.transcription.TranscriptionClient`, and maps that
 client's errors onto the server's stable codes.
@@ -38,7 +38,7 @@ def transcription_client(config: Config) -> TranscriptionClient:
     if not token:
         raise ToolError(
             "missing_credentials",
-            "Set TRANSCRIPTION_API_TOKEN where jake-tools runs (the MCP server's environment, or the Hermes profile's secrets)",
+            "Set TRANSCRIPTION_API_TOKEN where jake-tools runs (the MCP server's environment)",
             detail={"variables": ["TRANSCRIPTION_API_TOKEN"]},
         )
     try:
@@ -84,9 +84,8 @@ def tool_error(exc: TranscriptionError) -> ToolError:
 
 DESCRIPTION = (
     "Transcribe and diarise audio files that exist on the filesystem of the "
-    "process running this tool (the jake-tools MCP server, or Hermes itself for "
-    "the native tool; not another machine's or container's view unless they "
-    "share it). Pass files in recording order; they are uploaded "
+    "process running this tool (the jake-tools MCP server; not another machine's or "
+    "container's view unless they share it). Pass files in recording order; they are uploaded "
     "and treated as ONE continuous recording with request-wide anonymous speaker "
     "labels (speaker_1, speaker_2, …). Returns the complete structured transcript: "
     "speaker segments with word timings in seconds from the start of the "
@@ -138,7 +137,6 @@ def build(config: Config) -> Handler:
 
 OPERATION = Operation(
     name="transcribe",
-    capability="transcription",
     skill="transcription",
     description=DESCRIPTION,
     build=build,

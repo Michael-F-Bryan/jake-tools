@@ -46,7 +46,7 @@ OPERATIONS: tuple[Operation, ...] = (
     # Publishes to, or changes, a list its readers can see.
     newsletter_create.OPERATION,
     newsletter_update.OPERATION,
-    # Sends transcript text to Claude, so it is in the `claude` capability.
+    # Sends transcript text to Claude; needs no transcription endpoint.
     polish_transcript.OPERATION,
     # Unavailable unless transcription.api_base_url is configured.
     transcribe.OPERATION,

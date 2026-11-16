@@ -53,7 +53,6 @@ def build(config: Config) -> Handler:
 
 OPERATION = Operation(
     name="clockify_workspace_catalogue",
-    capability="clockify",
     skill="clockify-time",
     description=DESCRIPTION,
     build=build,

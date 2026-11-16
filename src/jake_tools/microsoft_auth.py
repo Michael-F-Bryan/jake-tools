@@ -319,7 +319,7 @@ def shared_provider(settings: MicrosoftSettings) -> MicrosoftTokenProvider:
 
     Operations build a client per call; a per-call provider would refresh every
     time. Equal settings (including the secrets) share a provider, and
-    different grants (another Hermes profile) never do.
+    different grants (another agent environment) never do.
     """
     with _providers_lock:
         provider = _providers.get(settings)

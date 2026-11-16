@@ -24,7 +24,7 @@ def clockify_client(config: Config) -> ClockifyClient:
     if not key:
         raise ToolError(
             "missing_credentials",
-            "Set CLOCKIFY_API_KEY where jake-tools runs (the MCP server's environment, or the Hermes profile's secrets)",
+            "Set CLOCKIFY_API_KEY where jake-tools runs (the MCP server's environment)",
             detail={"variables": ["CLOCKIFY_API_KEY"]},
         )
     try:

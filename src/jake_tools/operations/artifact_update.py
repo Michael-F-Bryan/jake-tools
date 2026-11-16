@@ -1,8 +1,8 @@
 """``artifact_update``: publish the next version of an existing private artifact.
 
-A separate ``artifact_update`` capability (toolset) from ``artifact``: it
-overwrites the live content of something that already exists. Needs ``artifacts.enabled``. :mod:`jake_tools.artifacts`
-does the work.
+A separate, narrower operation from ``artifact_publish``: it overwrites the
+live content of something that already exists. Needs ``artifacts.enabled``.
+:mod:`jake_tools.artifacts` does the work.
 """
 
 from __future__ import annotations
@@ -50,7 +50,6 @@ def build(config: Config) -> Handler:
 
 OPERATION = Operation(
     name="artifact_update",
-    capability="artifact_update",
     skill="artifact-publishing",
     description=DESCRIPTION,
     build=build,
