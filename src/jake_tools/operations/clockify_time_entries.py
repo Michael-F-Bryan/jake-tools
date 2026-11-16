@@ -39,7 +39,6 @@ def build(config: Config) -> Handler:
 
 OPERATION = Operation(
     name="clockify_time_entries",
-    capability="clockify",
     skill="clockify-time",
     description=DESCRIPTION,
     build=build,

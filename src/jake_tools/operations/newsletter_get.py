@@ -29,7 +29,6 @@ def build(config: Config) -> Handler:
 
 OPERATION = Operation(
     name="newsletter_get",
-    capability="newsletter",
     skill="newsletters",
     description=DESCRIPTION,
     build=build,

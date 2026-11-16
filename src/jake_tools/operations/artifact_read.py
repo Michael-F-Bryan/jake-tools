@@ -45,7 +45,6 @@ def build(config: Config) -> Handler:
 
 OPERATION = Operation(
     name="artifact_read",
-    capability="artifact",
     skill="artifact-publishing",
     description=DESCRIPTION,
     build=build,

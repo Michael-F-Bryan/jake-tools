@@ -1,8 +1,8 @@
 """Hermetic checks on the delegation recipes (no model call).
 
 They prove the documented recipes are well-formed ``claude_start`` requests,
-that the saved receipts are receipts of *these* recipes, and that MCP and
-native consumers read one file. They cannot show what the runtime approves or
+that the saved receipts are receipts of *these* recipes, and that the MCP resource and
+the packaged file are one. They cannot show what the runtime approves or
 that a model follows a brief: that is ``test_delegation_recipes_live.py``
 (``--slow``), whose sanitised outcomes the receipts keep.
 """
@@ -28,7 +28,7 @@ from recipe_fixtures import (
 )
 
 from jake_tools.claude_runs.control import StartRequest
-from jake_tools.hermes.plugin import SKILLS_DIR
+from jake_tools.mcp.server import SKILLS_DIR
 
 RECIPE_NAMES = {"read-only-review", "scoped-output", "completion-only-continuation"}
 WRITE_TOOLS = {"Write", "Edit", "Bash", "NotebookEdit"}
@@ -183,15 +183,10 @@ def test_skill_points_at_the_recipes_and_they_ship_beside_it() -> None:
     assert "references/recipes.md" in (skill / "SKILL.md").read_text()
 
 
-async def test_mcp_serves_the_same_recipes_file_the_native_plugin_registers(
+async def test_mcp_serves_the_packaged_recipes_file(
     tmp_path: Path,
 ) -> None:
-    """One file, two routes: the MCP resource and the plugin skill's reference
-    are both that file, so there is no second maintained copy."""
-    from test_hermes_plugin import RecordingContext, config_for
-
-    from jake_tools.hermes.plugin import register_operations
-
+    """The MCP resource is the packaged file, so there is no second copy."""
     uri = "skill://claude-delegation/references/recipes.md"
     async with start_mcp_server(isolated_mcp_env(tmp_path / "home")) as session:
         listed = {str(r.uri) for r in (await session.list_resources()).resources}
@@ -200,11 +195,3 @@ async def test_mcp_serves_the_same_recipes_file_the_native_plugin_registers(
     content = resource.contents[0]
     assert isinstance(content, TextResourceContents)
     assert content.text == recipes_path().read_text()
-
-    config = config_for(tmp_path, {})
-    ctx = RecordingContext()
-    register_operations(ctx, config, lambda: config)
-    registered = ctx.skills["claude-delegation"]
-    assert (registered.parent / "references" / "recipes.md").read_text() == (
-        content.text
-    )

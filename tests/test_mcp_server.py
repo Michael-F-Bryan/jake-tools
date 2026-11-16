@@ -30,11 +30,13 @@ from pydantic import BaseModel
 from jake_tools.config import load_config
 from jake_tools.mcp.errors import ToolError, ToolErrorPayload, error_result
 from jake_tools.mcp.server import (
+    SKILLS_DIR,
     build_server,
     packaged_skills,
     skill_description,
     structured_tool,
 )
+from jake_tools.operations.catalogue import OPERATIONS
 
 ServerFactory = Callable[..., AbstractAsyncContextManager[ClientSession]]
 
@@ -141,8 +143,11 @@ async def test_stdio_tool_descriptions_point_to_readable_relevant_skills(
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
         for name, skill in expected.items():
             description = " ".join((tools[name].description or "").split())
-            assert f"Before using this tool, read `skill://{skill}`" in description
-            assert "this server's `read_resource`" in description
+            assert (
+                f"Before using this tool, read the MCP resource `skill://{skill}`"
+                in description
+            )
+            assert "MCP resource-read interface" in description
             assert "already loaded in the current context" in description
             assert "Reuse the loaded guide for subsequent calls." in description
         assert "skill://" not in (tools["ping"].description or "")
@@ -408,3 +413,102 @@ async def test_artifact_tools_are_absent_unless_enabled(
     async with mcp_server(mcp_env) as session:
         names = {tool.name for tool in (await session.list_tools()).tools}
     assert not {"artifact_publish", "artifact_read", "artifact_update"} & names
+
+
+async def test_every_available_operation_is_listed_exactly_once_without_a_grant(
+    mcp_server: ServerFactory, mcp_env: dict[str, str]
+) -> None:
+    configured = {
+        **mcp_env,
+        "TRANSCRIPTION_API_BASE_URL": "http://127.0.0.1:9",
+        "JAKE_TOOLS_ARTIFACTS_ENABLED": "true",
+    }
+    async with mcp_server(mcp_env) as session:
+        plain = [tool.name for tool in (await session.list_tools()).tools]
+    async with mcp_server(configured) as session:
+        full = [tool.name for tool in (await session.list_tools()).tools]
+
+    everything = sorted(op.name for op in OPERATIONS)
+    assert sorted(full) == sorted([*everything, "ping"])
+    assert len(plain) == len(set(plain))
+    assert sorted(set(everything) - set(plain)) == sorted(
+        {"transcribe", "artifact_publish", "artifact_read", "artifact_update"}
+    )
+
+
+async def test_every_guide_and_reference_is_listed_and_read_byte_for_byte(
+    mcp_server: ServerFactory, mcp_env: dict[str, str]
+) -> None:
+    files = {f"skill://{skill.name}": skill / "SKILL.md" for skill in packaged_skills()}
+    for skill in packaged_skills():
+        for path in (skill / "references").rglob("*.md"):
+            files[f"skill://{skill.name}/{path.relative_to(skill).as_posix()}"] = path
+    assert len(files) > len(packaged_skills())  # references exist
+
+    async with mcp_server(mcp_env) as session:
+        listed = [str(r.uri) for r in (await session.list_resources()).resources]
+        assert sorted(listed) == sorted(files)
+        for uri, path in files.items():
+            content = (await session.read_resource(uri)).contents[0]
+            assert isinstance(content, TextResourceContents)
+            assert content.text.encode() == path.read_bytes(), uri
+
+
+async def test_every_tool_description_names_a_listed_guide(
+    mcp_server: ServerFactory, mcp_env: dict[str, str]
+) -> None:
+    configured = {
+        **mcp_env,
+        "TRANSCRIPTION_API_BASE_URL": "http://127.0.0.1:9",
+        "JAKE_TOOLS_ARTIFACTS_ENABLED": "true",
+    }
+    async with mcp_server(configured) as session:
+        listed = {str(r.uri) for r in (await session.list_resources()).resources}
+        tools = (await session.list_tools()).tools
+    for tool in tools:
+        if tool.name == "ping":
+            continue
+        description = tool.description or ""
+        uri = f"skill://{next(o for o in OPERATIONS if o.name == tool.name).skill}"
+        assert uri in listed, tool.name
+        assert f"`{uri}`" in description, tool.name
+
+
+def test_packaged_guidance_has_no_native_only_instruction() -> None:
+    forbidden = ("skill_view(", "jake-tools:", "plugin skill", "Hermes profile")
+    paths = [*(SKILLS_DIR.rglob("*.md"))]
+    assert paths
+    for path in paths:
+        text = path.read_text()
+        for phrase in forbidden:
+            assert phrase not in text, f"{path.relative_to(SKILLS_DIR)}: {phrase}"
+
+
+def test_nothing_in_the_package_imports_hermes_and_no_plugin_entry_point() -> None:
+    import ast
+    import tomllib
+    from importlib.metadata import entry_points
+
+    root = Path(__file__).resolve().parent.parent / "src" / "jake_tools"
+    banned = ("hermes_cli", "hermes_constants", "model_tools", "agent")
+    assert not (root / "hermes").exists()
+    for path in root.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            names = (
+                [a.name for a in node.names]
+                if isinstance(node, ast.Import)
+                else [node.module or ""]
+                if isinstance(node, ast.ImportFrom) and node.level == 0
+                else []
+            )
+            for name in names:
+                assert name.split(".")[0] not in banned, f"{path}: {name}"
+    pyproject = tomllib.loads(
+        (root.parent.parent / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert "hermes_agent.plugins" not in pyproject.get("project", {}).get(
+        "entry-points", {}
+    )
+    assert not [
+        e for e in entry_points(group="hermes_agent.plugins") if e.name == "jake-tools"
+    ]

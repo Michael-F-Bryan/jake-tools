@@ -1,4 +1,4 @@
-"""``polish_transcript`` through the real MCP server over stdio, and natively.
+"""``polish_transcript`` through the real MCP server over stdio.
 
 The server, the operation, the pipeline and the Claude Agent SDK run for
 real; the ``claude`` CLI is ``tests/fake_claude.py``, which returns the
@@ -15,19 +15,14 @@ from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any
 
-import pytest
 from mcp import ClientSession
 from polish_fixtures import (
     EMPTY_EDITS,
     EMPTY_REVIEW,
-    transcript_payload,
     write_transcript,
 )
 
-from jake_tools.config import load_config
-from jake_tools.hermes.tools import make_handler, signature_metadata
 from jake_tools.mcp.errors import ToolErrorPayload
-from jake_tools.operations.catalogue import OPERATIONS
 
 ServerFactory = Callable[..., AbstractAsyncContextManager[ClientSession]]
 
@@ -164,27 +159,3 @@ async def test_a_polish_runs_tool_less_through_the_real_sdk(
         assert "--setting-sources=" in argv  # no settings files at all
         assert not any(a.startswith("--allowedTools") for a in argv)
     assert {argv[argv.index("--model") + 1] for argv in argvs} == {"sonnet", "opus"}
-
-
-def test_the_native_handler_reports_the_same_errors(tmp_path: Path) -> None:
-    config = load_config(
-        {"HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / "c")}
-    )
-    operation = next(op for op in OPERATIONS if op.name == "polish_transcript")
-    handler = make_handler(
-        operation, signature_metadata(operation, config), lambda: config
-    )
-    source = tmp_path / "raw.json"
-    source.write_text(json.dumps(transcript_payload(TURNS)))
-    out = json.loads(
-        handler({"transcript_path": str(source), "output_directory": str(tmp_path)})
-    )
-    assert out["code"] == "invalid_argument"
-    assert out["detail"] == {"argument": "output_directory"}
-    assert "already exists" in out["error"]
-
-
-@pytest.mark.parametrize("name", ["polish_transcript"])
-def test_the_operation_is_a_claude_capability(name: str) -> None:
-    operation = next(op for op in OPERATIONS if op.name == name)
-    assert operation.capability == "claude" and operation.skill == "transcription"

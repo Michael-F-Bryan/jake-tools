@@ -5,9 +5,8 @@ description: Delegate a bounded task to a separate Claude Code agent with the ja
 
 # Delegating to Claude
 
-Tools from jake-tools: native Hermes tools from the `jake-tools` plugin, or the
-`jake-tools` MCP server's (Hermes registers those as `mcp_<server>_<tool>`).
-This skill uses the bare names:
+Tools from the `jake-tools` MCP server (an MCP client may prefix them; Hermes
+registers them as `mcp__<server>__<tool>`). This skill uses the bare names:
 
 | Tool | Use |
 | --- | --- |
@@ -27,15 +26,16 @@ check the work → optionally `claude_start(resume_task_id=...)`. Read
 `claude_status` or `claude_transcript` only when you need the detail.
 
 Every task runs in its own process and survives restarts of the MCP server
-or Hermes; task IDs, tokens, cursors and message IDs stay valid across them.
+or the MCP client (Hermes included); task IDs, tokens, cursors and message IDs stay valid across them.
 `claude_*` results leave out fields that are null: an absent field is null.
 
 ## Discovery and side effects
 
 Use the host's tool search/list and schema-description facility to discover
-`claude_*` tools and inspect current arguments; prefixes are host-dependent. Load
-this skill from the running installation (`jake-tools:claude-delegation` in
-Hermes, `skill://claude-delegation` over MCP) if a local copy may be stale. No local checkout or agent-side credential lookup is needed;
+`claude_*` tools and inspect current arguments; prefixes are host-dependent. Read
+this guide from the running server as the MCP resource
+`skill://claude-delegation`, through your client's MCP resource reader
+(in Hermes: the server's `read_resource` utility tool, `mcp__<server>__read_resource`, with `uri`), if a local copy may be stale. No local checkout or agent-side credential lookup is needed;
 the worker uses the server's configured Claude installation/authentication.
 Report unavailable tools or authentication rather than guessing credentials.
 
@@ -50,7 +50,7 @@ writes. Put the approved scope in the brief and verify resulting state yourself.
 ## 1. Write a self-contained brief
 
 The worker sees the `brief` and the files in `working_directory`. It sees no
-conversation, no Hermes memory, no skills, no MCP servers and no settings
+conversation, no memory of the calling agent, no skills, no MCP servers and no settings
 files. Put in the brief: the goal; context it can't discover; exact paths
 (relative to `working_directory`) and commands; acceptance criteria it can
 check itself; and what its final message must contain (that comes back as
@@ -59,9 +59,7 @@ check itself; and what its final message must contain (that comes back as
 Copyable, runtime-tested starting points (read-only review, scoped output
 with a tiny checkpoint, completion-only continuation) and what the runtime
 did with each path and Bash rule form are in `references/recipes.md`
-(`skill://claude-delegation/references/recipes.md` over MCP,
-`skill_view("jake-tools:claude-delegation", file_path="references/recipes.md")`
-in Hermes). Always give `working_directory` yourself; never guess it.
+(the MCP resource `skill://claude-delegation/references/recipes.md`). Always give `working_directory` yourself; never guess it.
 
 ## 2. Grant the smallest set of tools
 
@@ -376,9 +374,8 @@ kept. `rollback` is always `none`: before retrying, look at
 
 ## Errors
 
-MCP errors come back with `isError: true` and `{code, message, detail?}`.
-Native Hermes errors carry `{error, code, message, detail?}`, where `error`
-repeats the message for the host. The codes and argument details are shared:
+Errors come back with `isError: true` and `{code, message, detail?}`. The codes
+and argument details are:
 
 | `code` | Cause |
 | --- | --- |

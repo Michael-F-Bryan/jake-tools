@@ -128,7 +128,7 @@ def _build_clients(config: Config) -> tuple[ClockifyClient, JiraClient]:
         raise ToolError(
             "missing_credentials",
             "Clockify credentials are not configured: set CLOCKIFY_API_KEY "
-            "where jake-tools runs (the MCP server's environment, or the Hermes profile's secrets).",
+            "where jake-tools runs (the MCP server's environment).",
             detail={"variables": ["CLOCKIFY_API_KEY"]},
         )
     base_url = config.jira_base_url.value
@@ -147,7 +147,7 @@ def _build_clients(config: Config) -> tuple[ClockifyClient, JiraClient]:
         raise ToolError(
             "missing_credentials",
             f"Jira credentials are not configured: set {', '.join(missing)} "
-            "where jake-tools runs (the MCP server's environment, or the Hermes profile's secrets).",
+            "where jake-tools runs (the MCP server's environment).",
             detail={"variables": missing},
         )
     # Constructor errors are configuration problems; their text may quote a
@@ -239,7 +239,6 @@ def _secret_forms(config: Config) -> set[tuple[str, str]]:
 
 OPERATION = Operation(
     name="clockify_jira_sync",
-    capability="clockify",
     skill="clockify-jira-sync",
     description=DESCRIPTION,
     build=build,

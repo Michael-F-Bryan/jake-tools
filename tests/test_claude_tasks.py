@@ -198,6 +198,73 @@ async def test_stdio_lists_the_delegation_tools_with_their_arguments(
 # --- observing: poll, cursor, events, results -----------------------------------
 
 
+async def test_worker_and_its_cli_never_inherit_the_servers_secrets(
+    mcp_server: ServerFactory,
+    fake_env: dict[str, str],
+    tmp_path: Path,
+    workdir: Path,
+) -> None:
+    from jake_tools.config import SECRET_VARIABLES
+
+    names = [n for base in SECRET_VARIABLES for n in (base, f"{base}_FILE")]
+    secrets = {name: f"synthetic-secret-{name}" for name in names}
+    seen = tmp_path / "cli-environment.json"
+    env = {
+        **fake_env,
+        **secrets,
+        "JAKE_TEST_MARKER": "1",
+        "FAKE_CLAUDE_ENV_FILE": str(seen),
+    }
+    async with mcp_server(env) as session:
+        started = await start(session, workdir, "[[scenario:echo]] hello")
+        await call(
+            session,
+            "claude_poll",
+            task_id=started["task_id"],
+            token=started["observation_token"],
+            until="terminal",
+            wait_seconds=30,
+        )
+    raw = seen.read_text()
+    inherited = json.loads(raw)
+    assert inherited["JAKE_TEST_MARKER"] == "1"
+    assert not set(names) & set(inherited)
+    assert not any(value in raw for value in secrets.values())
+
+
+def _null_values(value: Any, path: str = "$") -> list[str]:
+    if value is None:
+        return [path]
+    if isinstance(value, dict):
+        return [p for k, v in value.items() for p in _null_values(v, f"{path}.{k}")]
+    if isinstance(value, list):
+        return [p for i, v in enumerate(value) for p in _null_values(v, f"{path}[{i}]")]
+    return []
+
+
+async def test_claude_results_omit_null_fields_over_stdio(
+    mcp_server: ServerFactory,
+    fake_env: dict[str, str],
+    workdir: Path,
+) -> None:
+    # The converse (a non-Claude result keeps its nulls) is asserted in
+    # test_mcp_clockify_jira_sync.py (``report["failure"] is None``).
+    async with mcp_server(fake_env) as session:
+        started = await start(session, workdir, "[[scenario:echo]] hello")
+        polled = await call(
+            session,
+            "claude_poll",
+            task_id=started["task_id"],
+            token=started["observation_token"],
+            until="terminal",
+            wait_seconds=30,
+        )
+    assert polled["status"] == "completed"
+    assert polled["wake_reason"] == "terminal"
+    assert _null_values(started) == []
+    assert _null_values(polled) == []
+
+
 async def test_poll_returns_a_compact_snapshot_and_a_complete_result(
     mcp_server: ServerFactory,
     fake_env: dict[str, str],

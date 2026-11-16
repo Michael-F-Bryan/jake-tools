@@ -25,9 +25,7 @@ from .errors import ToolError
 
 
 def task_service(config: Config) -> TaskService:
-    return TaskService(
-        config.runs_dir.value, RunDefaults.from_config(config), config.worker_environ
-    )
+    return TaskService(config.runs_dir.value, RunDefaults.from_config(config))
 
 
 @contextmanager

@@ -1,10 +1,10 @@
 """The MCPServer app: tool, resource and extension registration only.
 
-Tool logic lives in :mod:`jake_tools.operations`, shared with the native
-Hermes adapter; :mod:`jake_tools.mcp.tools` registers each operation through
-:func:`structured_tool`. Packaged skills
-are served as ``skill://<name>`` resources so an agent can fetch the text
-matching the running server even if its local copy is stale. The native
+Tool logic lives in :mod:`jake_tools.operations`, shared with the CLI;
+:mod:`jake_tools.mcp.tools` registers each operation through
+:func:`structured_tool`. Packaged skills and their references are served as
+``skill://<name>`` and ``skill://<name>/references/<file>.md`` resources, so
+every MCP client reads the guidance matching the running server. The native
 MCP Tasks extension (:mod:`jake_tools.mcp.tasks`) is the one extension.
 """
 
@@ -196,7 +196,12 @@ _INSTRUCTIONS = (
     "invalid_argument, access_denied, plan_stale, unknown_task, "
     "capacity_exceeded, worker_failed, request_conflict, session_busy, "
     "resume_unavailable, task_not_running, upstream_error, internal_error). "
-    "The packaged skills are served as skill://<name> resources. "
+    "Guidance is served as resources: each guide is skill://<name> and its "
+    "supporting references are skill://<name>/references/<file>.md; read them "
+    "with your client's MCP resource-read interface. "
+    "Three prompts prepare issue work and only return instructions: "
+    "issue_discovery, issue_planning and issue_maintainer_review, each taking "
+    "an issue_url. "
     "A 2026-07-28 client that declares io.modelcontextprotocol/tasks on a "
     "claude_start request gets a native task (tasks/get, tasks/update, "
     "tasks/cancel); every other client gets the ordinary result."

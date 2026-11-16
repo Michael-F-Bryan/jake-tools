@@ -24,7 +24,7 @@ from .worker import worker
 )
 @click.pass_context
 def main(ctx: click.Context) -> None:
-    """The jake-tools MCP server for Hermes."""
+    """jake-tools as a stdio MCP server, for any MCP client."""
     if ctx.invoked_subcommand is None:
         ctx.invoke(serve)
 

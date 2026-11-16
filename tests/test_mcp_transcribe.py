@@ -79,7 +79,10 @@ async def test_endpoint_without_token_exposes_the_tool_and_reports_missing_crede
         assert tools["transcribe"].input_schema["required"] == ["files"]
         assert tools["transcribe"].output_schema is None
         description = " ".join((tools["transcribe"].description or "").split())
-        assert "Before using this tool, read `skill://transcription`" in description
+        assert (
+            "Before using this tool, read the MCP resource `skill://transcription`"
+            in description
+        )
         resource = await session.read_resource("skill://transcription")
         result = await session.call_tool(
             "transcribe", {"files": [str(p) for p in recordings]}

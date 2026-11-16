@@ -5,12 +5,10 @@ description: Reconcile Jira work items into Clockify projects and tasks with the
 
 # Jira → Clockify sync
 
-One tool, `clockify_jira_sync`, from jake-tools: a native Hermes tool from the
-`jake-tools` plugin, or the `jake-tools` MCP server's (Hermes registers that as
-`mcp_<server>_clockify_jira_sync`). This skill uses the bare name. It needs
-Clockify and Jira credentials where jake-tools runs (the MCP server's
-environment, or the Hermes profile's secrets), so it only works where Jira is
-configured.
+One tool, `clockify_jira_sync`, from the jake-tools MCP server (an MCP client may prefix the name, as
+Hermes does: `mcp__<server>__clockify_jira_sync`). This skill uses the bare
+name. It needs Clockify and Jira credentials in the MCP server's environment,
+so it only works where Jira is configured.
 
 It creates projects and tasks, renames them, reactivates tasks, and marks
 tasks done. It never deletes anything, and it has no other Clockify or Jira
@@ -32,9 +30,9 @@ underway work.
 
 Find `clockify_jira_sync` through the host's tool search/list, then inspect its
 live schema: `issues?: list[str]`, `apply: bool = false`,
-`plan_digest?: str`. Load this skill from the running installation
-(`jake-tools:clockify-jira-sync` in Hermes, `skill://clockify-jira-sync` over
-MCP) for its version. Do not pass CLI flags or assume a local checkout is needed. Credentials
+`plan_digest?: str`. Read this guide from the running server as the MCP resource
+`skill://clockify-jira-sync`, through your client's MCP resource reader
+(in Hermes: the server's `read_resource` utility tool, `mcp__<server>__read_resource`, with `uri`), for its version. Do not pass CLI flags or assume a local checkout is needed. Credentials
 are resolved by jake-tools (`CLOCKIFY_API_KEY`, `JIRA_BASE_URL`, `JIRA_EMAIL`,
 `JIRA_API_TOKEN`, including configured secret-file variants); do not retrieve
 local vault credentials to make the call. Missing configuration is a blocker.

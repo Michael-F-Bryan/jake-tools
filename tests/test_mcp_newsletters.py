@@ -97,7 +97,10 @@ async def test_discovery_lists_the_tools_with_bounds_and_the_bundled_guidance(
     assert tools["newsletter_create"].input_schema["required"] == ["title", "body"]
     for name in TOOLS:
         description = " ".join((tools[name].description or "").split())
-        assert "Before using this tool, read `skill://newsletters`" in description
+        assert (
+            "Before using this tool, read the MCP resource `skill://newsletters`"
+            in description
+        )
         assert "recovery" in description or name in {
             "newsletter_list",
             "newsletter_get",

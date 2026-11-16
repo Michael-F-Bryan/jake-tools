@@ -2,7 +2,7 @@
 
 Every failure an operation reports is a :class:`ToolError` with a stable
 ``code``. Adapters turn it into their own error shape (an MCP ``isError``
-result, a Hermes tool error) carrying :attr:`ToolError.payload`. Messages name
+result) carrying :attr:`ToolError.payload`. Messages name
 the integration and the variable, never a value, and ``detail`` carries only
 what a caller can act on (an offending argument name, a task ID, a digest).
 """
