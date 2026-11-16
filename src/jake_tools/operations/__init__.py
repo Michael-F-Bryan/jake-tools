@@ -54,6 +54,12 @@ SKILL_GUIDES: dict[str, str] = {
         "the publication boundary, write verification, partial-outcome recovery and "
         "how to handle each error."
     ),
+    "sharepoint-files": (
+        "The guide defines the Microsoft identity used, how a link or channel "
+        "resolves, listing coverage, version/etag identity, the write boundary, "
+        "conflict and conditional-replace rules, uncertain-write and verification "
+        "outcomes, PDF limits and how to handle each error."
+    ),
     "transcription": (
         "The guide explains the transcript schema, what speaker and overlap fields "
         "do and do not promise, what polishing sends to Claude, changes and leaves "

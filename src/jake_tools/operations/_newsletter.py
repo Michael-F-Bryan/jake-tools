@@ -38,7 +38,13 @@ EntryId = Annotated[str, Field(pattern=r"^[0-9]{1,10}$")]
 REAUTHORISE = "docs/microsoft-auth.md"
 
 
-def microsoft_settings(config: Config) -> MicrosoftSettings:
+def microsoft_settings(
+    config: Config, *, purpose: str = "the newsletter"
+) -> MicrosoftSettings:
+    """The configured grant, or ``missing_credentials`` naming what is unset.
+
+    Shared by every Microsoft-backed operation: one identity, never a fallback.
+    """
     required = (
         (
             "microsoft.tenant_id",
@@ -61,7 +67,7 @@ def microsoft_settings(config: Config) -> MicrosoftSettings:
     if missing:
         raise ToolError(
             "missing_credentials",
-            "Microsoft is not configured for the newsletter. Set "
+            f"Microsoft is not configured for {purpose}. Set "
             + ", ".join(env for _name, env in missing)
             + f" where jake-tools runs (see {REAUTHORISE}). No other account is used.",
             detail={
