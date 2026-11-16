@@ -16,7 +16,7 @@ DESCRIPTION = (
     "compared. The save is accepted only if the item's etag did not change while it "
     "was read and the byte count equals the item's size; otherwise nothing is "
     "saved. At most 50 MiB. The file is transported unchanged, never converted or "
-    "edited: keep the returned `etag` to replace it later with sharepoint_replace. "
+    "edited. Replacing existing files is not supported. "
     "Uses the server's configured Microsoft account; never another."
 )
 

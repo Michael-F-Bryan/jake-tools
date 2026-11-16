@@ -10,12 +10,18 @@ responses. It says nothing about live Microsoft behaviour (issue #41).
 from __future__ import annotations
 
 import hashlib
+import io
+import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
+import requests
 from fake_drive import DRIVE_ID, FakeDrive
 from fake_microsoft import ACCOUNT, CLIENT, REFRESH_TOKEN, TENANT
+from requests.adapters import BaseAdapter
+from urllib3.response import HTTPResponse
 
 from jake_tools import file_transfers
 from jake_tools.file_transfers import (
@@ -33,6 +39,7 @@ from jake_tools.file_transfers import (
     resolve_link,
     upload_new,
 )
+from jake_tools.http import HttpSession
 from jake_tools.microsoft_auth import MicrosoftSettings, MicrosoftTokenProvider
 from jake_tools.sharepoint_files import DriveClient, FilesError, encode_sharing_url
 
@@ -363,6 +370,128 @@ def test_a_failed_content_request_is_reported_without_the_secret_url(
     assert not (tmp_path / "a").exists()
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [("eTag", None), ("eTag", ""), ("eTag", "   "), ("size", None), ("size", -1)],
+)
+@pytest.mark.parametrize("read", ["before", "after", "both"])
+def test_download_requires_usable_metadata(
+    fake: FakeDrive,
+    client: DriveClient,
+    tmp_path: Path,
+    field: str,
+    value: object,
+    read: str,
+) -> None:
+    node = fake.add_file("a.txt", b"hello")
+    valid = fake._driveitem(node)
+    invalid = dict(valid)
+    if value is None:
+        invalid.pop(field)
+    else:
+        invalid[field] = value
+    payloads = [
+        invalid if read in ("before", "both") else valid,
+        invalid if read in ("after", "both") else valid,
+    ]
+    fake.script["GET item"] = ["apply-then-json:" + json.dumps(p) for p in payloads]
+    target = tmp_path / "a.txt"
+
+    with pytest.raises(FileReadError) as caught:
+        download_file(client, drive_id=DRIVE_ID, item_id=node.id, destination=target)
+
+    assert caught.value.reason == "verification_unavailable"
+    assert "nothing was saved" in str(caught.value)
+    assert not target.exists()
+
+
+def test_an_empty_original_file_has_usable_size_evidence(
+    fake: FakeDrive, client: DriveClient, tmp_path: Path
+) -> None:
+    node = fake.add_file("empty.txt", b"")
+    target = tmp_path / "empty.txt"
+    result = download_file(
+        client, drive_id=DRIVE_ID, item_id=node.id, destination=target
+    )
+    assert target.read_bytes() == b""
+    assert result.size_bytes == 0
+    assert "size equals the item's size (0 bytes)" in result.compared
+
+
+@pytest.mark.parametrize("etag", [None, "", "   "])
+def test_pdf_also_requires_a_usable_version(
+    fake: FakeDrive, client: DriveClient, tmp_path: Path, etag: str | None
+) -> None:
+    node = fake.add_file("a.docx", b"PK")
+    payload = fake._driveitem(node)
+    payload["eTag"] = etag
+    fake.script["GET item"] = ["apply-then-json:" + json.dumps(payload)]
+    target = tmp_path / "a.pdf"
+    with pytest.raises(FileReadError) as caught:
+        download_pdf(client, drive_id=DRIVE_ID, item_id=node.id, destination=target)
+    assert caught.value.reason == "verification_unavailable"
+    assert not target.exists()
+
+
+class TrackedBody(io.BytesIO):
+    bytes_read = 0
+
+    def read(self, size: int | None = -1) -> bytes:
+        data = super().read(size)
+        self.bytes_read += len(data)
+        return data
+
+    def release_conn(self) -> None:
+        pass
+
+
+class ContentAdapter(BaseAdapter):
+    def __init__(self, status: int, *, redirected: bool) -> None:
+        self.status = status
+        self.redirected = redirected
+        self.body = TrackedBody(b"x" * (1024 * 1024))
+
+    def send(
+        self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None
+    ):
+        assert request.url is not None
+        response = requests.Response()
+        response.request = request
+        response.url = request.url
+        response.status_code = self.status
+        if self.redirected and request.url.endswith("/content"):
+            response.status_code = 302
+            response.headers["Location"] = "https://content.example/file"
+            response.raw = HTTPResponse(body=io.BytesIO(b""), preload_content=False)
+        else:
+            response.raw = HTTPResponse(body=self.body, preload_content=False)
+            if self.status == 302:
+                response.headers["Location"] = "https://content.example/file"
+        return response
+
+    def close(self) -> None:
+        self.body.close()
+
+
+@pytest.mark.parametrize("status", [200, 302, 400, 503])
+@pytest.mark.parametrize("redirected", [False, True])
+def test_unexpected_content_response_is_not_eagerly_consumed(
+    status: int, redirected: bool
+) -> None:
+    adapter = ContentAdapter(status, redirected=redirected)
+    with requests.Session() as session:
+        session.mount("https://", adapter)
+        client = DriveClient(
+            token_provider=lambda _: "fixture-token", session=cast(HttpSession, session)
+        )
+        with pytest.raises(FilesError):
+            client.download(DRIVE_ID, "item", max_bytes=4)
+        # The initial 200/4xx/5xx must not be read at all; even a redirected
+        # content body is bounded when Content-Length is absent.
+        assert adapter.body.bytes_read <= 5
+        assert adapter.body.closed
+
+
 # -- rendered PDF --------------------------------------------------------------
 
 
@@ -637,6 +766,78 @@ def test_a_change_after_the_write_is_reported_not_hidden(
         upload(client, folder.id, "a.txt", b"payload")
     assert caught.value.outcome == "verification_failed"
     assert caught.value.changed_since_write is True
+
+
+@pytest.mark.parametrize("field", ["drive_id", "item_id"])
+def test_upload_readback_must_identify_the_acknowledged_item(
+    fake: FakeDrive, client: DriveClient, field: str
+) -> None:
+    folder = fake.add_folder("Docs")
+
+    def substitute_metadata() -> None:
+        node = fake.named(folder.id, "a.txt")
+        assert node is not None
+        payload = fake._driveitem(node)
+        if field == "drive_id":
+            payload["parentReference"]["driveId"] = "other-drive"
+        else:
+            payload["id"] = "other-item"
+        fake.script["GET item"] = ["apply-then-json:" + json.dumps(payload)]
+
+    fake.hooks["after_commit"] = substitute_metadata
+    with pytest.raises(FileTransferError) as caught:
+        upload(client, folder.id, "a.txt", b"x")
+    saved = fake.named(folder.id, "a.txt")
+    assert saved is not None
+    error = caught.value
+    assert error.outcome == "verification_failed"
+    assert field.replace("_", " ") in error.mismatches
+    assert error.item is not None and error.item.item_id == saved.id
+    assert error.item.drive_id == DRIVE_ID
+    assert error.detail()["item"] == error.item.model_dump(
+        mode="json", exclude_none=True
+    )
+    assert error.observed is not None and error.observed.item is not None
+    assert getattr(error.observed.item, field) == "other-" + field.removesuffix("_id")
+
+
+@pytest.mark.parametrize("conflict", ["fail", "rename"])
+def test_a_later_remote_rename_is_not_reported_as_conflict_renaming(
+    fake: FakeDrive, client: DriveClient, conflict: str
+) -> None:
+    folder = fake.add_folder("Docs")
+
+    def rename_before_readback() -> None:
+        node = fake.named(folder.id, "a.txt")
+        if node is not None:
+            node.name = "later.txt"
+            node.version += 1
+
+    fake.hooks["before_get_item"] = rename_before_readback
+    with pytest.raises(FileTransferError) as caught:
+        upload(client, folder.id, "a.txt", b"x", conflict=conflict)
+    assert caught.value.outcome == "verification_failed"
+    assert "name unchanged since acknowledgement" in caught.value.mismatches
+    assert caught.value.changed_since_write is True
+    assert caught.value.item is not None and caught.value.item.name == "a.txt"
+
+
+def test_fail_policy_rejects_an_acknowledged_rename(
+    fake: FakeDrive, client: DriveClient
+) -> None:
+    folder = fake.add_folder("Docs")
+
+    def change_session_policy() -> None:
+        for session in fake.sessions.values():
+            session["conflict"] = "rename"
+        fake.add_file("a.txt", b"theirs", parent=folder.id)
+
+    fake.hooks["before_commit"] = change_session_policy
+    with pytest.raises(FileTransferError) as caught:
+        upload(client, folder.id, "a.txt", b"x", conflict="fail")
+    assert caught.value.outcome == "verification_failed"
+    assert "name matches fail policy" in caught.value.mismatches
+    assert caught.value.item is not None and caught.value.item.name == "a 1.txt"
 
 
 @pytest.mark.parametrize(

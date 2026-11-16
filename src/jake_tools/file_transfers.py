@@ -270,6 +270,8 @@ class UploadResult(BaseModel):
     item: RemoteItem
     requested_name: str | None = None
     renamed: bool = False
+    """True only for a server rename acknowledged under the rename policy.
+    A later name change fails verification instead of being called a conflict rename."""
     etag_at_write: str | None = None
     changed_since_write: bool
     """True when the item's ``etag`` at readback is not the one the upload
@@ -385,6 +387,17 @@ def _read_to(
                 reason="unsupported_conversion",
                 detail={"supported_extensions": sorted(PDF_SOURCE_EXTENSIONS)},
             )
+    if (
+        not before.etag
+        or not before.etag.strip()
+        or (not pdf and (before.size_bytes is None or before.size_bytes < 0))
+    ):
+        raise FileReadError(
+            "verification_unavailable",
+            "Microsoft did not return a usable etag and size for verification; "
+            "nothing was saved. Inspect the item with sharepoint_get before retrying.",
+            item=before,
+        )
     if before.size_bytes is not None and before.size_bytes > MAX_TRANSFER_BYTES:
         raise FileInputError(
             "item_id",
@@ -411,6 +424,17 @@ def _read_to(
             ) from exc
         raise
     after = client.get_item(drive_id, item_id)
+    if (
+        not after.etag
+        or not after.etag.strip()
+        or (not pdf and (after.size_bytes is None or after.size_bytes < 0))
+    ):
+        raise FileReadError(
+            "verification_unavailable",
+            "Microsoft did not return a usable etag and size for verification; "
+            "nothing was saved. Inspect the item with sharepoint_get before retrying.",
+            item=after,
+        )
     compared = [f"etag unchanged ({before.etag})"]
     if after.etag != before.etag:
         raise FileReadError(
@@ -428,7 +452,7 @@ def _read_to(
             )
         compared.append("starts with %PDF-")
     else:
-        if before.size_bytes is not None and len(content) != before.size_bytes:
+        if len(content) != before.size_bytes or len(content) != after.size_bytes:
             raise FileReadError(
                 "size_mismatch",
                 f"{before.name!r} is {before.size_bytes} bytes but {len(content)} "
@@ -565,6 +589,7 @@ def upload_new(
         content=content,
         requested_name=name,
         parent_id=parent_id,
+        conflict=conflict,
     )
 
 
@@ -648,8 +673,9 @@ def _verify(
     written: RemoteItem,
     *,
     content: bytes,
-    requested_name: str | None,
+    requested_name: str,
     parent_id: str,
+    conflict: ConflictBehavior,
 ) -> UploadResult:
     drive_id = written.drive_id
     found: bytes | None
@@ -679,24 +705,37 @@ def _verify(
     )
     _check(compared, mismatches, "size", item.size_bytes == len(content))
     _check(compared, mismatches, "is a file", item.kind == "file")
-    if parent_id is not None:
-        _check(compared, mismatches, "parent folder", item.parent_id == parent_id)
-    if requested_name is not None and item.name != requested_name:
-        compared.append(f"name differs ({requested_name!r} -> {item.name!r}): renamed")
+    _check(compared, mismatches, "drive id", item.drive_id == written.drive_id)
+    _check(compared, mismatches, "item id", item.item_id == written.item_id)
+    _check(compared, mismatches, "parent folder", item.parent_id == parent_id)
+    renamed = written.name != requested_name
+    if conflict == "fail":
+        _check(compared, mismatches, "name matches fail policy", not renamed)
+    elif renamed:
+        compared.append(
+            f"name differs ({requested_name!r} -> {written.name!r}): renamed at acknowledgement"
+        )
+    _check(
+        compared,
+        mismatches,
+        "name unchanged since acknowledgement",
+        item.name == written.name,
+    )
     changed = item.etag != written.etag
     if mismatches:
         raise FileTransferError(
             "verification_failed",
             "the readback differs from what was uploaded: " + "; ".join(mismatches),
             drive_id=drive_id,
-            item=item,
+            item=written,
+            observed=Observation(state="found_different", item=item),
             mismatches=mismatches,
             changed_since_write=changed,
         )
     return UploadResult(
         item=item,
         requested_name=requested_name,
-        renamed=requested_name is not None and item.name != requested_name,
+        renamed=renamed,
         etag_at_write=written.etag,
         changed_since_write=changed,
         size_bytes=len(content),

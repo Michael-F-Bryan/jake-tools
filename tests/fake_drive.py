@@ -231,7 +231,11 @@ class FakeDrive(FakeMicrosoft):
                 )
             )
             self.sessions.pop(session_id)
-            return 201, self._driveitem(node)
+            payload = self._driveitem(node)
+            after = self.hooks.get("after_commit")
+            if after is not None:
+                after()
+            return 201, payload
 
     @staticmethod
     def _route(method: str, path: str) -> str:

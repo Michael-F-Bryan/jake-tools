@@ -299,19 +299,24 @@ class DriveClient:
         if format is not None:
             path += f"?format={urllib.parse.quote(format, safe='')}"
         redirect = self._send(
-            "GET", self._graph_root + path, what=what, redirect_ok=True
+            "GET", self._graph_root + path, what=what, redirect_ok=True, stream=True
         )
-        location = redirect.headers.get("Location")
-        if not 300 <= redirect.status_code < 400 or not location:
-            raise FilesError(
-                what,
-                status=redirect.status_code,
-                detail="expected a redirect to the content",
-            )
         try:
-            target = require_secure_url(location, "download location")
-        except ValueError as exc:
-            raise FilesError(what, detail="the content location is not https") from exc
+            location = redirect.headers.get("Location")
+            if not 300 <= redirect.status_code < 400 or not location:
+                raise FilesError(
+                    what,
+                    status=redirect.status_code,
+                    detail="expected a redirect to the content",
+                )
+            try:
+                target = require_secure_url(location, "download location")
+            except ValueError as exc:
+                raise FilesError(
+                    what, detail="the content location is not https"
+                ) from exc
+        finally:
+            redirect.close()
         response = self._send(
             "GET",
             target,
@@ -328,7 +333,9 @@ class DriveClient:
             chunks: list[bytes] = []
             total = 0
             try:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                for chunk in response.iter_content(
+                    chunk_size=min(1024 * 1024, max_bytes + 1)
+                ):
                     total += len(chunk)
                     if total > max_bytes:
                         raise TooLargeError(
@@ -449,16 +456,27 @@ class DriveClient:
                 # content) somewhere else on its own: the callers that expect
                 # one read its Location themselves.
                 allow_redirects=False,
+                # Requests still consumes redirect bodies to prepare Response.next,
+                # even with allow_redirects=False and stream=True. Close them at
+                # the response hook, before that preparation can read any bytes.
+                hooks={"response": _close_redirect_body} if stream else None,
             )
         except requests.RequestException as exc:
             # The exception text carries the URL, which can be a secret.
             raise FilesError(what, detail=type(exc).__name__) from exc
         redirected = 300 <= response.status_code < 400
         if response.status_code >= 400 or (redirected and not redirect_ok):
-            code = _error_code(response)
+            # Content/error bodies can be arbitrarily large. For streamed calls
+            # the status is sufficient; do not consume JSON just to get a code.
+            code = None if stream else _error_code(response)
             response.close()
             raise FilesError(what, status=response.status_code, code=code)
         return response
+
+
+def _close_redirect_body(response: requests.Response, **kwargs: Any) -> None:
+    if response.is_redirect:
+        response.close()
 
 
 def _q(value: str) -> str:
