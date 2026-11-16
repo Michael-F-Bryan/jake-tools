@@ -276,9 +276,10 @@ def packaged_skills_dir() -> Path:
     """The skills shipped by the installation that owns ``SERVER_BIN``."""
     if "JAKE_TOOLS_MCP_BIN" not in os.environ:
         return SKILLS_DIR
-    found = sorted(
-        SERVER_BIN.parent.parent.glob("lib/python*/site-packages/jake_tools/skills")
-    )
+    # A Nix mkApplication output only holds bin/ symlinks into a separate
+    # environment, so resolve the executable before looking beside it.
+    prefix = SERVER_BIN.resolve().parent.parent
+    found = sorted(prefix.glob("lib/python*/site-packages/jake_tools/skills"))
     assert found, f"cannot locate the packaged skills of {SERVER_BIN}"
     return found[0]
 
