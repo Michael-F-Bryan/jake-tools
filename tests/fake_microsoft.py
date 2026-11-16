@@ -122,6 +122,9 @@ class FakeMicrosoft:
             def do_PATCH(self) -> None:
                 fake.handle(self)
 
+            def do_PUT(self) -> None:
+                fake.handle(self)
+
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)

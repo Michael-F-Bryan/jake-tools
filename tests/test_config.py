@@ -268,6 +268,8 @@ def test_settings_listing_is_complete_and_stable(tmp_path: Path) -> None:
         "MICROSOFT_CLIENT_SECRET",
         "newsletters.graph_root",
         "newsletters.sharepoint_root",
+        "files.graph_root",
+        "files.sharepoint_hosts",
         "artifacts.enabled",
     ]
     assert config.runs_dir.display_value().startswith(str(tmp_path))
