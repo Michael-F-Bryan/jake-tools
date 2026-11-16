@@ -14,7 +14,7 @@ a general sign-in service: Jake never obtains a grant itself.
 | With what authority? | The delegated permissions that application was consented for, limited by what that person can do in SharePoint. Not application-wide access. |
 | Where is the grant kept? | In the operator-provisioned secret `MICROSOFT_REFRESH_TOKEN` (and `MICROSOFT_CLIENT_SECRET` if the application is a confidential client). Never in `config.toml`, tool arguments, results or logs. |
 | Which resources? | Two token audiences: Microsoft Graph (`https://graph.microsoft.com`, list items) and SharePoint (`https://<tenant>.sharepoint.com`, attachments). Each is requested and cached separately; a Graph token is not accepted by SharePoint REST. |
-| Which agents? | Those granted the `newsletter` capability (read) and `newsletter_publish` (create/update) in the Hermes plugin; every MCP client of a server with the configuration has all four. |
+| Which agents? | Every Hermes profile with the plugin enabled and every MCP client of a server with the configuration has all four tools (list/get read; create/update publish). |
 | Fallback? | None. There is no Azure CLI fallback and no other account. The `jake-tools newsletter` command is separate: it uses the person's own `az login`. |
 
 Jake never changes tenant grants, never consents on anyone's behalf and never

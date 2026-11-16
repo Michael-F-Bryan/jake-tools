@@ -39,14 +39,13 @@ Hermes' own Python environment (nixfiles does this with the flake's
 `lib.mkHermesPlugin`), it loads where a profile lists `jake-tools` in
 `plugins.enabled`, and registers:
 
-- **Tools**, for the capabilities in
-  `plugins.entries.jake-tools.settings.capabilities` (`artifact`, `artifact_update`,
-  `claude`, `clockify`, `newsletter`, `newsletter_publish`, `transcription`; unset means none). They have the MCP tools' names,
-  schemas, results and error codes; failures are
-  `{"error", "code", "message", "detail"}`. `transcribe` also needs
-  `transcription.api_base_url`. `ping` stays MCP-only.
+- **Tools**, every operation the profile's configuration makes available.
+  They have the MCP tools' names, schemas, results and error codes; failures
+  are `{"error", "code", "message", "detail"}`. `transcribe` needs
+  `transcription.api_base_url`, and the experimental `artifact_*` tools need
+  `artifacts.enabled`; nothing else gates registration. `ping` stays MCP-only.
 - **Skills**, `jake-tools:<skill>` (via `skill_view`), from the same packaged
-  sources, for the granted tools only.
+  sources, for the registered tools only.
 
 The plugin registers no terminal backend and leaves Hermes' terminal alone:
 keep the installer's backend (`local`) and its project-environment hook.
@@ -93,8 +92,7 @@ check the assembled runtime imports `jake_tools.hermes` and meets
 
 - a locked `jake-tools` flake input (`nix flake update jake-tools` updates
   it), with the package added to Hermes' `extraPythonPackages`;
-- `plugins.enabled: [jake-tools]` and
-  `plugins.entries.jake-tools.settings.capabilities` per agent, with
+- `plugins.enabled: [jake-tools]` per agent, with
   `plugins.isolation: in_process` (the default). Plugin toolsets
   (`jake_tools_<capability>`) are on by default, except on a platform whose
   saved toolsets list already "knows" them;
@@ -106,7 +104,7 @@ check the assembled runtime imports `jake_tools.hermes` and meets
 
 Tests: `tests/test_hermes_plugin.py` (hermetic) runs by default.
 `tests/test_hermes_runtime.py` is the acceptance test inside a real
-installation. It covers discovery, capability-scoped tools and skills,
+installation. It covers discovery, tools and skills,
 profile-scoped credentials, the worker environment, and that `local`'s PTY,
 stdin and environment are what they are without the plugin. Run
 `uv run pytest --slow tests/test_hermes_runtime.py` with `JAKE_TOOLS_HERMES`
@@ -288,8 +286,7 @@ read and change the CSU Weekly Newsletter SharePoint list, including
 attachment-only updates, as **one explicitly configured Microsoft account**
 through a delegated, refresh-aware grant (tenant, application and account are
 configuration; a grant for any other account is refused, and there is no
-fallback to `az login`). Reads and publication are separate Hermes grants
-(`newsletter`, `newsletter_publish`). Lists are one bounded page with explicit
+fallback to `az login`). Lists are one bounded page with explicit
 coverage (`complete`, `next_cursor`). Every write reads the entry back and
 downloads each attachment to compare bytes; a failure after the entry exists
 returns its ID and an applied/failed/uncertain/not-attempted effect per step,
@@ -331,7 +328,7 @@ end_seconds?, max_budget_usd?)` turns a saved `transcribe` result into a
 clean-verbatim Markdown draft in a new directory, with a word ledger, review
 items, metadata and the exact prompts and replies. It sends the transcript's
 **text** (never audio) to Claude through the local CLI. That is why it is a
-`claude` capability and not `transcription`, and why it needs no
+`claude` toolset and not `transcription`, and why it needs no
 transcription endpoint. Per chunk of about 900 words, a conservative edit pass
 proposes filler, stutter and restart deletions, punctuation and optional
 glossary candidates, and code validates each against the source words. A
@@ -354,8 +351,7 @@ The file's contents are sent to Anthropic.
 It rests on an **undocumented** Claude Code mechanism: the SDK hides the
 `Artifact` tool unless `CLAUDE_CODE_ARTIFACT` is set, which Jake does for these
 sessions only. It may change without notice, so the tools are off unless
-`artifacts.enabled = true` (`JAKE_TOOLS_ARTIFACTS_ENABLED`) and, under Hermes,
-the `artifact` capability is granted. Each session is guarded before every
+`artifacts.enabled = true` (`JAKE_TOOLS_ARTIFACTS_ENABLED`). Each session is guarded before every
 tool call by a `PreToolUse` hook that judges the raw model input, so it can only
 read the one file and publish it once (or read the one URL); a prompt is not what
 keeps it there. `verified` means the hosted file,
@@ -365,7 +361,7 @@ readback reported `private`. Sharing, listing and deleting are not supported.
 `artifact_update(url, file_path, expected_version_id)` (`jake-tools artifact
 update URL FILE --expected-version-id V`) publishes a file as the **next
 version of an existing private artifact you own**, keeping its URL and id, under
-a separate `artifact_update` grant (it overwrites live content). A separate read
+`artifact_update` (it overwrites live content). A separate read
 first checks the artifact is yours, private and at the version you expect; a
 stale version fails with `plan_stale` and writes nothing. Afterwards another
 read checks the same artifact, unchanged visibility, the new version and the

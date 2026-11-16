@@ -5,9 +5,9 @@ group, so Hermes discovers it in whatever Python environment its installer
 (nixfiles) provides. It loads only when the profile lists ``jake-tools`` in
 ``plugins.enabled``. ``register(ctx)``:
 
-- registers the shared :mod:`jake_tools.operations` for the capabilities
-  named in ``plugins.entries.jake-tools.settings.capabilities`` (none when
-  unset), as native tools of the same names as the MCP server's;
+- registers the shared :mod:`jake_tools.operations` that the profile's
+  configuration makes available, as native tools of the same names as the
+  MCP server's;
 - registers the packaged skills those operations point to, from the same
   ``skills/`` sources the MCP server serves, as ``jake-tools:<skill>``.
 

@@ -332,7 +332,7 @@ everything else. User, project and managed settings stay in force, so
 
 `artifact_publish(file_path)` and `artifact_read(url, ...)` (also
 `jake-tools artifact publish|read`) use that route behind an off-by-default
-`artifacts.enabled` setting and a separate `artifact` Hermes capability. They
+`artifacts.enabled` setting. They
 publish only a new artifact, never update, share, list or delete, and never
 retry. Read their `verified`, `private_confirmed` and `problems` fields, not a
 URL alone. The mechanism is undocumented and may change without notice; whether

@@ -16,13 +16,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from jake_tools.claude_runs.spawn import worker_environment
 from jake_tools.config import Config, load_config
 from jake_tools.hermes.plugin import (
-    SKILLS_DIR,
-    configured_capabilities,
     register_operations,
 )
 from jake_tools.hermes.profile import (
@@ -239,39 +235,40 @@ def test_operations_run_inside_an_event_loop_with_the_callers_context() -> None:
 # --- registration ----------------------------------------------------------
 
 
-def test_only_granted_capabilities_are_registered(tmp_path: Path) -> None:
+def test_every_available_operation_is_registered_without_a_grant(
+    tmp_path: Path,
+) -> None:
     config = config_for(tmp_path, {})
     ctx = RecordingContext()
-    register_operations(ctx, ("claude",), config, lambda: config)
-    assert set(ctx.tools) == {op.name for op in OPERATIONS if op.capability == "claude"}
-    assert {t["toolset"] for t in ctx.tools.values()} == {"jake_tools_claude"}
-    # polish_transcript sends transcript text to Claude, so `claude` grants
-    # it, with the transcription guide that documents it.
-    assert "polish_transcript" in ctx.tools
-    assert ctx.skills == {
-        "claude-delegation": SKILLS_DIR / "claude-delegation" / "SKILL.md",
-        "transcription": SKILLS_DIR / "transcription" / "SKILL.md",
-    }
-
-    nothing = RecordingContext()
-    register_operations(nothing, (), config, lambda: config)
-    assert nothing.tools == {} and nothing.skills == {}
+    register_operations(ctx, config, lambda: config)
+    # Unconfigured: only the transcription endpoint and the experimental
+    # artifact opt-in make an operation unavailable.
+    unavailable = {"transcribe", "artifact_publish", "artifact_read", "artifact_update"}
+    assert set(ctx.tools) == {op.name for op in OPERATIONS} - unavailable
+    # The capability still names each tool's Hermes toolset.
+    for op in OPERATIONS:
+        if op.name in ctx.tools:
+            assert ctx.tools[op.name]["toolset"] == f"jake_tools_{op.capability}"
+    # polish_transcript sends transcript text to Claude: `claude` toolset,
+    # with the transcription guide that documents it.
+    assert ctx.tools["polish_transcript"]["toolset"] == "jake_tools_claude"
+    assert {"newsletter_create", "newsletter_update"} <= set(ctx.tools)
+    assert set(ctx.skills) == {op.skill for op in OPERATIONS if op.name in ctx.tools}
 
 
 def test_transcription_needs_its_endpoint(tmp_path: Path) -> None:
     without = config_for(tmp_path, {})
     ctx = RecordingContext()
-    register_operations(ctx, ("transcription",), without, lambda: without)
-    assert ctx.tools == {} and ctx.skills == {}
+    register_operations(ctx, without, lambda: without)
+    assert "transcribe" not in ctx.tools
 
     with_endpoint = config_for(
         tmp_path, {}, TRANSCRIPTION_API_BASE_URL="https://example.invalid"
     )
     ctx = RecordingContext()
-    register_operations(ctx, ("transcription",), with_endpoint, lambda: with_endpoint)
-    # Local transcription alone never grants sending text to a cloud model.
-    assert set(ctx.tools) == {"transcribe"}
-    assert set(ctx.skills) == {"transcription"}
+    register_operations(ctx, with_endpoint, lambda: with_endpoint)
+    assert ctx.tools["transcribe"]["toolset"] == "jake_tools_transcription"
+    assert "transcription" in ctx.skills
 
 
 def test_registered_skills_are_the_packaged_sources(tmp_path: Path) -> None:
@@ -282,79 +279,41 @@ def test_registered_skills_are_the_packaged_sources(tmp_path: Path) -> None:
         JAKE_TOOLS_ARTIFACTS_ENABLED="true",
     )
     ctx = RecordingContext()
-    register_operations(
-        ctx,
-        ("artifact", "claude", "clockify", "newsletter", "transcription"),
-        config,
-        lambda: config,
-    )
+    register_operations(ctx, config, lambda: config)
     assert sorted(ctx.skills) == sorted(path.name for path in packaged_skills())
     for name, path in ctx.skills.items():
         assert path.is_file() and path.parent.name == name
 
 
-def test_capability_settings_are_validated() -> None:
-    assert configured_capabilities(None) == ()
-    assert configured_capabilities(["transcription", "claude"]) == (
-        "claude",
-        "transcription",
-    )
-    with pytest.raises(ValueError, match="unknown everything"):
-        configured_capabilities(["everything"])
-    with pytest.raises(ValueError, match="list of names"):
-        configured_capabilities("claude")
-
-
-def test_artifact_tools_need_both_the_capability_and_the_setting(
-    tmp_path: Path,
-) -> None:
+def test_artifact_tools_need_only_the_experimental_opt_in(tmp_path: Path) -> None:
+    artifact_tools = {"artifact_publish", "artifact_read", "artifact_update"}
     disabled = config_for(tmp_path, {})
     enabled = config_for(tmp_path, {}, JAKE_TOOLS_ARTIFACTS_ENABLED="true")
 
     ctx = RecordingContext()
-    register_operations(ctx, ("artifact",), disabled, lambda: disabled)
-    assert ctx.tools == {}  # capability alone: the setting is off
+    register_operations(ctx, disabled, lambda: disabled)
+    assert artifact_tools.isdisjoint(ctx.tools)
+    assert "artifact-publishing" not in ctx.skills
 
     ctx = RecordingContext()
-    register_operations(ctx, ("claude", "clockify"), enabled, lambda: enabled)
-    assert "artifact_publish" not in ctx.tools  # setting alone: no capability
-
-    ctx = RecordingContext()
-    register_operations(ctx, ("artifact",), enabled, lambda: enabled)
-    assert set(ctx.tools) == {"artifact_publish", "artifact_read"}
-    assert set(ctx.skills) == {"artifact-publishing"}
-
-    # Overwriting an existing artifact is its own grant, never implied.
-    ctx = RecordingContext()
-    register_operations(ctx, ("artifact_update",), enabled, lambda: enabled)
-    assert set(ctx.tools) == {"artifact_update"}
-    ctx = RecordingContext()
-    register_operations(ctx, ("artifact_update",), disabled, lambda: disabled)
-    assert ctx.tools == {}
+    register_operations(ctx, enabled, lambda: enabled)
+    assert artifact_tools <= set(ctx.tools)
+    assert "artifact-publishing" in ctx.skills
 
 
-def test_newsletter_reads_and_publication_are_separate_grants(tmp_path: Path) -> None:
+def test_newsletter_tools_are_registered_by_default(tmp_path: Path) -> None:
     config = config_for(tmp_path, {})
-
-    reads = RecordingContext()
-    register_operations(reads, ("newsletter",), config, lambda: config)
-    assert set(reads.tools) == {"newsletter_list", "newsletter_get"}
-    assert set(reads.skills) == {"newsletters"}
-
-    writes = RecordingContext()
-    register_operations(writes, ("newsletter_publish",), config, lambda: config)
-    assert set(writes.tools) == {"newsletter_create", "newsletter_update"}
-    assert {t["toolset"] for t in writes.tools.values()} == {
-        "jake_tools_newsletter_publish"
-    }
-    description = writes.tools["newsletter_create"]["schema"]["description"]
+    ctx = RecordingContext()
+    register_operations(ctx, config, lambda: config)
+    reads = {"newsletter_list", "newsletter_get"}
+    writes = {"newsletter_create", "newsletter_update"}
+    assert (reads | writes) <= set(ctx.tools)
+    assert "newsletters" in ctx.skills
+    # Publication safeguards live in the description and the write path,
+    # not in a registration grant.
+    description = ctx.tools["newsletter_create"]["schema"]["description"]
     assert "PUBLICATION ACTION" in description
     assert "jake-tools:newsletters" in description
-
-    # Not granted unless named: an unconfigured profile gets neither.
-    nothing = RecordingContext()
-    register_operations(nothing, (), config, lambda: config)
-    assert nothing.tools == {}
 
 
 def test_microsoft_secrets_come_from_the_profile_not_the_process(
@@ -384,9 +343,7 @@ def test_native_newsletter_tools_read_and_publish_against_a_fake_upstream(
         secrets = {"MICROSOFT_REFRESH_TOKEN": REFRESH_TOKEN}
         config = config_for(tmp_path, secrets, **fake.env())
         ctx = RecordingContext()
-        register_operations(
-            ctx, ("newsletter", "newsletter_publish"), config, lambda: config
-        )
+        register_operations(ctx, config, lambda: config)
         file = tmp_path / "note.txt"
         file.write_bytes(b"attached")
 

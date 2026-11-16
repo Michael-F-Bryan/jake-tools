@@ -125,15 +125,11 @@ def hermes(tmp_path: Path) -> Hermes:
 
 
 @needs_hermes
-def test_the_plugin_registers_what_the_profile_grants(hermes: Hermes) -> None:
+def test_the_plugin_registers_its_available_tools_and_skills(hermes: Hermes) -> None:
     hermes.configure(
         """
         plugins:
           enabled: [jake-tools]
-          entries:
-            jake-tools:
-              settings:
-                capabilities: [claude]
         """
     )
     out = hermes.run(
@@ -142,7 +138,7 @@ def test_the_plugin_registers_what_the_profile_grants(hermes: Hermes) -> None:
         from hermes_cli.plugins import get_plugin_manager
         from agent.terminal_env_registry import plugin_backend_names
         names = registry.get_all_tool_names()
-        emit("tools", sorted(n for n in names if n.startswith(("claude_", "clockify_", "transcribe", "ping"))))
+        emit("tools", sorted(n for n in names if n.startswith(("claude_", "transcribe", "ping"))))
         emit("skills", sorted(get_plugin_manager()._plugin_skills))
         emit("backends", plugin_backend_names())
         emit("skill", call("skill_view", {"name": "jake-tools:claude-delegation"}).get("content", "")[:2000])
@@ -158,7 +154,7 @@ def test_the_plugin_registers_what_the_profile_grants(hermes: Hermes) -> None:
         "claude_transcript",
         "claude_update",
     ]
-    assert out["skills"] == ["jake-tools:claude-delegation"]
+    assert "jake-tools:claude-delegation" in out["skills"]
     assert out["backends"] == []  # the plugin leaves the terminal alone
     assert "# Delegating to Claude" in str(out["skill"])
 
@@ -183,10 +179,6 @@ def test_native_tools_use_only_the_owning_profiles_credentials(
         """
         plugins:
           enabled: [jake-tools]
-          entries:
-            jake-tools:
-              settings:
-                capabilities: [claude, clockify]
         """
     )
     fake_bin = tmp_path / "fake-bin"
@@ -274,10 +266,6 @@ def test_under_the_local_backend_the_plugin_keeps_local_behaviour(
         f"""
         plugins:
           enabled: [jake-tools]
-          entries:
-            jake-tools:
-              settings:
-                capabilities: [clockify]
         terminal:
           backend: local
           cwd: {tmp_path}
@@ -332,10 +320,6 @@ def test_native_compact_supervision_contract(hermes: Hermes, tmp_path: Path) -> 
         """
         plugins:
           enabled: [jake-tools]
-          entries:
-            jake-tools:
-              settings:
-                capabilities: [claude]
         """
     )
     out = hermes.run(

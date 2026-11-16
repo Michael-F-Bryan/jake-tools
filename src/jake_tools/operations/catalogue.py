@@ -43,16 +43,16 @@ OPERATIONS: tuple[Operation, ...] = (
     # Read-only; always listed, and `missing_credentials` until Microsoft is configured.
     newsletter_list.OPERATION,
     newsletter_get.OPERATION,
-    # A separate grant: publishes to, or changes, a list its readers can see.
+    # Publishes to, or changes, a list its readers can see.
     newsletter_create.OPERATION,
     newsletter_update.OPERATION,
-    # Sends transcript text to Claude, so it is a `claude` capability.
+    # Sends transcript text to Claude, so it is in the `claude` capability.
     polish_transcript.OPERATION,
     # Unavailable unless transcription.api_base_url is configured.
     transcribe.OPERATION,
     # Unavailable unless artifacts.enabled: an undocumented Claude Code mechanism.
     artifact_publish.OPERATION,
     artifact_read.OPERATION,
-    # A separate grant: overwrites an existing artifact's live content.
+    # Overwrites an existing artifact's live content.
     artifact_update.OPERATION,
 )

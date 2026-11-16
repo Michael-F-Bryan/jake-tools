@@ -1,8 +1,7 @@
 """``artifact_update``: publish the next version of an existing private artifact.
 
-A separate ``artifact_update`` capability from ``artifact``: it overwrites the
-live content of something that already exists, so granting publish/read does
-not grant it. Also needs ``artifacts.enabled``. :mod:`jake_tools.artifacts`
+A separate ``artifact_update`` capability (toolset) from ``artifact``: it
+overwrites the live content of something that already exists. Needs ``artifacts.enabled``. :mod:`jake_tools.artifacts`
 does the work.
 """
 

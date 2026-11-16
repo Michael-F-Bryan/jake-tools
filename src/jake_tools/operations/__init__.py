@@ -1,7 +1,7 @@
 """The tool operations every agent-facing adapter exposes.
 
 One module per operation. Each defines ``OPERATION``: its name, the
-capability that gates it, its transport-neutral description, the packaged
+capability that groups it, its transport-neutral description, the packaged
 skill that explains it, and ``build(config)``, which returns the async
 handler for one resolved :class:`~jake_tools.config.Config`. The handler's
 parameters are the operation's arguments; it returns a Pydantic result or
@@ -39,7 +39,7 @@ Capability = Literal[
     "newsletter_publish",
     "transcription",
 ]
-"""What an agent can be granted. Each operation belongs to exactly one."""
+"""The group an operation belongs to (a Hermes toolset). Each has exactly one."""
 
 Handler = Callable[..., Awaitable[BaseModel]]
 

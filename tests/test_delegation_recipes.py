@@ -203,7 +203,7 @@ async def test_mcp_serves_the_same_recipes_file_the_native_plugin_registers(
 
     config = config_for(tmp_path, {})
     ctx = RecordingContext()
-    register_operations(ctx, ("claude",), config, lambda: config)
+    register_operations(ctx, config, lambda: config)
     registered = ctx.skills["claude-delegation"]
     assert (registered.parent / "references" / "recipes.md").read_text() == (
         content.text

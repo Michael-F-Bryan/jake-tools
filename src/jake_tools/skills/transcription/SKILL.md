@@ -90,8 +90,8 @@ draft for a person to review, not a verified record.
 - **Cloud boundary.** The transcript's words, timings, labels and any glossary
   go to Anthropic's Claude models through jake-tools' local Claude CLI
   (tool-less calls, no settings files or MCP servers). The audio never does.
-  Do not polish a conversation that must not leave the host. It belongs to the
-  `claude` capability, so a transcription-only grant does not include it.
+  Do not polish a conversation that must not leave the host. It needs no
+  transcription endpoint and is available whenever Claude is.
 - **Paths** are absolute, as jake-tools sees them. The source file is read
   once and never written (its SHA-256 is re-checked). `output_directory` must
   not exist (`invalid_argument` otherwise) and its parent must.

@@ -9,7 +9,7 @@ platforms: [linux, macos, windows]
 
 # CSU Weekly Newsletter entries
 
-Use jake-tools to list and read newsletter list entries and, when granted, to
+Use jake-tools to list and read newsletter list entries and to
 create or update them with attachments. The tools are native Hermes tools from
 the `jake-tools` plugin, or the `jake-tools` MCP server's (Hermes prefixes those
 with `mcp_<server>_`); names below are bare names. Inspect the live input schema
@@ -22,7 +22,7 @@ before calling.
 | `newsletter_create` | **Publication.** Create one entry (+ attachments), then verify. |
 | `newsletter_update` | **Publication.** Change title/body and/or add attachments, then verify. |
 
-Reads and writes are separate grants (`newsletter`, `newsletter_publish`). Not
+Create and update change a list its readers can see. Not
 tools: composing or choosing content, sending the newsletter, deleting entries,
 replacing or removing attachments, mail, OneNote, other SharePoint lists/files.
 

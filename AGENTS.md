@@ -146,7 +146,7 @@ Sub-commands: `serve` (default), `doctor`, `install-skills`, and the hidden
   the tool that needs them and raise `ToolError("missing_credentials", ...)`
   naming the variable, never the value.
 - `operations/<tool>.py` holds one thin handler each as an `Operation`
-  (name, capability, description, skill, `build(config)`), listed in
+  (name, capability (its Hermes toolset group), description, skill, `build(config)`), listed in
   `operations/catalogue.py`; adapters never duplicate an operation's logic,
   schema or description. `mcp/server.py` registers them (plus the MCP-only
   `ping`) through `structured_tool`, which sends the handler's
@@ -388,7 +388,7 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
   pinned document shell (`parse.SHELL_PREFIX`) removed. A different shell is
   an unverified result, not an approximate pass. Re-record
   `tests/artifact_fixtures/` if Claude Code changes its wording.
-- **Update is a separate, narrow grant** (`artifact_update` capability,
+- **Update is a separate, narrow tool** (`artifact_update`,
   `ArtifactGuard.for_update`): the one exact file onto the one exact existing URL,
   after a separate read session proved it is yours, private and at the caller's
   `expected_version_id` (a stale version fails with `plan_stale` before any write
@@ -411,9 +411,8 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
 
 ## Microsoft newsletters (`microsoft_auth`, `newsletter_entries`)
 
-`newsletter_list`/`newsletter_get` (`newsletter` capability) and
-`newsletter_create`/`newsletter_update` (`newsletter_publish`, a separate
-grant: it changes a list its readers can see). Operator docs:
+`newsletter_list`/`newsletter_get` and
+`newsletter_create`/`newsletter_update` (which change a list its readers can see). Operator docs:
 `docs/microsoft-auth.md`; agent guidance: `skills/newsletters`.
 
 - Identity is configuration, never a tool argument or a fallback:

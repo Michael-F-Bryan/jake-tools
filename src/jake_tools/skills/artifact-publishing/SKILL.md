@@ -9,7 +9,7 @@ description: Publish an existing self-contained HTML file as a NEW private Claud
 jake-tools sees it, UTF-8, at most 1 MB) as a **new** artifact on claude.ai through the signed-in
 Claude account, then reads it back in a separate session. `artifact_read(url, ...)` reads one
 artifact back and changes nothing. The tools exist only when `artifacts.enabled` is set
-(`JAKE_TOOLS_ARTIFACTS_ENABLED`) and, under Hermes, the `artifact` capability is granted.
+(`JAKE_TOOLS_ARTIFACTS_ENABLED`).
 
 ## What it is built on (read this first)
 
@@ -70,8 +70,8 @@ be seen), and `output_path` to save the hosted file, shell removed, to a new pat
 ## Updating an existing artifact
 
 `artifact_update(url, file_path, expected_version_id)` publishes the file as the **next version of
-an existing private artifact you own**, same URL and id. It needs the separate `artifact_update`
-grant because it overwrites live content.
+an existing private artifact you own**, same URL and id. It is a separate tool
+because it overwrites live content.
 
 - Pass the version you believe is live (`version_id` from `artifact_read`/`artifact_publish`/a
   previous update). A separate read checks, **before anything is written**, that the artifact is

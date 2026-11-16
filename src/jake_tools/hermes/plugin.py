@@ -6,10 +6,10 @@ import logging
 import os
 from collections.abc import Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, get_args
+from typing import TYPE_CHECKING
 
 from ..config import Config
-from ..operations import Capability, Operation
+from ..operations import Operation
 from ..operations.catalogue import OPERATIONS
 from .profile import profile_config
 from .tools import ConfigFactory, make_handler, signature_metadata, tool_schema
@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
-CAPABILITIES: tuple[str, ...] = get_args(Capability)
 
 
 def register_plugin(ctx: PluginContext) -> None:
@@ -31,7 +30,6 @@ def register_plugin(ctx: PluginContext) -> None:
     # are configured); the profile's secrets are read per call.
     register_operations(
         ctx,
-        configured_capabilities(ctx.get_config("capabilities")),
         current_profile_config(with_secrets=False),
         current_profile_config,
     )
@@ -39,12 +37,11 @@ def register_plugin(ctx: PluginContext) -> None:
 
 def register_operations(
     ctx: PluginContext,
-    capabilities: tuple[Capability, ...],
     config: Config,
     config_factory: ConfigFactory,
 ) -> tuple[Operation, ...]:
-    """Register the granted operations and the skills they point to."""
-    operations = enabled_operations(capabilities, config)
+    """Register the available operations and the skills they point to."""
+    operations = available_operations(config)
     for operation in operations:
         metadata = signature_metadata(operation, config)
         ctx.register_tool(
@@ -56,43 +53,12 @@ def register_operations(
         )
     for skill in skills_for(operations):
         ctx.register_skill(skill, SKILLS_DIR / skill / "SKILL.md")
-    log.info(
-        "jake-tools: capabilities %s; %d tools",
-        ", ".join(capabilities) or "none",
-        len(operations),
-    )
+    log.info("jake-tools: %d tools", len(operations))
     return operations
 
 
-def configured_capabilities(value: object) -> tuple[Capability, ...]:
-    """``plugins.entries.jake-tools.settings.capabilities``, validated.
-
-    Unset means none: an agent gets Jake's tools only when its configuration
-    names them. A malformed value fails the plugin's load (Hermes reports it)
-    rather than guessing.
-    """
-    if value is None:
-        return ()
-    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        raise ValueError("jake-tools settings.capabilities must be a list of names")
-    unknown = sorted(set(value) - set(CAPABILITIES))
-    if unknown:
-        raise ValueError(
-            f"jake-tools settings.capabilities has unknown {', '.join(unknown)}; "
-            f"known: {', '.join(CAPABILITIES)}"
-        )
-    return tuple(c for c in CAPABILITIES if c in value)  # type: ignore[misc]
-
-
-def enabled_operations(
-    capabilities: Iterable[Capability], config: Config
-) -> tuple[Operation, ...]:
-    granted = set(capabilities)
-    return tuple(
-        operation
-        for operation in OPERATIONS
-        if operation.capability in granted and operation.available(config)
-    )
+def available_operations(config: Config) -> tuple[Operation, ...]:
+    return tuple(operation for operation in OPERATIONS if operation.available(config))
 
 
 def skills_for(operations: Iterable[Operation]) -> tuple[str, ...]:

@@ -1,9 +1,9 @@
 """``polish_transcript``: a clean-verbatim draft of a saved ``transcribe`` result.
 
-Part of the ``claude`` capability, not ``transcription``: it sends the
-transcript's words to Anthropic's models through the local Claude CLI
-(tool-less ``ClaudeAgent.run_structured`` calls), and an agent granted only
-local transcription must not gain that. It needs no transcription endpoint,
+Part of the ``claude`` capability (toolset), not ``transcription``: it sends
+the transcript's words to Anthropic's models through the local Claude CLI
+(tool-less ``ClaudeAgent.run_structured`` calls), which local transcription
+never does. It needs no transcription endpoint,
 so it is always available. The handler validates arguments and maps errors;
 :mod:`jake_tools.polishing` does the work.
 """
