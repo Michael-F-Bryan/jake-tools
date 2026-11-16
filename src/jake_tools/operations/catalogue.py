@@ -28,7 +28,6 @@ from . import (
     sharepoint_get,
     sharepoint_list,
     sharepoint_pdf,
-    sharepoint_replace,
     sharepoint_resolve,
     sharepoint_upload,
     transcribe,
@@ -59,9 +58,8 @@ OPERATIONS: tuple[Operation, ...] = (
     sharepoint_list.OPERATION,
     sharepoint_download.OPERATION,
     sharepoint_pdf.OPERATION,
-    # Write to files other people use; verified by readback.
+    # Adds a new file to a library other people use; verified by readback.
     sharepoint_upload.OPERATION,
-    sharepoint_replace.OPERATION,
     # Sends transcript text to Claude; needs no transcription endpoint.
     polish_transcript.OPERATION,
     # Unavailable unless transcription.api_base_url is configured.

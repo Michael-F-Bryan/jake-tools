@@ -255,6 +255,28 @@ against a local fake of the token endpoint, Graph and SharePoint; they do not
 establish live Microsoft compatibility. The `jake-tools newsletter` command
 is separate and still uses the caller's own `az login`.
 
+## SharePoint and Teams file MCP tools
+
+`sharepoint_resolve`, `sharepoint_get`, `sharepoint_list`, `sharepoint_download`,
+`sharepoint_pdf` and `sharepoint_upload` move files between the host and a
+SharePoint/Teams library as the same configured Microsoft account as the newsletter
+tools (the application additionally needs the delegated `Files.ReadWrite.All`
+permission). A SharePoint link on an allowed host (`files.sharepoint_hosts`) or an
+explicit team and channel resolves to a drive item; every item carries its
+drive/item IDs, URL and `etag`/`ctag` version, and a folder listing is one page
+with explicit coverage. A download is saved only if the version did not change
+while reading it; PDF rendering is Microsoft's own, with unsupported source types
+refused up front. A new file chooses `fail` or `rename` on a name clash and never
+overwrites; it is read back and compared byte for byte (`verified: true`), and a
+write that may or may not have happened is `write_uncertain` and is never retried.
+**Replacing an existing file is deliberately not offered**: Microsoft documents
+`if-match` only when an upload session is created, not at the commit, so a
+replacement could silently overwrite an edit made in between (issue #11 keeps
+that criterion open). Guidance: `skill://sharepoint-files`; the same operations are
+available to an operator as `jake-tools files ...`. The tests run the real server,
+clients and token provider against a local fake of the token endpoint and Graph;
+they do not establish live Microsoft compatibility.
+
 ## Transcription MCP tool
 
 When `transcription.api_base_url` (or `TRANSCRIPTION_API_BASE_URL`) is set, the

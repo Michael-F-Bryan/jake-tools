@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fake_drive import DRIVE_ID, ROOT_ID, FakeDrive
+from fake_drive import DRIVE_ID, FakeDrive
 from fake_microsoft import CLIENT_SECRET, REFRESH_TOKEN
 from mcp import ClientSession
 from mcp.types import TextResourceContents
@@ -33,7 +33,6 @@ TOOLS = {
     "sharepoint_download",
     "sharepoint_pdf",
     "sharepoint_upload",
-    "sharepoint_replace",
 }
 LINK = "https://csuses.sharepoint.com/:f:/s/team/EabcDEF?e=SECRETLINKTOKEN"
 
@@ -92,16 +91,12 @@ async def test_discovery_lists_the_tools_bounds_and_the_bundled_guidance(
         resource = await session.read_resource("skill://sharepoint-files")
 
     assert set(tools) >= TOOLS
+    # Replacing an existing file is deliberately not offered (no commit-time
+    # version condition is documented): no tool may be named for it.
+    assert not [name for name in tools if "replace" in name]
     listing = tools["sharepoint_list"].input_schema["properties"]
     assert (listing["limit"]["minimum"], listing["limit"]["maximum"]) == (1, 200)
     assert listing["drive_id"]["pattern"] and listing["item_id"]["pattern"]
-    replace = tools["sharepoint_replace"].input_schema
-    assert set(replace["required"]) == {
-        "drive_id",
-        "item_id",
-        "source_path",
-        "expected_etag",
-    }
     upload = tools["sharepoint_upload"].input_schema["properties"]
     assert upload["on_conflict"]["enum"] == ["fail", "rename"]  # never "replace"
     for name in TOOLS:
@@ -110,15 +105,13 @@ async def test_discovery_lists_the_tools_bounds_and_the_bundled_guidance(
             "Before using this tool, read the MCP resource `skill://sharepoint-files`"
             in description
         )
-    for name in ("sharepoint_upload", "sharepoint_replace"):
-        assert "WRITE ACTION" in (tools[name].description or "")
+    assert "WRITE ACTION" in (tools["sharepoint_upload"].description or "")
     content = resource.contents[0]
     assert isinstance(content, TextResourceContents)
     for needed in (
         "write_uncertain",
-        "plan_stale",
         "unsupported_conversion",
-        "Do NOT just retry",
+        "Replacing an existing file is not offered",
         "verified: true",
     ):
         assert needed in content.text
@@ -173,15 +166,6 @@ async def test_argument_bounds_keep_the_error_contract(
                 },
             ),
             await session.call_tool(
-                "sharepoint_replace",
-                {
-                    "drive_id": DRIVE_ID,
-                    "item_id": "a",
-                    "source_path": "relative.txt",
-                    "expected_etag": "x\ny",
-                },
-            ),
-            await session.call_tool(
                 "sharepoint_download",
                 {"drive_id": DRIVE_ID, "item_id": "a", "destination": "rel.txt"},
             ),
@@ -193,7 +177,7 @@ async def test_argument_bounds_keep_the_error_contract(
 # -- an end-to-end collaboration ---------------------------------------------------
 
 
-async def test_resolve_list_download_conflict_replace_and_new_upload(
+async def test_resolve_list_download_pdf_and_new_uploads(
     mcp_server: ServerFactory,
     fake: FakeDrive,
     env: dict[str, str],
@@ -205,11 +189,9 @@ async def test_resolve_list_download_conflict_replace_and_new_upload(
         channel.id
     )
     fake.links[LINK] = channel.id
-    doc = fake.add_file("Minutes.docx", b"PK minutes v1", parent=channel.id, by="Pat")
+    fake.add_file("Minutes.docx", b"PK minutes v1", parent=channel.id, by="Pat")
     for number in range(3):
         fake.add_file(f"extra{number}.txt", b"e", parent=channel.id)
-    new_doc = tmp_path / "Minutes edited.docx"
-    new_doc.write_bytes(b"PK minutes v2 edited")
     contacts = tmp_path / "contacts.xlsx"
     contacts.write_bytes(b"PK contacts")
     out = tmp_path / "got.docx"
@@ -276,35 +258,6 @@ async def test_resolve_list_download_conflict_replace_and_new_upload(
                 },
             )
         )
-        # Someone else saves while we work on our copy.
-        fake.edit(doc, b"PK minutes v1 + their edit", by="Sam Editor")
-        stale = error(
-            await session.call_tool(
-                "sharepoint_replace",
-                {
-                    "drive_id": DRIVE_ID,
-                    "item_id": entry["item_id"],
-                    "source_path": str(new_doc),
-                    "expected_etag": downloaded["item"]["etag"],
-                },
-            )
-        )
-        current = payload(
-            await session.call_tool(
-                "sharepoint_get", {"drive_id": DRIVE_ID, "item_id": entry["item_id"]}
-            )
-        )
-        replaced = payload(
-            await session.call_tool(
-                "sharepoint_replace",
-                {
-                    "drive_id": DRIVE_ID,
-                    "item_id": entry["item_id"],
-                    "source_path": str(new_doc),
-                    "expected_etag": current["etag"],
-                },
-            )
-        )
         created = payload(
             await session.call_tool(
                 "sharepoint_upload",
@@ -348,18 +301,6 @@ async def test_resolve_list_download_conflict_replace_and_new_upload(
     assert downloaded["item"]["etag"] == entry["etag"]
     assert rendered["format"] == "pdf" and pdf.read_bytes().startswith(b"%PDF-")
 
-    assert stale.code == "plan_stale" and stale.detail
-    assert (
-        stale.detail["reason"] == "version_conflict"
-        and stale.detail["applied"] is False
-    )
-    assert stale.detail["current"]["modified_by"] == "Sam Editor"
-    assert stale.detail["expected_etag"] == downloaded["item"]["etag"]
-    assert replaced["verified"] is True and replaced["operation"] == "replace"
-    assert doc.content == b"PK minutes v2 edited"
-    assert replaced["item"]["etag"] == doc.etag
-    assert replaced["expected_etag"] == current["etag"]
-
     assert created["verified"] and created["renamed"] is False
     assert created["item"]["name"] == "contacts.xlsx"
     assert (clash.code, clash.detail["outcome"], clash.detail["reason"]) == (  # type: ignore[index]
@@ -379,8 +320,6 @@ async def test_resolve_list_download_conflict_replace_and_new_upload(
             pages,
             downloaded,
             rendered,
-            stale.model_dump(),
-            replaced,
             created,
             clash.model_dump(),
             renamed,
@@ -517,37 +456,3 @@ async def test_a_readback_mismatch_is_an_error_that_keeps_the_item_identity(
     assert failure.detail["mismatches"][0].startswith("content")
     assert failure.detail["retry_safe"] is False
     assert "sharepoint_get" in failure.detail["next_step"]
-
-
-async def test_a_replacement_stopped_by_if_match_after_the_check_writes_nothing(
-    mcp_server: ServerFactory, fake: FakeDrive, env: dict[str, str], tmp_path: Path
-) -> None:
-    doc = fake.add_file("plan.docx", b"v1")
-    seen = doc.etag
-    source = tmp_path / "plan.docx"
-    source.write_bytes(b"mine")
-
-    def late_edit() -> None:
-        fake.hooks.pop("before_session")
-        fake.edit(doc, b"their late edit", "Sam Editor")
-
-    fake.hooks["before_session"] = late_edit
-    async with mcp_server(env) as session:
-        result = await session.call_tool(
-            "sharepoint_replace",
-            {
-                "drive_id": DRIVE_ID,
-                "item_id": doc.id,
-                "source_path": str(source),
-                "expected_etag": seen,
-            },
-        )
-
-    failure = error(result)
-    assert failure.code == "plan_stale" and failure.detail
-    assert failure.detail["outcome"] == "not_applied"
-    assert failure.detail["reason"] == "version_conflict"
-    assert failure.detail["retry_safe"] is True
-    assert failure.detail["item"]["modified_by"] == "Sam Editor"
-    assert doc.content == b"their late edit"
-    assert fake.calls("PUT", "/upload/") == []

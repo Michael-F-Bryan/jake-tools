@@ -15,11 +15,11 @@ Graph v1.0):
   ``Location`` that "doesn't require an ``Authorization`` header"
   (``driveitem-get-content``, ``driveitem-get-content-format``);
 * ``POST .../createUploadSession`` is the one upload route: it documents
-  ``if-match`` (``412`` on a stale eTag) and ``@microsoft.graph.conflictBehavior``
-  (``fail`` by default, ``rename``), and the content is then ``PUT`` to the
-  returned ``uploadUrl`` without an ``Authorization`` header
-  (``driveitem-createuploadsession``). ``Upload small files`` documents
-  neither ``if-match`` nor a conflict parameter, so it is not used.
+  ``@microsoft.graph.conflictBehavior`` (``fail`` by default, ``rename``), and
+  the content is then ``PUT`` to the returned ``uploadUrl`` without an
+  ``Authorization`` header (``driveitem-createuploadsession``). Only new files
+  are uploaded: replacing an existing item needs a commit-time version
+  condition, and none is documented for SharePoint (see ``file_transfers``).
 
 No request is ever retried and redirects are never followed implicitly: the
 two that exist (a download's ``Location``) are followed by hand, without the
@@ -44,8 +44,7 @@ from .newsletters import GRAPH_RESOURCE, GRAPH_ROOT
 
 ItemKind = Literal["file", "folder", "other"]
 ConflictBehavior = Literal["fail", "rename"]
-"""``replace`` is deliberately absent: it would overwrite whatever is there,
-which is exactly what a conditional replacement exists to prevent."""
+"""``replace`` is deliberately absent: it would overwrite whatever is there."""
 
 CONTENT_TIMEOUT_SECONDS = (10, 120)
 METADATA_TIMEOUT_SECONDS = 30
@@ -103,7 +102,7 @@ class RemoteItem(BaseModel):
     """A drive item and the version of it that was seen.
 
     ``etag`` changes with any change to the item; ``ctag`` only with a change
-    to its content. Pass ``etag`` back, verbatim, as ``expected_etag``.
+    to its content.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -346,35 +345,22 @@ class DriveClient:
         self,
         drive_id: str,
         *,
-        item_id: str | None = None,
-        parent_id: str | None = None,
-        name: str | None = None,
-        conflict: ConflictBehavior | None = None,
-        if_match: str | None = None,
+        parent_id: str,
+        name: str,
+        conflict: ConflictBehavior,
     ) -> str:
-        """Open an upload session and return its ``uploadUrl`` (a secret).
-
-        Either ``item_id`` (replace that item's content) or ``parent_id`` and
-        ``name`` (a new file). Nothing is written until content is uploaded.
-        """
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if if_match is not None:
-            headers["If-Match"] = if_match
-        if item_id is not None:
-            path = f"{self._item_path(drive_id, item_id)}/createUploadSession"
-            body: dict[str, Any] = {}
-        else:
-            assert parent_id is not None and name is not None
-            path = f"{self._item_path(drive_id, parent_id)}:/{_q(name)}:/createUploadSession"
-            body = {
-                "item": {"@microsoft.graph.conflictBehavior": conflict, "name": name}
-            }
+        """Open an upload session for a NEW file and return its ``uploadUrl``
+        (a secret). Nothing is written until content is uploaded."""
+        path = (
+            f"{self._item_path(drive_id, parent_id)}:/{_q(name)}:/createUploadSession"
+        )
+        body = {"item": {"@microsoft.graph.conflictBehavior": conflict, "name": name}}
         response = self._send(
             "POST",
             self._graph_root + path,
             what="create upload session",
             json=body,
-            headers=headers,
+            headers={"Content-Type": "application/json"},
         )
         session = _parse(
             _UploadSession,

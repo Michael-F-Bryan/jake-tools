@@ -22,7 +22,6 @@ from ..file_transfers import (
     FileInputError,
     FileReadError,
     FileTransferError,
-    VersionConflictError,
 )
 from ..microsoft_auth import MicrosoftAuthError, require_secure_url, shared_provider
 from ..sharepoint_files import DriveClient, FilesError
@@ -37,8 +36,6 @@ TeamId = Annotated[
     str, Field(pattern=r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 ]
 ChannelId = Annotated[str, Field(pattern=r"^[A-Za-z0-9:@._-]{1,200}$")]
-ETag = Annotated[str, Field(min_length=1, max_length=200, pattern=r"^[\x20-\x7e]+$")]
-"""An item's ``etag`` exactly as a result showed it, quotes and braces included."""
 
 
 def drive_client(config: Config) -> DriveClient:
@@ -87,22 +84,6 @@ async def call_files[ResultT: BaseModel](
             detail["reason"] = exc.reason
         detail.update(exc.extra)
         raise ToolError("invalid_argument", str(exc), detail=detail) from exc
-    except VersionConflictError as exc:
-        raise ToolError(
-            "plan_stale",
-            str(exc),
-            detail={
-                "reason": "version_conflict",
-                "applied": False,
-                "expected_etag": exc.expected,
-                "current": exc.current.model_dump(mode="json", exclude_none=True),
-                "next_step": (
-                    "Download the current version, reconcile the other person's "
-                    "edits outside this tool, then call sharepoint_replace with "
-                    "the current etag."
-                ),
-            },
-        ) from exc
     except FileReadError as exc:
         detail = {"reason": exc.reason, "applied": False}
         if exc.item is not None:
@@ -167,8 +148,6 @@ def _write_error(exc: FileTransferError) -> ToolError:
     detail = exc.detail()
     detail["integration"] = "microsoft"
     cause = exc.__cause__
-    if exc.outcome == "not_applied" and exc.reason == "version_conflict":
-        return ToolError("plan_stale", str(exc), detail=detail)
     if exc.outcome == "not_applied" and exc.reason == "name_exists":
         return ToolError("invalid_argument", str(exc), detail=detail)
     if isinstance(cause, FilesError) and cause.status in (401, 403):

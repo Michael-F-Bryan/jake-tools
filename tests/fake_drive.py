@@ -10,16 +10,15 @@ documented contracts (Microsoft Learn, Graph v1.0):
   ``.../children`` paged by ``$top``/``$skiptoken`` and ``@odata.nextLink``;
 * ``GET .../content[?format=pdf]`` answering ``302`` to a pre-authenticated
   ``/download/<token>`` that REFUSES a request carrying ``Authorization``;
-* ``POST .../createUploadSession`` (``if-match`` answered ``412`` when stale;
-  ``@microsoft.graph.conflictBehavior`` honoured at the final fragment, where
-  the documentation says a name conflict surfaces) and ``PUT /upload/<id>``
+* ``POST .../parent:/name:/createUploadSession`` (``@microsoft.graph.conflictBehavior``
+  honoured at the final fragment, where the documentation says a name conflict
+  surfaces) and ``PUT /upload/<id>``
   with ``Content-Range``, also refusing ``Authorization``.
 
-Failure injection reuses ``script`` (keys below). Hooks let a test make a
-concurrent edit land at a chosen moment. It proves the client's and tools'
-mechanics only: it is not Microsoft, and whether SharePoint actually enforces
-``If-Match`` on a session, resolves a given link form, or renders a given file
-is exactly what it cannot say (issue #41).
+Failure injection reuses ``script`` (keys below). Hooks let a test make an
+edit land at a chosen moment. It proves the client's and tools' mechanics only:
+it is not Microsoft, and whether SharePoint resolves a given link form or renders
+a given file is exactly what it cannot say.
 
 Script routes: ``GET shares``, ``GET channel``, ``GET item``, ``GET children``,
 ``GET content``, ``POST session``, ``PUT upload``, ``GET download``.
@@ -82,6 +81,10 @@ class FakeDrive(FakeMicrosoft):
         self.refuse_pdf_names: set[str] = set()
         self.next_node = 1
         self.nodes[ROOT_ID] = Node(ROOT_ID, "root", None, folder=True)
+
+    def start(self) -> FakeDrive:
+        super().start()
+        return self
 
     # -- test helpers ----------------------------------------------------
 
@@ -205,13 +208,6 @@ class FakeDrive(FakeMicrosoft):
             hook()
         stored = body + b"!" if self.corrupt_commit else body
         with self.lock:
-            if session["item_id"] is not None:
-                node = self.nodes[session["item_id"]]
-                node.content = stored
-                node.version += 1
-                node.modified_by = "Jake's Account"
-                self.sessions.pop(session_id)
-                return 200, self._driveitem(node)
             parent, name = session["parent"], session["name"]
             exists = self.named(parent, name)
             if exists is not None:
@@ -325,32 +321,14 @@ class FakeDrive(FakeMicrosoft):
     def _open_session(
         self, node: Node, rest: str, body: bytes
     ) -> tuple[int, Any, bytes | None]:
-        hook = self.hooks.get("before_session")
-        if hook is not None:
-            hook()
-        info: dict[str, Any] = {"item_id": None, "parent": None, "name": None}
+        spec = json.loads(body or b"{}").get("item", {})
+        info: dict[str, Any] = {
+            "parent": node.id,
+            "name": rest.removeprefix(":/").removesuffix(":/createUploadSession"),
+            "conflict": spec.get("@microsoft.graph.conflictBehavior", "fail"),
+        }
+        session_id = uuid.uuid4().hex
         with self.lock:
-            sent = next(
-                (
-                    h
-                    for m, p, h in reversed(self.header_log)
-                    if m == "POST" and p.endswith("createUploadSession")
-                ),
-                {},
-            )
-            if rest == "/createUploadSession":
-                info["item_id"] = node.id
-                condition = sent.get("If-Match")
-                if condition is not None and condition != node.etag:
-                    return 412, {"error": {"code": "preconditionFailed"}}, None
-            else:
-                spec = json.loads(body or b"{}").get("item", {})
-                info.update(
-                    parent=node.id,
-                    name=rest.removeprefix(":/").removesuffix(":/createUploadSession"),
-                    conflict=spec.get("@microsoft.graph.conflictBehavior", "fail"),
-                )
-            session_id = uuid.uuid4().hex
             self.sessions[session_id] = info
         return (
             200,

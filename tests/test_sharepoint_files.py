@@ -14,7 +14,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
-from fake_drive import DRIVE_ID, ROOT_ID, FakeDrive
+from fake_drive import DRIVE_ID, FakeDrive
 from fake_microsoft import ACCOUNT, CLIENT, REFRESH_TOKEN, TENANT
 
 from jake_tools import file_transfers
@@ -22,7 +22,6 @@ from jake_tools.file_transfers import (
     FileInputError,
     FileReadError,
     FileTransferError,
-    VersionConflictError,
     check_link,
     check_name,
     download_file,
@@ -30,7 +29,6 @@ from jake_tools.file_transfers import (
     get_item,
     list_folder,
     read_source,
-    replace_file,
     resolve_channel,
     resolve_link,
     upload_new,
@@ -77,14 +75,6 @@ def headers_of(fake: FakeDrive, method: str, fragment: str) -> dict[str, str]:
     found = requests_to(fake, method, fragment)
     assert found, f"no {method} {fragment}"
     return found[-1]
-
-
-def one_shot(fake: FakeDrive, hook: str, action: Callable[[], None]) -> None:
-    def run() -> None:
-        fake.hooks.pop(hook, None)
-        action()
-
-    fake.hooks[hook] = run
 
 
 # -- locating ------------------------------------------------------------------
@@ -456,7 +446,7 @@ def test_a_new_file_is_created_through_an_upload_session_and_read_back(
 
     saved = fake.named(folder.id, "list 2026.xlsx")
     assert saved is not None and saved.content == b"PK-contact-list"
-    assert result.verified is True and result.operation == "create"
+    assert result.verified is True
     assert result.item.item_id == saved.id and result.item.etag == saved.etag
     assert result.item.parent_id == folder.id and result.renamed is False
     assert result.sha256 == sha(b"PK-contact-list") and result.size_bytes == 15
@@ -687,119 +677,6 @@ def test_the_source_file_is_checked_before_anything_is_sent(
     with pytest.raises(FileInputError) as caught:
         read_source(ok)
     assert caught.value.reason == "too_large"
-
-
-# -- conditional replacement ---------------------------------------------------
-
-
-def replace(client: DriveClient, node_id: str, data: bytes, etag: str):
-    return replace_file(
-        client,
-        drive_id=DRIVE_ID,
-        item_id=node_id,
-        content=data,
-        expected_etag=etag,
-    )
-
-
-def test_a_replacement_at_the_expected_version_sends_if_match_and_verifies(
-    fake: FakeDrive, client: DriveClient
-) -> None:
-    node = fake.add_file("plan.docx", b"v1")
-    before = node.etag
-
-    result = replace(client, node.id, b"version two", before)
-
-    assert result.operation == "replace" and result.verified is True
-    assert node.content == b"version two" and node.version == 2
-    assert result.expected_etag == before and result.item.etag == node.etag
-    assert result.item.etag != before and result.changed_since_write is False
-    assert result.sha256 == sha(b"version two")
-    header = headers_of(fake, "POST", "createUploadSession")
-    assert header["If-Match"] == before  # verbatim, quotes and braces included
-    assert fake.calls("POST", "createUploadSession")[0].path.endswith(
-        f"/items/{node.id}/createUploadSession"
-    )
-
-
-def test_a_file_changed_before_the_call_is_refused_without_a_session(
-    fake: FakeDrive, client: DriveClient
-) -> None:
-    node = fake.add_file("plan.docx", b"v1")
-    seen = node.etag
-    fake.edit(node, b"their edit", by="Sam Editor")
-
-    with pytest.raises(VersionConflictError) as caught:
-        replace(client, node.id, b"mine", seen)
-
-    assert caught.value.expected == seen
-    assert caught.value.current.etag == node.etag
-    assert caught.value.current.modified_by == "Sam Editor"
-    assert node.content == b"their edit"
-    assert fake.calls("POST", "createUploadSession") == []
-    assert fake.calls("PUT", "/upload/") == []
-
-
-def test_an_edit_that_lands_after_the_check_is_stopped_by_if_match(
-    fake: FakeDrive, client: DriveClient
-) -> None:
-    node = fake.add_file("plan.docx", b"v1")
-    seen = node.etag
-    one_shot(fake, "before_session", lambda: fake.edit(node, b"their late edit", "Sam"))
-
-    with pytest.raises(FileTransferError) as caught:
-        replace(client, node.id, b"mine", seen)
-
-    error = caught.value
-    assert (error.outcome, error.reason) == ("not_applied", "version_conflict")
-    assert error.retry_safe and "Download the current version" in error.next_step
-    assert error.item is not None and error.item.etag == node.etag  # who has it now
-    assert error.item.modified_by == "Sam"
-    assert node.content == b"their late edit"  # not overwritten
-    assert fake.calls("PUT", "/upload/") == []  # no content was sent
-
-
-def test_replacing_a_folder_is_refused(fake: FakeDrive, client: DriveClient) -> None:
-    folder = fake.add_folder("Dir")
-    with pytest.raises(FileInputError) as caught:
-        replace(client, folder.id, b"x", folder.etag)
-    assert caught.value.reason == "not_a_file"
-
-
-def test_a_locked_file_is_reported_as_not_applied(
-    fake: FakeDrive, client: DriveClient
-) -> None:
-    node = fake.add_file("plan.docx", b"v1")
-    fake.script["PUT upload"] = ["423"]
-    with pytest.raises(FileTransferError) as caught:
-        replace(client, node.id, b"mine", node.etag)
-    assert (caught.value.outcome, caught.value.reason) == ("not_applied", "locked")
-    assert node.content == b"v1"
-
-
-def test_an_uncertain_replacement_is_not_retried_and_looks_at_the_item(
-    fake: FakeDrive, client: DriveClient
-) -> None:
-    node = fake.add_file("plan.docx", b"v1")
-    fake.script["PUT upload"] = ["apply-then-500"]
-
-    with pytest.raises(FileTransferError) as caught:
-        replace(client, node.id, b"mine now", node.etag)
-
-    assert caught.value.outcome == "write_uncertain"
-    assert caught.value.observed is not None
-    assert caught.value.observed.state == "found_identical"
-    assert len(fake.calls("PUT", "/upload/")) == 1
-
-
-def test_a_replacement_whose_readback_differs_is_not_verified(
-    fake: FakeDrive, client: DriveClient
-) -> None:
-    node = fake.add_file("plan.docx", b"v1")
-    fake.corrupt_commit = True
-    with pytest.raises(FileTransferError) as caught:
-        replace(client, node.id, b"mine now", node.etag)
-    assert caught.value.outcome == "verification_failed"
 
 
 def test_the_token_is_refreshed_not_reused_past_expiry_and_never_in_errors(

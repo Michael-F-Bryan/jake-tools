@@ -141,7 +141,6 @@ async def test_stdio_tool_descriptions_point_to_readable_relevant_skills(
         "sharepoint_download": "sharepoint-files",
         "sharepoint_pdf": "sharepoint-files",
         "sharepoint_upload": "sharepoint-files",
-        "sharepoint_replace": "sharepoint-files",
         "artifact_publish": "artifact-publishing",
         "artifact_read": "artifact-publishing",
         "artifact_update": "artifact-publishing",

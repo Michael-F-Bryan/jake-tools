@@ -1,4 +1,4 @@
-"""SharePoint/Teams file transport: resolve, list, download, upload, replace.
+"""SharePoint/Teams file transport: resolve, list, download, upload a new file.
 
 :class:`~jake_tools.sharepoint_files.DriveClient` is the HTTP; this module owns
 what a caller can trust:
@@ -10,14 +10,12 @@ what a caller can trust:
   while it was read and the bytes are the size the item reported.
 * **Verification.** A write is accepted only after a separate readback of the
   exact item: the bytes are downloaded and compared with what was sent.
-* **No silent overwrite.** A new file chooses ``fail`` or ``rename`` on a name
-  clash, never ``replace``. Replacing needs the ``etag`` the caller last saw: a
-  different current version is refused before anything is sent, and the same
-  ``etag`` is sent as ``If-Match`` when the upload session is created
-  (documented to answer ``412`` if stale). That check is made once, at session
-  creation; the upstream documents no check at the final commit, so the window
-  between them is not closed. The readback proves what is there, not that
-  nobody else wrote in that window.
+* **No overwrite.** A new file chooses ``fail`` or ``rename`` on a name clash,
+  never ``replace``. Replacing an existing file is deliberately NOT offered:
+  Microsoft documents ``if-match`` (``412``) only when an upload session is
+  created, and documents no condition at the commit, so an edit landing in
+  between would be overwritten undetectably. A "conditional replace" that cannot
+  keep that promise is withheld rather than advertised (issue #11).
 * **Honest outcomes.** :class:`FileTransferError` says whether nothing was
   written (``not_applied``), the write may or may not have happened
   (``write_uncertain``), or it happened and the readback disagrees
@@ -29,7 +27,6 @@ This transports files made elsewhere; it never edits their content.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import urllib.parse
 from collections.abc import Callable
@@ -106,9 +103,7 @@ WriteOutcome = Literal[
     "verification_failed",
     "verification_unavailable",
 ]
-WriteReason = Literal[
-    "name_exists", "version_conflict", "locked", "rejected", "no_upload_location"
-]
+WriteReason = Literal["name_exists", "rejected"]
 
 
 class FileInputError(ValueError):
@@ -126,15 +121,6 @@ class FileInputError(ValueError):
         self.argument = argument
         self.reason = reason
         self.extra = detail or {}
-
-
-class VersionConflictError(RuntimeError):
-    """The item is not at the version the caller expected. Nothing was written."""
-
-    def __init__(self, message: str, *, expected: str, current: RemoteItem) -> None:
-        super().__init__(message)
-        self.expected = expected
-        self.current = current
 
 
 class FileReadError(RuntimeError):
@@ -192,20 +178,8 @@ class FileTransferError(RuntimeError):
                 if self.reason == "name_exists":
                     return (
                         "Nothing was written: a file with that name already exists. "
-                        "Pick another name, use on_conflict=rename, or read the "
-                        "existing file and replace it with sharepoint_replace."
-                    )
-                if self.reason == "version_conflict":
-                    return (
-                        "Nothing was written: the file is no longer at the version "
-                        "you expected, so someone else changed it. Download the "
-                        "current version, reconcile their edits outside this tool, "
-                        "then call sharepoint_replace with the new etag."
-                    )
-                if self.reason == "locked":
-                    return (
-                        "Nothing was written: the file is locked (open for editing "
-                        "or checked out). Ask the person, then try again."
+                        "Pick another name or use on_conflict=rename; an existing "
+                        "file is never overwritten."
                     )
                 return "Nothing was written. Fix the cause and call again."
             case "write_uncertain":
@@ -292,12 +266,10 @@ class DownloadResult(BaseModel):
 class UploadResult(BaseModel):
     """A write the readback confirmed. ``item`` is the item as read back."""
 
-    operation: Literal["create", "replace"]
     verified: Literal[True] = True
     item: RemoteItem
     requested_name: str | None = None
     renamed: bool = False
-    expected_etag: str | None = None
     etag_at_write: str | None = None
     changed_since_write: bool
     """True when the item's ``etag`` at readback is not the one the upload
@@ -590,61 +562,9 @@ def upload_new(
     return _verify(
         client,
         written,
-        operation="create",
         content=content,
         requested_name=name,
-        expected_etag=None,
         parent_id=parent_id,
-    )
-
-
-def replace_file(
-    client: DriveClient,
-    *,
-    drive_id: str,
-    item_id: str,
-    content: bytes,
-    expected_etag: str,
-) -> UploadResult:
-    current = client.get_item(drive_id, item_id)
-    if current.kind != "file":
-        raise FileInputError(
-            "item_id",
-            f"{current.name!r} is a {current.kind}; only a file can be replaced",
-            reason="not_a_file",
-        )
-    if current.etag != expected_etag:
-        raise VersionConflictError(
-            f"{current.name!r} is at etag {current.etag}, not the {expected_etag} "
-            "you expected: it was changed since you read it. Nothing was written.",
-            expected=expected_etag,
-            current=current,
-        )
-    try:
-        written = _write(
-            client,
-            drive_id=drive_id,
-            name=current.name,
-            content=content,
-            open_session=lambda: client.create_upload_session(
-                drive_id, item_id=item_id, if_match=expected_etag
-            ),
-            look=lambda: client.get_item(drive_id, item_id),
-        )
-    except FileTransferError as exc:
-        if exc.reason == "version_conflict":
-            # The upstream refused the If-Match: show who has the file now.
-            with contextlib.suppress(UpstreamError):
-                exc.item = client.get_item(drive_id, item_id)
-        raise
-    return _verify(
-        client,
-        written,
-        operation="replace",
-        content=content,
-        requested_name=None,
-        expected_etag=expected_etag,
-        parent_id=None,
     )
 
 
@@ -666,7 +586,7 @@ def _write(
         raise FileTransferError(
             "not_applied",
             f"could not start the upload: {exc}",
-            reason=_reason(exc, at_session=True),
+            reason=_reason(exc),
             drive_id=drive_id,
             name=name,
         ) from exc
@@ -677,7 +597,7 @@ def _write(
             raise FileTransferError(
                 "not_applied",
                 f"the upload was rejected: {exc}",
-                reason=_reason(exc, at_session=False),
+                reason=_reason(exc),
                 drive_id=drive_id,
                 name=name,
             ) from exc
@@ -690,13 +610,9 @@ def _write(
         ) from exc
 
 
-def _reason(exc: FilesError, *, at_session: bool) -> WriteReason | None:
-    if exc.status == 412:
-        return "version_conflict"
+def _reason(exc: FilesError) -> WriteReason | None:
     if exc.status == 409 or exc.code == "nameAlreadyExists":
         return "name_exists"
-    if exc.status == 423 or exc.code == "resourceLocked":
-        return "locked"
     return "rejected" if exc.rejected else None
 
 
@@ -710,15 +626,18 @@ def _observe(
     and changes nothing."""
     try:
         item = look()
-        if item is None:
-            return Observation(state="not_found")
-        if item.kind != "file":
-            return Observation(state="found_different", item=item)
+    except UpstreamError, OSError:
+        return Observation(state="unreadable")
+    if item is None:
+        return Observation(state="not_found")
+    if item.kind != "file":
+        return Observation(state="found_different", item=item)
+    try:
         found = client.download(drive_id, item.item_id, max_bytes=len(content) + 1)
     except TooLargeError:
         return Observation(state="found_different", item=item)
     except UpstreamError, OSError:
-        return Observation(state="unreadable")
+        return Observation(state="unreadable", item=item)
     return Observation(
         state="found_identical" if found == content else "found_different", item=item
     )
@@ -728,11 +647,9 @@ def _verify(
     client: DriveClient,
     written: RemoteItem,
     *,
-    operation: Literal["create", "replace"],
     content: bytes,
     requested_name: str | None,
-    expected_etag: str | None,
-    parent_id: str | None,
+    parent_id: str,
 ) -> UploadResult:
     drive_id = written.drive_id
     found: bytes | None
@@ -777,11 +694,9 @@ def _verify(
             changed_since_write=changed,
         )
     return UploadResult(
-        operation=operation,
         item=item,
         requested_name=requested_name,
         renamed=requested_name is not None and item.name != requested_name,
-        expected_etag=expected_etag,
         etag_at_write=written.etag,
         changed_since_write=changed,
         size_bytes=len(content),

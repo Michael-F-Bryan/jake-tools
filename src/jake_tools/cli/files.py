@@ -29,7 +29,6 @@ from jake_tools.operations import (
     sharepoint_get,
     sharepoint_list,
     sharepoint_pdf,
-    sharepoint_replace,
     sharepoint_resolve,
     sharepoint_upload,
 )
@@ -57,7 +56,7 @@ def _run(operation: Operation, as_json: bool, **arguments: Any) -> None:
 
 @click.group()
 def files() -> None:
-    """Resolve, list, download, upload and replace SharePoint/Teams files.
+    """Resolve, list, download and upload SharePoint/Teams files.
 
     Acts as the one Microsoft account configured for jake-tools. Items are
     addressed by DRIVE_ID and ITEM_ID, as `resolve` and `list` print them.
@@ -175,28 +174,4 @@ def upload_command(
         source_path=source_path,
         name=name,
         on_conflict=on_conflict,
-    )
-
-
-@files.command("replace")
-@click.argument("drive_id")
-@click.argument("item_id")
-@click.argument("source_path")
-@click.option(
-    "--expected-etag",
-    required=True,
-    help="The etag you last saw, exactly; a different current version writes nothing.",
-)
-@json_option
-def replace_command(
-    drive_id: str, item_id: str, source_path: str, expected_etag: str, as_json: bool
-) -> None:
-    """Replace file ITEM_ID with SOURCE_PATH only if it is still at the expected etag."""
-    _run(
-        sharepoint_replace.OPERATION,
-        as_json,
-        drive_id=drive_id,
-        item_id=item_id,
-        source_path=source_path,
-        expected_etag=expected_etag,
     )

@@ -58,11 +58,12 @@ def run(env: dict[str, str], *args: str) -> Result:
 def test_the_group_is_registered_and_documented() -> None:
     result = CliRunner().invoke(main, ["files", "--help"])
     assert result.exit_code == 0
-    for command in ("resolve", "get", "list", "download", "pdf", "upload", "replace"):
+    assert "replace" not in result.output.lower()  # not offered, on purpose
+    for command in ("resolve", "get", "list", "download", "pdf", "upload"):
         assert command in result.output
 
 
-def test_resolve_list_download_replace_and_upload_from_a_shell(
+def test_resolve_list_download_and_upload_from_a_shell(
     fake: FakeDrive, env: dict[str, str], tmp_path: Path
 ) -> None:
     folder = fake.add_folder("Contacts")
@@ -75,37 +76,16 @@ def test_resolve_list_download_replace_and_upload_from_a_shell(
     resolved = run(env, "resolve", "--url", LINK, "--json")
     listing = run(env, "list", DRIVE_ID, folder.id, "--limit", "5")
     downloaded = run(env, "download", DRIVE_ID, doc.id, str(out), "--json")
-    etag = json.loads(downloaded.output)["item"]["etag"]
-    replaced = run(
-        env, "replace", DRIVE_ID, doc.id, str(new), "--expected-etag", etag, "--json"
-    )
     created = run(env, "upload", DRIVE_ID, folder.id, str(new), "--name", "copy.docx")
 
-    for result in (resolved, listing, downloaded, replaced, created):
+    for result in (resolved, listing, downloaded, created):
         assert result.exit_code == 0, result.output
     assert json.loads(resolved.output)["item"]["item_id"] == folder.id
     assert "plan.docx" in listing.output and "complete: True" in listing.output
     assert out.read_bytes() == b"v1"
-    assert json.loads(replaced.output)["verified"] is True
-    assert doc.content == b"v2 bytes"
+    assert doc.content == b"v1"
     assert "verified: True" in created.output
     assert fake.named(folder.id, "copy.docx") is not None
-
-
-def test_a_stale_replacement_exits_nonzero_and_prints_the_conflict(
-    fake: FakeDrive, env: dict[str, str], tmp_path: Path
-) -> None:
-    doc = fake.add_file("plan.docx", b"v1")
-    seen = doc.etag
-    fake.edit(doc, b"their edit", "Sam Editor")
-    new = tmp_path / "new.docx"
-    new.write_bytes(b"mine")
-
-    result = run(env, "replace", DRIVE_ID, doc.id, str(new), "--expected-etag", seen)
-
-    assert result.exit_code != 0
-    assert "plan_stale" in result.output and "Sam Editor" in result.output
-    assert doc.content == b"their edit"
 
 
 def test_an_uncertain_upload_prints_its_outcome_and_next_step(
