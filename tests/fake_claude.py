@@ -736,6 +736,9 @@ def main() -> None:
             {k: v for k, v in os.environ.items() if k.startswith("CLAUDE_CODE_")}
         )
     )
+    names_file = os.environ.get("FAKE_CLAUDE_ENV_NAMES_FILE")
+    if names_file:  # opt-in: let a test observe what the worker handed down
+        Path(names_file).write_text(json.dumps(dict(os.environ)))
     args = parse_args(argv)
     session = Session(args)
     if args.get("resume") and not args.get("fork-session"):

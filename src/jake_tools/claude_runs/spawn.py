@@ -92,9 +92,7 @@ def worker_environment(environ: Mapping[str, str] | None = None) -> dict[str, st
     return {key: value for key, value in source.items() if key not in dropped}
 
 
-def spawn_worker(
-    run_dir: Path, environ: Mapping[str, str] | None = None
-) -> subprocess.Popen[bytes]:
+def spawn_worker(run_dir: Path) -> subprocess.Popen[bytes]:
     """Start ``python -m jake_tools.mcp worker RUN_DIR`` in its own session.
 
     stdin is ``/dev/null``; stdout and stderr go to ``worker.stdout`` and
@@ -117,7 +115,7 @@ def spawn_worker(
             stdout=stdout_fd,
             stderr=stderr_fd,
             cwd=run_dir,
-            env=worker_environment(environ),
+            env=worker_environment(),
             start_new_session=True,
             close_fds=True,
         )

@@ -431,7 +431,6 @@ async def test_every_available_operation_is_listed_exactly_once_without_a_grant(
     everything = sorted(op.name for op in OPERATIONS)
     assert sorted(full) == sorted([*everything, "ping"])
     assert len(plain) == len(set(plain))
-    assert "transcribe" not in plain and "transcribe" in full
     assert sorted(set(everything) - set(plain)) == sorted(
         {"transcribe", "artifact_publish", "artifact_read", "artifact_update"}
     )
@@ -470,11 +469,9 @@ async def test_every_tool_description_names_a_listed_guide(
         if tool.name == "ping":
             continue
         description = tool.description or ""
-        assert (
-            f"`skill://{next(o for o in OPERATIONS if o.name == tool.name).skill}`"
-            in description
-        )
-        assert any(f"`{uri}`" in description for uri in listed), tool.name
+        uri = f"skill://{next(o for o in OPERATIONS if o.name == tool.name).skill}"
+        assert uri in listed, tool.name
+        assert f"`{uri}`" in description, tool.name
 
 
 def test_packaged_guidance_has_no_native_only_instruction() -> None:
@@ -489,6 +486,7 @@ def test_packaged_guidance_has_no_native_only_instruction() -> None:
 
 def test_nothing_in_the_package_imports_hermes_and_no_plugin_entry_point() -> None:
     import ast
+    import tomllib
     from importlib.metadata import entry_points
 
     root = Path(__file__).resolve().parent.parent / "src" / "jake_tools"
@@ -505,6 +503,12 @@ def test_nothing_in_the_package_imports_hermes_and_no_plugin_entry_point() -> No
             )
             for name in names:
                 assert name.split(".")[0] not in banned, f"{path}: {name}"
+    pyproject = tomllib.loads(
+        (root.parent.parent / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert "hermes_agent.plugins" not in pyproject.get("project", {}).get(
+        "entry-points", {}
+    )
     assert not [
         e for e in entry_points(group="hermes_agent.plugins") if e.name == "jake-tools"
     ]

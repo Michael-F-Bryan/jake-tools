@@ -31,7 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 
@@ -348,12 +348,8 @@ def start_task(
     runs_dir: Path,
     request: StartRequest,
     defaults: RunDefaults,
-    environ: Mapping[str, str] | None = None,
 ) -> ClaudeStartResult:
     """Create the run directory, spawn the worker, return once it is durable.
-
-    ``environ`` is the environment the worker is derived from (default: this
-    process's); see :func:`~.spawn.worker_environment`.
 
     With a ``request_id`` already on record, returns that task
     (``replayed``) or raises :class:`RequestConflictError`, before any
@@ -402,7 +398,7 @@ def start_task(
         if request.request_id is not None:
             _record_request_locked(runs_dir, request, spec.task_id)
         try:
-            process = spawn_worker(run_dir, environ)
+            process = spawn_worker(run_dir)
         except OSError as exc:
             reason = exc.strerror or type(exc).__name__
             update_state(
