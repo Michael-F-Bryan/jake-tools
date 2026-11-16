@@ -14,30 +14,42 @@
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
-      # Build the package and native Hermes plugin into an installer-chosen
-      # interpreter's environment (nixfiles installs it into Hermes):
-      #   jake-tools.lib.mkHermesPlugin {
-      #     inherit pkgs python;
-      #     lockedDependencies = [ ... ];  # what that environment lacks
-      #   }
-      lib.mkHermesPlugin = import ./nix/hermes-plugin.nix;
-
-      # The native transcription service, built with nixpkgs' Swift and Apple
-      # SDK, and its pinned models as an immutable `--models-dir`.
-      packages.aarch64-darwin =
+      # The standalone Jake package on every system; on macOS also the native
+      # transcription service, built with nixpkgs' Swift and Apple SDK, and its
+      # pinned models as an immutable `--models-dir`.
+      packages = forAllSystems (
+        pkgs:
         let
-          pkgs = nixpkgs.legacyPackages.aarch64-darwin;
+          jake-tools = pkgs.callPackage ./nix/package.nix { python = pkgs.python314; };
         in
         {
+          # `bin/jake-tools` and `bin/jake-tools-mcp` on their own Python with
+          # the dependencies pinned in uv.lock; Hermes launches the latter as
+          # a stdio MCP server (docs/hermes-mcp.md).
+          inherit jake-tools;
+          default = jake-tools;
+        }
+        // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "aarch64-darwin") {
           transcription-service = pkgs.callPackage ./nix/transcription-service.nix { };
           transcription-models = pkgs.callPackage ./nix/transcription-models.nix { };
-        };
+        }
+      );
 
-      # The Swift tests (mechanics, stub engine) under the same toolchain:
+      # `jake-tools` smoke test: both entry points start (the build itself
+      # imports `jake_tools.mcp.server`).
+      #
+      # The Swift tests (mechanics, stub engine) run under the same toolchain:
       #   nix build .#checks.aarch64-darwin.transcription-service
-      checks.aarch64-darwin.transcription-service =
-        self.packages.aarch64-darwin.transcription-service.overrideAttrs
-          { doCheck = true; };
+      checks =
+        nixpkgs.lib.recursiveUpdate
+          (forAllSystems (pkgs: {
+            jake-tools = self.packages.${pkgs.stdenv.hostPlatform.system}.jake-tools.tests.smoke;
+          }))
+          {
+            aarch64-darwin.transcription-service =
+              self.packages.aarch64-darwin.transcription-service.overrideAttrs
+                { doCheck = true; };
+          };
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShellNoCC {
