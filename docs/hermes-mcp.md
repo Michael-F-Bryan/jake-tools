@@ -29,7 +29,7 @@ Hermes (`e96221f`, read from its installed source) or a live deployment.
 Install the Nix package from this flake:
 `jake-tools.packages.${system}.jake-tools` (also `default`). It provides
 `bin/jake-tools-mcp` and `bin/jake-tools`, on its own Python with a runtime
-closure taken from `uv.lock`. The consumer's `flake.lock` pins the revision.
+closure taken from `uv.lock` (built with uv2nix from the locked wheels). The consumer's `flake.lock` pins the revision.
 Do not run `uv run --project` against a checkout for a deployed agent.
 
 ## 3. The `mcp_servers.jake-tools` entry

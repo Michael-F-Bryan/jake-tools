@@ -1,10 +1,32 @@
 {
   description = "Development environment for jake-tools";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+    # Build the Python package from uv.lock.
+    pyproject-nix.url = "github:pyproject-nix/pyproject.nix";
+    pyproject-nix.inputs.nixpkgs.follows = "nixpkgs";
+
+    uv2nix.url = "github:pyproject-nix/uv2nix";
+    uv2nix.inputs.pyproject-nix.follows = "pyproject-nix";
+    uv2nix.inputs.nixpkgs.follows = "nixpkgs";
+
+    pyproject-build-systems.url = "github:pyproject-nix/build-system-pkgs";
+    pyproject-build-systems.inputs.pyproject-nix.follows = "pyproject-nix";
+    pyproject-build-systems.inputs.uv2nix.follows = "uv2nix";
+    pyproject-build-systems.inputs.nixpkgs.follows = "nixpkgs";
+  };
 
   outputs =
-    { self, nixpkgs, ... }:
+    {
+      self,
+      nixpkgs,
+      pyproject-nix,
+      uv2nix,
+      pyproject-build-systems,
+      ...
+    }:
     let
       systems = [
         "aarch64-linux"
@@ -20,7 +42,9 @@
       packages = forAllSystems (
         pkgs:
         let
-          jake-tools = pkgs.callPackage ./nix/package.nix { python = pkgs.python314; };
+          jake-tools = pkgs.callPackage ./nix/package.nix {
+            inherit pyproject-nix uv2nix pyproject-build-systems;
+          };
         in
         {
           # `bin/jake-tools` and `bin/jake-tools-mcp` on their own Python with
