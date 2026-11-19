@@ -35,8 +35,11 @@ reopens one that Jira says is finished.
 Explicit selection overrides those discovery filters and nothing else. Each
 requested issue still needs a resolvable `Project / Phase` ancestor and passes
 the duplicate and wrong-project checks, so a problem is a conflict naming that
-key. A key Jira cannot return fails the call as `upstream_error` naming it.
-Ancestors fetched for placement are not selected. What an explicit issue gets:
+key (an ambiguous phase project also blocks each requested issue under it,
+with a reason of its own). A key Jira cannot return fails the call as
+`upstream_error` naming it. Ancestors fetched for placement are not selected:
+their phase project is checked, but their own Clockify tasks are never created,
+renamed or completed. What an explicit issue gets:
 
 - **No Clockify task yet.** Backlog, TRIAGE, Investigate, To Do or underway: one
   `CREATE_TASK`, active. Done or Won’t Do: `CREATE_TASK` **then**
@@ -47,8 +50,10 @@ Ancestors fetched for placement are not selected. What an explicit issue gets:
   complete reconciliation applies, and a task already in the right state has no
   actions at all.
 
-`active_issues` in the report's `inventory` keeps its name but counts the
-issues the scope selected, Done ones included when `issues` is given.
+`inventory.active_issues` counts planned or underway issues: all discovered
+ones, or the requested ones whose Jira status category is not Done. A requested
+Done issue is still planned without being counted, so `active_issues: 0` does
+not mean nothing was selected; read `actions` and `conflicts`.
 
 ## Discovery, configuration and scope
 

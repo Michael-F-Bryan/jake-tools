@@ -712,7 +712,8 @@ async def test_explicit_finished_issue_assigned_elsewhere_is_created_completed(
         # Preview is read-only and names both writes, in order.
         assert upstream.writes == []
         assert preview["scope"]["kind"] == "issues"
-        assert preview["inventory"]["active_issues"] == 1
+        # Planned, but a finished issue is not counted as planned or underway.
+        assert preview["inventory"]["active_issues"] == 0
         assert preview["conflicts"] == []
         assert _summary(preview) == [
             ("CREATE_TASK", "SF-691"),

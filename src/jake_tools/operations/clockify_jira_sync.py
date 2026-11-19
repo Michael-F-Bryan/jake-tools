@@ -54,8 +54,8 @@ Review, and Backlog, TRIAGE, and Investigate are not automatically created.
 Explicit selection never bypasses placement under a Project / Phase ancestor,
 duplicate or wrong-project conflicts, the digest, or verification. A key that
 cannot be planned is a conflict naming it, and one Jira cannot return fails the
-call with an upstream_error naming it. Fetched ancestors are for placement only
-and are not selected.
+call with an upstream_error naming it. Fetched ancestors are for placement only:
+their phase project is checked, but their own tasks are never touched.
 
 Only Jira status category Done completes a task. A missing task for a Done or
 Won't Do issue is planned as CREATE_TASK followed by MARK_TASK_DONE for the

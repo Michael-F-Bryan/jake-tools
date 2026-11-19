@@ -1103,6 +1103,104 @@ def test_explicit_done_issue_with_bad_task_mapping_is_a_keyed_conflict(
     assert clockify.operations == []
 
 
+@pytest.mark.parametrize("ancestor_state", ["done-active-task", "renamed-task"])
+def test_explicit_issue_leaves_the_tasks_of_its_ancestors_alone(
+    ancestor_state: str,
+) -> None:
+    ancestor = jira_issue(
+        "SF-200",
+        "Intermediate",
+        issue_type="Feature",
+        status="Done" if ancestor_state == "done-active-task" else "To Do",
+        status_category="Done" if ancestor_state == "done-active-task" else "To Do",
+    )
+    leaf = jira_issue(
+        "SF-691",
+        "Leaf",
+        status="Done",
+        status_category="Done",
+        issue_type="Subtask",
+        parent_key="SF-200",
+    )
+    stale = clockify_task("SF-200", "Old summary")
+    clockify, jira = _explicit_clients(leaf, ancestors=[ancestor], tasks=[stale])
+
+    snapshot = _prepare_explicit(clockify, jira, "SF-691")
+
+    assert [(a.kind, a.jira_key) for a in snapshot.plan.actions] == [
+        (SyncActionKind.CREATE_TASK, "SF-691"),
+        (SyncActionKind.MARK_TASK_DONE, "SF-691"),
+    ]
+    assert snapshot.selected_issues == (leaf,)
+
+
+def test_duplicate_ancestor_task_does_not_block_an_explicit_issue() -> None:
+    ancestor = jira_issue("SF-200", "Intermediate", issue_type="Feature")
+    leaf = jira_issue("SF-691", "Leaf", issue_type="Subtask", parent_key="SF-200")
+    clockify, jira = _explicit_clients(
+        leaf,
+        ancestors=[ancestor],
+        tasks=[
+            clockify_task("SF-200", "Intermediate"),
+            clockify_task("SF-200", "Intermediate", task_id="duplicate"),
+        ],
+    )
+
+    snapshot = _prepare_explicit(clockify, jira, "SF-691")
+
+    assert [(a.kind, a.jira_key) for a in snapshot.plan.actions] == [
+        (SyncActionKind.CREATE_TASK, "SF-691")
+    ]
+
+
+def test_explicit_done_issue_under_duplicate_phase_gets_its_own_reason() -> None:
+    leaf = jira_issue(
+        "SF-691", "Leaf", status="Done", status_category="Done", assignee="David"
+    )
+    project = clockify_project("SF-131", "Production Vehicle")
+    clockify, jira = _explicit_clients(
+        leaf,
+        projects=[project, project.model_copy(update={"id": "duplicate-project"})],
+    )
+
+    snapshot = _prepare_explicit(clockify, jira, "SF-691")
+
+    conflicts = {a.jira_key: a for a in snapshot.plan.actions}
+    assert set(conflicts) == {"SF-131", "SF-691"}
+    assert all(isinstance(a, ConflictAction) for a in conflicts.values())
+    assert "SF-131" in conflicts["SF-691"].message
+    assert "multiple active Clockify projects" in conflicts["SF-691"].message
+    report = SyncReport.from_snapshot(
+        snapshot, jira_project="SF", clockify_client="Sunfish Robotics"
+    )
+    assert report.actions == ()
+    assert {c.jira_key for c in report.conflicts} == {"SF-131", "SF-691"}
+
+
+def test_report_counts_requested_done_issues_as_planned_but_not_active() -> None:
+    done = jira_issue("SF-691", "Leaf", status="Done", status_category="Done")
+    clockify, jira = _explicit_clients(done)
+    explicit = SyncReport.from_snapshot(
+        _prepare_explicit(clockify, jira, "SF-691"),
+        jira_project="SF",
+        clockify_client="Sunfish Robotics",
+    )
+    assert explicit.inventory.active_issues == 0
+    assert [a.kind for a in explicit.actions] == [
+        SyncActionKind.CREATE_TASK,
+        SyncActionKind.MARK_TASK_DONE,
+    ]
+
+    jira.active_issues = [jira_issue("SF-700", "Planned", status="To Do")]
+    jira.issues["SF-700"] = jira.active_issues[0]
+    automatic = SyncReport.from_snapshot(
+        _prepare_explicit(clockify, jira),
+        jira_project="SF",
+        clockify_client="Sunfish Robotics",
+    )
+    assert automatic.inventory.active_issues == 1
+
+
 def test_automatic_discovery_still_selects_only_what_jira_discovery_returns() -> None:
     discovered = jira_issue("SF-700", "Planned", status="To Do")
     finished = jira_issue(
@@ -1344,8 +1442,15 @@ def test_deep_ancestry_preserves_task_updates_and_conflict_guards(
         issue_keys=[issue.key],
     )
 
-    assert len(snapshot.plan.actions) == 1
-    action = snapshot.plan.actions[0]
+    if state == "duplicate-phase":
+        # The ambiguous phase, and the requested issue it blocks.
+        assert [(a.kind, a.jira_key) for a in snapshot.plan.actions] == [
+            (SyncActionKind.CONFLICT, "SF-326"),
+            (SyncActionKind.CONFLICT, "SF-4"),
+        ]
+        assert "SF-4" in snapshot.plan.actions[0].message
+    assert len(snapshot.plan.actions) == (2 if state == "duplicate-phase" else 1)
+    action = snapshot.plan.actions[-1]
     assert action.kind == expected_kind
     if expected_kind == SyncActionKind.CONFLICT:
         assert message in action.message

@@ -512,10 +512,13 @@ def plan_jira_sync(
         if managed_keys is None
         else index.conflicted_project_keys & managed_keys
     )
+    # With explicit issues, managed_keys also holds the ancestors fetched for
+    # placement. Their phase projects are guarded (the task lands there), but
+    # only the selected keys' own tasks are reconciled, so only theirs conflict.
     conflict_task_keys = (
         index.conflicted_task_keys
         if managed_keys is None
-        else index.conflicted_task_keys & managed_keys
+        else index.conflicted_task_keys & selected_by_key.keys()
     )
 
     for key in sorted(conflict_project_keys):
@@ -611,6 +614,18 @@ def plan_jira_sync(
             )
             continue
         if phase.key in conflict_project_keys:
+            if managed_keys is not None:
+                # Say why this requested issue produced no task action.
+                actions.append(
+                    ConflictAction(
+                        jira_key=issue.key,
+                        project_key=phase.key,
+                        message=(
+                            f"cannot place {issue.key}: multiple active Clockify "
+                            f"projects reference its Project / Phase {phase.key}"
+                        ),
+                    )
+                )
             continue
 
         plan_project(phase.key, phase.summary)
@@ -682,7 +697,10 @@ def plan_jira_sync(
                 )
             )
 
-    for key, task in sorted(task_by_key.items()):
+    # Explicit issues reconcile exactly the selected tasks (above): a fetched
+    # ancestor is placement, not selection, so its own task is left alone.
+    other_tasks = task_by_key if managed_keys is None else {}
+    for key, task in sorted(other_tasks.items()):
         if key in conflict_task_keys or key in selected_by_key:
             continue
         issue = jira_by_key.get(key)
@@ -961,9 +979,10 @@ class SyncReportScope(BaseModel):
 class SyncReportInventory(BaseModel):
     """Counts behind a report.
 
-    ``active_issues`` keeps its published name but counts the issues the scope
-    selected: assigned planned or underway work, or every requested issue
-    (Done ones included) when ``issues`` was given.
+    ``active_issues`` is the planned or underway issues the scope selected:
+    all of the discovered issues, or the requested ones whose Jira status
+    category is not Done. A requested Done issue is still planned (and
+    created, then completed, when missing) without being counted here.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -1099,7 +1118,11 @@ class SyncReport(BaseModel):
                 issue_keys=snapshot.requested_issue_keys,
             ),
             inventory=SyncReportInventory(
-                active_issues=len(snapshot.selected_issues),
+                active_issues=sum(
+                    snapshot.scope == SyncScope.ASSIGNED_ACTIVE
+                    or issue.status_category != "Done"
+                    for issue in snapshot.selected_issues
+                ),
                 jira_issues=len(snapshot.jira_issues),
                 projects=len(snapshot.projects),
                 tasks=len(snapshot.tasks),
