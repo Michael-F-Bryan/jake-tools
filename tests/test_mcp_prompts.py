@@ -24,7 +24,7 @@ async def test_issue_prompts(
     boundaries = {
         "issue_discovery": "This is discovery, not implementation.",
         "issue_planning": "This is planning, not permission to implement.",
-        "issue_maintainer_review": "Review only. Don't implement changes",
+        "issue_maintainer_review": "Review only. Do not implement changes",
     }
     async with mcp_server(mcp_env) as session:
         catalogue = {p.name: p for p in (await session.list_prompts()).prompts}

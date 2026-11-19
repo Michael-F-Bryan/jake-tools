@@ -44,6 +44,8 @@ Give the reader a concrete model before introducing compressed technical labels.
 
 Retain the specifics that constrain implementation: relevant interfaces, rules, thresholds, state transitions, ownership boundaries and affected source locations. Use a small table, diagram or code/configuration snippet when it explains these more clearly than prose. Do not add snippets for appearance, or present unqualified syntax as settled design.
 
+Where the proposal changes a public API or communication between components, sketch the affected contract and interaction: who initiates the operation, what crosses the boundary, how success or failure is reported, and who owns the resulting state and lifecycle. Show the relevant request/response, event or message shape, or a short interaction sequence where useful. Distinguish existing contracts from proposed changes, and cover compatibility with current consumers. Specify enough to expose consequential design choices without prescribing every field or internal helper. If no contract change is needed, say which existing interaction is being reused.
+
 Explain each mechanism alongside the behaviour or guarantee it supports. Keep separate concerns in separate paragraphs or bullets; do not turn bullets into compressed specifications.
 
 3. Delivery
@@ -75,16 +77,72 @@ Read back the published comment and return its URL. Do not change code, the issu
 
 def issue_maintainer_review(issue_url: str) -> str:
     """Challenge an issue's architecture for maintainability and post the review."""
-    return f"""Review the proposed architecture for {issue_url} from the perspective of the primary maintainer who will have to understand, debug and extend this code.
+    return f"""Review the problem framing and proposed architecture for {issue_url} from the perspective of the maintainer who will have to understand, debug and extend the code.
 
-Read the issue, discovery and planning comments, then inspect enough actual code to challenge their assumptions. Treat the plan as a proposal, not authority. Reuse applicable evidence and focus on consequential uncertainties rather than repeating discovery.
+Read the issue, discovery and planning comments, then inspect enough actual code and consumers to challenge their assumptions. Treat the plan as a proposal, not authority. Reuse applicable evidence and investigate only gaps that could materially change the judgement. Preserve settled decisions; if new evidence warrants reopening one, make that explicit.
 
-Look for misplaced responsibilities, unnecessary abstractions, duplicated mechanisms, hidden state, misleading failure semantics and tests that freeze implementation details. Challenge both overengineering and shortcuts that move complexity onto callers or future maintainers. For larger work, examine whether slices expose integration risks early, dependencies and shared contracts permit the proposed parallelism, and compatibility or state transitions are accounted for where needed.
+Check the problem framing
+Establish the underlying user or operational need, the evidence that something is wrong, and why it warrants intervention. Separate observed symptoms, inferred causes, requested outcomes and proposed mechanisms. Check whether the plan has inherited an unsupported diagnosis or treated a suggested solution as a requirement.
 
-Challenge the strongest promises, especially completeness, uniqueness, atomicity and successful delivery. Look for plausible cases where proposed checks pass while the user-visible promise is false, including missing or contradictory evidence. Check whether real-system acceptance can be reached rather than replaced by a local substitute. Distinguish demonstrated defects, unresolved risks and optional preferences; do not present hypothetical counterexamples as observed failures.
+Ask whether solving the stated problem would deliver the useful outcome. Consider whether a narrower intervention, an operational or configuration change, or leaving the system unchanged would address the need with less continuing responsibility. Explain the capability or consequence sacrificed by an alternative; doing less is not automatically better.
 
-For each material concern, explain the concrete consequence and recommend a simpler or more maintainable alternative tied to evidence and likely changes, not taste. Don't manufacture objections: say which parts should stand. Keep depth proportionate to risk; a small sound change does not need extra stages or a redesign.
+Preserve explicit decisions and requirements. If the evidence suggests one should change, present that as a proposed revision for Michael to decide—not permission to redefine the task. If the framing is sound, proceed without manufacturing a challenge.
 
-Post a concise review on the issue, leading with your judgement: ready to implement, implementable with specific corrections, or blocked on a decision or missing evidence. Separate necessary corrections from optional improvements. Say which corrections can be incorporated during implementation and which need a decision or bounded investigation first; don't require a rewritten plan just to restate settled corrections. Readiness is not implementation approval. Link evidence, identify the inspected revision and superseded guidance, and make the handoff understandable without your local checkout. On repeat reviews, focus on changes and unresolved concerns. Read it back and return the comment URL.
+Judge the approach before its mechanics
+Ask whether the proposed responsibilities are necessary, whether an existing component should own them, and whether any mechanism can disappear while preserving the required behaviour.
 
-Review only. Don't implement changes, rewrite the issue's scope, or claim to speak on behalf of the human maintainer."""
+When you find a defect, consider removing or relocating the mechanism that creates it before adding another guard, state field or recovery path. Compare continuing ownership, coordination and debugging costs—not just code size or file count. Challenge both overengineering and shortcuts that push complexity onto callers. Do not simplify by silently dropping requirements, and do not renovate unrelated code for consistency.
+
+Examine responsibilities and interfaces
+Look for misplaced responsibilities, duplicated mechanisms, hidden state, implicit ordering and changes that require coordinated edits across several components. Judge abstractions by the coherent complexity they encapsulate and what callers no longer need to know. One real consumer can justify a useful boundary; hypothetical consumers do not justify a framework.
+
+Where public APIs or component interactions change, trace a representative operation across the proposed boundaries and existing consumers. Check:
+- Who initiates the operation and owns authoritative state and lifecycle.
+- What crosses each boundary and what a response or event actually guarantees.
+- How completion, failure and recovery become visible to the caller.
+- Compatibility with actual consumers and consequential retry, cancellation or ordering behaviour.
+
+Use representative caller code or an interaction sketch where it exposes the design more clearly than signatures alone. What must the caller know, sequence, configure and recover from? Prefer interfaces that make ordinary correct use straightforward and localise likely changes, without hiding capabilities a real consumer needs.
+
+If the plan lacks enough detail to assess a consequential boundary, identify the specific missing contract or interaction—not a general request for more design. Leave routine implementation choices to the implementer.
+
+Challenge guarantees and evidence
+Test the strongest promises, especially completeness, uniqueness, atomicity and successful delivery. Look for concrete scenarios where the proposed checks pass while the user-visible promise is false. Consider missing, malformed, stale or contradictory evidence where it could change the result.
+
+Distinguish demonstrated defects, unresolved design risks and optional preferences. A plausible counterexample is not an observed failure; explain the conditions under which it matters.
+
+Check that tests exercise meaningful behaviour rather than freezing internal structure or reproducing mock choreography. Establish whether real-system acceptance is reachable and what evidence it requires. Local substitutes cannot establish provider or protocol compatibility.
+
+Do not recommend production hooks, orchestration or compatibility machinery mainly to make an unavailable acceptance test locally demonstrable. Prefer an explicit verification gap and the smallest credible evidence path over a different, more complicated production design.
+
+Check delivery where it affects the design
+For larger work, examine whether the slices expose integration risks early and produce useful end-to-end results. Check that actual dependencies and shared contracts support any proposed parallelism. Account for compatibility, persistent-state transitions, cutover and recovery where needed.
+
+Keep depth proportionate to risk. Do not demand extra stages, a redesign or a complete specification for a small sound change.
+
+Write the review
+Post an issue comment leading with your judgement:
+- Ready to implement.
+- Implementable with specific corrections.
+- Blocked on a decision or missing evidence.
+
+Make a material problem-framing concern prominent in that judgement rather than burying it beneath design details.
+
+Follow with the concerns that determine the judgement, ordered by consequence. For each material concern:
+- Identify the problem assumption, proposed behaviour or boundary.
+- Show the concrete scenario or source evidence that exposes the problem.
+- Explain the consequence for users, callers or maintainers.
+- Recommend the smallest coherent correction, including removal or reuse where appropriate.
+- State whether it can be incorporated during implementation or needs a decision or bounded investigation first.
+
+Include a short interaction sequence, contract excerpt or code reference when it makes a concern clearer. Explain the concrete case before introducing compressed technical labels. Keep separate concerns separate; do not compress several findings into a paragraph-sized bullet.
+
+Separate necessary corrections from optional improvements and proposed requirement changes. Tie maintainability concerns to present friction or credible changes, not taste. Do not manufacture objections or fill the comment with generic endorsements. Explain why an existing part should stand only when that helps resolve a real design question. If no material concern remains, give a brief judgement.
+
+Do not reproduce the plan, dump a review checklist or require a rewritten plan merely to restate settled corrections. Readiness is not implementation approval.
+
+Link supporting evidence and source code at the inspected revision. Identify superseded guidance where relevant, and make the review understandable without access to your local checkout. On repeat reviews, focus on changes and unresolved concerns rather than reopening settled findings.
+
+Read back the published comment and return its URL.
+
+Review only. Do not implement changes, rewrite the issue's scope, or claim to speak on behalf of the human maintainer."""
