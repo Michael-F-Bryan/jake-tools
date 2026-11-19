@@ -3,7 +3,7 @@
 Thin, like ``artifact``: each command builds the same operation handler the MCP
 server registers (``OPERATION.build(config)``) and runs it, so the arguments
 are validated, the Microsoft identity is the configured one
-(``docs/microsoft-auth.md``; ``.env`` is honoured like every other command), and
+(``docs/microsoft-auth.md``; environment only: no ``.env``, no config file), and
 the result and the failure detail are the tool's own. There is no second
 code path and no ``az login`` identity.
 

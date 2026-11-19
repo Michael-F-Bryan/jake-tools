@@ -944,16 +944,16 @@ def test_fingerprint_without_rules_matches_requests_made_before_rules_existed(
 
 
 def test_run_defaults_come_from_config(tmp_path: Path) -> None:
-    config_dir = tmp_path / ".config" / "jake-tools"
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.toml").write_text(
-        '[claude]\nmodel = "m"\neffort = "low"\nmax_turns = 3\n'
-        "timeout_seconds = 12.5\nmax_budget_usd = 0.25\n"
-    )
-
     defaults = RunDefaults.from_config(
         load_config(
-            {"HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / ".config")}
+            {
+                "HOME": str(tmp_path),
+                "JAKE_TOOLS_CLAUDE_MODEL": "m",
+                "JAKE_TOOLS_CLAUDE_EFFORT": "low",
+                "JAKE_TOOLS_CLAUDE_MAX_TURNS": "3",
+                "JAKE_TOOLS_CLAUDE_TIMEOUT_SECONDS": "12.5",
+                "JAKE_TOOLS_CLAUDE_MAX_BUDGET_USD": "0.25",
+            }
         )
     )
 

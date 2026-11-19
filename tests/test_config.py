@@ -25,29 +25,26 @@ def _env(home: Path, **extra: str) -> dict[str, str]:
 def test_xdg_defaults_follow_the_spec_fallbacks(tmp_path: Path) -> None:
     xdg = XdgPaths.from_environ(_env(tmp_path))
 
-    assert xdg.config_home == tmp_path / ".config"
     assert xdg.state_home == tmp_path / ".local" / "state"
     assert xdg.cache_home == tmp_path / ".cache"
-    assert xdg.config_dirs == (Path("/etc/xdg"),)
-    assert xdg.config_files == (
-        tmp_path / ".config" / "jake-tools" / "config.toml",
-        Path("/etc/xdg/jake-tools/config.toml"),
-    )
+    assert xdg.app_state_dir == tmp_path / ".local" / "state" / "jake-tools"
+    assert xdg.app_cache_dir == tmp_path / ".cache" / "jake-tools"
+    # There is no config directory: nothing is ever read from one.
+    assert not hasattr(xdg, "config_home")
+    assert not hasattr(xdg, "config_files")
 
 
 def test_xdg_ignores_relative_values_and_honours_absolute_ones(tmp_path: Path) -> None:
     xdg = XdgPaths.from_environ(
         _env(
             tmp_path,
-            XDG_CONFIG_HOME="relative/config",
             XDG_STATE_HOME=str(tmp_path / "state"),
-            XDG_CONFIG_DIRS=f"relative:{tmp_path / 'xdg-a'}:{tmp_path / 'xdg-b'}",
+            XDG_CACHE_HOME="relative/cache",
         )
     )
 
-    assert xdg.config_home == tmp_path / ".config"
     assert xdg.state_home == tmp_path / "state"
-    assert xdg.config_dirs == (tmp_path / "xdg-a", tmp_path / "xdg-b")
+    assert xdg.cache_home == tmp_path / ".cache"
 
 
 def test_defaults_when_nothing_is_configured(tmp_path: Path) -> None:
@@ -81,26 +78,13 @@ def test_defaults_when_nothing_is_configured(tmp_path: Path) -> None:
     )
 
 
-def test_precedence_flag_env_config_home_config_dirs_default(tmp_path: Path) -> None:
-    config_home = tmp_path / ".config" / "jake-tools"
-    config_home.mkdir(parents=True)
-    (config_home / "config.toml").write_text(
-        '[clockify]\njira_project = "HOME"\nclient = "Home Client"\n'
-        'workspaces = ["ws-home"]\n[claude]\nmax_turns = 7\n'
-    )
-    system_dir = tmp_path / "etc-xdg" / "jake-tools"
-    system_dir.mkdir(parents=True)
-    (system_dir / "config.toml").write_text(
-        '[clockify]\njira_project = "SYS"\nclient = "System Client"\n'
-        "[claude]\nmax_turns = 3\ntimeout_seconds = 120\n[session_store]\n"
-        'path = "/srv/hermes/state.db"\n'
-    )
-
+def test_precedence_is_flag_then_env_then_default(tmp_path: Path) -> None:
     config = load_config(
         _env(
             tmp_path,
-            XDG_CONFIG_DIRS=str(tmp_path / "etc-xdg"),
             JAKE_TOOLS_CLOCKIFY_CLIENT="Env Client",
+            JAKE_TOOLS_JIRA_PROJECT="ENV",
+            JAKE_TOOLS_CLAUDE_MAX_TURNS="7",
         ),
         overrides={"clockify.jira_project": "FLAG"},
     )
@@ -111,15 +95,118 @@ def test_precedence_flag_env_config_home_config_dirs_default(tmp_path: Path) -> 
         "env",
     )
     assert config.clockify_client.origin == "JAKE_TOOLS_CLOCKIFY_CLIENT"
-    assert config.clockify_workspaces.value == ("ws-home",)
     assert config.claude_max_turns.value == 7
-    assert config.claude_max_turns.source == "config"
-    assert config.claude_max_turns.origin == str(config_home / "config.toml")
-    # Only the system file sets these, so they come from the lowest-precedence file.
-    assert config.claude_timeout_seconds.value == 120.0
-    assert config.claude_timeout_seconds.origin == str(system_dir / "config.toml")
-    assert config.session_store_path.value == Path("/srv/hermes/state.db")
-    assert config.claude_max_budget_usd.source == "default"
+    assert config.claude_max_turns.origin == "JAKE_TOOLS_CLAUDE_MAX_TURNS"
+    assert config.claude_timeout_seconds.source == "default"
+    assert {setting.source for setting in config.settings()} == {
+        "flag",
+        "env",
+        "default",
+    }
+
+
+def test_a_none_flag_does_not_override_the_environment(tmp_path: Path) -> None:
+    config = load_config(
+        _env(tmp_path, JAKE_TOOLS_JIRA_PROJECT="ENV"),
+        overrides={"clockify.jira_project": None},
+    )
+
+    assert (config.jira_project.value, config.jira_project.source) == ("ENV", "env")
+
+
+# (setting, environment variable, raw value, resolved value): every non-secret
+# deployment setting is set by exactly this variable.
+ENV_MAPPINGS: tuple[tuple[str, str, str, object], ...] = (
+    ("claude.runs_dir", "JAKE_TOOLS_RUNS_DIR", "/r", Path("/r")),
+    ("session_store.path", "JAKE_TOOLS_SESSION_STORE", "/s.db", Path("/s.db")),
+    ("clockify.jira_project", "JAKE_TOOLS_JIRA_PROJECT", "ZZ", "ZZ"),
+    ("clockify.client", "JAKE_TOOLS_CLOCKIFY_CLIENT", "Acme", "Acme"),
+    ("clockify.api_base_url", "CLOCKIFY_API_BASE_URL", "http://x/", "http://x/"),
+    (
+        "clockify.workspaces",
+        "JAKE_TOOLS_CLOCKIFY_WORKSPACES",
+        "60176d9aa84b61134aaef479",
+        ("60176d9aa84b61134aaef479",),
+    ),
+    ("claude.model", "JAKE_TOOLS_CLAUDE_MODEL", "m", "m"),
+    ("claude.effort", "JAKE_TOOLS_CLAUDE_EFFORT", "low", "low"),
+    ("claude.max_turns", "JAKE_TOOLS_CLAUDE_MAX_TURNS", "3", 3),
+    ("claude.timeout_seconds", "JAKE_TOOLS_CLAUDE_TIMEOUT_SECONDS", "12.5", 12.5),
+    ("claude.max_budget_usd", "JAKE_TOOLS_CLAUDE_MAX_BUDGET_USD", "0.25", 0.25),
+    ("claude.max_live_tasks", "JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS", "4", 4),
+    ("claude.account_context", "JAKE_TOOLS_CLAUDE_ACCOUNT_CONTEXT", "a:1", "a:1"),
+    (
+        "transcription.api_base_url",
+        "TRANSCRIPTION_API_BASE_URL",
+        "http://t",
+        "http://t",
+    ),
+    (
+        "transcription.timeout_seconds",
+        "JAKE_TOOLS_TRANSCRIPTION_TIMEOUT_SECONDS",
+        "42",
+        42.0,
+    ),
+    ("microsoft.tenant_id", "JAKE_TOOLS_MICROSOFT_TENANT_ID", "t", "t"),
+    ("microsoft.client_id", "JAKE_TOOLS_MICROSOFT_CLIENT_ID", "c", "c"),
+    ("microsoft.account", "JAKE_TOOLS_MICROSOFT_ACCOUNT", "a@x.test", "a@x.test"),
+    (
+        "microsoft.account_object_id",
+        "JAKE_TOOLS_MICROSOFT_ACCOUNT_OBJECT_ID",
+        "o",
+        "o",
+    ),
+    (
+        "microsoft.authority_url",
+        "JAKE_TOOLS_MICROSOFT_AUTHORITY_URL",
+        "http://a",
+        "http://a",
+    ),
+    (
+        "newsletters.graph_root",
+        "JAKE_TOOLS_NEWSLETTERS_GRAPH_ROOT",
+        "http://g",
+        "http://g",
+    ),
+    (
+        "newsletters.sharepoint_root",
+        "JAKE_TOOLS_NEWSLETTERS_SHAREPOINT_ROOT",
+        "http://sp",
+        "http://sp",
+    ),
+    ("files.graph_root", "JAKE_TOOLS_FILES_GRAPH_ROOT", "http://fg", "http://fg"),
+    (
+        "files.sharepoint_hosts",
+        "JAKE_TOOLS_FILES_SHAREPOINT_HOSTS",
+        "a.test,b.test",
+        ("a.test", "b.test"),
+    ),
+    ("artifacts.enabled", "JAKE_TOOLS_ARTIFACTS_ENABLED", "true", True),
+)
+
+
+def test_every_non_secret_setting_has_a_tested_environment_variable(
+    tmp_path: Path,
+) -> None:
+    covered = {setting for setting, *_ in ENV_MAPPINGS}
+    non_secret = {
+        setting.name
+        for setting in load_config(_env(tmp_path)).settings()
+        if not setting.secret
+    }
+    assert covered == non_secret
+
+
+@pytest.mark.parametrize(("setting", "variable", "raw", "expected"), ENV_MAPPINGS)
+def test_each_setting_is_set_by_its_environment_variable(
+    tmp_path: Path, setting: str, variable: str, raw: str, expected: object
+) -> None:
+    config = load_config(_env(tmp_path, **{variable: raw}))
+
+    resolved = {s.name: s for s in config.settings()}[setting]
+    assert resolved.value == expected
+    assert (resolved.source, resolved.origin) == ("env", variable)
+    assert all(s.source == "default" for s in config.settings() if s is not resolved)
 
 
 def test_workspace_allowlist_from_environment_is_comma_separated(
@@ -133,12 +220,7 @@ def test_workspace_allowlist_from_environment_is_comma_separated(
     assert config.clockify_workspaces.source == "env"
 
 
-def test_secrets_come_from_the_environment_only(tmp_path: Path) -> None:
-    config_home = tmp_path / ".config" / "jake-tools"
-    config_home.mkdir(parents=True)
-    (config_home / "config.toml").write_text(
-        '[clockify]\napi_key = "should-not-be-read"\n'
-    )
+def test_secrets_come_from_the_environment_or_a_name_file(tmp_path: Path) -> None:
     secret_file = tmp_path / "jira-token"
     secret_file.write_text("from-file\n")
 
@@ -198,40 +280,27 @@ def test_env_overrides_runs_dir_and_session_store(tmp_path: Path) -> None:
     assert config.session_store_path.value == tmp_path / "store.db"
 
 
-def test_unparsable_config_file_is_a_config_error(tmp_path: Path) -> None:
-    config_home = tmp_path / ".config" / "jake-tools"
-    config_home.mkdir(parents=True)
-    (config_home / "config.toml").write_text("[clockify\n")
-
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(_env(tmp_path))
-
-    assert str(config_home / "config.toml") in str(excinfo.value)
-
-
 def test_wrong_type_names_the_setting_and_where_it_came_from(tmp_path: Path) -> None:
-    config_home = tmp_path / ".config" / "jake-tools"
-    config_home.mkdir(parents=True)
-    (config_home / "config.toml").write_text('[claude]\nmax_turns = "lots"\n')
-
     with pytest.raises(ConfigError) as excinfo:
-        load_config(_env(tmp_path))
+        load_config(_env(tmp_path, JAKE_TOOLS_CLAUDE_MAX_TURNS="lots"))
 
     message = str(excinfo.value)
     assert "claude.max_turns" in message
-    assert str(config_home / "config.toml") in message
+    assert "JAKE_TOOLS_CLAUDE_MAX_TURNS" in message
     assert "integer" in message
 
 
-def test_invalid_effort_lists_the_choices(tmp_path: Path) -> None:
-    config_home = tmp_path / ".config" / "jake-tools"
-    config_home.mkdir(parents=True)
-    (config_home / "config.toml").write_text('[claude]\neffort = "turbo"\n')
+def test_a_bad_flag_value_names_the_flag(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="flag claude.max_turns"):
+        load_config(_env(tmp_path), overrides={"claude.max_turns": "lots"})
 
+
+def test_invalid_effort_lists_the_choices(tmp_path: Path) -> None:
     with pytest.raises(ConfigError) as excinfo:
-        load_config(_env(tmp_path))
+        load_config(_env(tmp_path, JAKE_TOOLS_CLAUDE_EFFORT="turbo"))
 
     assert "low, medium, high" in str(excinfo.value)
+    assert "JAKE_TOOLS_CLAUDE_EFFORT" in str(excinfo.value)
 
 
 def test_settings_listing_is_complete_and_stable(tmp_path: Path) -> None:
@@ -286,22 +355,15 @@ def test_clockify_api_base_url_defaults_to_the_public_api(tmp_path: Path) -> Non
     assert overridden.clockify_api_base_url.source == "env"
 
 
-def test_transcription_settings_follow_env_then_config_and_the_token_is_a_secret(
+def test_transcription_settings_follow_env_and_the_token_is_a_secret(
     tmp_path: Path,
 ) -> None:
-    config_home = tmp_path / ".config" / "jake-tools"
-    config_home.mkdir(parents=True)
-    (config_home / "config.toml").write_text(
-        '[transcription]\napi_base_url = "http://from-config:1"\ntimeout_seconds = 42\n'
-    )
     token_file = tmp_path / "token"
     token_file.write_text("s3cret\n")
 
-    from_config = load_config(_env(tmp_path))
-    assert from_config.transcription_api_base_url.value == "http://from-config:1"
-    assert from_config.transcription_api_base_url.source == "config"
-    assert from_config.transcription_timeout_seconds.value == 42.0
-    assert from_config.has_transcription_endpoint
+    unset = load_config(_env(tmp_path))
+    assert unset.transcription_api_base_url.value is None
+    assert not unset.has_transcription_endpoint
 
     from_env = load_config(
         _env(
@@ -311,6 +373,7 @@ def test_transcription_settings_follow_env_then_config_and_the_token_is_a_secret
             TRANSCRIPTION_API_TOKEN_FILE=str(token_file),
         )
     )
+    assert from_env.has_transcription_endpoint
     assert from_env.transcription_api_base_url.value == "http://from-env:2"
     assert from_env.transcription_api_base_url.origin == "TRANSCRIPTION_API_BASE_URL"
     assert from_env.transcription_timeout_seconds.value == 7.5
@@ -318,23 +381,12 @@ def test_transcription_settings_follow_env_then_config_and_the_token_is_a_secret
     assert from_env.transcription_api_token.display_value() == "set"
     assert "s3cret" not in repr(from_env.transcription_api_token.display_value())
 
-    # The token is environment-only: a config file cannot supply it.
-    (config_home / "config.toml").write_text(
-        '[transcription]\napi_token = "from-config"\n'
-    )
-    assert load_config(_env(tmp_path)).transcription_api_token.value is None
-
 
 def test_artifacts_are_off_unless_explicitly_enabled(tmp_path: Path) -> None:
     assert load_config(_env(tmp_path)).artifacts_enabled.value is False
 
-    config_home = tmp_path / ".config" / "jake-tools"
-    config_home.mkdir(parents=True)
-    (config_home / "config.toml").write_text("[artifacts]\nenabled = true\n")
-    from_config = load_config(_env(tmp_path))
-    assert from_config.artifacts_enabled.value is True
-    assert from_config.artifacts_enabled.source == "config"
-
+    on = load_config(_env(tmp_path, JAKE_TOOLS_ARTIFACTS_ENABLED="true"))
+    assert on.artifacts_enabled.value is True and on.artifacts_enabled.source == "env"
     off = load_config(_env(tmp_path, JAKE_TOOLS_ARTIFACTS_ENABLED="false"))
     assert (
         off.artifacts_enabled.value is False and off.artifacts_enabled.source == "env"
@@ -349,16 +401,9 @@ def test_the_account_context_label_is_optional_and_unset_by_default(
     assert blank.claude_account_context.value is None
 
 
-def test_the_account_context_label_comes_from_env_or_the_config_file(
+def test_the_account_context_label_comes_from_the_environment(
     tmp_path: Path,
 ) -> None:
-    config_home = tmp_path / ".config" / "jake-tools"
-    config_home.mkdir(parents=True)
-    (config_home / "config.toml").write_text(
-        '[claude]\naccount_context = "from-file"\n'
-    )
-
-    assert load_config(_env(tmp_path)).claude_account_context.value == "from-file"
     env = {**_env(tmp_path), "JAKE_TOOLS_CLAUDE_ACCOUNT_CONTEXT": "work.max:1"}
     config = load_config(env)
     assert config.claude_account_context.value == "work.max:1"
@@ -385,22 +430,13 @@ def test_max_live_tasks_defaults_to_two(tmp_path: Path) -> None:
     assert config.claude_max_live_tasks.source == "default"
 
 
-def test_max_live_tasks_resolves_flag_over_env_over_file(tmp_path: Path) -> None:
-    config_dir = tmp_path / ".config" / "jake-tools"
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.toml").write_text("[claude]\nmax_live_tasks = 5\n")
-
-    from_file = load_config(_env(tmp_path))
+def test_max_live_tasks_resolves_flag_over_env_over_default(tmp_path: Path) -> None:
     from_env = load_config(_env(tmp_path, JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS="3"))
     from_flag = load_config(
         _env(tmp_path, JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS="3"),
         overrides={"claude.max_live_tasks": 4},
     )
 
-    assert (
-        from_file.claude_max_live_tasks.value,
-        from_file.claude_max_live_tasks.source,
-    ) == (5, "config")
     assert from_env.claude_max_live_tasks.value == 3
     assert from_env.claude_max_live_tasks.origin == "JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS"
     assert (
@@ -422,18 +458,6 @@ def test_max_live_tasks_rejects_anything_but_a_positive_integer_from_env(
     assert "positive integer" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("raw", ["0", "-3", "2.5", "true", "false", '"3x"'])
-def test_max_live_tasks_rejects_a_bad_config_file_value(
-    tmp_path: Path, raw: str
-) -> None:
-    config_dir = tmp_path / ".config" / "jake-tools"
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.toml").write_text(f"[claude]\nmax_live_tasks = {raw}\n")
-
-    with pytest.raises(ConfigError, match="claude.max_live_tasks"):
-        load_config(_env(tmp_path))
-
-
 def test_microsoft_settings_are_explicit_and_secrets_are_environment_only(
     tmp_path: Path,
 ) -> None:
@@ -442,18 +466,8 @@ def test_microsoft_settings_are_explicit_and_secrets_are_environment_only(
     assert unset.microsoft_account.value is None  # no default account, ever
     assert unset.microsoft_authority_url.value == "https://login.microsoftonline.com"
     assert unset.newsletters_graph_root.value == "https://graph.microsoft.com/v1.0"
-
-    config_dir = tmp_path / ".config" / "jake-tools"
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.toml").write_text(
-        '[microsoft]\ntenant_id = "t-from-config"\naccount = "a@example.test"\n'
-        'refresh_token = "must-be-ignored"\nclient_secret = "must-be-ignored"\n'
-    )
-    from_config = load_config(_env(tmp_path))
-    assert from_config.microsoft_tenant_id.value == "t-from-config"
-    assert from_config.microsoft_tenant_id.source == "config"
-    assert from_config.microsoft_refresh_token.value is None
-    assert from_config.microsoft_client_secret.value is None
+    assert unset.microsoft_refresh_token.value is None
+    assert unset.microsoft_client_secret.value is None
 
     secret_file = tmp_path / "rt"
     secret_file.write_text("from-file\n")

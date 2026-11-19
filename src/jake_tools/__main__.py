@@ -1,9 +1,11 @@
-import dotenv
+"""``jake-tools``: the CLI entrypoint.
 
-# Must be executed before importing the CLI
-dotenv.load_dotenv()
+Configuration is flags and the process environment only. No ``.env`` is
+loaded (not from the working directory, not from any ancestor) and there is no
+config file; see :mod:`jake_tools.config`.
+"""
 
-from .cli import main  # noqa: E402
+from .cli import main
 
 if __name__ == "__main__":
     main()

@@ -95,7 +95,7 @@ async def test_endpoint_without_token_exposes_the_tool_and_reports_missing_crede
     assert payload.detail == {"variables": ["TRANSCRIPTION_API_TOKEN"]}
 
 
-async def test_endpoint_from_config_file_also_exposes_the_tool(
+async def test_endpoint_from_a_config_file_is_ignored(
     mcp_server: ServerFactory,
     mcp_env_factory: Callable[..., dict[str, str]],
     mcp_home: Path,
@@ -106,7 +106,7 @@ async def test_endpoint_from_config_file_also_exposes_the_tool(
         '[transcription]\napi_base_url = "http://127.0.0.1:9"\ntimeout_seconds = 12\n'
     )
     async with mcp_server(mcp_env_factory(mcp_home)) as session:
-        assert "transcribe" in await _tool_names(session)
+        assert "transcribe" not in await _tool_names(session)
 
 
 async def test_transcribe_uploads_ordered_files_and_returns_the_structured_result(

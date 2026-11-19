@@ -39,8 +39,8 @@ operations. There is no Hermes plugin. The server provides:
 
 - **Tools**, every operation the environment's configuration makes available,
   with stable `{code, message, detail?}` error results. `transcribe` needs
-  `transcription.api_base_url`, and the experimental `artifact_*` tools need
-  `artifacts.enabled`; nothing else gates the catalogue. `ping` is a
+  `TRANSCRIPTION_API_BASE_URL`, and the experimental `artifact_*` tools need
+  `JAKE_TOOLS_ARTIFACTS_ENABLED=true`; nothing else gates the catalogue. `ping` is a
   connectivity check.
 - **Guidance resources**: each guide is `skill://<name>` and its supporting
   references are `skill://<name>/references/<file>.md`, served from the
@@ -54,8 +54,9 @@ which prefixes tools and exposes per-server utility tools for listing and
 reading resources and for listing and getting prompts. Nothing is imported
 into Hermes.
 
-Credentials and non-secret settings come only from the server process's own
-environment (or its `config.toml`), configured per agent environment: variables
+Credentials and non-secret settings come only from the server's flags and its
+own process environment (no `config.toml`, no `.env`; see
+[Configuration](#configuration)), configured per agent environment: variables
 such as `CLOCKIFY_API_KEY`, `JIRA_*`, `TRANSCRIPTION_API_TOKEN`,
 `MICROSOFT_REFRESH_TOKEN` and their `_FILE` forms. The server never reads
 another profile's secrets, delegated Claude workers never receive them, and a
@@ -66,6 +67,70 @@ Package, `mcp_servers` configuration, credentials, refresh and cutover from the
 old native plugin are in [docs/hermes-mcp.md](docs/hermes-mcp.md). The real-Hermes
 acceptance test is `tests/test_hermes_mcp.py` (`--slow`, with `JAKE_TOOLS_HERMES`
 set to a Hermes launcher; without it the test is blocked, not passed).
+
+## Configuration
+
+jake-tools is configured by **CLI flags and process environment variables,
+and nothing else**: flags win over the environment, which wins over the
+built-in default. There is no `config.toml` (not in `$XDG_CONFIG_HOME`, not in
+`$XDG_CONFIG_DIRS`, not anywhere) and no `.env` loading: a `.env` or
+`config.toml` in the working directory, its ancestors or `$HOME` has no effect
+on the `jake-tools` CLI or on `jake-tools-mcp`. Run state still lives under
+`$XDG_STATE_HOME/jake-tools` and caches under `$XDG_CACHE_HOME/jake-tools`.
+Secrets are environment-only: `NAME`, or `NAME_FILE` naming a file whose
+contents are the value (the direct variable wins); they have no flag and
+`doctor` only ever prints `set`/`unset`.
+
+> **Breaking change.** `config.toml` support was removed, with no fallback and
+> no automatic migration, and `jake-tools` no longer loads `.env` files. An
+> existing `config.toml` is silently ignored, so move each value to the
+> variable in the table (or pass the flag) before upgrading, and have your
+> process manager export the environment (`jake_tools.mcp doctor` prints
+> every setting and its source). Previously the five `claude.model`, `.effort`,
+> `.max_turns`, `.timeout_seconds` and `.max_budget_usd` settings were
+> file-only; they now have the `JAKE_TOOLS_CLAUDE_*` variables below.
+
+| Setting (as `doctor` prints it) | Environment variable | `serve` / `doctor` flag |
+| --- | --- | --- |
+| `claude.runs_dir` | `JAKE_TOOLS_RUNS_DIR` | `--runs-dir` |
+| `session_store.path` | `JAKE_TOOLS_SESSION_STORE` | `--session-store` |
+| `clockify.jira_project` | `JAKE_TOOLS_JIRA_PROJECT` | `--jira-project` |
+| `clockify.client` | `JAKE_TOOLS_CLOCKIFY_CLIENT` | `--clockify-client` |
+| `clockify.api_base_url` | `CLOCKIFY_API_BASE_URL` | `--clockify-api-base-url` |
+| `clockify.workspaces` | `JAKE_TOOLS_CLOCKIFY_WORKSPACES` (comma-separated IDs) | `--clockify-workspace` (repeat) |
+| `claude.model` | `JAKE_TOOLS_CLAUDE_MODEL` | `--claude-model` |
+| `claude.effort` | `JAKE_TOOLS_CLAUDE_EFFORT` | `--claude-effort` |
+| `claude.max_turns` | `JAKE_TOOLS_CLAUDE_MAX_TURNS` | `--claude-max-turns` |
+| `claude.timeout_seconds` | `JAKE_TOOLS_CLAUDE_TIMEOUT_SECONDS` | `--claude-timeout-seconds` |
+| `claude.max_budget_usd` | `JAKE_TOOLS_CLAUDE_MAX_BUDGET_USD` | `--claude-max-budget-usd` |
+| `claude.max_live_tasks` | `JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS` | `--claude-max-live-tasks` |
+| `claude.account_context` | `JAKE_TOOLS_CLAUDE_ACCOUNT_CONTEXT` | `--claude-account-context` |
+| `transcription.api_base_url` | `TRANSCRIPTION_API_BASE_URL` | `--transcription-api-base-url` |
+| `transcription.timeout_seconds` | `JAKE_TOOLS_TRANSCRIPTION_TIMEOUT_SECONDS` | `--transcription-timeout-seconds` |
+| `microsoft.tenant_id` | `JAKE_TOOLS_MICROSOFT_TENANT_ID` | `--microsoft-tenant-id` |
+| `microsoft.client_id` | `JAKE_TOOLS_MICROSOFT_CLIENT_ID` | `--microsoft-client-id` |
+| `microsoft.account` | `JAKE_TOOLS_MICROSOFT_ACCOUNT` | `--microsoft-account` |
+| `microsoft.account_object_id` | `JAKE_TOOLS_MICROSOFT_ACCOUNT_OBJECT_ID` | `--microsoft-account-object-id` |
+| `microsoft.authority_url` | `JAKE_TOOLS_MICROSOFT_AUTHORITY_URL` | (none; test stand-in) |
+| `newsletters.graph_root` | `JAKE_TOOLS_NEWSLETTERS_GRAPH_ROOT` | (none; test stand-in) |
+| `newsletters.sharepoint_root` | `JAKE_TOOLS_NEWSLETTERS_SHAREPOINT_ROOT` | (none; test stand-in) |
+| `files.graph_root` | `JAKE_TOOLS_FILES_GRAPH_ROOT` | (none; test stand-in) |
+| `files.sharepoint_hosts` | `JAKE_TOOLS_FILES_SHAREPOINT_HOSTS` (comma-separated) | `--files-sharepoint-host` (repeat) |
+| `artifacts.enabled` | `JAKE_TOOLS_ARTIFACTS_ENABLED` (`true`/`false`) | `--artifacts` / `--no-artifacts` |
+
+Secret environment variables (each also as `NAME_FILE`): `CLOCKIFY_API_KEY`,
+`JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `TRANSCRIPTION_API_TOKEN`,
+`MICROSOFT_REFRESH_TOKEN`, `MICROSOFT_CLIENT_SECRET`. Other inputs: `HOME`,
+`XDG_STATE_HOME`, `XDG_CACHE_HOME` and `HERMES_HOME` (the default session
+store is `$HERMES_HOME/state.db`).
+
+The flags belong to `jake-tools-mcp serve` and `jake-tools-mcp doctor` (the
+bare `jake-tools-mcp` takes none: name `serve`). The `jake-tools` CLI keeps its
+own existing flags, each with its environment variable: `clockify`'s
+`--api-key`/`--api-base-url` (`CLOCKIFY_API_KEY`, `CLOCKIFY_API_BASE_URL`),
+`--jira-*` (`JIRA_*`), and `clockify jira-sync`'s `--jira-project` and
+`--clockify-client` (`JAKE_TOOLS_JIRA_PROJECT`, `JAKE_TOOLS_CLOCKIFY_CLIENT`).
+`jake-tools files` reads the Microsoft settings from the environment only.
 
 ## Development
 
@@ -151,14 +216,13 @@ The stdio server (`jake-tools-mcp`) also provides:
   billable flag. It never starts a timer or retries a write.
 
 These tools require only `CLOCKIFY_API_KEY` (not Jira credentials), plus a mandatory
-workspace allowlist in MCP configuration:
+workspace allowlist in the MCP server's environment:
 
-```toml
-[clockify]
-workspaces = ["your-workspace-id"]
+```sh
+JAKE_TOOLS_CLOCKIFY_WORKSPACES=60176d9aa84b61134aaef479   # comma-separated IDs
 ```
 
-Alternatively set `JAKE_TOOLS_CLOCKIFY_WORKSPACES` to comma-separated IDs. Omitted
+Or pass `--clockify-workspace ID` (repeatable) to `serve`. Omitted
 workspace defaults to the first allowlisted ID; an empty allowlist or an outside
 workspace is `access_denied`. IDs accept only letters, digits, `_` and `-`.
 
@@ -216,8 +280,8 @@ so they survive server restarts:
   in chunks; `claude_cancel` stops the whole process tree and says whether
   termination was confirmed (never a rollback).
 
-How many tasks run at once is configurable: `claude.max_live_tasks` in
-`config.toml` or `JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS` (a positive integer;
+How many tasks run at once is configurable: `JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS`
+or `--claude-max-live-tasks` (a positive integer;
 default 2; `doctor` prints it). A start while that many are live is refused
 with `capacity_exceeded` (`detail.live`, `detail.limit`; there is no queue).
 The live count is shared by every process using one runs directory but each
@@ -280,7 +344,7 @@ they do not establish live Microsoft compatibility.
 
 ## Transcription MCP tool
 
-When `transcription.api_base_url` (or `TRANSCRIPTION_API_BASE_URL`) is set, the
+When `TRANSCRIPTION_API_BASE_URL` (or `--transcription-api-base-url`) is set, the
 stdio server also exposes `transcribe(files)`: it uploads audio files the MCP
 server can read, in recording order, to the native transcription service in
 [`transcription-service/`](transcription-service/README.md) and returns one
@@ -330,7 +394,7 @@ The file's contents are sent to Anthropic.
 It rests on an **undocumented** Claude Code mechanism: the SDK hides the
 `Artifact` tool unless `CLAUDE_CODE_ARTIFACT` is set, which Jake does for these
 sessions only. It may change without notice, so the tools are off unless
-`artifacts.enabled = true` (`JAKE_TOOLS_ARTIFACTS_ENABLED`). Each session is guarded before every
+`JAKE_TOOLS_ARTIFACTS_ENABLED=true` (or `--artifacts`). Each session is guarded before every
 tool call by a `PreToolUse` hook that judges the raw model input, so it can only
 read the one file and publish it once (or read the one URL); a prompt is not what
 keeps it there. `verified` means the hosted file,

@@ -250,7 +250,7 @@ def test_skill_description_rejects_invalid_packaged_metadata(
         skill_description(path)
 
 
-async def test_stdio_server_resolves_config_from_the_isolated_home(
+async def test_stdio_server_resolves_config_from_the_environment_only(
     mcp_server: ServerFactory,
     mcp_env_factory: Callable[..., dict[str, str]],
     mcp_home: Path,
@@ -258,36 +258,34 @@ async def test_stdio_server_resolves_config_from_the_isolated_home(
     config_dir = mcp_home / ".config" / "jake-tools"
     config_dir.mkdir(parents=True)
     (config_dir / "config.toml").write_text('[clockify]\njira_project = "ZZ"\n')
-    env = mcp_env_factory(mcp_home)
+    env = mcp_env_factory(mcp_home, JAKE_TOOLS_JIRA_PROJECT="ENV")
 
-    # The same loader the server uses, over the same environment: proves the
-    # isolated HOME is where the server will look, without a tool that leaks
-    # its config over the wire.
+    # The same loader the server uses, over the same environment, without a
+    # tool that leaks its config over the wire.
     config = load_config(env)
-    assert config.jira_project.value == "ZZ"
-    assert config.jira_project.origin == str(config_dir / "config.toml")
+    assert config.jira_project.value == "ENV"
+    assert config.jira_project.origin == "JAKE_TOOLS_JIRA_PROJECT"
 
     async with mcp_server(env) as session:
         assert (await session.call_tool("ping", {})).is_error is False
 
 
-def test_entrypoint_never_loads_dotenv_or_the_cli_entrypoint(tmp_path: Path) -> None:
-    """Importing and invoking the MCP entrypoint must not read a ``.env``.
+def test_entrypoints_never_import_dotenv_or_load_a_dotenv_file(tmp_path: Path) -> None:
+    """Neither entrypoint reads a ``.env``, and ``dotenv`` is not even imported.
 
-    ``dotenv`` the module may be imported by a dependency (pydantic-settings
-    does); what matters is that nothing on this path *calls* it, so a ``.env``
-    in the working directory never reaches the environment, and that the
-    ``jake-tools`` CLI entrypoint (which does load it) stays out. Nor may any
-    native inference dependency: transcription is a remote service and its
-    client is plain HTTP.
+    ``jake-tools`` (``jake_tools.__main__``) used to call ``load_dotenv()``;
+    now nothing does, so a ``.env`` in the working directory never reaches the
+    environment. No native inference dependency may be imported either:
+    transcription is a remote service and its client is plain HTTP.
     """
     (tmp_path / ".env").write_text("JAKE_TOOLS_JIRA_PROJECT=FROM_DOTENV\n")
     script = (
         "import os, sys\n"
+        "import jake_tools.__main__, jake_tools.cli\n"
         "import jake_tools.mcp.__main__ as entry, jake_tools.mcp.server\n"
         "entry.main(['--help'], standalone_mode=False)\n"
         "native = {'torch', 'coremltools', 'mlx', 'numpy', 'onnxruntime', 'objc'}\n"
-        "bad = sorted(m for m in sys.modules if m == 'jake_tools.__main__' "
+        "bad = sorted(m for m in sys.modules if m == 'dotenv' "
         "or m.split('.')[0] in native)\n"
         "print(bad, os.environ.get('JAKE_TOOLS_JIRA_PROJECT'))\n"
     )

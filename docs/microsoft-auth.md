@@ -13,7 +13,7 @@ a general sign-in service: Jake never obtains a grant itself.
 | --- | --- |
 | Who acts? | The account in `microsoft.account` (its sign-in name, in `microsoft.tenant_id`), through the registered application `microsoft.client_id`. |
 | With what authority? | The delegated permissions that application was consented for, limited by what that person can do in SharePoint. Not application-wide access. |
-| Where is the grant kept? | In the operator-provisioned secret `MICROSOFT_REFRESH_TOKEN` (and `MICROSOFT_CLIENT_SECRET` if the application is a confidential client). Never in `config.toml`, tool arguments, results or logs. |
+| Where is the grant kept? | In the operator-provisioned secret `MICROSOFT_REFRESH_TOKEN` (and `MICROSOFT_CLIENT_SECRET` if the application is a confidential client). Never in a file jake-tools reads, tool arguments, results or logs. |
 | Which resources? | Two token audiences: Microsoft Graph (`https://graph.microsoft.com`, list items) and SharePoint (`https://<tenant>.sharepoint.com`, attachments). Each is requested and cached separately; a Graph token is not accepted by SharePoint REST. |
 | Which agents? | Every MCP client (Hermes included) of a server started with the configuration has every tool (newsletter list/get and file read tools read; create/update/upload write). |
 | Fallback? | None. There is no Azure CLI fallback and no other account. The `jake-tools newsletter` command is separate: it uses the person's own `az login`. |
@@ -25,36 +25,34 @@ operator's decision, and its secrets are not read by Jake's tooling.
 
 ## Configuration
 
-Non-secret (flag-free; environment or `$XDG_CONFIG_HOME/jake-tools/config.toml`):
+Non-secret settings are environment variables (or, for `jake-tools-mcp serve`
+and `doctor`, the matching flag, which wins). There is no `config.toml` and no
+`.env` loading; see the README's Configuration section.
 
-```toml
-[microsoft]
-tenant_id = "0a3a5574-cfda-4314-952e-c0b3e1dcac6d"   # a GUID
-client_id = "<application (client) id GUID>"
-account   = "person@example.org"                       # the sign-in name the grant MUST belong to
-account_object_id = "<the user's object id GUID>"      # optional, recommended: immutable pin (oid)
-# authority_url = "https://login.microsoftonline.com"  # default
+```sh
+JAKE_TOOLS_MICROSOFT_TENANT_ID=0a3a5574-cfda-4314-952e-c0b3e1dcac6d   # a GUID
+JAKE_TOOLS_MICROSOFT_CLIENT_ID=<application (client) id GUID>
+JAKE_TOOLS_MICROSOFT_ACCOUNT=person@example.org     # the sign-in name the grant MUST belong to
+JAKE_TOOLS_MICROSOFT_ACCOUNT_OBJECT_ID=<the user's object id GUID>   # optional, recommended: immutable pin (oid)
+# JAKE_TOOLS_MICROSOFT_AUTHORITY_URL=https://login.microsoftonline.com   # default
 ```
 
-Environment equivalents: `JAKE_TOOLS_MICROSOFT_TENANT_ID`,
-`JAKE_TOOLS_MICROSOFT_CLIENT_ID`, `JAKE_TOOLS_MICROSOFT_ACCOUNT`,
-`JAKE_TOOLS_MICROSOFT_ACCOUNT_OBJECT_ID`,
-`JAKE_TOOLS_MICROSOFT_AUTHORITY_URL`.
+Flags: `--microsoft-tenant-id`, `--microsoft-client-id`, `--microsoft-account`,
+`--microsoft-account-object-id`. `jake-tools files` reads the environment only.
 
 Secrets (environment only, each also as `<NAME>_FILE`; set them in the MCP server process's environment):
 
 - `MICROSOFT_REFRESH_TOKEN` — required.
 - `MICROSOFT_CLIENT_SECRET` — only if the application is a confidential client.
 
-`newsletters.graph_root` / `newsletters.sharepoint_root`
-(`JAKE_TOOLS_NEWSLETTERS_GRAPH_ROOT`, `..._SHAREPOINT_ROOT`) default to the CSU
+`JAKE_TOOLS_NEWSLETTERS_GRAPH_ROOT` / `JAKE_TOOLS_NEWSLETTERS_SHAREPOINT_ROOT` default to the CSU
 site and exist so tests can point at a local stand-in. Anything other than
 HTTPS (or plain HTTP to `localhost`) is refused, because bearer tokens travel there.
 
 The file tools use Graph only (no SharePoint REST audience) and add two settings:
-`files.graph_root` (`JAKE_TOOLS_FILES_GRAPH_ROOT`; the same HTTPS-or-loopback rule,
-for tests) and `files.sharepoint_hosts` (`JAKE_TOOLS_FILES_SHAREPOINT_HOSTS`,
-comma-separated, default `csuses.sharepoint.com`): the only hosts
+`JAKE_TOOLS_FILES_GRAPH_ROOT` (the same HTTPS-or-loopback rule,
+for tests) and `JAKE_TOOLS_FILES_SHAREPOINT_HOSTS`
+(comma-separated, default `csuses.sharepoint.com`): the only hosts
 `sharepoint_resolve` accepts a link for, so a link on another tenant (including a
 guest-shared one) is refused rather than resolved. The grant must be consented for
 the delegated Graph permission `Files.ReadWrite.All` (Microsoft's documented

@@ -144,7 +144,7 @@ even when capacity is full. The same `request_id` with a different request
 is `request_conflict`.
 
 How many tasks may run at once is operator policy, not a protocol constant:
-the server's `claude.max_live_tasks` (default 2; it is not a universal two).
+the server's `JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS` (default 2; it is not a universal two).
 A start while the live tasks in the shared runs directory number at least that
 server's limit is `capacity_exceeded` (no queue); `detail.live` and
 `detail.limit` are the live count and that server's configured limit. Do not

@@ -48,8 +48,9 @@ it is not a separate skill or a routine fallback for a tool error.
 
 ## Prerequisites
 
-jake-tools needs `CLOCKIFY_API_KEY` (the MCP server's environment). Configure `clockify.workspaces`
-in its config.toml or comma-separated `JAKE_TOOLS_CLOCKIFY_WORKSPACES`. The
+jake-tools needs `CLOCKIFY_API_KEY` (the MCP server's environment). Configure the allowlist with
+comma-separated `JAKE_TOOLS_CLOCKIFY_WORKSPACES` (or `serve --clockify-workspace`;
+there is no config file). The
 allowlist is mandatory; an omitted workspace means its first ID, not the user's
 active workspace. IDs must contain only letters, digits, `_` and `-`.
 

@@ -12,10 +12,8 @@ import re
 import shutil
 import subprocess
 import tempfile
-import tomllib
 from collections.abc import Mapping
 from http import HTTPStatus
-from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -23,7 +21,7 @@ import requests
 from pydantic import BaseModel, ConfigDict
 
 from ..clockify import ClockifyClient, ClockifyError
-from ..config import Config, XdgPaths
+from ..config import Config
 from ..jira import JiraClient, JiraError
 from ..microsoft_auth import (
     MicrosoftAuthError,
@@ -52,47 +50,19 @@ class Check(BaseModel):
         return self.required and self.status == "fail"
 
 
-class ConfigFileStatus(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    path: Path
-    status: Literal["ok", "missing", "error"]
-    detail: str = ""
-
-
-def inspect_config_files(environ: Mapping[str, str]) -> list[ConfigFileStatus]:
-    """Parse every candidate config file independently of ``load_config``."""
-    results: list[ConfigFileStatus] = []
-    for path in XdgPaths.from_environ(environ).config_files:
-        try:
-            text = path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            results.append(ConfigFileStatus(path=path, status="missing"))
-            continue
-        except OSError as exc:
-            results.append(
-                ConfigFileStatus(path=path, status="error", detail=exc.strerror or "")
-            )
-            continue
-        try:
-            tomllib.loads(text)
-        except tomllib.TOMLDecodeError as exc:
-            results.append(ConfigFileStatus(path=path, status="error", detail=str(exc)))
-        else:
-            results.append(ConfigFileStatus(path=path, status="ok"))
-    return results
-
-
-def check_config_files(files: list[ConfigFileStatus]) -> Check:
-    bad = [f for f in files if f.status == "error"]
-    if bad:
-        detail = "; ".join(f"{f.path}: {f.detail}" for f in bad)
-        return Check(name="config", status="fail", detail=detail, required=True)
-    parsed = sum(f.status == "ok" for f in files)
+def check_config(config: Config) -> Check:
+    """Settings resolved; report where they came from, never their values."""
+    counts = {"flag": 0, "env": 0, "default": 0}
+    for setting in config.settings():
+        counts[setting.source] += 1
     return Check(
         name="config",
         status="ok",
-        detail=f"{parsed} config file(s) parsed, {len(files) - parsed} absent",
+        detail=(
+            f"{counts['flag']} from flags, {counts['env']} from environment, "
+            f"{counts['default']} default (flags and environment only; "
+            "no config file or .env is read)"
+        ),
         required=True,
     )
 
@@ -478,11 +448,9 @@ def check_microsoft(config: Config) -> Check:
     )
 
 
-def run_checks(
-    config: Config, files: list[ConfigFileStatus], environ: Mapping[str, str]
-) -> list[Check]:
+def run_checks(config: Config, environ: Mapping[str, str]) -> list[Check]:
     return [
-        check_config_files(files),
+        check_config(config),
         check_runs_dir(config),
         check_claude_cli(environ),
         check_clockify(config),

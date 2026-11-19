@@ -136,14 +136,20 @@ connects through its built-in MCP client (`docs/hermes-mcp.md`), with no Hermes
 plugin and no Hermes import anywhere in this package. Sub-commands: `serve`
 (default), `doctor`, and the hidden `worker RUN_DIR`. It is a separate entrypoint from `jake-tools` on purpose:
 
-- Nothing on this path imports `jake_tools.__main__`, or `dotenv`, and nothing calls `load_dotenv()`. The process
-  environment the MCP client passes is the only environment. A test pins this.
+- No entrypoint (this one or `jake-tools`) imports `dotenv` or loads a `.env`,
+  and nothing reads a `config.toml`. The process environment the client or
+  shell passes is the only environment. `python-dotenv` is not a dependency.
+  Tests pin this (`tests/test_config_contract.py`, run from a hostile cwd).
 - Stdout is the transport. Log to stderr only, never print.
-- Configuration comes from `config.load_config()`: XDG paths, then flag >
-  env > `$XDG_CONFIG_HOME/jake-tools/config.toml` > `$XDG_CONFIG_DIRS` >
-  default. Secrets are environment-only (`NAME` or `NAME_FILE`) and are never
-  read from `config.toml`. Every value is a `Resolved` that remembers its
-  source; `doctor` prints `display_value()`, which redacts secrets. Each
+- Configuration is explicit: `config.load_config()` resolves flag > env >
+  default, plus XDG state/cache paths. There is no config file. Every
+  non-secret setting has an environment variable (the `_Spec` in `config.py`);
+  `serve`/`doctor` expose the operator flags listed in `mcp/options.py`
+  (`FLAGS`, one explicit row each, a test ties each to its variable). A new
+  setting needs an env name, a `_Spec`, a README table row and, if
+  operator-facing, a flag row. Secrets are environment-only (`NAME` or
+  `NAME_FILE`), have no flag, and are redacted. Every value is a `Resolved`
+  that remembers its source; `doctor` prints `display_value()`. Each
   sub-command loads its own `Config`; there is still no `ctx.obj`.
 - Missing credentials never stop startup. Clients are built per call inside
   the tool that needs them and raise `ToolError("missing_credentials", ...)`
@@ -522,7 +528,7 @@ jake-tools files upload DRIVE_ID FOLDER_ID /abs/list.xlsx --on-conflict fail
 ```
 
 Also `get` and `pdf`. These run the MCP operations, as the configured Microsoft
-account (environment or `.env`; not `az login`). `upload` adds a file other
+account (environment only: no `.env`, no config file; not `az login`). `upload` adds a file other
 people can see. A nonzero exit includes an uncertain write, whose `outcome` and
 `next_step` are printed.
 

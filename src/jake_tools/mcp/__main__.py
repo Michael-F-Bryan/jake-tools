@@ -1,20 +1,22 @@
 """``python -m jake_tools.mcp``: serve (default) | doctor | worker.
 
 Stdout is the MCP transport, so every sub-command logs to stderr only.
-Configuration comes from :func:`jake_tools.config.load_config` over the
-process environment; each sub-command loads it itself, per the repository's
-no-``ctx.obj`` rule.
+Configuration is flags and the process environment only (flags win), through
+:func:`jake_tools.config.load_config`; there is no config file and no ``.env``.
+Each sub-command loads it itself, per the repository's no-``ctx.obj`` rule.
 """
 
 from __future__ import annotations
 
 import logging
 import sys
+from typing import Any
 
 import click
 
 from ..config import ConfigError, load_config
 from .doctor import doctor
+from .options import config_options
 from .worker import worker
 
 
@@ -30,13 +32,14 @@ def main(ctx: click.Context) -> None:
 
 
 @main.command()
-def serve() -> None:
+@config_options
+def serve(overrides: dict[str, Any]) -> None:
     """Run the stdio MCP server (the default when no sub-command is given)."""
     from .server import build_server
 
     configure_logging()
     try:
-        config = load_config()
+        config = load_config(overrides=overrides)
     except ConfigError as exc:
         raise click.ClickException(str(exc)) from exc
     app = build_server(config)

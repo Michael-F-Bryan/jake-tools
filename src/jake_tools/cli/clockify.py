@@ -24,6 +24,7 @@ from ..clockify_jira_sync import (
     SyncReportAction,
     run_jira_sync,
 )
+from ..config import DEFAULT_CLOCKIFY_CLIENT, DEFAULT_JIRA_PROJECT
 from ..jira import JiraClient, JiraError
 
 
@@ -185,14 +186,18 @@ def jira_name(key: str, summary: str, kind: str, as_json: bool) -> None:
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @click.option(
     "--jira-project",
-    default="SF",
+    envvar="JAKE_TOOLS_JIRA_PROJECT",
+    default=DEFAULT_JIRA_PROJECT,
     show_default=True,
+    show_envvar=True,
     help="Jira project key to reconcile.",
 )
 @click.option(
     "--clockify-client",
-    default="Sunfish Robotics",
+    envvar="JAKE_TOOLS_CLOCKIFY_CLIENT",
+    default=DEFAULT_CLOCKIFY_CLIENT,
     show_default=True,
+    show_envvar=True,
     help="Exact active Clockify client name for newly created projects.",
 )
 @click.option(

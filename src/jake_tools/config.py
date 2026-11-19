@@ -1,19 +1,22 @@
-"""Configuration for the ``jake_tools.mcp`` entrypoint.
+"""Configuration for every ``jake_tools`` entrypoint.
+
+Configuration is explicit: CLI flags and process environment variables, and
+nothing else. There is no ``config.toml`` (searched or otherwise) and no
+``.env`` file: the process environment is the only environment, and nothing in
+the working directory or its ancestors can change a setting. Every setting is
+resolved with one precedence, highest first:
+
+1. a CLI flag (``overrides`` here; the command maps its flags onto them),
+2. an environment variable (named in the setting's :class:`_Spec`),
+3. the built-in default.
 
 Paths follow the XDG Base Directory specification on every platform,
 including macOS, with the spec's fallbacks when a variable is unset or not
-absolute. Every setting is resolved with one precedence, highest first:
+absolute; only the state and cache directories are used (run state, caches),
+never a config directory.
 
-1. a CLI flag (``overrides`` here; the command maps its flags onto them),
-2. an environment variable,
-3. ``$XDG_CONFIG_HOME/jake-tools/config.toml``,
-4. each ``$XDG_CONFIG_DIRS`` entry's ``jake-tools/config.toml``, in order,
-5. the built-in default.
-
-Secrets are environment-only and are never read from ``config.toml``. Each
-also accepts the Docker/systemd ``*_FILE`` convention, with the direct
-variable winning if both are set. Nothing here reads ``.env`` files: the
-process environment is the only environment.
+Secrets are environment-only. Each also accepts the Docker/systemd ``*_FILE``
+convention, with the direct variable winning if both are set.
 
 Every resolved value remembers where it came from so ``doctor`` can print the
 source next to the value. :class:`Config` is immutable and built once per
@@ -23,7 +26,6 @@ process by :func:`load_config`.
 from __future__ import annotations
 
 import os
-import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,14 +45,9 @@ from .claude import DEFAULT_MODEL, EffortLevel
 from .clockify import CLOCKIFY_API_ROOT
 
 APP_DIRNAME = "jake-tools"
-CONFIG_FILENAME = "config.toml"
 
-Source = Literal["flag", "env", "config", "default"]
-"""Where a setting's value was resolved from.
-
-``config`` covers both ``$XDG_CONFIG_HOME`` and ``$XDG_CONFIG_DIRS`` files;
-:attr:`Resolved.origin` names the actual file.
-"""
+Source = Literal["flag", "env", "default"]
+"""Where a setting's value was resolved from."""
 
 SECRET_VARIABLES: tuple[str, ...] = (
     "CLOCKIFY_API_KEY",
@@ -99,7 +96,7 @@ loopback address (see ``microsoft_auth.require_secure_url``)."""
 
 
 class ConfigError(RuntimeError):
-    """A config file or environment value could not be used.
+    """A flag or environment value could not be used.
 
     The message names the setting and where it came from, never a value.
     """
@@ -111,25 +108,17 @@ class XdgPaths(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     home: Path
-    config_home: Path
     state_home: Path
     cache_home: Path
-    config_dirs: tuple[Path, ...]
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str]) -> XdgPaths:
         home = _home(environ)
         return cls(
             home=home,
-            config_home=_xdg_dir(environ, "XDG_CONFIG_HOME", home / ".config"),
             state_home=_xdg_dir(environ, "XDG_STATE_HOME", home / ".local" / "state"),
             cache_home=_xdg_dir(environ, "XDG_CACHE_HOME", home / ".cache"),
-            config_dirs=_xdg_dirs(environ),
         )
-
-    @property
-    def app_config_dir(self) -> Path:
-        return self.config_home / APP_DIRNAME
 
     @property
     def app_state_dir(self) -> Path:
@@ -139,24 +128,13 @@ class XdgPaths(BaseModel):
     def app_cache_dir(self) -> Path:
         return self.cache_home / APP_DIRNAME
 
-    @property
-    def config_files(self) -> tuple[Path, ...]:
-        """Candidate config files, highest precedence first."""
-        return (
-            self.app_config_dir / CONFIG_FILENAME,
-            *(
-                directory / APP_DIRNAME / CONFIG_FILENAME
-                for directory in self.config_dirs
-            ),
-        )
-
 
 class Resolved[T](BaseModel):
     """One setting's value plus where it was resolved from.
 
-    ``origin`` is the flag name, the environment variable name, or the config
-    file path, depending on ``source``; it is ``None`` for defaults unless the
-    default itself derived from the environment (e.g. ``HERMES_HOME``).
+    ``origin`` is the flag's setting name or the environment variable name,
+    depending on ``source``; it is ``None`` for defaults unless the default
+    itself derived from the environment (e.g. ``HERMES_HOME``).
     """
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
@@ -183,23 +161,12 @@ class Resolved[T](BaseModel):
         return self.source if self.origin is None else f"{self.source} ({self.origin})"
 
 
-class ConfigFile(BaseModel):
-    """One candidate ``config.toml`` and what loading it produced."""
-
-    model_config = ConfigDict(frozen=True)
-
-    path: Path
-    exists: bool
-    data: dict[str, Any] = {}
-
-
 class Config(BaseModel):
-    """Everything the MCP entrypoint can be configured with, fully resolved."""
+    """Everything jake-tools can be configured with, fully resolved."""
 
     model_config = ConfigDict(frozen=True)
 
     xdg: XdgPaths
-    config_files: tuple[ConfigFile, ...]
     hermes_home: Path | None
 
     clockify_api_key: Resolved[str | None]
@@ -221,7 +188,7 @@ class Config(BaseModel):
     claude_max_budget_usd: Resolved[float]
     claude_max_live_tasks: Resolved[int]
     """The most delegated tasks *this process* admits while they are live in
-    the shared runs directory (``claude.max_live_tasks``, a positive
+    the shared runs directory (``JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS``, a positive
     integer). Every process applies its own value to the one shared live
     count, so processes configured differently do not share a ceiling; see
     ``claude_runs/control.py``."""
@@ -328,9 +295,7 @@ class _Spec[T]:
     """How one non-secret setting is looked up."""
 
     name: str
-    env: str | None
-    table: str | None
-    key: str | None
+    env: str
     adapter: TypeAdapter[T]
 
 
@@ -375,30 +340,28 @@ def load_config(
 
     ``overrides`` maps setting names (``"claude.runs_dir"``) to values a CLI
     flag supplied; they win over everything. Raises :class:`ConfigError` when
-    a config file cannot be parsed or a value has the wrong type; a missing
-    file or variable is never an error.
+    a value has the wrong type or a ``*_FILE`` secret cannot be read; a
+    missing variable is never an error. No file other than a ``*_FILE``
+    secret is ever read.
     """
     env = dict(os.environ if environ is None else environ)
     flags = dict(overrides or {})
     xdg = XdgPaths.from_environ(env)
-    files = tuple(_read_config_file(path) for path in xdg.config_files)
     hermes_home = _optional_path(env.get("HERMES_HOME"))
 
     def resolve[T](
         spec: _Spec[T], default: T, default_origin: str | None = None
     ) -> Resolved[T]:
-        return _resolve(spec, env, files, flags, default, default_origin)
+        return _resolve(spec, env, flags, default, default_origin)
 
     runs_dir = resolve(
-        _Spec("claude.runs_dir", "JAKE_TOOLS_RUNS_DIR", "claude", "runs_dir", _PATH),
+        _Spec("claude.runs_dir", "JAKE_TOOLS_RUNS_DIR", _PATH),
         xdg.app_state_dir / "runs",
     )
     session_store = resolve(
         _Spec(
             "session_store.path",
             "JAKE_TOOLS_SESSION_STORE",
-            "session_store",
-            "path",
             TypeAdapter(Path | None),
         ),
         None if hermes_home is None else hermes_home / "state.db",
@@ -408,7 +371,6 @@ def load_config(
     secrets = {name: _secret(name, env) for name in SECRET_VARIABLES}
     return Config(
         xdg=xdg,
-        config_files=files,
         hermes_home=hermes_home,
         clockify_api_key=secrets["CLOCKIFY_API_KEY"],
         jira_base_url=secrets["JIRA_BASE_URL"],
@@ -418,8 +380,6 @@ def load_config(
             _Spec(
                 "clockify.jira_project",
                 "JAKE_TOOLS_JIRA_PROJECT",
-                "clockify",
-                "jira_project",
                 _STR,
             ),
             DEFAULT_JIRA_PROJECT,
@@ -428,8 +388,6 @@ def load_config(
             _Spec(
                 "clockify.client",
                 "JAKE_TOOLS_CLOCKIFY_CLIENT",
-                "clockify",
-                "client",
                 _STR,
             ),
             DEFAULT_CLOCKIFY_CLIENT,
@@ -438,8 +396,6 @@ def load_config(
             _Spec(
                 "clockify.api_base_url",
                 "CLOCKIFY_API_BASE_URL",
-                "clockify",
-                "api_base_url",
                 _STR,
             ),
             CLOCKIFY_API_ROOT,
@@ -448,8 +404,6 @@ def load_config(
             _Spec(
                 "clockify.workspaces",
                 "JAKE_TOOLS_CLOCKIFY_WORKSPACES",
-                "clockify",
-                "workspaces",
                 _STR_TUPLE,
             ),
             (),
@@ -457,29 +411,29 @@ def load_config(
         session_store_path=session_store,
         runs_dir=runs_dir,
         claude_model=resolve(
-            _Spec("claude.model", None, "claude", "model", _STR), DEFAULT_MODEL
+            _Spec("claude.model", "JAKE_TOOLS_CLAUDE_MODEL", _STR), DEFAULT_MODEL
         ),
         claude_effort=resolve(
-            _Spec("claude.effort", None, "claude", "effort", _EFFORT), None
+            _Spec("claude.effort", "JAKE_TOOLS_CLAUDE_EFFORT", _EFFORT), None
         ),
         claude_max_turns=resolve(
-            _Spec("claude.max_turns", None, "claude", "max_turns", _INT),
+            _Spec("claude.max_turns", "JAKE_TOOLS_CLAUDE_MAX_TURNS", _INT),
             DEFAULT_CLAUDE_MAX_TURNS,
         ),
         claude_timeout_seconds=resolve(
-            _Spec("claude.timeout_seconds", None, "claude", "timeout_seconds", _FLOAT),
+            _Spec(
+                "claude.timeout_seconds", "JAKE_TOOLS_CLAUDE_TIMEOUT_SECONDS", _FLOAT
+            ),
             DEFAULT_CLAUDE_TIMEOUT_SECONDS,
         ),
         claude_max_budget_usd=resolve(
-            _Spec("claude.max_budget_usd", None, "claude", "max_budget_usd", _FLOAT),
+            _Spec("claude.max_budget_usd", "JAKE_TOOLS_CLAUDE_MAX_BUDGET_USD", _FLOAT),
             DEFAULT_CLAUDE_MAX_BUDGET_USD,
         ),
         claude_max_live_tasks=resolve(
             _Spec(
                 "claude.max_live_tasks",
                 "JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS",
-                "claude",
-                "max_live_tasks",
                 _POSITIVE_INT,
             ),
             DEFAULT_CLAUDE_MAX_LIVE_TASKS,
@@ -488,8 +442,6 @@ def load_config(
             _Spec(
                 "claude.account_context",
                 "JAKE_TOOLS_CLAUDE_ACCOUNT_CONTEXT",
-                "claude",
-                "account_context",
                 _ACCOUNT_CONTEXT,
             ),
             None,
@@ -498,8 +450,6 @@ def load_config(
             _Spec(
                 "transcription.api_base_url",
                 "TRANSCRIPTION_API_BASE_URL",
-                "transcription",
-                "api_base_url",
                 _OPTIONAL_STR,
             ),
             None,
@@ -509,8 +459,6 @@ def load_config(
             _Spec(
                 "transcription.timeout_seconds",
                 "JAKE_TOOLS_TRANSCRIPTION_TIMEOUT_SECONDS",
-                "transcription",
-                "timeout_seconds",
                 _FLOAT,
             ),
             DEFAULT_TRANSCRIPTION_TIMEOUT_SECONDS,
@@ -519,8 +467,6 @@ def load_config(
             _Spec(
                 "microsoft.tenant_id",
                 "JAKE_TOOLS_MICROSOFT_TENANT_ID",
-                "microsoft",
-                "tenant_id",
                 _OPTIONAL_STR,
             ),
             None,
@@ -529,8 +475,6 @@ def load_config(
             _Spec(
                 "microsoft.client_id",
                 "JAKE_TOOLS_MICROSOFT_CLIENT_ID",
-                "microsoft",
-                "client_id",
                 _OPTIONAL_STR,
             ),
             None,
@@ -539,8 +483,6 @@ def load_config(
             _Spec(
                 "microsoft.account",
                 "JAKE_TOOLS_MICROSOFT_ACCOUNT",
-                "microsoft",
-                "account",
                 _OPTIONAL_STR,
             ),
             None,
@@ -549,8 +491,6 @@ def load_config(
             _Spec(
                 "microsoft.account_object_id",
                 "JAKE_TOOLS_MICROSOFT_ACCOUNT_OBJECT_ID",
-                "microsoft",
-                "account_object_id",
                 _OPTIONAL_STR,
             ),
             None,
@@ -559,8 +499,6 @@ def load_config(
             _Spec(
                 "microsoft.authority_url",
                 "JAKE_TOOLS_MICROSOFT_AUTHORITY_URL",
-                "microsoft",
-                "authority_url",
                 _STR,
             ),
             DEFAULT_MICROSOFT_AUTHORITY_URL,
@@ -571,8 +509,6 @@ def load_config(
             _Spec(
                 "newsletters.graph_root",
                 "JAKE_TOOLS_NEWSLETTERS_GRAPH_ROOT",
-                "newsletters",
-                "graph_root",
                 _STR,
             ),
             DEFAULT_GRAPH_ROOT,
@@ -581,8 +517,6 @@ def load_config(
             _Spec(
                 "newsletters.sharepoint_root",
                 "JAKE_TOOLS_NEWSLETTERS_SHAREPOINT_ROOT",
-                "newsletters",
-                "sharepoint_root",
                 _STR,
             ),
             DEFAULT_SHAREPOINT_ROOT,
@@ -591,8 +525,6 @@ def load_config(
             _Spec(
                 "files.graph_root",
                 "JAKE_TOOLS_FILES_GRAPH_ROOT",
-                "files",
-                "graph_root",
                 _STR,
             ),
             DEFAULT_GRAPH_ROOT,
@@ -601,8 +533,6 @@ def load_config(
             _Spec(
                 "files.sharepoint_hosts",
                 "JAKE_TOOLS_FILES_SHAREPOINT_HOSTS",
-                "files",
-                "sharepoint_hosts",
                 _STR_TUPLE,
             ),
             DEFAULT_FILES_SHAREPOINT_HOSTS,
@@ -611,8 +541,6 @@ def load_config(
             _Spec(
                 "artifacts.enabled",
                 "JAKE_TOOLS_ARTIFACTS_ENABLED",
-                "artifacts",
-                "enabled",
                 _BOOL,
             ),
             False,
@@ -623,7 +551,6 @@ def load_config(
 def _resolve[T](
     spec: _Spec[T],
     env: Mapping[str, str],
-    files: tuple[ConfigFile, ...],
     flags: Mapping[str, Any],
     default: T,
     default_origin: str | None,
@@ -635,7 +562,7 @@ def _resolve[T](
             source="flag",
             origin=spec.name,
         )
-    if spec.env is not None and spec.env in env:
+    if spec.env in env:
         raw: Any = env[spec.env]
         if spec.adapter is _STR_TUPLE:
             raw = tuple(item.strip() for item in raw.split(",") if item.strip())
@@ -645,16 +572,6 @@ def _resolve[T](
             source="env",
             origin=spec.env,
         )
-    if spec.table is not None and spec.key is not None:
-        for file in files:
-            table = file.data.get(spec.table)
-            if isinstance(table, dict) and spec.key in table:
-                return Resolved(
-                    name=spec.name,
-                    value=_coerce(spec, table[spec.key], f"{file.path}"),
-                    source="config",
-                    origin=str(file.path),
-                )
     return Resolved(
         name=spec.name, value=default, source="default", origin=default_origin
     )
@@ -724,20 +641,6 @@ def _strip_newline(value: str) -> str:
     return value.removesuffix("\n").removesuffix("\r")
 
 
-def _read_config_file(path: Path) -> ConfigFile:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return ConfigFile(path=path, exists=False)
-    except OSError as exc:
-        raise ConfigError(f"cannot read {path}: {exc.strerror}") from exc
-    try:
-        data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"cannot parse {path}: {exc}") from exc
-    return ConfigFile(path=path, exists=True, data=data)
-
-
 def _home(environ: Mapping[str, str]) -> Path:
     raw = environ.get("HOME")
     if raw and os.path.isabs(raw):
@@ -750,14 +653,6 @@ def _xdg_dir(environ: Mapping[str, str], variable: str, fallback: Path) -> Path:
     if raw and os.path.isabs(raw):
         return Path(raw)
     return fallback
-
-
-def _xdg_dirs(environ: Mapping[str, str]) -> tuple[Path, ...]:
-    raw = environ.get("XDG_CONFIG_DIRS")
-    if not raw:
-        return (Path("/etc/xdg"),)
-    dirs = tuple(Path(item) for item in raw.split(os.pathsep) if os.path.isabs(item))
-    return dirs or (Path("/etc/xdg"),)
 
 
 def _optional_path(raw: str | None) -> Path | None:

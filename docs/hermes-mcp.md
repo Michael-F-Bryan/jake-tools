@@ -11,7 +11,7 @@ Hermes (`e96221f`, read from its installed source) or a live deployment.
 
 - Tools: 18 by default (17 operations plus `ping`). `transcribe` appears only
   with a transcription endpoint and the three `artifact_*` tools only with
-  `artifacts.enabled`, for 22 in total. Hermes names
+  `JAKE_TOOLS_ARTIFACTS_ENABLED`, for 22 in total. Hermes names
   them `mcp__<server>__<tool>`, replacing characters outside `[A-Za-z0-9_]`
   with `_` (`tools/mcp_tool_schema.py`, `mcp_prefixed_tool_name`). Server
   `jake-tools` therefore gives `mcp__jake_tools__ping` and so on.
@@ -94,7 +94,7 @@ profile `.env` remain readable by the agent's terminal.
 
 There is no capability allowlist. `transcribe` is listed only when a
 transcription endpoint is configured; Artifact tools only when
-`artifacts.enabled`. Missing credentials never stop startup. The call answers
+`JAKE_TOOLS_ARTIFACTS_ENABLED`. Missing credentials never stop startup. The call answers
 `missing_credentials` and names the variable.
 
 ## 5. Updating and refresh
@@ -112,7 +112,7 @@ To tell the packages apart:
 
 - Configured: the `command` store path in `config.yaml`.
 - Fresh process: `jake-tools-mcp doctor` from that path prints the
-  environment, every setting with its source, config files and checks.
+  environment, every setting with its source and checks.
 - Serving the session: call `ping` through the session. It returns the
   package version, the server PID and the time. Compare a guide read with
   the deployed package too, because the version alone may not change.
@@ -120,7 +120,7 @@ To tell the packages apart:
 ### Runs directory
 
 `runs_dir` defaults to `$XDG_STATE_HOME/jake-tools/runs` (`~/.local/state/...`
-when unset) and is overridden by `JAKE_TOOLS_RUNS_DIR` or `claude.runs_dir`.
+when unset) and is overridden by `JAKE_TOOLS_RUNS_DIR` or `--runs-dir`.
 The native plugin ran in Hermes' full environment. The MCP server gets the
 filtered environment above, so the path matches only if `HOME` and `XDG_*`
 agree. Run `jake-tools-mcp doctor` with the server's environment and check

@@ -131,27 +131,26 @@ def test_defaults_pass_and_secrets_are_skipped(
 def test_settings_show_sources(
     run_doctor: RunDoctor, home: Path, claude_bin: Path
 ) -> None:
-    config_dir = home / ".config" / "jake-tools"
-    config_dir.mkdir(parents=True)
-    config_file = config_dir / "config.toml"
-    config_file.write_text('[clockify]\nclient = "Acme"\n')
-
     result = run_doctor(
         home,
         claude_bin,
+        "--clockify-client",
+        "Acme",
         JAKE_TOOLS_JIRA_PROJECT="ZZ",
+        JAKE_TOOLS_CLOCKIFY_CLIENT="Env Client",
         CLOCKIFY_API_KEY=SENTINEL,
     )
 
     assert (
         "clockify.jira_project = ZZ  [env (JAKE_TOOLS_JIRA_PROJECT)]" in result.stdout
     )
-    assert f"clockify.client = Acme  [config ({config_file})]" in result.stdout
+    assert "clockify.client = Acme  [flag (clockify.client)]" in result.stdout
     assert "claude.max_turns = 20  [default]" in result.stdout
     assert "CLOCKIFY_API_KEY = set  [env (CLOCKIFY_API_KEY)]" in result.stdout
     assert "JIRA_API_TOKEN = unset" in result.stdout
-    assert f"ok      {config_file}" in result.stdout
-    assert "missing" in result.stdout
+    assert "Config files" not in result.stdout
+    assert "config.toml" not in result.stdout
+    assert SENTINEL not in result.stdout
 
 
 def test_secrets_never_printed(
@@ -174,18 +173,14 @@ def test_secrets_never_printed(
     assert "FAIL  jira" in result.stdout
 
 
-def test_config_parse_failure_exits_1(
+def test_invalid_setting_exits_1_naming_the_variable(
     run_doctor: RunDoctor, home: Path, claude_bin: Path
 ) -> None:
-    config_dir = home / ".config" / "jake-tools"
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.toml").write_text("this is = = not toml")
-
-    result = run_doctor(home, claude_bin)
+    result = run_doctor(home, claude_bin, JAKE_TOOLS_CLAUDE_MAX_TURNS="lots")
 
     assert result.returncode == 1
     assert check_line(result.stdout, "config").startswith("FAIL")
-    assert "error" in result.stdout
+    assert "JAKE_TOOLS_CLAUDE_MAX_TURNS" in result.stdout
 
 
 def test_unwritable_runs_dir_exits_1(
@@ -458,7 +453,7 @@ def test_environment_block_reports_home_hermes_and_xdg(
 
     assert f"HOME = {home}" in result.stdout
     assert f"HERMES_HOME = {tmp_path / 'hermes'}" in result.stdout
-    assert f"XDG config home = {home / '.config'}" in result.stdout
+    assert "XDG config home" not in result.stdout
     assert f"XDG state home = {home / '.local' / 'state'}" in result.stdout
     assert f"XDG cache home = {home / '.cache'}" in result.stdout
 

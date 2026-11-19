@@ -9,7 +9,7 @@ description: Transcribe and diarise local audio files with the `transcribe` tool
 filesystem) to the native
 transcription service and returns one complete, structured transcript. All
 `transcribe` inference is local to that host; nothing goes to a cloud provider.
-The tool is only present when jake-tools has `transcription.api_base_url`
+The tool is only present when jake-tools has `TRANSCRIPTION_API_BASE_URL`
 configured; if you cannot see it, there is no transcription available here.
 `polish_transcript` (below) is different: it sends transcript text to Claude.
 
