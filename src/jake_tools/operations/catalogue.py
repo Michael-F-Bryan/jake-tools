@@ -24,6 +24,12 @@ from . import (
     newsletter_list,
     newsletter_update,
     polish_transcript,
+    sharepoint_download,
+    sharepoint_get,
+    sharepoint_list,
+    sharepoint_pdf,
+    sharepoint_resolve,
+    sharepoint_upload,
     transcribe,
 )
 
@@ -46,6 +52,14 @@ OPERATIONS: tuple[Operation, ...] = (
     # Publishes to, or changes, a list its readers can see.
     newsletter_create.OPERATION,
     newsletter_update.OPERATION,
+    # Read-only; always listed, and `missing_credentials` until Microsoft is configured.
+    sharepoint_resolve.OPERATION,
+    sharepoint_get.OPERATION,
+    sharepoint_list.OPERATION,
+    sharepoint_download.OPERATION,
+    sharepoint_pdf.OPERATION,
+    # Adds a new file to a library other people use; verified by readback.
+    sharepoint_upload.OPERATION,
     # Sends transcript text to Claude; needs no transcription endpoint.
     polish_transcript.OPERATION,
     # Unavailable unless transcription.api_base_url is configured.

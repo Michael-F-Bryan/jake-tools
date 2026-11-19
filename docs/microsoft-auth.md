@@ -1,9 +1,10 @@
 # Microsoft authentication for jake-tools
 
 Jake's newsletter tools (`newsletter_list`, `newsletter_get`,
-`newsletter_create`, `newsletter_update`) act on SharePoint through Microsoft
-Graph and SharePoint REST as **one configured person**, using a *delegated*
-grant. This page is for the operator who provisions and renews it. It is not
+`newsletter_create`, `newsletter_update`) and SharePoint file tools
+(`sharepoint_resolve`, `sharepoint_get`, `sharepoint_list`,
+`sharepoint_download`, `sharepoint_pdf`, `sharepoint_upload`) act on SharePoint through Microsoft Graph and SharePoint
+REST as **one configured person**, using a *delegated* grant. This page is for the operator who provisions and renews it. It is not
 a general sign-in service: Jake never obtains a grant itself.
 
 ## Identity and authority
@@ -14,7 +15,7 @@ a general sign-in service: Jake never obtains a grant itself.
 | With what authority? | The delegated permissions that application was consented for, limited by what that person can do in SharePoint. Not application-wide access. |
 | Where is the grant kept? | In the operator-provisioned secret `MICROSOFT_REFRESH_TOKEN` (and `MICROSOFT_CLIENT_SECRET` if the application is a confidential client). Never in `config.toml`, tool arguments, results or logs. |
 | Which resources? | Two token audiences: Microsoft Graph (`https://graph.microsoft.com`, list items) and SharePoint (`https://<tenant>.sharepoint.com`, attachments). Each is requested and cached separately; a Graph token is not accepted by SharePoint REST. |
-| Which agents? | Every MCP client (Hermes included) of a server started with the configuration has all four tools (list/get read; create/update publish). |
+| Which agents? | Every MCP client (Hermes included) of a server started with the configuration has every tool (newsletter list/get and file read tools read; create/update/upload write). |
 | Fallback? | None. There is no Azure CLI fallback and no other account. The `jake-tools newsletter` command is separate: it uses the person's own `az login`. |
 
 Jake never changes tenant grants, never consents on anyone's behalf and never
@@ -49,6 +50,18 @@ Secrets (environment only, each also as `<NAME>_FILE`; set them in the MCP serve
 (`JAKE_TOOLS_NEWSLETTERS_GRAPH_ROOT`, `..._SHAREPOINT_ROOT`) default to the CSU
 site and exist so tests can point at a local stand-in. Anything other than
 HTTPS (or plain HTTP to `localhost`) is refused, because bearer tokens travel there.
+
+The file tools use Graph only (no SharePoint REST audience) and add two settings:
+`files.graph_root` (`JAKE_TOOLS_FILES_GRAPH_ROOT`; the same HTTPS-or-loopback rule,
+for tests) and `files.sharepoint_hosts` (`JAKE_TOOLS_FILES_SHAREPOINT_HOSTS`,
+comma-separated, default `csuses.sharepoint.com`): the only hosts
+`sharepoint_resolve` accepts a link for, so a link on another tenant (including a
+guest-shared one) is refused rather than resolved. The grant must be consented for
+the delegated Graph permission `Files.ReadWrite.All` (Microsoft's documented
+least-privileged permission for `channel filesFolder` is `Files.Read.All`, and
+`Files.ReadWrite` suffices for upload and shares; one consent covers all). Jake
+does not grant it; without it the file tools answer `access_denied`
+(`insufficient_permission`) while the newsletter keeps working.
 
 Missing values are not a startup error: the tools are listed, and a call returns
 `missing_credentials` naming the variables and settings. `jake-tools-mcp doctor`

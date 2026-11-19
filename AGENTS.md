@@ -21,6 +21,8 @@ src/jake_tools/
   newsletters.py  # SharePoint Graph client (list paging, attachments, request/outcome classification)
   newsletter_entries.py # verified list/get/create/update workflows over the client; partial-outcome effects
   microsoft_auth.py # refresh-aware delegated tokens per resource audience; identity check
+  sharepoint_files.py # Graph drive-item client (shares, channel folder, children, 302 content, upload sessions)
+  file_transfers.py # verified resolve/list/download/upload/replace workflows; coverage, versions, outcomes
   transcription.py # HTTP client + transcript contract for transcription-service
 tests/            # mirrors packages above
 transcription-service/  # native Swift HTTP service (FluidAudio); see its README
@@ -430,6 +432,30 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
 - Attachment paths are read with the server's own permissions: a granted
   `newsletter_publish` agent can upload any readable file it names.
 
+## SharePoint and Teams files (`sharepoint_files`, `file_transfers`)
+
+Six `sharepoint_*` tools (guide: `skills/sharepoint-files`; operator CLI
+`jake-tools files`, which builds the same `OPERATION.build(config)` handlers).
+Same identity as the newsletter (`microsoft_settings`, `shared_provider`), plus
+delegated `Files.ReadWrite.All`. Maintainer invariants:
+
+- Items are Graph `drive_id` + `item_id`, validated and quoted into paths. Links
+  must be on `files.sharepoint_hosts`; `files.graph_root` exists only for fixtures.
+- Content `302`s are followed by hand WITHOUT the bearer token; pre-authenticated
+  download/upload URLs, and the link being resolved, never appear in an error.
+- Uploads use `createUploadSession` for NEW files only (`fail`/`rename`, never
+  `replace`; one fragment, at most 50 MiB). **Replacing an existing file is
+  withheld on purpose**: Microsoft documents `if-match` (412) only at session
+  creation, not at the commit, and none for "Upload small files", so no safe
+  conditional replace exists. Do not add one with locks, versions or retries; it
+  needs a documented commit-time condition (open on #11, a separate investigation).
+- A failure before content is sent (even a 5xx) is `not_applied`; no answer, a
+  5xx or an unreadable 2xx on the content PUT is `write_uncertain`; success is
+  only `verified: true` after the exact item's bytes were downloaded and compared.
+  Never retry a write. Source/destination paths use the server's permissions.
+- `tests/fake_drive.py` (extends `fake_microsoft.py`) is mechanics only; live
+  link forms, rendering and throttling were not checked against a tenant.
+
 ## External dependencies
 
 | Tool               | Used by                                               |
@@ -485,6 +511,20 @@ SharePoint list via Microsoft Graph. Body text is read from stdin for `add`
 Requires `az login` to the CSU tenant for a Graph access token. That is the
 interactive command line's own identity. The MCP `newsletter_*` tools
 never use it (see "Microsoft newsletters" below).
+
+### `files`
+
+```bash
+jake-tools files resolve --url "https://csuses.sharepoint.com/..." --json
+jake-tools files list DRIVE_ID ITEM_ID --limit 50
+jake-tools files download DRIVE_ID ITEM_ID /abs/new/path.docx
+jake-tools files upload DRIVE_ID FOLDER_ID /abs/list.xlsx --on-conflict fail
+```
+
+Also `get` and `pdf`. These run the MCP operations, as the configured Microsoft
+account (environment or `.env`; not `az login`). `upload` adds a file other
+people can see. A nonzero exit includes an uncertain write, whose `outcome` and
+`next_step` are printed.
 
 ## Boundaries
 

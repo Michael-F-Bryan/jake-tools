@@ -92,6 +92,7 @@ never retried: the service may still be processing the original request.
 DEFAULT_MICROSOFT_AUTHORITY_URL = "https://login.microsoftonline.com"
 DEFAULT_GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
 DEFAULT_SHAREPOINT_ROOT = "https://csuses.sharepoint.com/sites/leadershipteam/_api"
+DEFAULT_FILES_SHAREPOINT_HOSTS = ("csuses.sharepoint.com",)
 """Where the newsletter operations talk by default. Overridable only so a
 fixture upstream can stand in; a non-HTTPS value is refused unless it is a
 loopback address (see ``microsoft_auth.require_secure_url``)."""
@@ -246,6 +247,12 @@ class Config(BaseModel):
     microsoft_client_secret: Resolved[str | None]
     newsletters_graph_root: Resolved[str]
     newsletters_sharepoint_root: Resolved[str]
+    files_graph_root: Resolved[str]
+    """Where the ``sharepoint_*`` file tools reach Microsoft Graph. Overridable
+    only so a fixture upstream can stand in (HTTPS, or HTTP to loopback)."""
+    files_sharepoint_hosts: Resolved[tuple[str, ...]]
+    """The SharePoint hosts ``sharepoint_resolve`` accepts a link for. A link
+    on any other host (another tenant's, a guest-shared one) is refused."""
 
     artifacts_enabled: Resolved[bool]
     """Whether ``artifact_publish`` and ``artifact_read`` are exposed. Off by
@@ -283,6 +290,8 @@ class Config(BaseModel):
             self.microsoft_client_secret,
             self.newsletters_graph_root,
             self.newsletters_sharepoint_root,
+            self.files_graph_root,
+            self.files_sharepoint_hosts,
             self.artifacts_enabled,
         )
 
@@ -577,6 +586,26 @@ def load_config(
                 _STR,
             ),
             DEFAULT_SHAREPOINT_ROOT,
+        ),
+        files_graph_root=resolve(
+            _Spec(
+                "files.graph_root",
+                "JAKE_TOOLS_FILES_GRAPH_ROOT",
+                "files",
+                "graph_root",
+                _STR,
+            ),
+            DEFAULT_GRAPH_ROOT,
+        ),
+        files_sharepoint_hosts=resolve(
+            _Spec(
+                "files.sharepoint_hosts",
+                "JAKE_TOOLS_FILES_SHAREPOINT_HOSTS",
+                "files",
+                "sharepoint_hosts",
+                _STR_TUPLE,
+            ),
+            DEFAULT_FILES_SHAREPOINT_HOSTS,
         ),
         artifacts_enabled=resolve(
             _Spec(
