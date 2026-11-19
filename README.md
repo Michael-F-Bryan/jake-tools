@@ -104,7 +104,8 @@ To Do, In Progress, Blocked, and In Review. To Do is SF’s Planned This Week
 column; Backlog, TRIAGE, and Investigate are not automatically created. Existing
 Clockify tasks deferred to the backlog stay intact and are still renamed as
 needed; deferral is not completion. Repeat `--issue KEY` to reconcile exact work
-items regardless of assignee or status. The plan can create projects and tasks,
+items regardless of assignee or status; a missing task for a Done issue is
+created and then completed, both shown in the plan. The plan can create projects and tasks,
 rename records, reactivate eligible tasks, and mark tasks done when Jira’s status
 category is Done (including Done and Won’t Do). It ignores archived Clockify
 projects and never deletes projects, tasks, or time entries. Ambiguous active

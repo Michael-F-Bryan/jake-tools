@@ -463,7 +463,8 @@ jake-tools clockify jira-sync --issue SF-304 --apply --json
 
 `jira-sync` defaults to planned or underway Jira work assigned to `currentUser()`
 (status To Do, In Progress, Blocked, or In Review). Repeat
-`--issue KEY` to reconcile exact work items regardless of assignee. Dry-run is
+`--issue KEY` to reconcile exact work items regardless of assignee or status
+(a missing task for a Done issue is created, then completed). Dry-run is
 the default; `--apply` creates, renames, reactivates, or completes records and
 then re-fetches every changed Clockify object for verification. The command
 never deletes records.

@@ -200,8 +200,10 @@ def jira_name(key: str, summary: str, kind: str, as_json: bool) -> None:
     "issue_keys",
     multiple=True,
     help=(
-        "Reconcile an exact Jira issue regardless of assignee. Repeat for multiple "
-        "issues; otherwise sync planned or underway work assigned to currentUser()."
+        "Reconcile an exact Jira issue regardless of assignee or status (a "
+        "missing task for a Done issue is created, then completed). Repeat for "
+        "multiple issues; otherwise sync planned or underway work assigned to "
+        "currentUser()."
     ),
 )
 @click.pass_context
@@ -221,7 +223,7 @@ def jira_sync(
     Clockify records from the emitted plan. By default, planned or underway Jira
     work (To Do, In Progress, Blocked, In Review) assigned to currentUser() is
     selected. --issue selects exact work items
-    regardless of assignee. The command never deletes records.
+    regardless of assignee or status. The command never deletes records.
     """
     try:
         report = run_jira_sync(
