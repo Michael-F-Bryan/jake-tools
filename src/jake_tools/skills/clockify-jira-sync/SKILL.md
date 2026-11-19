@@ -20,11 +20,40 @@ regardless of intermediate parents. Ancestors are loaded for placement, not
 selected for task creation. Missing ancestors, chains with no phase, and cycles
 are conflicts; the sync never guesses a project or moves existing tasks.
 
+## Automatic discovery versus explicit issues
+
+| `issues` | Selects |
+| --- | --- |
+| omitted | The authenticated user's assigned work in To Do, In Progress, In Review or Blocked (scope `assigned-active`) |
+| non-empty | Exactly those issues, whatever their assignee or Jira status (scope `issues`) |
+
 Backlog, TRIAGE, and Investigate are excluded from automatic creation. Existing
-tasks deferred to the backlog stay intact and can still be renamed; only Jira
-status category Done (including Done and Won’t Do) completes them. The report
-retains the `assigned-active` scope and `active_issues` count for planned or
-underway work.
+tasks deferred to the backlog stay intact and can still be renamed. Only Jira
+status category Done (including Done and Won’t Do) completes a task, and nothing
+reopens one that Jira says is finished.
+
+Explicit selection overrides those discovery filters and nothing else. Each
+requested issue still needs a resolvable `Project / Phase` ancestor and passes
+the duplicate and wrong-project checks, so a problem is a conflict naming that
+key (an ambiguous phase project also blocks each requested issue under it,
+with a reason of its own). A key Jira cannot return fails the call as
+`upstream_error` naming it. Ancestors fetched for placement are not selected:
+their phase project is checked, but their own Clockify tasks are never created,
+renamed or completed. What an explicit issue gets:
+
+- **No Clockify task yet.** Backlog, TRIAGE, Investigate, To Do or underway: one
+  `CREATE_TASK`, active. Done or Won’t Do: `CREATE_TASK` **then**
+  `MARK_TASK_DONE` for the same key, because Clockify creates tasks active.
+  The second action has `task_id: null` in the preview (the task does not exist
+  yet) and the digest covers it, so the plan reviewed is the completed final state.
+- **A task already exists.** No duplicate: the normal name, reactivate and
+  complete reconciliation applies, and a task already in the right state has no
+  actions at all.
+
+`inventory.active_issues` counts planned or underway issues: all discovered
+ones, or the requested ones whose Jira status category is not Done. A requested
+Done issue is still planned without being counted, so `active_issues: 0` does
+not mean nothing was selected; read `actions` and `conflicts`.
 
 ## Discovery, configuration and scope
 
@@ -61,7 +90,8 @@ and credential requirements.
 1. **Preview.** Call with no arguments to cover planned or underway Jira work
    (To Do, In Progress, Blocked, In Review) assigned to the authenticated user,
    or `issues: ["SF-304", ...]` for exact keys
-   regardless of assignee. Preview is read-only. `apply` defaults to false.
+   regardless of assignee or status (including finished work you did not own,
+   for historical timesheets). Preview is read-only. `apply` defaults to false.
 2. **Read the report** before doing anything else (fields below). If
    `actions` is empty and `conflicts` is empty, there is nothing to do; say
    so and stop.
@@ -100,7 +130,11 @@ nothing.
 - `actions[].kind` is one of `CREATE_PROJECT`, `RENAME_PROJECT`,
   `CREATE_TASK`, `REACTIVATE_TASK`, `RENAME_TASK`, `MARK_TASK_DONE`. Renames
   show `current_name` → `desired_name`; creates have an empty
-  `current_name`.
+  `current_name`. A `CREATE_TASK` and a `MARK_TASK_DONE` for the same key
+  (with a null `task_id`) are one finished issue's task being created, then
+  completed later in the plan; actions are ordered by kind, so with several keys
+  they need not be adjacent. After an
+  apply, a created record's `task_id` (or `project_id`) is the verified one.
 - `conflicts` lists what the plan refuses to touch, each with a `jira_key` and
   a `message` (e.g. `"multiple active Clockify tasks reference SF-304"`).
   **Any conflict blocks the whole apply.**
@@ -139,7 +173,11 @@ failure:
 
 1. Tell the person what was applied and what failed.
 2. Preview again. The new plan shows what is still outstanding, including
-   whether the failed action actually landed.
+   whether the failed action actually landed. If a finished issue's task was
+   created and its completion failed, the created `CREATE_TASK` shows
+   `applied: true` with its `task_id`, `failure.kind` is `MARK_TASK_DONE`, and the
+   next preview plans only `MARK_TASK_DONE` on that task. If the creation's own
+   read-back failed, `failure.message` names the Clockify task ID to inspect.
    The fresh plan is evidence, not permission to repeat an uncertain POST: inspect
    the exact changed records (and known IDs) first. If a create may have landed
    but identity cannot be established, stop and report uncertainty; do not create

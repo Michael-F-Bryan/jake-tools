@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 import pytest
 from pydantic import ValidationError
@@ -140,7 +140,7 @@ def test_plan_creates_missing_projects_and_task_for_planned_or_underway_issues(
     )
 
     plan = plan_jira_sync(
-        active_issues=[phase, task],
+        selected_issues=[phase, task],
         jira_issues=[phase, task, parent],
         index=build_index([], []),
     )
@@ -175,7 +175,7 @@ def test_plan_renames_drift_and_completes_done_category_jira_tasks(status: str) 
     ]
 
     plan = plan_jira_sync(
-        active_issues=[],
+        selected_issues=[],
         jira_issues=jira,
         index=build_index([project], tasks),
     )
@@ -202,7 +202,7 @@ def test_plan_does_not_rename_project_for_whitespace_only_summary_drift() -> Non
     ]
 
     plan = plan_jira_sync(
-        active_issues=[],
+        selected_issues=[],
         jira_issues=jira,
         index=build_index([project], []),
     )
@@ -225,7 +225,7 @@ def test_plan_reactivates_done_task_when_it_is_active_and_assigned() -> None:
     )
 
     plan = plan_jira_sync(
-        active_issues=[issue],
+        selected_issues=[issue],
         jira_issues=[
             issue,
             jira_issue(
@@ -260,7 +260,7 @@ def test_plan_conflicts_when_existing_task_cannot_belong_to_missing_parent() -> 
     )
 
     plan = plan_jira_sync(
-        active_issues=[issue],
+        selected_issues=[issue],
         jira_issues=[
             issue,
             jira_issue(
@@ -301,7 +301,7 @@ def test_plan_ignores_archived_project_and_creates_usable_replacements() -> None
     )
 
     plan = plan_jira_sync(
-        active_issues=[issue],
+        selected_issues=[issue],
         jira_issues=[
             issue,
             jira_issue(
@@ -339,7 +339,7 @@ def test_plan_keeps_todo_or_reassigned_tasks_active_while_syncing_names() -> Non
     ]
 
     plan = plan_jira_sync(
-        active_issues=[],
+        selected_issues=[],
         jira_issues=jira,
         index=build_index([project], tasks),
     )
@@ -364,7 +364,7 @@ def test_plan_reports_ambiguous_active_task_duplicates_as_conflict() -> None:
     )
 
     plan = plan_jira_sync(
-        active_issues=[issue],
+        selected_issues=[issue],
         jira_issues=[
             issue,
             jira_issue(
@@ -402,7 +402,7 @@ def test_plan_and_apply_agree_on_duplicate_task_handling_through_shared_index() 
     index = build_index([project], tasks)
 
     plan = plan_jira_sync(
-        active_issues=[issue],
+        selected_issues=[issue],
         jira_issues=[
             issue,
             jira_issue(
@@ -849,13 +849,429 @@ def test_prepare_jira_sync_targets_exact_issue_regardless_of_assignee_or_status(
 
     assert snapshot.scope == "issues"
     assert snapshot.requested_issue_keys == ("SF-304",)
-    assert snapshot.active_issues == (issue,)
+    assert snapshot.selected_issues == (issue,)
     assert jira.requested_issue == "SF-304"
     assert jira.requested_keys == ["SF-131", "SF-304"]
     assert jira.active_project_requests == []
     assert [(action.kind, action.jira_key) for action in snapshot.plan.actions] == [
         (SyncActionKind.REACTIVATE_TASK, "SF-304")
     ]
+
+
+def _explicit_clients(
+    selected: JiraIssue,
+    *,
+    ancestors: Iterable[JiraIssue] = (),
+    tasks: Sequence[ClockifyTask] = (),
+    done_tasks: Sequence[ClockifyTask] = (),
+    projects: list[ClockifyProject] | None = None,
+) -> tuple[FakeClockifyInventoryClient, FakeJiraInventoryClient]:
+    phase = jira_issue(
+        "SF-131",
+        "Production Vehicle",
+        issue_type="Project / Phase",
+        parent_key=None,
+        parent_summary=None,
+    )
+    clockify = FakeClockifyInventoryClient(
+        clients=[ClockifyClientRecord(id="client-1", name="Sunfish Robotics")],
+        projects=(
+            [clockify_project("SF-131", "Production Vehicle")]
+            if projects is None
+            else projects
+        ),
+        active_tasks=list(tasks),
+        done_tasks=list(done_tasks),
+    )
+    jira = FakeJiraInventoryClient(
+        active_issues=[], issues=[phase, selected, *ancestors]
+    )
+    return clockify, jira
+
+
+def _prepare_explicit(
+    clockify: FakeClockifyInventoryClient,
+    jira: FakeJiraInventoryClient,
+    *keys: str,
+) -> SyncSnapshot:
+    return prepare_jira_sync(
+        clockify=clockify,
+        jira=jira,
+        jira_project="SF",
+        clockify_client="Sunfish Robotics",
+        issue_keys=keys,
+    )
+
+
+@pytest.mark.parametrize("status", ["Done", "Won’t Do"])
+def test_explicit_done_issue_without_a_task_plans_creation_then_completion(
+    status: str,
+) -> None:
+    issue = jira_issue(
+        "SF-691",
+        "Seaworthiness tab",
+        status=status,
+        status_category="Done",
+        assignee="David Htet",
+    )
+    clockify, jira = _explicit_clients(issue)
+
+    snapshot = _prepare_explicit(clockify, jira, "SF-691")
+
+    assert snapshot.selected_issues == (issue,)
+    assert snapshot.plan.actions == (
+        CreateTaskAction(
+            jira_key="SF-691",
+            project_key="SF-131",
+            desired_name="SF-691 Seaworthiness tab",
+        ),
+        CompleteTaskAction(
+            jira_key="SF-691",
+            project_key="SF-131",
+            desired_name="SF-691 Seaworthiness tab",
+            jira_status=status,
+            after_create=True,
+            message="completes the task created for this issue",
+        ),
+    )
+    assert clockify.operations == []
+
+
+def test_explicit_done_issue_creates_its_missing_phase_but_not_its_ancestors() -> None:
+    phase = jira_issue(
+        "SF-4",
+        "Zoda",
+        issue_type="Project / Phase",
+        parent_key=None,
+        parent_summary=None,
+    )
+    middle = jira_issue("SF-100", "Middle", parent_key="SF-4")
+    leaf = jira_issue(
+        "SF-691",
+        "Leaf",
+        status="Done",
+        status_category="Done",
+        issue_type="Subtask",
+        parent_key="SF-100",
+    )
+    clockify, jira = _explicit_clients(leaf, ancestors=[phase, middle], projects=[])
+
+    snapshot = _prepare_explicit(clockify, jira, "SF-691")
+
+    assert [(a.kind, a.jira_key) for a in snapshot.plan.actions] == [
+        (SyncActionKind.CREATE_PROJECT, "SF-4"),
+        (SyncActionKind.CREATE_TASK, "SF-691"),
+        (SyncActionKind.MARK_TASK_DONE, "SF-691"),
+    ]
+    assert {issue.key for issue in snapshot.jira_issues} >= {"SF-4", "SF-100"}
+    assert snapshot.selected_issues == (leaf,)
+
+    result = apply_sync_plan(
+        snapshot.plan,
+        clockify=clockify,
+        workspace_id=snapshot.workspace_id,
+        client_id=snapshot.client_id,
+        index=snapshot.index,
+    )
+
+    assert clockify.operations == [
+        "create_project:Jira: SF-4",
+        "create_task:created-SF-4",
+        "update_task:created-SF-691:DONE",
+    ]
+    assert [item.task.status for item in result.applied if item.task] == [
+        "ACTIVE",
+        "DONE",
+    ]
+
+
+@pytest.mark.parametrize("problem", ["missing", "orphan", "cycle"])
+def test_explicit_done_issue_with_broken_hierarchy_is_a_keyed_conflict(
+    problem: str,
+) -> None:
+    issue = jira_issue(
+        "SF-326", "Subtask", status="Done", status_category="Done", parent_key="SF-325"
+    )
+    parent = jira_issue(
+        "SF-325",
+        "Feature",
+        issue_type="Feature",
+        parent_key="SF-326" if problem == "cycle" else None,
+    )
+    clockify, jira = _explicit_clients(
+        issue, ancestors=[] if problem == "missing" else [parent]
+    )
+
+    snapshot = _prepare_explicit(clockify, jira, "SF-326")
+
+    assert len(snapshot.plan.actions) == 1
+    conflict = snapshot.plan.actions[0]
+    assert isinstance(conflict, ConflictAction)
+    assert conflict.jira_key == "SF-326"
+    assert {
+        "missing": "ancestor SF-325 is unavailable",
+        "orphan": "SF-325 has no parent Project / Phase",
+        "cycle": "cycle",
+    }[problem] in conflict.message
+
+
+@pytest.mark.parametrize("status", ["Backlog", "TRIAGE", "Investigate"])
+def test_explicit_deferred_issue_without_a_task_is_created_and_not_completed(
+    status: str,
+) -> None:
+    issue = jira_issue(
+        "SF-500",
+        "Future work",
+        status=status,
+        status_category="To Do",
+        assignee=None,
+    )
+    clockify, jira = _explicit_clients(issue)
+
+    snapshot = _prepare_explicit(clockify, jira, "SF-500")
+
+    assert [(a.kind, a.jira_key) for a in snapshot.plan.actions] == [
+        (SyncActionKind.CREATE_TASK, "SF-500")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("task_status", "task_summary", "expected"),
+    [
+        ("ACTIVE", "Seaworthiness tab", [SyncActionKind.MARK_TASK_DONE]),
+        ("ACTIVE", "Old name", [SyncActionKind.MARK_TASK_DONE]),
+        ("DONE", "Seaworthiness tab", []),
+        ("DONE", "Old name", [SyncActionKind.RENAME_TASK]),
+    ],
+)
+def test_explicit_done_issue_with_a_task_reconciles_it_without_creating_or_reopening(
+    task_status: TaskStatus, task_summary: str, expected: list[SyncActionKind]
+) -> None:
+    issue = jira_issue(
+        "SF-691", "Seaworthiness tab", status="Done", status_category="Done"
+    )
+    task = clockify_task("SF-691", task_summary, status=task_status)
+    clockify, jira = _explicit_clients(
+        issue,
+        tasks=[task] if task_status == "ACTIVE" else [],
+        done_tasks=[task] if task_status == "DONE" else [],
+    )
+
+    snapshot = _prepare_explicit(clockify, jira, "SF-691")
+
+    assert [action.kind for action in snapshot.plan.actions] == expected
+    assert all(
+        getattr(action, "task_id", task.id) == task.id
+        for action in snapshot.plan.actions
+    )
+
+
+@pytest.mark.parametrize("state", ["wrong-project", "duplicate-task"])
+def test_explicit_done_issue_with_bad_task_mapping_is_a_keyed_conflict(
+    state: str,
+) -> None:
+    issue = jira_issue(
+        "SF-691", "Seaworthiness tab", status="Done", status_category="Done"
+    )
+    other = clockify_project("SF-999", "Unrelated")
+    tasks = [clockify_task("SF-691", "Seaworthiness tab")]
+    if state == "wrong-project":
+        tasks = [clockify_task("SF-691", "Seaworthiness tab", project_id=other.id)]
+    else:
+        tasks.append(
+            clockify_task("SF-691", "Seaworthiness tab", task_id="task-SF-691-b")
+        )
+    clockify, jira = _explicit_clients(
+        issue,
+        tasks=tasks,
+        projects=[clockify_project("SF-131", "Production Vehicle"), other],
+    )
+
+    snapshot = _prepare_explicit(clockify, jira, "SF-691")
+
+    assert [(a.kind, a.jira_key) for a in snapshot.plan.actions] == [
+        (SyncActionKind.CONFLICT, "SF-691")
+    ]
+    with pytest.raises(SyncApplyError, match="SF-691"):
+        apply_sync_plan(
+            snapshot.plan,
+            clockify=clockify,
+            workspace_id=snapshot.workspace_id,
+            client_id=snapshot.client_id,
+            index=snapshot.index,
+        )
+    assert clockify.operations == []
+
+
+@pytest.mark.parametrize("ancestor_state", ["done-active-task", "renamed-task"])
+def test_explicit_issue_leaves_the_tasks_of_its_ancestors_alone(
+    ancestor_state: str,
+) -> None:
+    ancestor = jira_issue(
+        "SF-200",
+        "Intermediate",
+        issue_type="Feature",
+        status="Done" if ancestor_state == "done-active-task" else "To Do",
+        status_category="Done" if ancestor_state == "done-active-task" else "To Do",
+    )
+    leaf = jira_issue(
+        "SF-691",
+        "Leaf",
+        status="Done",
+        status_category="Done",
+        issue_type="Subtask",
+        parent_key="SF-200",
+    )
+    stale = clockify_task("SF-200", "Old summary")
+    clockify, jira = _explicit_clients(leaf, ancestors=[ancestor], tasks=[stale])
+
+    snapshot = _prepare_explicit(clockify, jira, "SF-691")
+
+    assert [(a.kind, a.jira_key) for a in snapshot.plan.actions] == [
+        (SyncActionKind.CREATE_TASK, "SF-691"),
+        (SyncActionKind.MARK_TASK_DONE, "SF-691"),
+    ]
+    assert snapshot.selected_issues == (leaf,)
+
+
+def test_duplicate_ancestor_task_does_not_block_an_explicit_issue() -> None:
+    ancestor = jira_issue("SF-200", "Intermediate", issue_type="Feature")
+    leaf = jira_issue("SF-691", "Leaf", issue_type="Subtask", parent_key="SF-200")
+    clockify, jira = _explicit_clients(
+        leaf,
+        ancestors=[ancestor],
+        tasks=[
+            clockify_task("SF-200", "Intermediate"),
+            clockify_task("SF-200", "Intermediate", task_id="duplicate"),
+        ],
+    )
+
+    snapshot = _prepare_explicit(clockify, jira, "SF-691")
+
+    assert [(a.kind, a.jira_key) for a in snapshot.plan.actions] == [
+        (SyncActionKind.CREATE_TASK, "SF-691")
+    ]
+
+
+def test_explicit_done_issue_under_duplicate_phase_gets_its_own_reason() -> None:
+    leaf = jira_issue(
+        "SF-691", "Leaf", status="Done", status_category="Done", assignee="David"
+    )
+    project = clockify_project("SF-131", "Production Vehicle")
+    clockify, jira = _explicit_clients(
+        leaf,
+        projects=[project, project.model_copy(update={"id": "duplicate-project"})],
+    )
+
+    snapshot = _prepare_explicit(clockify, jira, "SF-691")
+
+    conflicts = {a.jira_key: a for a in snapshot.plan.actions}
+    assert set(conflicts) == {"SF-131", "SF-691"}
+    assert all(isinstance(a, ConflictAction) for a in conflicts.values())
+    assert "SF-131" in conflicts["SF-691"].message
+    assert "multiple active Clockify projects" in conflicts["SF-691"].message
+    report = SyncReport.from_snapshot(
+        snapshot, jira_project="SF", clockify_client="Sunfish Robotics"
+    )
+    assert report.actions == ()
+    assert {c.jira_key for c in report.conflicts} == {"SF-131", "SF-691"}
+
+
+def test_report_counts_requested_done_issues_as_planned_but_not_active() -> None:
+    done = jira_issue("SF-691", "Leaf", status="Done", status_category="Done")
+    clockify, jira = _explicit_clients(done)
+    explicit = SyncReport.from_snapshot(
+        _prepare_explicit(clockify, jira, "SF-691"),
+        jira_project="SF",
+        clockify_client="Sunfish Robotics",
+    )
+    assert explicit.inventory.active_issues == 0
+    assert [a.kind for a in explicit.actions] == [
+        SyncActionKind.CREATE_TASK,
+        SyncActionKind.MARK_TASK_DONE,
+    ]
+
+    jira.active_issues = [jira_issue("SF-700", "Planned", status="To Do")]
+    jira.issues["SF-700"] = jira.active_issues[0]
+    automatic = SyncReport.from_snapshot(
+        _prepare_explicit(clockify, jira),
+        jira_project="SF",
+        clockify_client="Sunfish Robotics",
+    )
+    assert automatic.inventory.active_issues == 1
+
+
+def test_automatic_discovery_still_selects_only_what_jira_discovery_returns() -> None:
+    discovered = jira_issue("SF-700", "Planned", status="To Do")
+    finished = jira_issue(
+        "SF-691", "Finished", status="Done", status_category="Done", assignee="David"
+    )
+    clockify, jira = _explicit_clients(finished, ancestors=[discovered])
+    jira.active_issues = [discovered]
+
+    snapshot = _prepare_explicit(clockify, jira)
+
+    assert snapshot.scope == SyncScope.ASSIGNED_ACTIVE
+    assert snapshot.selected_issues == (discovered,)
+    assert [(a.kind, a.jira_key) for a in snapshot.plan.actions] == [
+        (SyncActionKind.CREATE_TASK, "SF-700")
+    ]
+    assert jira.active_project_requests == ["SF"]
+
+
+def test_completion_after_creation_names_exactly_one_task() -> None:
+    def complete(*, task_id: str | None, after_create: bool) -> CompleteTaskAction:
+        return CompleteTaskAction(
+            jira_key="SF-1",
+            desired_name="SF-1 x",
+            jira_status="Done",
+            task_id=task_id,
+            after_create=after_create,
+        )
+
+    complete(task_id="t-1", after_create=False)
+    complete(task_id=None, after_create=True)
+    with pytest.raises(ValidationError):
+        complete(task_id=None, after_create=False)
+    with pytest.raises(ValidationError):
+        complete(task_id="t-1", after_create=True)
+
+
+def test_apply_refuses_a_completion_whose_creation_did_not_run() -> None:
+    plan = SyncPlan(
+        actions=(
+            CompleteTaskAction(
+                jira_key="SF-691",
+                project_key="SF-131",
+                desired_name="SF-691 x",
+                jira_status="Done",
+                after_create=True,
+            ),
+        )
+    )
+    client = FakeClockifySyncClient()
+
+    with pytest.raises(SyncApplyError, match="SF-691") as raised:
+        apply_sync_plan(
+            plan,
+            clockify=client,
+            workspace_id="workspace-1",
+            client_id="client-1",
+            index=build_index([], []),
+        )
+
+    assert raised.value.applied == ()
+    assert client.operations == []
+
+
+def test_plan_digest_covers_the_final_state_of_a_created_task() -> None:
+    def digest(status: str, category: JiraStatusCategory) -> str:
+        issue = jira_issue("SF-691", "Tab", status=status, status_category=category)
+        clockify, jira = _explicit_clients(issue)
+        return plan_digest(_prepare_explicit(clockify, jira, "SF-691"))
+
+    assert digest("Done", "Done") != digest("In Progress", "In Progress")
+    assert digest("Done", "Done") != digest("Backlog", "To Do")
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -914,7 +1330,7 @@ def test_prepare_flattens_subtasks_under_ancestor_phase(
         issue_keys=[issue.key for issue in selected] if explicit else (),
     )
 
-    assert snapshot.active_issues == tuple(selected)
+    assert snapshot.selected_issues == tuple(selected)
     assert {issue.key for issue in snapshot.jira_issues} == {
         phase.key,
         feature.key,
@@ -1026,8 +1442,15 @@ def test_deep_ancestry_preserves_task_updates_and_conflict_guards(
         issue_keys=[issue.key],
     )
 
-    assert len(snapshot.plan.actions) == 1
-    action = snapshot.plan.actions[0]
+    if state == "duplicate-phase":
+        # The ambiguous phase, and the requested issue it blocks.
+        assert [(a.kind, a.jira_key) for a in snapshot.plan.actions] == [
+            (SyncActionKind.CONFLICT, "SF-326"),
+            (SyncActionKind.CONFLICT, "SF-4"),
+        ]
+        assert "SF-4" in snapshot.plan.actions[0].message
+    assert len(snapshot.plan.actions) == (2 if state == "duplicate-phase" else 1)
+    action = snapshot.plan.actions[-1]
     assert action.kind == expected_kind
     if expected_kind == SyncActionKind.CONFLICT:
         assert message in action.message
@@ -1193,14 +1616,14 @@ def test_sync_report_separates_actions_from_conflicts_and_carries_digest() -> No
 def test_sync_report_lists_conflicts_separately() -> None:
     orphan = jira_issue("SF-900", "No parent", parent_key=None, parent_summary=None)
     plan = plan_jira_sync(
-        active_issues=[orphan], jira_issues=[orphan], index=build_index([], [])
+        selected_issues=[orphan], jira_issues=[orphan], index=build_index([], [])
     )
     snapshot = SyncSnapshot(
         workspace_id="workspace-1",
         client_id="client-1",
         scope=SyncScope.ISSUES,
         requested_issue_keys=("SF-900",),
-        active_issues=(orphan,),
+        selected_issues=(orphan,),
         jira_issues=(orphan,),
         projects=(),
         tasks=(),

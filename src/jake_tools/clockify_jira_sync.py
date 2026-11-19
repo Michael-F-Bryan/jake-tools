@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable, Sequence
 from enum import StrEnum
 from typing import Annotated, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .clockify import (
     ClockifyClientRecord,
@@ -131,14 +131,30 @@ class RenameTaskAction(SyncActionBase):
 
 
 class CompleteTaskAction(SyncActionBase):
+    """Complete a task: an existing one by ``task_id``, or, with
+    ``after_create``, the one the plan's CREATE_TASK for the same Jira key
+    writes first (Clockify creates tasks active, so a Done issue's task
+    needs both writes). Exactly one of the two identifies the task.
+    """
+
     kind: Literal[SyncActionKind.MARK_TASK_DONE] = SyncActionKind.MARK_TASK_DONE
-    task_id: str
+    task_id: str | None = None
+    after_create: bool = False
     desired_name: str
     jira_status: str
     current_name: str = ""
     project_key: str | None = None
     project_id: str | None = None
     message: str = ""
+
+    @model_validator(mode="after")
+    def _identifies_one_task(self) -> CompleteTaskAction:
+        if (self.task_id is None) != self.after_create:
+            raise ValueError(
+                "a completion names an existing task_id, or follows the "
+                "creation of its task, never both or neither"
+            )
+        return self
 
 
 SyncAction = Annotated[
@@ -261,7 +277,9 @@ class SyncSnapshot(BaseModel):
     client_id: str
     scope: SyncScope
     requested_issue_keys: tuple[str, ...] = ()
-    active_issues: tuple[JiraIssue, ...]
+    # What the scope selects for planning: the assigned planned or underway
+    # work, or exactly the requested issues whatever their status.
+    selected_issues: tuple[JiraIssue, ...]
     jira_issues: tuple[JiraIssue, ...]
     projects: tuple[ClockifyProject, ...]
     tasks: tuple[ClockifyTask, ...]
@@ -395,22 +413,16 @@ def prepare_jira_sync(
         sorted({normalise_jira_key(key) for key in issue_keys})
     )
     if requested_issue_keys:
+        # Explicit keys override discovery filters (assignee, status) only.
         selected_issues = [jira.get_issue(key) for key in requested_issue_keys]
-        active_issues = [
-            issue for issue in selected_issues if issue.status_category != "Done"
-        ]
         scope = SyncScope.ISSUES
     else:
-        selected_issues = []
-        active_issues = jira.get_active_assigned_issues(jira_project)
+        selected_issues = jira.get_active_assigned_issues(jira_project)
         scope = SyncScope.ASSIGNED_ACTIVE
 
-    jira_keys = {issue.key for issue in active_issues}
-    jira_keys.update(issue.key for issue in selected_issues)
+    jira_keys = {issue.key for issue in selected_issues}
     jira_keys.update(
-        issue.parent_key
-        for issue in [*active_issues, *selected_issues]
-        if issue.parent_key is not None
+        issue.parent_key for issue in selected_issues if issue.parent_key is not None
     )
     if scope == SyncScope.ASSIGNED_ACTIVE:
         # Every Jira key already referenced by an active Clockify project or
@@ -422,11 +434,10 @@ def prepare_jira_sync(
         jira_keys.update(index.conflicted_task_keys)
 
     jira_by_key = {issue.key: issue for issue in jira.get_issues(sorted(jira_keys))}
-    jira_by_key.update({issue.key: issue for issue in active_issues})
     jira_by_key.update({issue.key: issue for issue in selected_issues})
     # Ancestors provide placement, not additional task selection. Fetch each
     # key at most once, including unavailable keys and cyclic hierarchies.
-    frontier = list(active_issues)
+    frontier = list(selected_issues)
     visited: set[str] = set()
     while frontier:
         visited.update(issue.key for issue in frontier)
@@ -449,7 +460,7 @@ def prepare_jira_sync(
         ]
     jira_issues = [jira_by_key[key] for key in sorted(jira_by_key)]
     plan = plan_jira_sync(
-        active_issues=active_issues,
+        selected_issues=selected_issues,
         jira_issues=jira_issues,
         index=index,
         managed_keys=jira_keys if scope == SyncScope.ISSUES else None,
@@ -459,7 +470,7 @@ def prepare_jira_sync(
         client_id=client_id,
         scope=scope,
         requested_issue_keys=requested_issue_keys,
-        active_issues=tuple(active_issues),
+        selected_issues=tuple(selected_issues),
         jira_issues=tuple(jira_issues),
         projects=tuple(projects),
         tasks=tuple(tasks),
@@ -487,13 +498,13 @@ def _project_phase_ancestor(
 
 def plan_jira_sync(
     *,
-    active_issues: Sequence[JiraIssue],
+    selected_issues: Sequence[JiraIssue],
     jira_issues: Sequence[JiraIssue],
     index: ClockifyIndex,
     managed_keys: set[str] | None = None,
 ) -> SyncPlan:
     jira_by_key = {issue.key: issue for issue in jira_issues}
-    active_by_key = {issue.key: issue for issue in active_issues}
+    selected_by_key = {issue.key: issue for issue in selected_issues}
 
     actions: list[SyncAction] = []
     conflict_project_keys = (
@@ -501,10 +512,13 @@ def plan_jira_sync(
         if managed_keys is None
         else index.conflicted_project_keys & managed_keys
     )
+    # With explicit issues, managed_keys also holds the ancestors fetched for
+    # placement. Their phase projects are guarded (the task lands there), but
+    # only the selected keys' own tasks are reconciled, so only theirs conflict.
     conflict_task_keys = (
         index.conflicted_task_keys
         if managed_keys is None
-        else index.conflicted_task_keys & managed_keys
+        else index.conflicted_task_keys & selected_by_key.keys()
     )
 
     for key in sorted(conflict_project_keys):
@@ -554,7 +568,36 @@ def plan_jira_sync(
                 )
             )
 
-    for issue in sorted(active_issues, key=lambda item: item.key):
+    def plan_completion(
+        issue: JiraIssue, task: ClockifyTask, project_key: str | None
+    ) -> None:
+        # Only the Done category closes a task, and it never reopens one.
+        desired_name = clockify_task_name_for_jira(issue.key, issue.summary)
+        if task.status == "ACTIVE":
+            actions.append(
+                CompleteTaskAction(
+                    jira_key=issue.key,
+                    current_name=task.name,
+                    desired_name=desired_name,
+                    project_key=project_key,
+                    project_id=task.project_id,
+                    task_id=task.id,
+                    jira_status=issue.status,
+                )
+            )
+        elif task.name != desired_name:
+            actions.append(
+                RenameTaskAction(
+                    jira_key=issue.key,
+                    current_name=task.name,
+                    desired_name=desired_name,
+                    project_key=project_key,
+                    project_id=task.project_id,
+                    task_id=task.id,
+                )
+            )
+
+    for issue in sorted(selected_issues, key=lambda item: item.key):
         if issue.issue_type == PROJECT_PHASE_ISSUE_TYPE:
             if issue.key not in conflict_project_keys:
                 plan_project(issue.key, issue.summary)
@@ -571,6 +614,18 @@ def plan_jira_sync(
             )
             continue
         if phase.key in conflict_project_keys:
+            if managed_keys is not None:
+                # Say why this requested issue produced no task action.
+                actions.append(
+                    ConflictAction(
+                        jira_key=issue.key,
+                        project_key=phase.key,
+                        message=(
+                            f"cannot place {issue.key}: multiple active Clockify "
+                            f"projects reference its Project / Phase {phase.key}"
+                        ),
+                    )
+                )
             continue
 
         plan_project(phase.key, phase.summary)
@@ -578,6 +633,7 @@ def plan_jira_sync(
             continue
 
         desired_name = clockify_task_name_for_jira(issue.key, issue.summary)
+        completed = issue.status_category == "Done"
         task = task_by_key.get(issue.key)
         if task is None:
             actions.append(
@@ -587,6 +643,19 @@ def plan_jira_sync(
                     project_key=phase.key,
                 )
             )
+            if completed:
+                # Clockify creates tasks active: a finished issue needs the
+                # second write, and the preview shows both.
+                actions.append(
+                    CompleteTaskAction(
+                        jira_key=issue.key,
+                        desired_name=desired_name,
+                        project_key=phase.key,
+                        after_create=True,
+                        jira_status=issue.status,
+                        message="completes the task created for this issue",
+                    )
+                )
             continue
 
         parent = project_by_key.get(phase.key)
@@ -603,7 +672,9 @@ def plan_jira_sync(
             )
             continue
 
-        if task.status == "DONE":
+        if completed:
+            plan_completion(issue, task, phase.key)
+        elif task.status == "DONE":
             actions.append(
                 ReactivateTaskAction(
                     jira_key=issue.key,
@@ -626,27 +697,22 @@ def plan_jira_sync(
                 )
             )
 
-    for key, task in sorted(task_by_key.items()):
-        if key in conflict_task_keys or key in active_by_key:
+    # Explicit issues reconcile exactly the selected tasks (above): a fetched
+    # ancestor is placement, not selection, so its own task is left alone.
+    other_tasks = task_by_key if managed_keys is None else {}
+    for key, task in sorted(other_tasks.items()):
+        if key in conflict_task_keys or key in selected_by_key:
             continue
         issue = jira_by_key.get(key)
         if issue is None:
             continue
-        desired_name = clockify_task_name_for_jira(issue.key, issue.summary)
         # Falling out of the selected scope (e.g. backlog deferral) is not
         # completion. Only the Done category closes an existing task.
-        if issue.status_category == "Done" and task.status == "ACTIVE":
-            actions.append(
-                CompleteTaskAction(
-                    jira_key=key,
-                    current_name=task.name,
-                    desired_name=desired_name,
-                    project_id=task.project_id,
-                    task_id=task.id,
-                    jira_status=issue.status,
-                )
-            )
-        elif task.name != desired_name:
+        if issue.status_category == "Done":
+            plan_completion(issue, task, None)
+            continue
+        desired_name = clockify_task_name_for_jira(issue.key, issue.summary)
+        if task.name != desired_name:
             actions.append(
                 RenameTaskAction(
                     jira_key=key,
@@ -684,6 +750,7 @@ def apply_sync_plan(
     projects_by_id = dict(index.projects_by_id)
     projects_by_key = dict(index.projects_by_jira_key)
     tasks_by_id = dict(index.tasks_by_id)
+    created_task_ids: dict[str, str] = {}
     applied: list[AppliedSyncAction] = []
 
     def apply_one(action: SyncAction) -> AppliedSyncAction:
@@ -743,6 +810,7 @@ def apply_sync_plan(
                 expected_status="ACTIVE",
             )
             tasks_by_id[created_task.id] = created_task
+            created_task_ids[action.jira_key] = created_task.id
             return AppliedSyncAction(action=action, task=created_task)
 
         # The remaining kinds (RenameTaskAction, ReactivateTaskAction,
@@ -752,10 +820,11 @@ def apply_sync_plan(
         assert isinstance(
             action, RenameTaskAction | ReactivateTaskAction | CompleteTaskAction
         )
-        current_task = tasks_by_id.get(action.task_id)
+        task_id = action.task_id or created_task_ids.get(action.jira_key)
+        current_task = tasks_by_id.get(task_id) if task_id else None
         if current_task is None:
             raise SyncApplyError(
-                f"{action.jira_key}: Clockify task {action.task_id!r} is unavailable"
+                f"{action.jira_key}: Clockify task {task_id!r} is unavailable"
             )
         expected_status = _expected_task_status(action, current_task)
         written_task = clockify.update_task(
@@ -864,13 +933,13 @@ def _verify_task(
 ) -> None:
     if task.name != action.desired_name:
         raise SyncApplyError(
-            f"{action.jira_key}: Clockify returned task name {task.name!r}, "
-            f"expected {action.desired_name!r}"
+            f"{action.jira_key}: Clockify returned task {task.id} with name "
+            f"{task.name!r}, expected {action.desired_name!r}"
         )
     if task.status != expected_status:
         raise SyncApplyError(
-            f"{action.jira_key}: Clockify returned task status {task.status!r}, "
-            f"expected {expected_status!r}"
+            f"{action.jira_key}: Clockify returned task {task.id} with status "
+            f"{task.status!r}, expected {expected_status!r}"
         )
 
 
@@ -908,6 +977,14 @@ class SyncReportScope(BaseModel):
 
 
 class SyncReportInventory(BaseModel):
+    """Counts behind a report.
+
+    ``active_issues`` is the planned or underway issues the scope selected:
+    all of the discovered issues, or the requested ones whose Jira status
+    category is not Done. A requested Done issue is still planned (and
+    created, then completed, when missing) without being counted here.
+    """
+
     model_config = ConfigDict(frozen=True)
 
     active_issues: int
@@ -1041,7 +1118,11 @@ class SyncReport(BaseModel):
                 issue_keys=snapshot.requested_issue_keys,
             ),
             inventory=SyncReportInventory(
-                active_issues=len(snapshot.active_issues),
+                active_issues=sum(
+                    snapshot.scope == SyncScope.ASSIGNED_ACTIVE
+                    or issue.status_category != "Done"
+                    for issue in snapshot.selected_issues
+                ),
                 jira_issues=len(snapshot.jira_issues),
                 projects=len(snapshot.projects),
                 tasks=len(snapshot.tasks),
@@ -1074,20 +1155,37 @@ class SyncReport(BaseModel):
         Every action ``apply_sync_plan`` returns (or had completed before it
         raised) was re-read and verified, so ``applied`` implies ``verified``.
         """
-        written = {(item.action.kind, item.action.jira_key) for item in applied}
+        written = {(item.action.kind, item.action.jira_key): item for item in applied}
         return self.model_copy(
             update={
                 "mode": "apply",
                 "applied": True,
                 "failure": failure,
                 "actions": tuple(
-                    action.model_copy(update={"applied": True, "verified": True})
-                    if (action.kind, action.jira_key) in written
+                    _with_written_record(action, written[key])
+                    if (key := (action.kind, action.jira_key)) in written
                     else action
                     for action in self.actions
                 ),
             }
         )
+
+
+def _with_written_record(
+    action: SyncReportAction, item: AppliedSyncAction
+) -> SyncReportAction:
+    """Flag the action written, and name the record it wrote.
+
+    A create has no ID in the plan; the report gives the verified record's, so
+    a later failure (a task created but not yet completed) leaves a known
+    identity to inspect.
+    """
+    update: dict[str, object] = {"applied": True, "verified": True}
+    if item.task is not None:
+        update.update(task_id=item.task.id, project_id=item.task.project_id)
+    elif item.project is not None:
+        update["project_id"] = item.project.id
+    return action.model_copy(update=update)
 
 
 def plan_digest(snapshot: SyncSnapshot) -> str:
