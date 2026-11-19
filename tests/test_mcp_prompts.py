@@ -51,3 +51,37 @@ async def test_issue_prompts(
         # unusable prompt with an unresolved placeholder.
         with pytest.raises(MCPError):
             await session.get_prompt("issue_discovery", {})
+
+
+async def test_prompts_keep_ownership_and_conditional_wording_contract(
+    mcp_server: ServerFactory, mcp_env: dict[str, str]
+):
+    """Pin where the guidance sits, not its prose; judgement is evidenced elsewhere.
+
+    The review must lead with whether the change is worth owning, before it
+    reviews mechanics, and planning must cover expansions and conditions. Whether
+    a model follows that is judged by real-model runs, not by this test.
+    """
+    async with mcp_server(mcp_env) as session:
+        review = (
+            (await session.get_prompt("issue_maintainer_review", {"issue_url": "u"}))
+            .messages[0]
+            .content
+        )
+        planning = (
+            (await session.get_prompt("issue_planning", {"issue_url": "u"}))
+            .messages[0]
+            .content
+        )
+    assert isinstance(review, TextContent) and isinstance(planning, TextContent)
+
+    opening = review.text.split("\n\n", 1)[0]
+    assert "worth owning" in opening
+    assert "smallest credible intervention" in opening
+    assert review.text.index("worth owning") < review.text.index(
+        "Judge the approach before its mechanics"
+    )
+    assert "materially expand ownership" in review.text
+    assert "where necessary" in review.text
+    assert "scope reduction or expansion" in planning.text
+    assert "where necessary" in planning.text

@@ -16,7 +16,7 @@ The MCP server exposes three prompts, each with one required `issue_url` argumen
 
 - `issue_discovery`: establish the problem, existing behaviour and remaining uncertainties.
 - `issue_planning`: propose the architecture, implementation sequence and evidence needed.
-- `issue_maintainer_review`: challenge the plan for maintainability and incidental complexity.
+- `issue_maintainer_review`: judge whether the change is worth owning, then challenge its maintainability and incidental complexity.
 
 Use them in that order through your client's MCP prompt picker, or via
 `prompts/get` (for example, `{"name":"issue_discovery","arguments":{"issue_url":"https://github.com/owner/repo/issues/42"}}`).
