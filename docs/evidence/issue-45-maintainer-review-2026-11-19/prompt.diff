@@ -1,0 +1,50 @@
+diff --git a/src/jake_tools/mcp/prompts.py b/src/jake_tools/mcp/prompts.py
+index be513f9..972fdaf 100644
+--- a/src/jake_tools/mcp/prompts.py
++++ b/src/jake_tools/mcp/prompts.py
+@@ -30,7 +30,7 @@ Produce a proposal that lets Michael understand and judge the design, and gives
+
+ Establish the design
+ - Recommend the smallest coherent design that delivers the intended outcome. Preserve settled decisions and distinguish them from your recommendations.
+-- Reconcile the proposal with the current implementation and prior discussion. If your recommendation has changed, explain what changed and why before presenting the new design. Make any proposed scope reduction explicit.
++- Reconcile the proposal with the current implementation and prior discussion. If your recommendation has changed, explain what changed and why before presenting the new design. Make any proposed scope reduction or expansion explicit, and keep conditional wording in the request, such as "where necessary", as a condition to establish rather than a requirement.
+ - Identify the existing components, code or libraries to reuse, their responsibilities and the important boundaries between them. Give new abstractions a present reason to exist.
+ - Resolve discoverable technical questions through bounded inspection. Leave routine engineering choices to the implementer; surface unresolved questions only when they materially affect behaviour, scope, risk or the ability to proceed.
+
+@@ -77,21 +77,23 @@ Read back the published comment and return its URL. Do not change code, the issu
+
+ def issue_maintainer_review(issue_url: str) -> str:
+     """Challenge an issue's architecture for maintainability and post the review."""
+-    return f"""Review the problem framing and proposed architecture for {issue_url} from the perspective of the maintainer who will have to understand, debug and extend the code.
++    return f"""Review {issue_url} as the maintainer who will have to own, understand, debug and extend the result. Your primary job is to challenge whether the proposed change is worth owning, not to make the proposed design complete. Before reviewing its mechanics, compare it with the smallest credible intervention that delivers the required outcome. This is not a mandate to object: accept a small sound change briefly, and do not treat fewer lines as a better design.
+
+ Read the issue, discovery and planning comments, then inspect enough actual code and consumers to challenge their assumptions. Treat the plan as a proposal, not authority. Reuse applicable evidence and investigate only gaps that could materially change the judgement. Preserve settled decisions; if new evidence warrants reopening one, make that explicit.
+
+ Check the problem framing
+ Establish the underlying user or operational need, the evidence that something is wrong, and why it warrants intervention. Separate observed symptoms, inferred causes, requested outcomes and proposed mechanisms. Check whether the plan has inherited an unsupported diagnosis or treated a suggested solution as a requirement.
+
+-Ask whether solving the stated problem would deliver the useful outcome. Consider whether a narrower intervention, an operational or configuration change, or leaving the system unchanged would address the need with less continuing responsibility. Explain the capability or consequence sacrificed by an alternative; doing less is not automatically better.
++Work that intervention out before judging the proposal; it may be a narrower fix, an operational or configuration change, or no change. Consider whether correcting one part, such as the signal or upstream cause, removes the need for another mechanism. Explain the capability the smaller option sacrifices; doing less is not automatically better, and required behaviour must not be dropped silently. Existing code, tests and planning detail are not evidence that a responsibility is necessary.
+
+-Preserve explicit decisions and requirements. If the evidence suggests one should change, present that as a proposed revision for Michael to decide—not permission to redefine the task. If the framing is sound, proceed without manufacturing a challenge.
++Preserve explicit decisions and requirements, including conditional wording such as "where necessary", which asks you to establish the need. If the evidence suggests one should change, present that as a proposed revision for Michael to decide—not permission to redefine the task. If the framing is sound, proceed without manufacturing a challenge.
++
++Distinguish corrections within the selected approach from proposals that materially expand ownership or operating responsibility beyond what was asked, for example substantial new persistent state, a migration or an operated CI job. Only a material expansion needs Michael's decision, not membership of a category: most helpers, fields, dependencies and tests are ordinary implementation choices for the implementer. Repetition across agent comments does not settle an expansion.
+
+ Judge the approach before its mechanics
+ Ask whether the proposed responsibilities are necessary, whether an existing component should own them, and whether any mechanism can disappear while preserving the required behaviour.
+
+-When you find a defect, consider removing or relocating the mechanism that creates it before adding another guard, state field or recovery path. Compare continuing ownership, coordination and debugging costs—not just code size or file count. Challenge both overengineering and shortcuts that push complexity onto callers. Do not simplify by silently dropping requirements, and do not renovate unrelated code for consistency.
++When you find a defect, reconsider the mechanism that creates it before it becomes another requirement: remove or relocate that mechanism, or check that the defect survives the smaller intervention, before adding a guard, state field or recovery path. Judge the combined burden of understanding, debugging, operating and extending the whole change, including maintained scripts, documents, dependencies and verification machinery, not whether each addition has a local justification. Compare ownership, coordination and debugging costs, not just code size. Challenge both overengineering and shortcuts that push complexity onto callers. Do not simplify by silently dropping requirements, and do not renovate unrelated code for consistency.
+
+ Examine responsibilities and interfaces
+ Look for misplaced responsibilities, duplicated mechanisms, hidden state, implicit ordering and changes that require coordinated edits across several components. Judge abstractions by the coherent complexity they encapsulate and what callers no longer need to know. One real consumer can justify a useful boundary; hypothetical consumers do not justify a framework.
+@@ -126,7 +128,7 @@ Post an issue comment leading with your judgement:
+ - Implementable with specific corrections.
+ - Blocked on a decision or missing evidence.
+
+-Make a material problem-framing concern prominent in that judgement rather than burying it beneath design details.
++Make a material problem-framing or ownership concern prominent in that judgement rather than burying it beneath design details.
+
+ Follow with the concerns that determine the judgement, ordered by consequence. For each material concern:
+ - Identify the problem assumption, proposed behaviour or boundary.
