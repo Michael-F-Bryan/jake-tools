@@ -60,6 +60,9 @@ class FakeUpstream:
     assigned_active: list[str] = field(default_factory=list)
     writes: list[str] = field(default_factory=list)
     fail_write_number: int | None = None
+    # What a single-task read returns instead of the stored field values, by
+    # task ID: a write Clockify acknowledged but did not persist as asked.
+    readback: dict[str, dict[str, str]] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
@@ -112,7 +115,13 @@ class FakeUpstream:
         }
 
 
-def _jira_issue(key: str, summary: str, status: str, issue_type: str) -> dict[str, Any]:
+def _jira_issue(
+    key: str,
+    summary: str,
+    status: str,
+    issue_type: str,
+    assignee: str = "Michael Bryan",
+) -> dict[str, Any]:
     category = {
         "Done": "Done",
         "Won’t Do": "Done",
@@ -124,7 +133,7 @@ def _jira_issue(key: str, summary: str, status: str, issue_type: str) -> dict[st
     fields: dict[str, Any] = {
         "summary": summary,
         "status": {"name": status, "statusCategory": {"name": category}},
-        "assignee": {"displayName": "Michael Bryan"},
+        "assignee": {"displayName": assignee},
         "issuetype": {"name": issue_type},
     }
     if issue_type != "Project / Phase":
@@ -214,12 +223,24 @@ def _clockify(
                 if t["projectId"] == project_id and t["status"] == want
             ]
             return 200, page if query.get("page") == "1" else []
+        if method == "POST":
+            upstream.writes.append(f"POST task {body['name']}")
+            if upstream.fail_write_number == len(upstream.writes):
+                return 500, {"message": "simulated Clockify outage"}
+            created = {
+                "id": f"t-new-{len(upstream.writes)}",
+                "name": body["name"],
+                "projectId": project_id,
+                "status": "ACTIVE",
+            }
+            upstream.tasks[created["id"]] = created
+            return 201, created
     if match := re.fullmatch(rf"{ws}/projects/([^/]+)/tasks/([^/]+)", path):
         task = upstream.tasks.get(match.group(2))
         if task is None:
             return 404, {"message": "no such task"}
         if method == "GET":
-            return 200, task
+            return 200, {**task, **upstream.readback.get(task["id"], {})}
         if method == "PUT":
             upstream.writes.append(f"PUT task {task['id']}")
             if upstream.fail_write_number == len(upstream.writes):
@@ -321,6 +342,9 @@ async def test_tool_is_listed_with_its_input_schema(
     assert "planned or underway" in tool.description
     assert "plan_digest" in tool.description
     assert "Never deletes" in tool.description
+    # The explicit-versus-automatic distinction the guide repeats.
+    assert "regardless of assignee or Jira status" in tool.description
+    assert "CREATE_TASK followed by MARK_TASK_DONE" in tool.description
 
 
 async def test_apply_without_digest_is_invalid_and_touches_nothing(
@@ -643,6 +667,314 @@ async def test_conflicts_block_apply(
     error = _err(result, "invalid_argument")
     assert error["detail"] == {"conflicts": ["SF-304"]}
     assert upstream.writes == []
+
+
+# --- Explicit issues override discovery filters ----------------------------------
+
+SF691_SUMMARY = "Seaworthiness tab: sensor health report and thruster test"
+SF691_TASK = f"SF-691 {SF691_SUMMARY}"
+
+
+def _add_issue_assigned_elsewhere(upstream: FakeUpstream, status: str) -> None:
+    upstream.issues["SF-691"] = _jira_issue(
+        "SF-691", SF691_SUMMARY, status, "Task", assignee="David Htet"
+    )
+
+
+def _summary(report: dict[str, Any]) -> list[tuple[str, str]]:
+    return [(a["kind"], a["jira_key"]) for a in report["actions"]]
+
+
+async def _preview_and_apply(
+    session: ClientSession, **arguments: Any
+) -> tuple[dict[str, Any], CallToolResult]:
+    preview = _ok(await session.call_tool("clockify_jira_sync", arguments))
+    applied = await session.call_tool(
+        "clockify_jira_sync",
+        {**arguments, "apply": True, "plan_digest": preview["plan_digest"]},
+    )
+    return preview, applied
+
+
+@pytest.mark.parametrize("status", ["Done", "Won’t Do"])
+async def test_explicit_finished_issue_assigned_elsewhere_is_created_completed(
+    mcp_server: ServerFactory,
+    sync_env: dict[str, str],
+    upstream: FakeUpstream,
+    status: str,
+) -> None:
+    _add_issue_assigned_elsewhere(upstream, status)
+    async with mcp_server(sync_env) as session:
+        preview = _ok(
+            await session.call_tool("clockify_jira_sync", {"issues": ["SF-691"]})
+        )
+
+        # Preview is read-only and names both writes, in order.
+        assert upstream.writes == []
+        assert preview["scope"]["kind"] == "issues"
+        assert preview["inventory"]["active_issues"] == 1
+        assert preview["conflicts"] == []
+        assert _summary(preview) == [
+            ("CREATE_TASK", "SF-691"),
+            ("MARK_TASK_DONE", "SF-691"),
+        ]
+        create, complete = preview["actions"]
+        assert create["project_key"] == "SF-131"
+        assert create["desired_name"] == SF691_TASK
+        assert complete["jira_status"] == status
+        assert complete["task_id"] is None
+
+        applied = _ok(
+            await session.call_tool(
+                "clockify_jira_sync",
+                {
+                    "issues": ["SF-691"],
+                    "apply": True,
+                    "plan_digest": preview["plan_digest"],
+                },
+            )
+        )
+
+    assert applied["failure"] is None
+    assert [(a["kind"], a["applied"], a["verified"]) for a in applied["actions"]] == [
+        ("CREATE_TASK", True, True),
+        ("MARK_TASK_DONE", True, True),
+    ]
+    # The report names the record each write landed on.
+    assert [a["task_id"] for a in applied["actions"]] == ["t-new-1", "t-new-1"]
+    assert upstream.writes == [f"POST task {SF691_TASK}", "PUT task t-new-1"]
+    assert upstream.tasks["t-new-1"] == {
+        "id": "t-new-1",
+        "name": SF691_TASK,
+        "projectId": "p-131",
+        "status": "DONE",
+    }
+
+
+async def test_completed_creation_digest_covers_the_final_state(
+    mcp_server: ServerFactory, sync_env: dict[str, str], upstream: FakeUpstream
+) -> None:
+    _add_issue_assigned_elsewhere(upstream, "Done")
+    async with mcp_server(sync_env) as session:
+        preview = _ok(
+            await session.call_tool("clockify_jira_sync", {"issues": ["SF-691"]})
+        )
+        # Someone reopens the issue after the plan was reviewed.
+        _add_issue_assigned_elsewhere(upstream, "In Progress")
+        result = await session.call_tool(
+            "clockify_jira_sync",
+            {
+                "issues": ["SF-691"],
+                "apply": True,
+                "plan_digest": preview["plan_digest"],
+            },
+        )
+
+    _err(result, "plan_stale")
+    assert upstream.writes == []
+
+
+@pytest.mark.parametrize("status", ["Backlog", "TRIAGE", "Investigate"])
+async def test_explicit_deferred_issue_is_created_and_stays_active(
+    mcp_server: ServerFactory,
+    sync_env: dict[str, str],
+    upstream: FakeUpstream,
+    status: str,
+) -> None:
+    _add_issue_assigned_elsewhere(upstream, status)
+    async with mcp_server(sync_env) as session:
+        preview, result = await _preview_and_apply(session, issues=["SF-691"])
+
+    assert _summary(preview) == [("CREATE_TASK", "SF-691")]
+    assert _ok(result)["failure"] is None
+    assert upstream.tasks["t-new-1"]["status"] == "ACTIVE"
+    assert upstream.writes == [f"POST task {SF691_TASK}"]
+
+
+async def test_explicit_issue_already_in_clockify_is_not_duplicated(
+    mcp_server: ServerFactory, sync_env: dict[str, str], upstream: FakeUpstream
+) -> None:
+    _add_issue_assigned_elsewhere(upstream, "Done")
+    upstream.tasks["t-691"] = {
+        "id": "t-691",
+        "name": "SF-691 Seaworthiness tab",
+        "projectId": "p-131",
+        "status": "ACTIVE",
+    }
+    async with mcp_server(sync_env) as session:
+        preview, result = await _preview_and_apply(session, issues=["SF-691"])
+        # Applied, the same request now has nothing left to do.
+        again = _ok(
+            await session.call_tool("clockify_jira_sync", {"issues": ["SF-691"]})
+        )
+
+    assert _summary(preview) == [("MARK_TASK_DONE", "SF-691")]
+    assert preview["actions"][0]["task_id"] == "t-691"
+    assert _ok(result)["failure"] is None
+    assert again["actions"] == [] and again["conflicts"] == []
+    assert upstream.writes == ["PUT task t-691"]
+    assert upstream.tasks["t-691"] == {
+        "id": "t-691",
+        "name": SF691_TASK,
+        "projectId": "p-131",
+        "status": "DONE",
+    }
+
+
+async def test_automatic_discovery_never_creates_finished_or_unassigned_work(
+    mcp_server: ServerFactory, sync_env: dict[str, str], upstream: FakeUpstream
+) -> None:
+    # Done and assigned elsewhere: outside discovery, so it stays outside.
+    _add_issue_assigned_elsewhere(upstream, "Done")
+    # To Do and assigned to the user: discovery still creates it.
+    upstream.issues["SF-700"] = _jira_issue("SF-700", "Planned work", "To Do", "Task")
+    upstream.assigned_active = ["SF-427", "SF-700"]
+    async with mcp_server(sync_env) as session:
+        preview = _ok(await session.call_tool("clockify_jira_sync", {}))
+
+    assert preview["scope"]["kind"] == "assigned-active"
+    assert ("CREATE_TASK", "SF-700") in _summary(preview)
+    assert "SF-691" not in {a["jira_key"] for a in preview["actions"]}
+
+
+async def test_explicit_finished_issue_with_unresolvable_parent_is_a_keyed_conflict(
+    mcp_server: ServerFactory, sync_env: dict[str, str], upstream: FakeUpstream
+) -> None:
+    _add_issue_assigned_elsewhere(upstream, "Done")
+    upstream.issues["SF-691"]["fields"]["parent"]["key"] = "SF-777"  # not in Jira
+    async with mcp_server(sync_env) as session:
+        preview, result = await _preview_and_apply(session, issues=["SF-691"])
+
+    assert preview["actions"] == []
+    assert [
+        (c["jira_key"], "SF-777" in c["message"]) for c in preview["conflicts"]
+    ] == [("SF-691", True)]
+    assert _err(result, "invalid_argument")["detail"] == {"conflicts": ["SF-691"]}
+    assert upstream.writes == []
+
+
+async def test_explicit_finished_issue_with_duplicate_task_is_a_keyed_conflict(
+    mcp_server: ServerFactory, sync_env: dict[str, str], upstream: FakeUpstream
+) -> None:
+    _add_issue_assigned_elsewhere(upstream, "Done")
+    for task_id in ("t-691-a", "t-691-b"):
+        upstream.tasks[task_id] = {
+            "id": task_id,
+            "name": SF691_TASK,
+            "projectId": "p-131",
+            "status": "ACTIVE",
+        }
+    async with mcp_server(sync_env) as session:
+        preview, result = await _preview_and_apply(session, issues=["SF-691"])
+
+    assert [c["jira_key"] for c in preview["conflicts"]] == ["SF-691"]
+    assert "multiple active Clockify tasks" in preview["conflicts"][0]["message"]
+    assert _err(result, "invalid_argument")["detail"] == {"conflicts": ["SF-691"]}
+    assert upstream.writes == []
+
+
+async def test_explicit_issue_missing_from_jira_is_an_error_naming_the_key(
+    mcp_server: ServerFactory, sync_env: dict[str, str], upstream: FakeUpstream
+) -> None:
+    _add_issue_assigned_elsewhere(upstream, "Done")
+    result = await _call(mcp_server, sync_env, issues=["SF-691", "SF-999"])
+
+    error = _err(result, "upstream_error")
+    assert error["detail"] == {"integration": "jira"}
+    assert "/rest/api/3/issue/SF-999" in error["message"]
+    assert upstream.writes == []
+
+
+# --- Completed creation: partial failures ---------------------------------------
+
+
+async def test_creation_failure_leaves_nothing_and_skips_the_completion(
+    mcp_server: ServerFactory, sync_env: dict[str, str], upstream: FakeUpstream
+) -> None:
+    _add_issue_assigned_elsewhere(upstream, "Done")
+    upstream.fail_write_number = 1
+    async with mcp_server(sync_env) as session:
+        _, result = await _preview_and_apply(session, issues=["SF-691"])
+
+    report = _ok(result)
+    assert [(a["kind"], a["applied"]) for a in report["actions"]] == [
+        ("CREATE_TASK", False),
+        ("MARK_TASK_DONE", False),
+    ]
+    assert report["failure"]["kind"] == "CREATE_TASK"
+    assert report["failure"]["jira_key"] == "SF-691"
+    assert upstream.writes == [f"POST task {SF691_TASK}"]
+    assert "t-new-1" not in upstream.tasks
+
+
+async def test_creation_readback_mismatch_names_the_created_task_and_stops(
+    mcp_server: ServerFactory, sync_env: dict[str, str], upstream: FakeUpstream
+) -> None:
+    _add_issue_assigned_elsewhere(upstream, "Done")
+    upstream.readback["t-new-1"] = {"name": "SF-691 something else"}
+    async with mcp_server(sync_env) as session:
+        _, result = await _preview_and_apply(session, issues=["SF-691"])
+
+    report = _ok(result)
+    assert [(a["kind"], a["applied"]) for a in report["actions"]] == [
+        ("CREATE_TASK", False),
+        ("MARK_TASK_DONE", False),
+    ]
+    assert report["failure"]["kind"] == "CREATE_TASK"
+    # The write may have landed; the message says which task to inspect.
+    assert "t-new-1" in report["failure"]["message"]
+    assert upstream.writes == [f"POST task {SF691_TASK}"]
+    assert upstream.tasks["t-new-1"]["status"] == "ACTIVE"
+
+
+async def test_completion_failure_after_creation_keeps_the_task_for_recovery(
+    mcp_server: ServerFactory, sync_env: dict[str, str], upstream: FakeUpstream
+) -> None:
+    _add_issue_assigned_elsewhere(upstream, "Done")
+    upstream.fail_write_number = 2
+    async with mcp_server(sync_env) as session:
+        _, result = await _preview_and_apply(session, issues=["SF-691"])
+        upstream.fail_write_number = None
+        retry_preview, retry = await _preview_and_apply(session, issues=["SF-691"])
+
+    report = _ok(result)
+    assert [(a["kind"], a["applied"], a["verified"]) for a in report["actions"]] == [
+        ("CREATE_TASK", True, True),
+        ("MARK_TASK_DONE", False, False),
+    ]
+    assert report["actions"][0]["task_id"] == "t-new-1"
+    assert report["failure"]["kind"] == "MARK_TASK_DONE"
+    assert report["failure"]["jira_key"] == "SF-691"
+    # A fresh preview finds the created task: it completes it, creates nothing.
+    assert _summary(retry_preview) == [("MARK_TASK_DONE", "SF-691")]
+    assert retry_preview["actions"][0]["task_id"] == "t-new-1"
+    assert _ok(retry)["failure"] is None
+    assert upstream.writes == [
+        f"POST task {SF691_TASK}",
+        "PUT task t-new-1",
+        "PUT task t-new-1",
+    ]
+    assert upstream.tasks["t-new-1"]["status"] == "DONE"
+
+
+async def test_completion_readback_mismatch_after_creation_is_reported(
+    mcp_server: ServerFactory, sync_env: dict[str, str], upstream: FakeUpstream
+) -> None:
+    _add_issue_assigned_elsewhere(upstream, "Done")
+    # Clockify acknowledges the completion but reads the task back as active
+    # (which is also what the creation readback and the update guard expect).
+    upstream.readback["t-new-1"] = {"status": "ACTIVE"}
+    async with mcp_server(sync_env) as session:
+        _, result = await _preview_and_apply(session, issues=["SF-691"])
+
+    report = _ok(result)
+    assert [(a["kind"], a["applied"]) for a in report["actions"]] == [
+        ("CREATE_TASK", True),
+        ("MARK_TASK_DONE", False),
+    ]
+    assert report["failure"]["kind"] == "MARK_TASK_DONE"
+    assert "t-new-1" in report["failure"]["message"]
+    assert upstream.writes == [f"POST task {SF691_TASK}", "PUT task t-new-1"]
 
 
 # --- CLI parity ---------------------------------------------------------------

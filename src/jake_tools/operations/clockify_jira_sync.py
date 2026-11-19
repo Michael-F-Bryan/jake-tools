@@ -43,13 +43,27 @@ with conflicts are never applied (invalid_argument listing the conflicting
 Jira keys). Every written record is re-read and verified; each action in the
 returned report has applied/verified flags. If a write fails part-way, the
 result is still a report: actions written before the failure are marked
-applied, and `failure` names the action that failed and why.
+applied, and `failure` names the action that failed and why. A created task's
+ID is reported on its action once written.
 
-issues: optional Jira keys (e.g. ["SF-304"]) to reconcile regardless of
-assignee; omitted means planned or underway Jira work assigned to the
-credentialled user: status To Do, In Progress, Blocked, or In Review. Backlog,
-TRIAGE, and Investigate are not automatically created. Existing deferred tasks
-are kept and renamed as needed; only Jira status category Done completes them.
+issues: optional Jira keys (e.g. ["SF-304"]). When given, exactly those
+issues are selected regardless of assignee or Jira status; the choice of
+issues is the only filter. Omitted means planned or underway Jira work
+assigned to the credentialled user: status To Do, In Progress, Blocked, or In
+Review, and Backlog, TRIAGE, and Investigate are not automatically created.
+Explicit selection never bypasses placement under a Project / Phase ancestor,
+duplicate or wrong-project conflicts, the digest, or verification. A key that
+cannot be planned is a conflict naming it, and one Jira cannot return fails the
+call with an upstream_error naming it. Fetched ancestors are for placement only
+and are not selected.
+
+Only Jira status category Done completes a task. A missing task for a Done or
+Won't Do issue is planned as CREATE_TASK followed by MARK_TASK_DONE for the
+same key (Clockify creates tasks active), so the preview shows both writes and
+the digest covers the completed final state; the second action has no task_id
+until the first runs. A missing Backlog, TRIAGE, or Investigate task is
+created active. Existing tasks keep their normal rename/reactivate/complete
+reconciliation, and one already in the right state needs no action.
 
 Never deletes anything in Clockify or Jira, and never writes to Jira.
 """
