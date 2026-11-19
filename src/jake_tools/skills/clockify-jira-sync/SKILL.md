@@ -130,8 +130,10 @@ nothing.
 - `actions[].kind` is one of `CREATE_PROJECT`, `RENAME_PROJECT`,
   `CREATE_TASK`, `REACTIVATE_TASK`, `RENAME_TASK`, `MARK_TASK_DONE`. Renames
   show `current_name` → `desired_name`; creates have an empty
-  `current_name`. A `CREATE_TASK` immediately followed by a `MARK_TASK_DONE` for
-  the same key is one finished issue's task being created and completed. After an
+  `current_name`. A `CREATE_TASK` and a `MARK_TASK_DONE` for the same key
+  (with a null `task_id`) are one finished issue's task being created, then
+  completed later in the plan; actions are ordered by kind, so with several keys
+  they need not be adjacent. After an
   apply, a created record's `task_id` (or `project_id`) is the verified one.
 - `conflicts` lists what the plan refuses to touch, each with a `jira_key` and
   a `message` (e.g. `"multiple active Clockify tasks reference SF-304"`).
