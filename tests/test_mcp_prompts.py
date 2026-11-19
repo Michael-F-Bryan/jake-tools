@@ -23,7 +23,7 @@ async def test_issue_prompts(
 ):
     boundaries = {
         "issue_discovery": "This is discovery, not implementation.",
-        "issue_planning": "This is a proposal for discussion, not permission to implement.",
+        "issue_planning": "This is planning, not permission to implement.",
         "issue_maintainer_review": "Review only. Don't implement changes",
     }
     async with mcp_server(mcp_env) as session:
@@ -43,7 +43,7 @@ async def test_issue_prompts(
             text = message.content.text
             assert issue_url in text
             assert boundary in text
-            assert "Post a concise" in text
+            assert "Post " in text
             assert "comment" in text
             assert "Read" in text and "back" in text
 

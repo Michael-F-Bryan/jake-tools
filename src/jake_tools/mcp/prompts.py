@@ -26,15 +26,51 @@ def issue_planning(issue_url: str) -> str:
     """Propose an implementation architecture and post it as an issue comment."""
     return f"""Plan the implementation of {issue_url}, using the discovery comment, issue discussion and current code as your starting point.
 
-Recommend the smallest coherent design that delivers the full intended outcome. Explain responsibilities, boundaries, existing code or libraries to reuse, and domain guarantees that must survive. Give abstractions a present reason to exist; don't build a framework for hypothetical requirements. Preserve settled decisions unless new evidence warrants revisiting them, and distinguish them from recommendations and unresolved questions.
+Produce a proposal that lets Michael understand and judge the design, and gives an implementer enough technical direction to proceed without repeating discovery. This is planning, not permission to implement.
 
-For larger work, propose coherent, verifiable delivery slices that together achieve the outcome. Identify the first end-to-end slice, dependencies and evidence needed before proceeding. Detail near-term work; leave later mechanics open where early results may change them. Where parallel work would help, identify independent workstreams, shared contracts and integration points; keep tightly coupled design, implementation and testing together. Do not add stages or agents merely because the task is large. Where existing consumers or persistent state are affected, account for compatibility, transition and recovery, not just the final design.
+Establish the design
+- Recommend the smallest coherent design that delivers the intended outcome. Preserve settled decisions and distinguish them from your recommendations.
+- Reconcile the proposal with the current implementation and prior discussion. If your recommendation has changed, explain what changed and why before presenting the new design. Make any proposed scope reduction explicit.
+- Identify the existing components, code or libraries to reuse, their responsibilities and the important boundaries between them. Give new abstractions a present reason to exist.
+- Resolve discoverable technical questions through bounded inspection. Leave routine engineering choices to the implementer; surface unresolved questions only when they materially affect behaviour, scope, risk or the ability to proceed.
 
-Explain how we will establish that it works. For consequential guarantees, identify evidence at the useful consumer boundary and plausible counterexamples that could disprove them. Address missing, malformed, stale or contradictory evidence where it affects those guarantees. Prefer behavioural tests that survive sensible refactoring over mocks of our own implementation. Identify the real-system acceptance path and access or environment prerequisites: local substitutes cannot establish real-system compatibility, and unavailable acceptance remains unverified.
+Write the issue comment in layers
 
-Post a concise architecture proposal on the issue, leading with the recommendation and consequential trade-offs, followed by delivery sequence, verification and decisions still needed. Link evidence rather than reproducing it; make the handoff usable without your local checkout. Build on prior discussion and identify what changed or is superseded. Leave routine engineering choices to the implementer. Read it back and return the comment URL.
+1. Recommendation and rationale
+Start with what will change, what will stay the same and why this resolves the problem. Explain the consequential trade-off in ordinary technical language. The opening should make sense without reading the implementation details below it.
 
-This is a proposal for discussion, not permission to implement. Don't change code or silently expand the ticket."""
+2. Proposed behaviour and technical design
+Give the reader a concrete model before introducing compressed technical labels. Use a worked example or short flow where it helps explain the behaviour.
+
+Retain the specifics that constrain implementation: relevant interfaces, rules, thresholds, state transitions, ownership boundaries and affected source locations. Use a small table, diagram or code/configuration snippet when it explains these more clearly than prose. Do not add snippets for appearance, or present unqualified syntax as settled design.
+
+Explain each mechanism alongside the behaviour or guarantee it supports. Keep separate concerns in separate paragraphs or bullets; do not turn bullets into compressed specifications.
+
+3. Delivery
+Describe coherent, verifiable slices, starting with the first useful end-to-end result. Detail near-term work and leave later mechanics open where early results may change them.
+
+Include dependencies and consequential compatibility, migration, cutover or recovery constraints. Identify parallel work only where it is genuinely independent; keep tightly coupled design, implementation and testing together. Do not create stages or agents merely because the task is large.
+
+4. Verification
+Explain how we will establish that the proposed behaviour works at its useful consumer boundary. Include the important failure or counterexample that could disprove a consequential guarantee, rather than an exhaustive test inventory.
+
+Distinguish local behavioural tests, historical evidence and real-system acceptance. Name access or environment prerequisites and any acceptance that must remain unverified. Account for missing, stale or contradictory evidence where it could change the result.
+
+5. Decisions and limitations
+State the material decisions Michael still owns, with your recommendation and the consequence of the alternative. Do not turn ordinary implementation choices into questions for him. If no decision is needed, say so briefly or omit this section.
+
+Publication
+Post the proposal as an issue comment. Build on the existing discussion rather than repeating discovery. Link supporting evidence and source code at the inspected revision; do not rely on local workspace paths for essential context.
+
+Keep detailed research and exhaustive checklists in supporting material, but retain the technical facts needed to understand, judge and implement the proposal in the comment itself. Do not trade readability for either dense completeness or a sparse executive summary. Use only the headings and detail the issue needs.
+
+Before posting, read the draft as a whole:
+- Can the reader explain the proposed behaviour and main trade-off from the opening?
+- Do the technical details make that model concrete, rather than interrupt it?
+- Could an implementer identify the change boundaries and critical safeguards without repeating discovery?
+- Are proposals, settled decisions and unverified details clearly distinguished?
+
+Read back the published comment and return its URL. Do not change code, the issue description or status, or silently expand the ticket."""
 
 
 def issue_maintainer_review(issue_url: str) -> str:
