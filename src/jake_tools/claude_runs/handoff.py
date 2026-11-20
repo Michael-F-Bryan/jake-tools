@@ -6,8 +6,8 @@ resumes the same Claude session once more through :class:`ClaudeAgent`
 with nothing to act with:
 
 - ``tools=()`` (the session exposes no built-in tool), no permission rules,
-  no local tools and so no in-process MCP server (``strict_mcp_config``
-  keeps every other server out);
+  no local tools and so no in-process MCP server, and no shared-memory
+  server either (``strict_mcp_config`` keeps every other server out);
 - ``max_turns=1``, and ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` caps the reply;
 - a wall-clock bound of :data:`HANDOFF_TIMEOUT_SECONDS`, never past the
   task's own deadline, and ``max_budget_usd`` set to what the task has left.
@@ -101,6 +101,11 @@ async def write_handoff(
         tools=(),
         allowed_tools=(),
         local_tools=(),
+        # ``ClaudeAgent`` layers this over the worker's defaults, and only
+        # fields set here win: say so for the memory server and its approvals,
+        # or the "tool-free" handoff would inherit them.
+        mcp_servers={},
+        mcp_tools=(),
         max_turns=1,
         max_budget_usd=budget_left_usd,
         session_id=None,

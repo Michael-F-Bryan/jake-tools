@@ -239,6 +239,17 @@ plugin and no Hermes import anywhere in this package. Sub-commands: `serve`
   answering a prompt sent after the observation clears it, and that prompt's
   time stays as a per-context watermark (7 days) so a delayed older failure
   write is dropped rather than resurrecting the cooldown.
+- Shared memory (`hindsight.py`, README "Shared Hindsight memory for workers"):
+  `hindsight.api_url` + `hindsight.bank_id` (+ `access`) are copied into
+  `spec.json` at launch and become one explicit HTTP MCP server on Hindsight
+  0.10.1's single-bank route `/mcp/<bank>/`, with `mcp__hindsight__recall`,
+  `reflect` and (`readwrite`) `retain` approved by name, independent of
+  `tools`. Never the multi-bank route, never a default bank, no system prompt
+  (`--system-prompt ""` stays), no automatic retention, no credential.
+  `handoff.py` must keep overriding `mcp_servers`/`mcp_tools` because specs
+  merge field by field. Tests: `test_hindsight.py`, and `--slow`
+  `test_hindsight_live.py` (real CLI against `fake_hindsight.py`, a real MCP
+  server on the same route shape).
 - Delegation recipes (`skills/claude-delegation/references/recipes.md`) are
   JSON fences the live tests run verbatim
   (`tests/test_delegation_recipes_live.py`, `--slow`); receipts under

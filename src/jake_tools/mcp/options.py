@@ -125,6 +125,24 @@ FLAGS: tuple[Flag, ...] = (
         "Non-secret label of the Claude account context.",
     ),
     Flag(
+        "--hindsight-api-url",
+        "hindsight.api_url",
+        "JAKE_TOOLS_HINDSIGHT_API_URL",
+        "Hindsight server delegated workers share memory through (set with the bank).",
+    ),
+    Flag(
+        "--hindsight-bank-id",
+        "hindsight.bank_id",
+        "JAKE_TOOLS_HINDSIGHT_BANK_ID",
+        "Hindsight bank delegated workers share with their parent agent.",
+    ),
+    Flag(
+        "--hindsight-access",
+        "hindsight.access",
+        "JAKE_TOOLS_HINDSIGHT_ACCESS",
+        "Worker memory access: read, or readwrite (default).",
+    ),
+    Flag(
         "--transcription-api-base-url",
         "transcription.api_base_url",
         "TRANSCRIPTION_API_BASE_URL",

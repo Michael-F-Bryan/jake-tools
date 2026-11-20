@@ -105,6 +105,9 @@ contents are the value (the direct variable wins); they have no flag and
 | `claude.max_budget_usd` | `JAKE_TOOLS_CLAUDE_MAX_BUDGET_USD` | `--claude-max-budget-usd` |
 | `claude.max_live_tasks` | `JAKE_TOOLS_CLAUDE_MAX_LIVE_TASKS` | `--claude-max-live-tasks` |
 | `claude.account_context` | `JAKE_TOOLS_CLAUDE_ACCOUNT_CONTEXT` | `--claude-account-context` |
+| `hindsight.api_url` | `JAKE_TOOLS_HINDSIGHT_API_URL` | `--hindsight-api-url` |
+| `hindsight.bank_id` | `JAKE_TOOLS_HINDSIGHT_BANK_ID` | `--hindsight-bank-id` |
+| `hindsight.access` | `JAKE_TOOLS_HINDSIGHT_ACCESS` (`read` or `readwrite`, default) | `--hindsight-access` |
 | `transcription.api_base_url` | `TRANSCRIPTION_API_BASE_URL` | `--transcription-api-base-url` |
 | `transcription.timeout_seconds` | `JAKE_TOOLS_TRANSCRIPTION_TIMEOUT_SECONDS` | `--transcription-timeout-seconds` |
 | `microsoft.tenant_id` | `JAKE_TOOLS_MICROSOFT_TENANT_ID` | `--microsoft-tenant-id` |
@@ -299,6 +302,22 @@ capabilities: it then gets a `CreateTaskResult` and polls with `tasks/get`,
 answers questions with `tasks/update` and cancels with `tasks/cancel`. Every
 other client, including Hermes on its `initialize` connection, gets the
 ordinary tools unchanged. Both are views of the same task.
+
+### Shared Hindsight memory for workers
+
+With `hindsight.api_url` and `hindsight.bank_id` both set (neither has a
+default, and there is no fallback bank), every delegated worker gets the
+Hindsight server and bank of the agent that started it, as one explicit HTTP
+MCP server at `<api_url>/mcp/<bank_id>/` (Hindsight 0.10.1's single-bank route:
+no tool can name another bank). Approved: `recall`, `reflect`, and `retain`
+unless `hindsight.access=read`. The route's administrative and deleting tools
+are listed but refused. This is not the Hindsight plugin or hooks, ambient MCP
+inheritance or a settings file; nothing is retained automatically; no prompt is
+added; the `max_turns` handoff stays tool-free. The URL is HTTPS or loopback
+HTTP, and carries no credential (the pod's server is unauthenticated and
+loopback-only). `doctor` lists the route's tools without calling any and fails
+only when just one of the two settings is set. A worker with `Bash` can still
+reach the server directly; the bank limit is of the MCP route, not a sandbox.
 
 ## Newsletter MCP tools (Microsoft)
 

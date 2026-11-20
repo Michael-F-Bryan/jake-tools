@@ -94,6 +94,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 from ..ai_usage import AICallTelemetry, Usage
 from ..claude import EffortLevel, check_tool_name, permission_rule_tool
 from ..config import ACCOUNT_CONTEXT_PATTERN
+from ..hindsight import HindsightMemory
 from .failures import Cooldown, Failure
 
 RunStatus = Literal["working", "input_required", "completed", "failed", "cancelled"]
@@ -170,6 +171,10 @@ class RunSpec(BaseModel):
     """The operator-declared account-context label (``claude.account_context``)
     at launch, fixed for the run; ``None`` when unset or for older runs, which
     take part in no cooldown sharing (see :mod:`.cooldowns`).
+    ``hindsight`` is the shared-memory connection (server, bank, access) the
+    run was launched with: the same one the parent agent uses, fixed for the
+    run and holding no secret; ``None`` (unset, or older runs) means the
+    worker gets no memory tools (see :mod:`jake_tools.hindsight`).
     ``session_id`` is the Claude session this invocation writes: a fresh
     UUID for a new conversation, the parent's for a resume (the CLI keeps it).
     ``cost_baseline_usd`` is the session's cumulative cost when this
@@ -179,6 +184,7 @@ class RunSpec(BaseModel):
     session exposes and ``allowed_tools`` the permission rules that
     auto-approve calls; ``None`` (every run written before the two were
     separate) approves each exposed tool outright."""
+    hindsight: HindsightMemory | None = None
 
     @property
     def approval_rules(self) -> tuple[str, ...]:

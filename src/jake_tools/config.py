@@ -43,6 +43,12 @@ from pydantic import (
 
 from .claude import DEFAULT_MODEL, EffortLevel
 from .clockify import CLOCKIFY_API_ROOT
+from .hindsight import (
+    HindsightAccess,
+    HindsightMemory,
+    OptionalApiUrl,
+    OptionalBankId,
+)
 
 APP_DIRNAME = "jake-tools"
 
@@ -225,6 +231,25 @@ class Config(BaseModel):
     """Whether ``artifact_publish`` and ``artifact_read`` are exposed. Off by
     default: they depend on an undocumented Claude Code mechanism."""
 
+    hindsight_api_url: Resolved[str | None]
+    hindsight_bank_id: Resolved[str | None]
+    hindsight_access: Resolved[HindsightAccess]
+    """The Hindsight server, bank and access that delegated workers share with
+    the agent that started them (see :mod:`jake_tools.hindsight`). Unset
+    (the default) means workers get no memory. Both the URL and the bank are
+    needed (``doctor`` fails when only one is set), and there is no fallback
+    bank: a worker is never given a default or a global one."""
+
+    @property
+    def hindsight(self) -> HindsightMemory | None:
+        """The memory connection workers are launched with, or ``None``."""
+        url, bank = self.hindsight_api_url.value, self.hindsight_bank_id.value
+        if url is None or bank is None:
+            return None
+        return HindsightMemory(
+            api_url=url, bank_id=bank, access=self.hindsight_access.value
+        )
+
     def settings(self) -> tuple[Resolved[Any], ...]:
         """Every setting, in a stable order, for ``doctor`` to print."""
         return (
@@ -260,6 +285,9 @@ class Config(BaseModel):
             self.files_graph_root,
             self.files_sharepoint_hosts,
             self.artifacts_enabled,
+            self.hindsight_api_url,
+            self.hindsight_bank_id,
+            self.hindsight_access,
         )
 
     @property
@@ -314,6 +342,9 @@ AccountContext = Annotated[
     BeforeValidator(_blank_is_unset),
 ]
 _ACCOUNT_CONTEXT = TypeAdapter(AccountContext)
+_HINDSIGHT_URL = TypeAdapter(OptionalApiUrl)
+_HINDSIGHT_BANK = TypeAdapter(OptionalBankId)
+_HINDSIGHT_ACCESS = TypeAdapter(HindsightAccess)
 _STR_TUPLE = TypeAdapter(tuple[str, ...])
 _PATH = TypeAdapter(Path)
 _INT = TypeAdapter(int)
@@ -369,7 +400,7 @@ def load_config(
     )
 
     secrets = {name: _secret(name, env) for name in SECRET_VARIABLES}
-    return Config(
+    config = Config(
         xdg=xdg,
         hermes_home=hermes_home,
         clockify_api_key=secrets["CLOCKIFY_API_KEY"],
@@ -545,7 +576,20 @@ def load_config(
             ),
             False,
         ),
+        hindsight_api_url=resolve(
+            _Spec("hindsight.api_url", "JAKE_TOOLS_HINDSIGHT_API_URL", _HINDSIGHT_URL),
+            None,
+        ),
+        hindsight_bank_id=resolve(
+            _Spec("hindsight.bank_id", "JAKE_TOOLS_HINDSIGHT_BANK_ID", _HINDSIGHT_BANK),
+            None,
+        ),
+        hindsight_access=resolve(
+            _Spec("hindsight.access", "JAKE_TOOLS_HINDSIGHT_ACCESS", _HINDSIGHT_ACCESS),
+            "readwrite",
+        ),
     )
+    return config
 
 
 def _resolve[T](
@@ -603,6 +647,12 @@ def _describe_expected(spec: _Spec[Any]) -> str:
         return "a number"
     if spec.adapter is _PATH:
         return "a path"
+    if spec.adapter is _HINDSIGHT_URL:
+        return "an https URL (or http to localhost) with no path"
+    if spec.adapter is _HINDSIGHT_BANK:
+        return "a bank id of letters, digits, . _ - (at most 128)"
+    if spec.adapter is _HINDSIGHT_ACCESS:
+        return "one of read, readwrite"
     if spec.adapter is _ACCOUNT_CONTEXT:
         return "a label of letters, digits and . _ : - (at most 64)"
     return "a string"

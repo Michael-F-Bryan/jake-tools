@@ -143,7 +143,7 @@ def doctor(
 def test_mcp_ignores_toml_and_dotenv_files_everywhere(hostile: Hostile) -> None:
     result, settings = doctor(hostile)
 
-    assert len(settings) == 32, result.stdout
+    assert len(settings) == 35, result.stdout
     for name, rest in settings.items():
         assert rest.endswith("[default]") or rest.startswith("unset"), (name, rest)
     assert settings["clockify.workspaces"] == "(empty)  [default]"
@@ -343,6 +343,10 @@ def sample(flag: Flag) -> tuple[str, object]:
     """A valid raw environment value and the flag value that must beat it."""
     if flag.is_bool:
         return "true", False
+    if flag.setting == "hindsight.api_url":
+        return "http://127.0.0.1:1", "http://127.0.0.1:2"
+    if flag.setting == "hindsight.access":
+        return "read", "readwrite"
     if isinstance(flag.type, click.Choice):
         return "low", "high"
     if flag.type is int:

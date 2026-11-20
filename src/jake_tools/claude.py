@@ -177,6 +177,15 @@ class LocalTool:
     handler: Callable[[dict[str, Any]], Awaitable[LocalToolResult]]
 
 
+def http_mcp_server(url: str) -> McpServerConfig:
+    """An external streamable-HTTP MCP server definition for ``url``.
+
+    No headers: nothing here carries a credential, and an argument vector is
+    visible to every local user.
+    """
+    return {"type": "http", "url": url}
+
+
 def local_tool_name(name: str) -> str:
     """The name the agent uses for the :class:`LocalTool` called ``name``."""
     return f"mcp__{LOCAL_MCP_SERVER}__{name}"

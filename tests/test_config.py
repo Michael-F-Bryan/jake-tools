@@ -182,6 +182,19 @@ ENV_MAPPINGS: tuple[tuple[str, str, str, object], ...] = (
         ("a.test", "b.test"),
     ),
     ("artifacts.enabled", "JAKE_TOOLS_ARTIFACTS_ENABLED", "true", True),
+    (
+        "hindsight.api_url",
+        "JAKE_TOOLS_HINDSIGHT_API_URL",
+        "http://127.0.0.1:8888/",
+        "http://127.0.0.1:8888",
+    ),
+    (
+        "hindsight.bank_id",
+        "JAKE_TOOLS_HINDSIGHT_BANK_ID",
+        "michael-personal",
+        "michael-personal",
+    ),
+    ("hindsight.access", "JAKE_TOOLS_HINDSIGHT_ACCESS", "read", "read"),
 )
 
 
@@ -340,6 +353,9 @@ def test_settings_listing_is_complete_and_stable(tmp_path: Path) -> None:
         "files.graph_root",
         "files.sharepoint_hosts",
         "artifacts.enabled",
+        "hindsight.api_url",
+        "hindsight.bank_id",
+        "hindsight.access",
     ]
     assert config.runs_dir.display_value().startswith(str(tmp_path))
 

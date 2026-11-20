@@ -580,3 +580,58 @@ def test_microsoft_check_reports_partial_revoked_and_working_grants(
         assert REFRESH_TOKEN not in output and CLIENT_SECRET not in output
         assert "microsoft.account = editor@example.test" in output
         assert "MICROSOFT_REFRESH_TOKEN = set" in output
+
+
+def test_hindsight_check_is_skipped_without_memory_and_reads_the_real_route(
+    run_doctor: RunDoctor, home: Path, claude_bin: Path
+) -> None:
+    from fake_hindsight import fake_hindsight
+
+    skipped = run_doctor(home, claude_bin)
+    assert check_line(skipped.stdout, "hindsight").startswith("SKIP")
+
+    with fake_hindsight() as server:
+        ok = run_doctor(
+            home,
+            claude_bin,
+            JAKE_TOOLS_HINDSIGHT_API_URL=server.url,
+            JAKE_TOOLS_HINDSIGHT_BANK_ID="bank-under-test",
+            JAKE_TOOLS_HINDSIGHT_ACCESS="read",
+        )
+    line = check_line(ok.stdout, "hindsight")
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert line.startswith("OK")
+    assert "bank-under-test (read)" in line
+    assert "recall, reflect" in line and "retain" not in line
+    assert server.calls == []  # tools were listed, never called
+    assert server.requests and all(
+        path.startswith("/mcp/bank-under-test/") for path in server.requests
+    )
+
+
+def test_an_unreachable_hindsight_route_warns_without_failing_the_deployment(
+    run_doctor: RunDoctor, home: Path, claude_bin: Path
+) -> None:
+    result = run_doctor(
+        home,
+        claude_bin,
+        JAKE_TOOLS_HINDSIGHT_API_URL="http://127.0.0.1:9",
+        JAKE_TOOLS_HINDSIGHT_BANK_ID="bank-under-test",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    line = check_line(result.stdout, "hindsight")
+    assert line.startswith("WARN")
+    assert "127.0.0.1:9/" not in line  # the exception text (an address) is not echoed
+
+
+def test_a_half_configured_hindsight_pair_fails_the_deployment_check(
+    run_doctor: RunDoctor, home: Path, claude_bin: Path
+) -> None:
+    result = run_doctor(
+        home, claude_bin, JAKE_TOOLS_HINDSIGHT_API_URL="http://127.0.0.1:8888"
+    )
+
+    assert result.returncode == 1
+    assert check_line(result.stdout, "hindsight").startswith("FAIL")
+    assert "no default bank" in result.stdout

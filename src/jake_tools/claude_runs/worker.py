@@ -23,7 +23,8 @@ through :meth:`ClaudeAgent.converse`:
   pending request in ``inputs/``, sets ``input_required``, and blocks until
   ``claude_update`` answers or declines it, then returns the answer as the
   tool result, so the same turn carries on. It is not a permission
-  channel: it grants nothing, and no external MCP server is ever loaded.
+  channel: it grants nothing. The only external MCP server a worker ever loads is the
+  one explicit shared-memory connection, when configured (below).
 
 Isolation: the session exposes exactly the requested built-ins as
 ``tools`` (an empty request is genuinely tool-less); the request's
@@ -33,6 +34,13 @@ that would need approval rather than waiting on it (calls the CLI needs no
 approval for, such as reads inside the working directory and read-only
 Bash commands, still run); ``setting_sources=()`` so no settings file is
 read; and (via ``AgentSpec.to_options``) ``strict_mcp_config``.
+
+Memory: when the server was configured with a Hindsight endpoint and bank,
+``spec.hindsight`` records them at launch and the worker passes exactly one
+HTTP MCP server, the parent's bank on its single-bank route, with its tools
+approved by name (:mod:`jake_tools.hindsight`). No ambient MCP server, plugin,
+hook or settings file is involved, nothing is retained automatically, and the
+``max_turns`` handoff never sees it.
 
 Availability: the CLI drops a requested tool it does not provide in this
 session (an unknown name, or one unavailable to this account, provider or
@@ -96,9 +104,11 @@ from ..claude import (
     Message,
     ResultView,
     describe,
+    http_mcp_server,
     message_to_json,
     unexposed_tools,
 )
+from ..hindsight import SERVER_NAME
 from . import cooldowns
 from .events import (
     STORED_TOOL_INPUT_CHARS,
@@ -317,10 +327,17 @@ async def run_worker(run_dir: Path) -> Outcome:
 
 def agent_spec(spec: RunSpec, *, local_tools: tuple[LocalTool, ...] = ()) -> AgentSpec:
     resuming = spec.resume_task_id is not None
+    memory = spec.hindsight
     return AgentSpec(
         model=spec.model,
         tools=spec.tools,
         allowed_tools=spec.allowed_tools,
+        # Shared memory is the one external MCP server a worker is given: the
+        # parent's Hindsight bank over its single-bank route, with read (and,
+        # if configured, retain) tools approved by name. It is independent of
+        # ``tools``, so a task with no built-ins still has its memory tools.
+        mcp_servers={SERVER_NAME: http_mcp_server(memory.mcp_url)} if memory else {},
+        mcp_tools=memory.tool_names if memory else (),
         effort=spec.effort,
         max_turns=spec.max_turns,
         max_budget_usd=spec.max_budget_usd,

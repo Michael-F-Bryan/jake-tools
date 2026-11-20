@@ -108,6 +108,20 @@ network access. That includes `uv run pytest`, which runs project code.
 unanswered question blocks the task until its timeout. It grants no
 permissions; a worker cannot use it to get more tools.
 
+**Shared memory.** When the operator configured Hindsight
+(`hindsight.api_url` and `hindsight.bank_id`), every worker is also given your
+own memory bank as the MCP tools `mcp__hindsight__recall`,
+`mcp__hindsight__reflect` and (with `readwrite` access, the default)
+`mcp__hindsight__retain`. They are independent of `tools` and need no grant
+from you; `claude_status` lists them under `exposed_tools`. Nothing is
+recalled or retained for the worker, and no instruction is added to its
+prompt, so say what you want in the brief: for example "recall what we
+decided about X before you start", or "retain the root cause once verified,
+nothing else". Keep secrets, personal data and transcripts out of memory, and
+treat what a worker recalls or retains as unverified, like anything else it
+reports. It cannot reach any other bank and the bank's administrative and
+deleting tools are refused.
+
 ## 3. Start
 
 ```json

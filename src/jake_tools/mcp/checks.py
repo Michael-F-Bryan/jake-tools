@@ -17,7 +17,10 @@ from http import HTTPStatus
 from typing import Literal
 from urllib.parse import urlsplit
 
+import anyio
 import requests
+from mcp import Client
+from mcp.types import Tool
 from pydantic import BaseModel, ConfigDict
 
 from ..clockify import ClockifyClient, ClockifyError
@@ -378,6 +381,71 @@ def check_transcription(config: Config) -> Check:
     )
 
 
+def check_hindsight(config: Config) -> Check:
+    """The shared-memory route workers are given: reachable, with their tools.
+
+    Read-only: it lists tools over MCP and calls none. Never required, since
+    an unreachable server only makes the workers' memory tools fail, so it
+    warns; a route that lets a tool pick the bank is the one failure.
+    """
+    memory = config.hindsight
+    if (config.hindsight_api_url.value is None) != (
+        config.hindsight_bank_id.value is None
+    ):
+        return Check(
+            name="hindsight",
+            status="fail",
+            detail="hindsight.api_url and hindsight.bank_id must be set together; "
+            "with only one, workers get no memory (there is no default bank)",
+            required=True,
+        )
+    if memory is None:
+        return Check(
+            name="hindsight",
+            status="skip",
+            detail="hindsight.api_url and hindsight.bank_id are unset; "
+            "delegated workers get no memory tools",
+        )
+    where = f"single-bank route for bank {memory.bank_id} ({memory.access})"
+
+    async def list_tools() -> list[Tool]:
+        with anyio.fail_after(CLAUDE_TIMEOUT_SECONDS / 3):
+            async with Client(memory.mcp_url) as client:
+                return (await client.list_tools()).tools
+
+    try:
+        tools = anyio.run(list_tools)
+    except Exception as exc:  # the message may carry the address
+        return Check(
+            name="hindsight",
+            status="warn",
+            detail=f"{where} could not be queried ({type(exc).__name__}); "
+            "workers would start but their memory tools would fail",
+        )
+    names = {tool.name for tool in tools}
+    wanted = [name.rsplit("__", 1)[1] for name in memory.tool_names]
+    if any("bank_id" in tool.input_schema.get("properties", {}) for tool in tools):
+        return Check(
+            name="hindsight",
+            status="fail",
+            detail=f"{where} has a tool that takes a bank_id; workers must only "
+            "use the single-bank route",
+            required=True,
+        )
+    if missing := [name for name in wanted if name not in names]:
+        return Check(
+            name="hindsight",
+            status="warn",
+            detail=f"{where} lacks tool(s) {', '.join(missing)}",
+        )
+    return Check(
+        name="hindsight",
+        status="ok",
+        detail=f"{where}; {len(names)} tools exposed, workers approved for "
+        + ", ".join(wanted),
+    )
+
+
 def check_microsoft(config: Config) -> Check:
     """The newsletter's delegated Microsoft grant: configured, and refreshable.
 
@@ -457,5 +525,6 @@ def run_checks(config: Config, environ: Mapping[str, str]) -> list[Check]:
         check_jira(config),
         check_session_store(config),
         check_transcription(config),
+        check_hindsight(config),
         check_microsoft(config),
     ]

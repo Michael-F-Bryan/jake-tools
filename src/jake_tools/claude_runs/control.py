@@ -39,6 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 
 from ..claude import EffortLevel, permission_rule_tool
 from ..config import DEFAULT_CLAUDE_MAX_LIVE_TASKS, Config
+from ..hindsight import HindsightMemory
 from . import cooldowns
 from .events import EventLog
 from .inbox import Inbox
@@ -186,6 +187,8 @@ class RunDefaults(BaseModel):
     timeout_seconds: float = Field(gt=0)
     max_budget_usd: float = Field(gt=0)
     account_context: str | None = None
+    hindsight: HindsightMemory | None = None
+    """Shared memory the launched workers get (see :mod:`jake_tools.hindsight`)."""
     max_live_tasks: int = Field(default=DEFAULT_MAX_LIVE_TASKS, ge=1)
     """Admission limit applied by the process holding these defaults."""
 
@@ -198,6 +201,7 @@ class RunDefaults(BaseModel):
             timeout_seconds=config.claude_timeout_seconds.value,
             max_budget_usd=config.claude_max_budget_usd.value,
             account_context=config.claude_account_context.value,
+            hindsight=config.hindsight,
             max_live_tasks=config.claude_max_live_tasks.value,
         )
 
@@ -341,6 +345,7 @@ class StartRequest(BaseModel):
             cost_baseline_exact=cost_baseline_exact,
             allow_questions=self.allow_questions,
             account_context=defaults.account_context,
+            hindsight=defaults.hindsight,
         )
 
 
