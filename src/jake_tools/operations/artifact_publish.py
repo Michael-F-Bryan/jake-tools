@@ -1,7 +1,8 @@
 """``artifact_publish``: publish an existing HTML file as a NEW private Claude Artifact.
 
-An off-by-default ``artifacts.enabled`` setting gates it: it sends the file's contents to claude.ai and relies on an
-undocumented Claude Code mechanism. :mod:`jake_tools.artifacts` does the work.
+Always listed. It sends the file's contents to claude.ai through an
+undocumented Claude Code mechanism, so authority is held by the guard, not by
+hiding the tool. :mod:`jake_tools.artifacts` does the work.
 """
 
 from __future__ import annotations
@@ -46,5 +47,4 @@ OPERATION = Operation(
     skill="artifact-publishing",
     description=DESCRIPTION,
     build=build,
-    available=lambda config: config.artifacts_enabled.value,
 )

@@ -9,8 +9,9 @@ description: Transcribe and diarise local audio files with the `transcribe` tool
 filesystem) to the native
 transcription service and returns one complete, structured transcript. All
 `transcribe` inference is local to that host; nothing goes to a cloud provider.
-The tool is only present when jake-tools has `TRANSCRIPTION_API_BASE_URL`
-configured; if you cannot see it, there is no transcription available here.
+The tool is always listed, but it works only once the operator has set
+`TRANSCRIPTION_API_BASE_URL` and `TRANSCRIPTION_API_TOKEN` for jake-tools; until then it
+answers `missing_credentials` naming the missing variable (relay that to the operator).
 `polish_transcript` (below) is different: it sends transcript text to Claude.
 
 ## Calling it
@@ -149,7 +150,7 @@ Every failure is a result with `isError: true` and a stable `code`:
 | `invalid_argument` | (file problems) `detail.file` names the path | The server cannot read that file, it is empty, or it is not decodable audio. Fix the path or the file. |
 | `invalid_argument` | `invalid_input` | The service refused a file: unsupported container (WebM, Ogg), not audio, or damaged/truncated. The message names the file. Convert or replace it; retrying the same file gives the same answer. |
 | `invalid_argument` | `payload_too_large` | Too many files, too many bytes, or too much audio for one call. Split the recording. |
-| `missing_credentials` | | `TRANSCRIPTION_API_TOKEN` is unset on the server. Report it; nothing you pass fixes it. |
+| `missing_credentials` | `detail.variables` | `TRANSCRIPTION_API_BASE_URL` or `TRANSCRIPTION_API_TOKEN` is unset on the server (the variable is named). Report it; nothing you pass fixes it. |
 | `access_denied` | `unauthorized` | The token was rejected. Report it. |
 | `capacity_exceeded` | `overloaded` | The queue is full. Wait at least `detail.retry_after_seconds`, then try again. |
 | `upstream_error` | `not_ready` | The service is starting or its models failed to load. Wait for `retry_after_seconds` (starting) or report it (failed). |

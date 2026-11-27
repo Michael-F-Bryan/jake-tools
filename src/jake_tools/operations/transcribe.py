@@ -1,8 +1,8 @@
 """``transcribe``: upload client-local audio to the native transcription service.
 
-Registered only when ``transcription.api_base_url`` is configured; an agent
-that cannot see the tool has no transcription available, by design. The
-handler is a thin adapter: it checks the files exist here, hands them to
+Always listed. A missing ``transcription.api_base_url`` or
+``TRANSCRIPTION_API_TOKEN`` is a ``missing_credentials`` error naming the
+variable, so an agent can tell the operator what to set. The handler is a thin adapter: it checks the files exist here, hands them to
 :class:`~jake_tools.transcription.TranscriptionClient`, and maps that
 client's errors onto the server's stable codes.
 """
@@ -31,8 +31,11 @@ def transcription_client(config: Config) -> TranscriptionClient:
     base_url = config.transcription_api_base_url.value
     if base_url is None:
         raise ToolError(
-            "invalid_argument",
-            "transcription.api_base_url is not configured",
+            "missing_credentials",
+            "Set TRANSCRIPTION_API_BASE_URL (flag --transcription-api-base-url) "
+            "to the transcription service's base URL where jake-tools runs "
+            "(the MCP server's environment)",
+            detail={"variables": ["TRANSCRIPTION_API_BASE_URL"]},
         )
     token = config.transcription_api_token.value
     if not token:
@@ -140,5 +143,4 @@ OPERATION = Operation(
     skill="transcription",
     description=DESCRIPTION,
     build=build,
-    available=lambda config: config.has_transcription_endpoint,
 )

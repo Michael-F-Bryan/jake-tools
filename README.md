@@ -37,11 +37,12 @@ server and the single agent-facing interface, for Hermes and every other MCP
 client. The `jake-tools` CLI stays the operator interface over the same shared
 operations. There is no Hermes plugin. The server provides:
 
-- **Tools**, every operation the environment's configuration makes available,
-  with stable `{code, message, detail?}` error results. `transcribe` needs
-  `TRANSCRIPTION_API_BASE_URL`, and the experimental `artifact_*` tools need
-  `JAKE_TOOLS_ARTIFACTS_ENABLED=true`; nothing else gates the catalogue. `ping` is a
-  connectivity check.
+- **Tools**, every operation, always listed, with stable
+  `{code, message, detail?}` error results. No setting hides a tool: a missing
+  prerequisite (for example `TRANSCRIPTION_API_BASE_URL` or
+  `TRANSCRIPTION_API_TOKEN` for `transcribe`, or a Claude Code session that
+  does not expose `Artifact` for `artifact_*`) is an error that names what to
+  fix when the tool is called. `ping` is a connectivity check.
 - **Guidance resources**: each guide is `skill://<name>` and its supporting
   references are `skill://<name>/references/<file>.md`, served from the
   installed package so they always match the running code. Each tool
@@ -119,7 +120,6 @@ contents are the value (the direct variable wins); they have no flag and
 | `newsletters.sharepoint_root` | `JAKE_TOOLS_NEWSLETTERS_SHAREPOINT_ROOT` | (none; test stand-in) |
 | `files.graph_root` | `JAKE_TOOLS_FILES_GRAPH_ROOT` | (none; test stand-in) |
 | `files.sharepoint_hosts` | `JAKE_TOOLS_FILES_SHAREPOINT_HOSTS` (comma-separated) | `--files-sharepoint-host` (repeat) |
-| `artifacts.enabled` | `JAKE_TOOLS_ARTIFACTS_ENABLED` (`true`/`false`) | `--artifacts` / `--no-artifacts` |
 
 Secret environment variables (each also as `NAME_FILE`): `CLOCKIFY_API_KEY`,
 `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `TRANSCRIPTION_API_TOKEN`,
@@ -363,14 +363,15 @@ they do not establish live Microsoft compatibility.
 
 ## Transcription MCP tool
 
-When `TRANSCRIPTION_API_BASE_URL` (or `--transcription-api-base-url`) is set, the
-stdio server also exposes `transcribe(files)`: it uploads audio files the MCP
+The stdio server always exposes `transcribe(files)`; until
+`TRANSCRIPTION_API_BASE_URL` (or `--transcription-api-base-url`) and
+`TRANSCRIPTION_API_TOKEN` are set it answers `missing_credentials` naming the
+variable. Once configured it uploads audio files the MCP
 server can read, in recording order, to the native transcription service in
 [`transcription-service/`](transcription-service/README.md) and returns one
 structured transcript (speaker segments with word timings in seconds from the
 start of the concatenated recording, per-file spans, anonymous request-wide
-speakers, limitations and processing times). Without an endpoint the tool is
-absent. `TRANSCRIPTION_API_TOKEN` is the bearer token the service expects;
+speakers, limitations and processing times). `TRANSCRIPTION_API_TOKEN` is the bearer token the service expects;
 `transcription.timeout_seconds` (default 1800) bounds one call. The service
 runs one job at a time with a bounded queue; a timeout is reported with
 `retry_safe=false` and never retried, because the service may still be working
@@ -412,8 +413,10 @@ The file's contents are sent to Anthropic.
 
 It rests on an **undocumented** Claude Code mechanism: the SDK hides the
 `Artifact` tool unless `CLAUDE_CODE_ARTIFACT` is set, which Jake does for these
-sessions only. It may change without notice, so the tools are off unless
-`JAKE_TOOLS_ARTIFACTS_ENABLED=true` (or `--artifacts`). Each session is guarded before every
+sessions only. It may change without notice, but there is no switch: the tools are
+always listed, and if Claude Code does not expose `Artifact` (signed out, policy,
+`enableArtifact: false`, or the route changed) the call fails with
+`upstream_error`/`tool_not_exposed` before anything is published. Each session is guarded before every
 tool call by a `PreToolUse` hook that judges the raw model input, so it can only
 read the one file and publish it once (or read the one URL); a prompt is not what
 keeps it there. `verified` means the hosted file,

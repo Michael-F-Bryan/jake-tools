@@ -227,10 +227,6 @@ class Config(BaseModel):
     """The SharePoint hosts ``sharepoint_resolve`` accepts a link for. A link
     on any other host (another tenant's, a guest-shared one) is refused."""
 
-    artifacts_enabled: Resolved[bool]
-    """Whether ``artifact_publish`` and ``artifact_read`` are exposed. Off by
-    default: they depend on an undocumented Claude Code mechanism."""
-
     hindsight_api_url: Resolved[str | None]
     hindsight_bank_id: Resolved[str | None]
     hindsight_access: Resolved[HindsightAccess]
@@ -284,7 +280,6 @@ class Config(BaseModel):
             self.newsletters_sharepoint_root,
             self.files_graph_root,
             self.files_sharepoint_hosts,
-            self.artifacts_enabled,
             self.hindsight_api_url,
             self.hindsight_bank_id,
             self.hindsight_access,
@@ -293,16 +288,6 @@ class Config(BaseModel):
     @property
     def has_clockify_credentials(self) -> bool:
         return self.clockify_api_key.value is not None
-
-    @property
-    def has_transcription_endpoint(self) -> bool:
-        """Whether the ``transcribe`` tool is exposed at all.
-
-        The endpoint is deliberate configuration; the token is a secret that
-        may be missing, in which case the tool is exposed and reports
-        ``missing_credentials`` when called.
-        """
-        return self.transcription_api_base_url.value is not None
 
     @property
     def missing_jira_variables(self) -> tuple[str, ...]:
@@ -567,14 +552,6 @@ def load_config(
                 _STR_TUPLE,
             ),
             DEFAULT_FILES_SHAREPOINT_HOSTS,
-        ),
-        artifacts_enabled=resolve(
-            _Spec(
-                "artifacts.enabled",
-                "JAKE_TOOLS_ARTIFACTS_ENABLED",
-                _BOOL,
-            ),
-            False,
         ),
         hindsight_api_url=resolve(
             _Spec("hindsight.api_url", "JAKE_TOOLS_HINDSIGHT_API_URL", _HINDSIGHT_URL),

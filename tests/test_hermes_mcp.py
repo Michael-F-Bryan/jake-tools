@@ -261,8 +261,7 @@ class Hermes:
 
 
 def expected_tools(hermes: Hermes) -> list[str]:
-    config = load_config(hermes.seen_by_server())
-    names = [op.name for op in OPERATIONS if op.available(config)] + ["ping"]
+    names = [op.name for op in OPERATIONS] + ["ping"]
     return sorted(PREFIX + name for name in names)
 
 
@@ -319,8 +318,8 @@ def test_discovery_guidance_and_prompts_through_hermes(hermes: Hermes) -> None:
         )
     assert set(entry) == {"command", "args", "env"}
     expected = expected_tools(hermes)
-    assert PREFIX + "transcribe" not in expected
-    assert not [n for n in expected if n.startswith(PREFIX + "artifact_")]
+    assert PREFIX + "transcribe" in expected
+    assert PREFIX + "artifact_publish" in expected
     assert_registered(out, expected)
 
     skills = packaged_skills_dir()
@@ -368,7 +367,7 @@ def jake(result: Any) -> dict[str, Any]:
 
 
 @needs_hermes
-def test_transcribe_is_listed_only_with_an_endpoint(hermes: Hermes) -> None:
+def test_transcribe_is_listed_with_an_endpoint(hermes: Hermes) -> None:
     hermes.configure(TRANSCRIPTION_API_BASE_URL="http://127.0.0.1:9/v1")
     out, _ = hermes.run("")
     expected = expected_tools(hermes)

@@ -68,7 +68,6 @@ def test_defaults_when_nothing_is_configured(tmp_path: Path) -> None:
         config.transcription_timeout_seconds.value
         == DEFAULT_TRANSCRIPTION_TIMEOUT_SECONDS
     )
-    assert not config.has_transcription_endpoint
     assert all(setting.source == "default" for setting in config.settings())
     assert not config.has_clockify_credentials
     assert config.missing_jira_variables == (
@@ -181,7 +180,6 @@ ENV_MAPPINGS: tuple[tuple[str, str, str, object], ...] = (
         "a.test,b.test",
         ("a.test", "b.test"),
     ),
-    ("artifacts.enabled", "JAKE_TOOLS_ARTIFACTS_ENABLED", "true", True),
     (
         "hindsight.api_url",
         "JAKE_TOOLS_HINDSIGHT_API_URL",
@@ -352,7 +350,6 @@ def test_settings_listing_is_complete_and_stable(tmp_path: Path) -> None:
         "newsletters.sharepoint_root",
         "files.graph_root",
         "files.sharepoint_hosts",
-        "artifacts.enabled",
         "hindsight.api_url",
         "hindsight.bank_id",
         "hindsight.access",
@@ -379,7 +376,6 @@ def test_transcription_settings_follow_env_and_the_token_is_a_secret(
 
     unset = load_config(_env(tmp_path))
     assert unset.transcription_api_base_url.value is None
-    assert not unset.has_transcription_endpoint
 
     from_env = load_config(
         _env(
@@ -389,24 +385,12 @@ def test_transcription_settings_follow_env_and_the_token_is_a_secret(
             TRANSCRIPTION_API_TOKEN_FILE=str(token_file),
         )
     )
-    assert from_env.has_transcription_endpoint
     assert from_env.transcription_api_base_url.value == "http://from-env:2"
     assert from_env.transcription_api_base_url.origin == "TRANSCRIPTION_API_BASE_URL"
     assert from_env.transcription_timeout_seconds.value == 7.5
     assert from_env.transcription_api_token.value == "s3cret"
     assert from_env.transcription_api_token.display_value() == "set"
     assert "s3cret" not in repr(from_env.transcription_api_token.display_value())
-
-
-def test_artifacts_are_off_unless_explicitly_enabled(tmp_path: Path) -> None:
-    assert load_config(_env(tmp_path)).artifacts_enabled.value is False
-
-    on = load_config(_env(tmp_path, JAKE_TOOLS_ARTIFACTS_ENABLED="true"))
-    assert on.artifacts_enabled.value is True and on.artifacts_enabled.source == "env"
-    off = load_config(_env(tmp_path, JAKE_TOOLS_ARTIFACTS_ENABLED="false"))
-    assert (
-        off.artifacts_enabled.value is False and off.artifacts_enabled.source == "env"
-    )
 
 
 def test_the_account_context_label_is_optional_and_unset_by_default(

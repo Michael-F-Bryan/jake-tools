@@ -2,7 +2,7 @@
 
 The server is spawned under a hermetic HOME; the only fake is the transcription
 service at its HTTP boundary (``fake_transcription.py``). These establish
-discovery gating, upload mechanics, result shape and error mapping, not
+discovery, upload mechanics, result shape and error mapping, not
 transcription quality.
 """
 
@@ -54,19 +54,22 @@ def _payload(result: Any) -> ToolErrorPayload:
     return ToolErrorPayload.model_validate(result.structured_content)
 
 
-async def test_no_endpoint_means_no_transcribe_tool(
-    mcp_server: ServerFactory, mcp_env: dict[str, str]
+async def test_no_endpoint_still_lists_transcribe_and_names_the_missing_variable(
+    mcp_server: ServerFactory, mcp_env: dict[str, str], recordings: list[Path]
 ) -> None:
     async with mcp_server(mcp_env) as session:
         names = await _tool_names(session)
         resources = {str(r.uri) for r in (await session.list_resources()).resources}
-    assert "ping" in names
-    assert "transcribe" not in names
-    # The guidance ships regardless; only the tool is gated.
+        result = await session.call_tool("transcribe", {"files": [str(recordings[0])]})
+    assert {"ping", "transcribe"} <= names
     assert "skill://transcription" in resources
+    payload = _payload(result)
+    assert payload.code == "missing_credentials"
+    assert payload.detail == {"variables": ["TRANSCRIPTION_API_BASE_URL"]}
+    assert "--transcription-api-base-url" in payload.message
 
 
-async def test_endpoint_without_token_exposes_the_tool_and_reports_missing_credentials(
+async def test_endpoint_without_token_reports_missing_credentials(
     mcp_server: ServerFactory,
     mcp_env_factory: Callable[..., dict[str, str]],
     mcp_home: Path,
@@ -106,7 +109,11 @@ async def test_endpoint_from_a_config_file_is_ignored(
         '[transcription]\napi_base_url = "http://127.0.0.1:9"\ntimeout_seconds = 12\n'
     )
     async with mcp_server(mcp_env_factory(mcp_home)) as session:
-        assert "transcribe" not in await _tool_names(session)
+        names = await _tool_names(session)
+        result = await session.call_tool("transcribe", {"files": [str(__file__)]})
+    # The file's endpoint is not read: transcribe is listed, still unconfigured.
+    assert "transcribe" in names
+    assert _payload(result).detail == {"variables": ["TRANSCRIPTION_API_BASE_URL"]}
 
 
 async def test_transcribe_uploads_ordered_files_and_returns_the_structured_result(

@@ -62,9 +62,9 @@ OPERATIONS: tuple[Operation, ...] = (
     sharepoint_upload.OPERATION,
     # Sends transcript text to Claude; needs no transcription endpoint.
     polish_transcript.OPERATION,
-    # Unavailable unless transcription.api_base_url is configured.
+    # Always listed; missing_credentials names the endpoint/token until configured.
     transcribe.OPERATION,
-    # Unavailable unless artifacts.enabled: an undocumented Claude Code mechanism.
+    # Undocumented Claude Code mechanism; guarded per call, always listed.
     artifact_publish.OPERATION,
     artifact_read.OPERATION,
     # Overwrites an existing artifact's live content.
