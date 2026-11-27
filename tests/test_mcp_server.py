@@ -111,11 +111,6 @@ async def test_stdio_starts_without_any_credentials_and_lists_skill_resources(
 async def test_stdio_tool_descriptions_point_to_readable_relevant_skills(
     mcp_server: ServerFactory, mcp_env: dict[str, str]
 ) -> None:
-    mcp_env = {
-        **mcp_env,
-        "TRANSCRIPTION_API_BASE_URL": "http://127.0.0.1:9",
-        "JAKE_TOOLS_ARTIFACTS_ENABLED": "true",
-    }
     expected = {
         "clockify_jira_sync": "clockify-jira-sync",
         "clockify_time_entries": "clockify-time",
@@ -411,33 +406,20 @@ async def _unused() -> AsyncIterator[None]:  # keeps pytest-asyncio's mode exerc
     yield None
 
 
-async def test_artifact_tools_are_absent_unless_enabled(
+async def test_every_operation_is_listed_exactly_once_with_no_opt_in(
     mcp_server: ServerFactory, mcp_env: dict[str, str]
 ) -> None:
     async with mcp_server(mcp_env) as session:
-        names = {tool.name for tool in (await session.list_tools()).tools}
-    assert not {"artifact_publish", "artifact_read", "artifact_update"} & names
+        listed = [tool.name for tool in (await session.list_tools()).tools]
 
-
-async def test_every_available_operation_is_listed_exactly_once_without_a_grant(
-    mcp_server: ServerFactory, mcp_env: dict[str, str]
-) -> None:
-    configured = {
-        **mcp_env,
-        "TRANSCRIPTION_API_BASE_URL": "http://127.0.0.1:9",
-        "JAKE_TOOLS_ARTIFACTS_ENABLED": "true",
-    }
-    async with mcp_server(mcp_env) as session:
-        plain = [tool.name for tool in (await session.list_tools()).tools]
-    async with mcp_server(configured) as session:
-        full = [tool.name for tool in (await session.list_tools()).tools]
-
-    everything = sorted(op.name for op in OPERATIONS)
-    assert sorted(full) == sorted([*everything, "ping"])
-    assert len(plain) == len(set(plain))
-    assert sorted(set(everything) - set(plain)) == sorted(
-        {"transcribe", "artifact_publish", "artifact_read", "artifact_update"}
-    )
+    assert len(listed) == len(set(listed))
+    assert sorted(listed) == sorted([*(op.name for op in OPERATIONS), "ping"])
+    assert {
+        "transcribe",
+        "artifact_publish",
+        "artifact_read",
+        "artifact_update",
+    } <= set(listed)
 
 
 async def test_every_guide_and_reference_is_listed_and_read_byte_for_byte(
@@ -461,12 +443,7 @@ async def test_every_guide_and_reference_is_listed_and_read_byte_for_byte(
 async def test_every_tool_description_names_a_listed_guide(
     mcp_server: ServerFactory, mcp_env: dict[str, str]
 ) -> None:
-    configured = {
-        **mcp_env,
-        "TRANSCRIPTION_API_BASE_URL": "http://127.0.0.1:9",
-        "JAKE_TOOLS_ARTIFACTS_ENABLED": "true",
-    }
-    async with mcp_server(configured) as session:
+    async with mcp_server(mcp_env) as session:
         listed = {str(r.uri) for r in (await session.list_resources()).resources}
         tools = (await session.list_tools()).tools
     for tool in tools:

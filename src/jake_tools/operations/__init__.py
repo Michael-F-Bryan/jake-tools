@@ -69,10 +69,6 @@ SKILL_GUIDES: dict[str, str] = {
 """What each packaged skill gives a caller, for the adapter's skill pointer."""
 
 
-def _always(config: Config) -> bool:
-    return True
-
-
 @dataclass(frozen=True)
 class Operation:
     """One agent-facing tool, independent of how it is served."""
@@ -83,9 +79,6 @@ class Operation:
     build: Callable[[Config], Handler]
     omit_none: bool = False
     """Omit null result fields and use compact JSON."""
-    available: Callable[[Config], bool] = _always
-    """Whether ``config`` exposes the operation at all (``transcribe`` needs
-    an endpoint). An unavailable operation is not registered."""
 
     @property
     def skill_guide(self) -> str:

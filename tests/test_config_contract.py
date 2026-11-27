@@ -33,7 +33,6 @@ JAKE_TOOLS_JIRA_PROJECT={POISON}
 JAKE_TOOLS_CLOCKIFY_CLIENT={POISON}
 JAKE_TOOLS_CLOCKIFY_WORKSPACES={POISON}
 JAKE_TOOLS_CLAUDE_MAX_TURNS=999
-JAKE_TOOLS_ARTIFACTS_ENABLED=true
 JAKE_TOOLS_RUNS_DIR=/nonexistent/{POISON}
 TRANSCRIPTION_API_BASE_URL=http://127.0.0.1:9
 CLOCKIFY_API_KEY={POISON}
@@ -143,12 +142,11 @@ def doctor(
 def test_mcp_ignores_toml_and_dotenv_files_everywhere(hostile: Hostile) -> None:
     result, settings = doctor(hostile)
 
-    assert len(settings) == 35, result.stdout
+    assert len(settings) == 34, result.stdout
     for name, rest in settings.items():
         assert rest.endswith("[default]") or rest.startswith("unset"), (name, rest)
     assert settings["clockify.workspaces"] == "(empty)  [default]"
     assert settings["claude.max_turns"] == "20  [default]"
-    assert settings["artifacts.enabled"] == "False  [default]"
     assert settings["CLOCKIFY_API_KEY"] == "unset  [default]"
     assert settings["transcription.api_base_url"] == "unset  [default]"
     state = hostile.home / ".local" / "state" / "jake-tools" / "runs"
@@ -177,10 +175,8 @@ def test_mcp_flags_override_the_environment(hostile: Hostile) -> None:
         "ws-flag-2",
         "--claude-max-turns",
         "5",
-        "--no-artifacts",
         JAKE_TOOLS_CLOCKIFY_WORKSPACES=WORKSPACE,
         JAKE_TOOLS_CLAUDE_MAX_TURNS="9",
-        JAKE_TOOLS_ARTIFACTS_ENABLED="true",
         JAKE_TOOLS_JIRA_PROJECT="ENV",
     )
 
@@ -188,7 +184,6 @@ def test_mcp_flags_override_the_environment(hostile: Hostile) -> None:
         "ws-flag-1, ws-flag-2  [flag (clockify.workspaces)]"
     )
     assert settings["claude.max_turns"] == "5  [flag (claude.max_turns)]"
-    assert settings["artifacts.enabled"] == "False  [flag (artifacts.enabled)]"
     # No flag for this one: the environment still applies.
     assert settings["clockify.jira_project"] == ("ENV  [env (JAKE_TOOLS_JIRA_PROJECT)]")
 
@@ -232,30 +227,23 @@ async def tool_names(hostile: Hostile, *args: str, **env: str) -> set[str]:
         return {tool.name for tool in (await session.list_tools()).tools}
 
 
-async def test_serve_ignores_files_and_honours_environment_then_flags(
+async def test_serve_lists_every_tool_regardless_of_files_environment_or_flags(
     hostile: Hostile,
 ) -> None:
-    # The poisoned .env/config.toml both enable transcription and artifacts.
+    # No setting hides a capability: a poisoned .env/config.toml, a configured
+    # endpoint, and a removed artifacts switch all leave the same catalogue.
     plain = await tool_names(hostile)
-    assert "transcribe" not in plain
-    assert not {"artifact_publish", "artifact_read"} & plain
-
-    from_env = await tool_names(
-        hostile,
-        TRANSCRIPTION_API_BASE_URL="http://127.0.0.1:9",
-        JAKE_TOOLS_ARTIFACTS_ENABLED="true",
+    assert {"transcribe", "artifact_publish", "artifact_read", "artifact_update"} <= (
+        plain
     )
-    assert {"transcribe", "artifact_publish", "artifact_read"} <= from_env
 
-    flag_beats_env = await tool_names(
+    configured = await tool_names(
         hostile,
-        "--no-artifacts",
         "--transcription-api-base-url",
         "http://127.0.0.1:9",
-        JAKE_TOOLS_ARTIFACTS_ENABLED="true",
+        JAKE_TOOLS_ARTIFACTS_ENABLED="false",
     )
-    assert "transcribe" in flag_beats_env
-    assert not {"artifact_publish", "artifact_read"} & flag_beats_env
+    assert configured == plain
 
 
 # --- the jake-tools CLI ---------------------------------------------------------

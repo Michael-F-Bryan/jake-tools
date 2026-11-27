@@ -18,13 +18,12 @@ from . import ping
 def register_all(app: MCPServer, config: Config) -> None:
     ping.register(app, config)
     for operation in OPERATIONS:
-        if operation.available(config):
-            structured_tool(
-                app,
-                name=operation.name,
-                description=mcp_description(operation),
-                omit_none=operation.omit_none,
-            )(operation.build(config))
+        structured_tool(
+            app,
+            name=operation.name,
+            description=mcp_description(operation),
+            omit_none=operation.omit_none,
+        )(operation.build(config))
 
 
 def mcp_description(operation: Operation) -> str:

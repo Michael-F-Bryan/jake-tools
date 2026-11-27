@@ -9,9 +9,7 @@ Hermes (`e96221f`, read from its installed source) or a live deployment.
 
 ## 1. What a connected Hermes gets
 
-- Tools: 18 by default (17 operations plus `ping`). `transcribe` appears only
-  with a transcription endpoint and the three `artifact_*` tools only with
-  `JAKE_TOOLS_ARTIFACTS_ENABLED`, for 22 in total. Hermes names
+- Tools: every implemented operation plus `ping`, with no opt-in setting. Hermes names
   them `mcp__<server>__<tool>`, replacing characters outside `[A-Za-z0-9_]`
   with `_` (`tools/mcp_tool_schema.py`, `mcp_prefixed_tool_name`). Server
   `jake-tools` therefore gives `mcp__jake_tools__ping` and so on.
@@ -92,10 +90,11 @@ profile `.env` remain readable by the agent's terminal.
 
 ## 4. Availability
 
-There is no capability allowlist. `transcribe` is listed only when a
-transcription endpoint is configured; Artifact tools only when
-`JAKE_TOOLS_ARTIFACTS_ENABLED`. Missing credentials never stop startup. The call answers
-`missing_credentials` and names the variable.
+There is no capability allowlist and no enable switch: every tool is listed.
+Missing credentials never stop startup. The call answers `missing_credentials`
+and names the variable (for `transcribe`, `TRANSCRIPTION_API_BASE_URL` and
+`TRANSCRIPTION_API_TOKEN`); a Claude Code that does not expose `Artifact` gives
+`upstream_error` with `reason: tool_not_exposed`.
 
 ## 5. Updating and refresh
 

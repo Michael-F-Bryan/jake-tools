@@ -8,8 +8,10 @@ description: Publish an existing self-contained HTML file as a NEW private Claud
 `artifact_publish(file_path)` publishes an existing `.html`/`.htm` file (an absolute path as
 jake-tools sees it, UTF-8, at most 1 MB) as a **new** artifact on claude.ai through the signed-in
 Claude account, then reads it back in a separate session. `artifact_read(url, ...)` reads one
-artifact back and changes nothing. The tools exist only when `JAKE_TOOLS_ARTIFACTS_ENABLED=true`
-is set in the server's environment.
+artifact back and changes nothing. The tools are always listed; there is no enable setting. If the server's Claude Code does
+not expose `Artifact` (not signed in, policy, `enableArtifact: false`, or the undocumented route
+changed), the call fails with `upstream_error` and `detail.reason: "tool_not_exposed"` before
+anything is published: tell the operator to check the Claude Code login and policy.
 
 ## What it is built on (read this first)
 

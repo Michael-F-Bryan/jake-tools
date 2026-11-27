@@ -186,13 +186,6 @@ FLAGS: tuple[Flag, ...] = (
         "SharePoint host sharepoint_resolve accepts; repeat for several.",
         multiple=True,
     ),
-    Flag(
-        "--artifacts/--no-artifacts",
-        "artifacts.enabled",
-        "JAKE_TOOLS_ARTIFACTS_ENABLED",
-        "Expose artifact_publish and artifact_read.",
-        is_bool=True,
-    ),
 )
 
 

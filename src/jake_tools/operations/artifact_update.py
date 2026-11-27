@@ -1,7 +1,8 @@
 """``artifact_update``: publish the next version of an existing private artifact.
 
 A separate, narrower operation from ``artifact_publish``: it overwrites the
-live content of something that already exists. Needs ``artifacts.enabled``.
+live content of something that already exists. Always listed; the guard and
+the separate read-first proof are its safeguards.
 :mod:`jake_tools.artifacts` does the work.
 """
 
@@ -53,5 +54,4 @@ OPERATION = Operation(
     skill="artifact-publishing",
     description=DESCRIPTION,
     build=build,
-    available=lambda config: config.artifacts_enabled.value,
 )

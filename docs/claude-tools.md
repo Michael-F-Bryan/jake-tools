@@ -331,8 +331,8 @@ everything else. User, project and managed settings stay in force, so
 ### The experimental tools
 
 `artifact_publish(file_path)` and `artifact_read(url, ...)` (also
-`jake-tools artifact publish|read`) use that route behind an off-by-default
-`JAKE_TOOLS_ARTIFACTS_ENABLED` setting. They
+`jake-tools artifact publish|read`) use that route; they are always
+listed, with no enable switch (the guard, not hiding, bounds authority). They
 publish only a new artifact, never update, share, list or delete, and never
 retry. Read their `verified`, `private_confirmed` and `problems` fields, not a
 URL alone. The mechanism is undocumented and may change without notice; whether

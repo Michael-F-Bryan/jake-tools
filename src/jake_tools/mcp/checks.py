@@ -300,17 +300,17 @@ def check_session_store(config: Config) -> Check:
 def check_transcription(config: Config) -> Check:
     """The native transcription service: reachable, ready, and the token works.
 
-    Skipped when no endpoint is configured (the tool is then not exposed).
-    With an endpoint, a missing token or an unreachable, unready or
-    token-rejecting service is a failure: the tool would be advertised but
-    every call would fail.
+    Skipped when no endpoint is configured (the tool is still listed and
+    answers ``missing_credentials``). With an endpoint, a missing token or an
+    unreachable, unready or token-rejecting service is a failure: every call
+    would fail.
     """
     base_url = config.transcription_api_base_url.value
     if base_url is None:
         return Check(
             name="transcription",
             status="skip",
-            detail="transcription.api_base_url is unset; the transcribe tool is not exposed",
+            detail="transcription.api_base_url is unset; transcribe is listed but fails with missing_credentials",
         )
     token = config.transcription_api_token.value
     if not token:
@@ -318,7 +318,7 @@ def check_transcription(config: Config) -> Check:
             name="transcription",
             status="fail",
             detail="transcription.api_base_url is set but TRANSCRIPTION_API_TOKEN is unset; "
-            "transcribe is exposed and would fail with missing_credentials",
+            "transcribe would fail with missing_credentials",
             required=True,
         )
     secrets = _sensitive_values(config)

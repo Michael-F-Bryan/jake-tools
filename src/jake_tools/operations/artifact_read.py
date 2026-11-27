@@ -48,5 +48,4 @@ OPERATION = Operation(
     skill="artifact-publishing",
     description=DESCRIPTION,
     build=build,
-    available=lambda config: config.artifacts_enabled.value,
 )

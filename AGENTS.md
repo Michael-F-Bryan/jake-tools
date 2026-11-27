@@ -155,9 +155,10 @@ plugin and no Hermes import anywhere in this package. Sub-commands: `serve`
   the tool that needs them and raise `ToolError("missing_credentials", ...)`
   naming the variable, never the value.
 - `operations/<tool>.py` holds one thin handler each as an `Operation`
-  (name, description, skill, `build(config)`, optional `available`), listed in
-  `operations/catalogue.py`; there is no capability allowlist or grouping, so
-  adding an operation there exposes it. The adapter never duplicates an operation's logic,
+  (name, description, skill, `build(config)`), listed in
+  `operations/catalogue.py`; there is no capability allowlist, grouping or
+  enable/availability switch, so adding an operation there exposes it; a missing
+  prerequisite is a clear `ToolError` at call time. The adapter never duplicates an operation's logic,
   schema or description. `mcp/server.py` registers them (plus the MCP-only
   `ping`) through `structured_tool`, which sends the handler's
   Pydantic result as structured content and turns a raised
@@ -324,10 +325,11 @@ warm and turns an ordered multipart upload into one structured transcript.
 the only tool; both are plain HTTP and import no native dependency. Contract,
 limits, concurrency and cancellation semantics: `transcription-service/README.md`.
 
-- The tool is registered only when `transcription.api_base_url` is set.
-  `TRANSCRIPTION_API_TOKEN` is a secret (environment-only, scrubbed from
-  worker environments). Doctor's `transcription` check is required once an
-  endpoint is configured.
+- The tool is always registered. Without `transcription.api_base_url` or
+  `TRANSCRIPTION_API_TOKEN` it answers `missing_credentials` naming the
+  variable. The token is a secret (environment-only, scrubbed from worker
+  environments). Doctor's `transcription` check is required once an endpoint is
+  configured.
 - No alternate backends, no direct inference in Python, no job store, no
   polling API. One job at a time, bounded queue, client disconnect cancels at
   the engine's next check, and so does the service's own
@@ -364,8 +366,9 @@ limits, concurrency and cancellation semantics: `transcription-service/README.md
 - The tool is hidden from SDK sessions unless the **undocumented**
   `CLAUDE_CODE_ARTIFACT` is set; it is set only through `AgentSpec.env` for
   these sessions, never persisted, never given to `claude_start` tasks, and
-  the operations are off unless `artifacts.enabled`. Do not describe the route
-  as supported.
+  the operations are always listed (no enable setting; a session without the
+  `Artifact` tool is `upstream_error`/`tool_not_exposed` before any write).
+  Do not describe the route as supported.
 - Authority is enforced *before* each call by `AgentSpec.tool_guard`, a
   `PreToolUse` hook (it runs even when an allow rule approves the call) that
   judges the **raw model-supplied input** and denies any key outside the
