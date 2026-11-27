@@ -175,9 +175,13 @@ needed; deferral is not completion. Repeat `--issue KEY` to reconcile exact work
 items regardless of assignee or status; a missing task for a Done issue is
 created and then completed, both shown in the plan. The plan can create projects and tasks,
 rename records, reactivate eligible tasks, and mark tasks done when Jira’s status
-category is Done (including Done and Won’t Do). It ignores archived Clockify
-projects and never deletes projects, tasks, or time entries. Ambiguous active
-duplicates are reported as conflicts and block `--apply`.
+category is Done (including Done and Won’t Do). A task under a different
+Clockify project than its Jira Project / Phase is relocated there with its time
+entries. Clockify cannot move a task, so this is a staged replacement with
+every entry re-pointed and read back. The source is retired, not deleted; see
+`skill://clockify-jira-sync`. It ignores archived Clockify projects and never
+deletes projects, tasks, or time entries. Ambiguous active duplicates are
+reported as conflicts and block `--apply`.
 
 JSON output identifies the selection scope and inventory counts. Applied writes
 are verified by fetching the changed Clockify object again; the command fails

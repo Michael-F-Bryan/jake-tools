@@ -11,7 +11,9 @@ from jake_tools.clockify import (
     ClockifyProject,
     ClockifyTask,
     ClockifyUser,
+    JsonObject,
     TaskStatus,
+    jira_key_of_task_name,
 )
 from jake_tools.clockify_jira_sync import (
     AppliedSyncAction,
@@ -21,6 +23,7 @@ from jake_tools.clockify_jira_sync import (
     CreateProjectAction,
     CreateTaskAction,
     ReactivateTaskAction,
+    RelocateTaskAction,
     RenameProjectAction,
     RenameTaskAction,
     SyncActionKind,
@@ -40,6 +43,12 @@ from jake_tools.clockify_jira_sync import (
     plan_jira_sync,
     prepare_jira_sync,
     run_jira_sync,
+)
+from jake_tools.clockify_relocation import (
+    RelocationMarker,
+    relocation_marker,
+    retired_task_name,
+    staged_task_name,
 )
 from jake_tools.jira import JiraIssue, JiraStatusCategory
 
@@ -245,7 +254,7 @@ def test_plan_reactivates_done_task_when_it_is_active_and_assigned() -> None:
     assert action.desired_name == "SF-427 Evaluate PX4 external control methods"
 
 
-def test_plan_conflicts_when_existing_task_cannot_belong_to_missing_parent() -> None:
+def test_plan_relocates_task_whose_jira_project_is_missing_in_clockify() -> None:
     wrong_project = clockify_project("SF-999", "Unrelated project")
     task = clockify_task(
         "SF-427",
@@ -274,12 +283,21 @@ def test_plan_conflicts_when_existing_task_cannot_belong_to_missing_parent() -> 
         index=build_index([wrong_project], [task]),
     )
 
+    # Jira decides placement: the destination project is created first, then
+    # the task moves there. The pure plan has not read any records yet.
     assert [(action.kind, action.jira_key) for action in plan.actions] == [
-        (SyncActionKind.CONFLICT, "SF-427"),
         (SyncActionKind.CREATE_PROJECT, "SF-131"),
+        (SyncActionKind.RELOCATE_TASK, "SF-427"),
     ]
-    assert all(action.kind != SyncActionKind.RENAME_TASK for action in plan.actions)
-    assert "different active project" in plan.actions[0].message
+    relocation = plan.actions[1]
+    assert isinstance(relocation, RelocateTaskAction)
+    assert relocation.project_key == "SF-131"
+    assert relocation.project_id is None
+    assert relocation.source_task_id == task.id
+    assert relocation.source_project_id == wrong_project.id
+    assert relocation.desired_name == "SF-427 Evaluate PX4 external control methods"
+    assert relocation.desired_status == "ACTIVE"
+    assert relocation.inspected is False
 
 
 def test_plan_ignores_archived_project_and_creates_usable_replacements() -> None:
@@ -530,6 +548,38 @@ class FakeClockifySyncClient:
     ) -> ClockifyTask:
         return self.task_read_override or self._tasks_by_id[task_id]
 
+    # Relocation reads: one member, no time entries. Relocation writes are
+    # exercised over real HTTP in test_mcp_clockify_jira_sync.py; this fake
+    # refuses them so a unit test can never pass by writing one here.
+    def _seeded_tasks(self) -> list[ClockifyTask]:
+        return []
+
+    def get_workspace_users(self, workspace_id: str) -> list[ClockifyUser]:
+        return [ClockifyUser(id="user-1")]
+
+    def get_task_time_entries(
+        self, workspace_id: str, user_id: str, *, project_id: str, task_id: str
+    ) -> list[JsonObject]:
+        return []
+
+    def get_time_entry_record(self, workspace_id: str, entry_id: str) -> JsonObject:
+        raise AssertionError("this fake holds no time entries")
+
+    def get_task_record(
+        self, workspace_id: str, project_id: str, task_id: str
+    ) -> JsonObject:
+        tasks = {t.id: t for t in self._seeded_tasks()} | self._tasks_by_id
+        return tasks[task_id].model_dump(mode="json", by_alias=True)
+
+    def _refuse(self, *_: object, **__: object) -> JsonObject:
+        self.operations.append("relocation_write")
+        raise AssertionError("relocation writes are tested over HTTP")
+
+    update_time_entry = _refuse
+    create_task_record = _refuse
+    update_task_record = _refuse
+    update_task_rate = _refuse
+
 
 def test_apply_sync_plan_creates_project_before_dependent_task() -> None:
     client = FakeClockifySyncClient()
@@ -728,6 +778,9 @@ class FakeClockifyInventoryClient(FakeClockifySyncClient):
     ) -> list[ClockifyTask]:
         source = self.active_tasks if active else self.done_tasks
         return [task for task in source if task.project_id == project_id]
+
+    def _seeded_tasks(self) -> list[ClockifyTask]:
+        return [*self.active_tasks, *self.done_tasks]
 
 
 class FakeJiraInventoryClient:
@@ -1066,21 +1119,40 @@ def test_explicit_done_issue_with_a_task_reconciles_it_without_creating_or_reope
     )
 
 
-@pytest.mark.parametrize("state", ["wrong-project", "duplicate-task"])
-def test_explicit_done_issue_with_bad_task_mapping_is_a_keyed_conflict(
-    state: str,
-) -> None:
+def test_explicit_done_issue_in_another_project_plans_a_completed_relocation() -> None:
     issue = jira_issue(
         "SF-691", "Seaworthiness tab", status="Done", status_category="Done"
     )
     other = clockify_project("SF-999", "Unrelated")
-    tasks = [clockify_task("SF-691", "Seaworthiness tab")]
-    if state == "wrong-project":
-        tasks = [clockify_task("SF-691", "Seaworthiness tab", project_id=other.id)]
-    else:
-        tasks.append(
-            clockify_task("SF-691", "Seaworthiness tab", task_id="task-SF-691-b")
-        )
+    task = clockify_task("SF-691", "Seaworthiness tab", project_id=other.id)
+    clockify, jira = _explicit_clients(
+        issue,
+        tasks=[task],
+        projects=[clockify_project("SF-131", "Production Vehicle"), other],
+    )
+
+    snapshot = _prepare_explicit(clockify, jira, "SF-691")
+
+    [action] = snapshot.plan.actions
+    assert isinstance(action, RelocateTaskAction)
+    assert (action.jira_key, action.project_id) == ("SF-691", "project-SF-131")
+    assert action.desired_status == "DONE"
+    assert action.inspected is True
+    assert action.entries == ()
+    assert action.source_fingerprint
+    assert "0 time entries follow it" in action.message
+    assert clockify.operations == []
+
+
+def test_explicit_done_issue_with_duplicate_task_is_a_keyed_conflict() -> None:
+    issue = jira_issue(
+        "SF-691", "Seaworthiness tab", status="Done", status_category="Done"
+    )
+    other = clockify_project("SF-999", "Unrelated")
+    tasks = [
+        clockify_task("SF-691", "Seaworthiness tab"),
+        clockify_task("SF-691", "Seaworthiness tab", task_id="task-SF-691-b"),
+    ]
     clockify, jira = _explicit_clients(
         issue,
         tasks=tasks,
@@ -1382,7 +1454,7 @@ def test_prepare_flattens_subtasks_under_ancestor_phase(
     [
         ("rename", SyncActionKind.RENAME_TASK, ""),
         ("reactivate", SyncActionKind.REACTIVATE_TASK, ""),
-        ("wrong-project", SyncActionKind.CONFLICT, "different active project"),
+        ("wrong-project", SyncActionKind.RELOCATE_TASK, ""),
         (
             "duplicate-phase",
             SyncActionKind.CONFLICT,
@@ -1849,3 +1921,182 @@ def test_run_jira_sync_partial_failure_returns_report_with_failure() -> None:
         ("SF-427", True),
         ("SF-304", False),
     ]
+
+
+# --- Relocation markers: only exact relations resume ------------------------------
+
+_PHASE = jira_issue(
+    "SF-131",
+    "Production Vehicle",
+    issue_type="Project / Phase",
+    parent_key=None,
+    parent_summary=None,
+)
+_ISSUE = jira_issue("SF-427", "Evaluate PX4", status="In Progress")
+
+
+B = "0123456789abcdef"
+
+
+def _relocation_plan(tasks: list[ClockifyTask]) -> SyncPlan:
+    projects = [
+        clockify_project("SF-131", "Production Vehicle"),
+        clockify_project("SF-999", "Unrelated"),
+    ]
+    return plan_jira_sync(
+        selected_issues=[_ISSUE],
+        jira_issues=[_ISSUE, _PHASE],
+        index=build_index(projects, tasks),
+    )
+
+
+def _named(
+    name: str, task_id: str, project_id: str, status: TaskStatus = "ACTIVE"
+) -> ClockifyTask:
+    return ClockifyTask(id=task_id, name=name, projectId=project_id, status=status)
+
+
+def test_markers_round_trip_and_never_claim_the_jira_key() -> None:
+    staged = staged_task_name("SF-427", "t-1", "SF-427 Evaluate PX4", baseline=B)
+    retired = retired_task_name("SF-427", "t-2", "SF-427 Evaluate PX4")
+    assert relocation_marker(staged) == RelocationMarker(
+        state="staged", jira_key="SF-427", other_task_id="t-1", baseline=B
+    )
+    # A person removes the baseline to accept the current records.
+    accepted = relocation_marker(staged.replace(f" #{B}", ""))
+    assert accepted is not None and accepted.baseline is None
+    assert relocation_marker(retired) == RelocationMarker(
+        state="retired", jira_key="SF-427", other_task_id="t-2"
+    )
+    assert jira_key_of_task_name(staged) is None
+    assert jira_key_of_task_name(retired) is None
+    assert relocation_marker("SF-427 Evaluate PX4") is None
+
+
+def test_staging_task_for_the_misplaced_source_resumes() -> None:
+    plan = _relocation_plan(
+        [
+            clockify_task(
+                "SF-427", "Evaluate PX4", project_id="project-SF-999", task_id="t-src"
+            ),
+            _named(
+                staged_task_name("SF-427", "t-src", "SF-427 Evaluate PX4", baseline=B),
+                "t-stage",
+                "project-SF-131",
+            ),
+        ]
+    )
+    [action] = plan.actions
+    assert isinstance(action, RelocateTaskAction)
+    assert (action.source_task_id, action.staged_task_id) == ("t-src", "t-stage")
+    assert action.source_retired is False
+
+
+def test_staging_task_with_source_retired_into_it_resumes_promotion() -> None:
+    plan = _relocation_plan(
+        [
+            _named(
+                retired_task_name("SF-427", "t-stage", "SF-427 Old"),
+                "t-src",
+                "project-SF-999",
+                "DONE",
+            ),
+            _named(
+                staged_task_name("SF-427", "t-src", "SF-427 Evaluate PX4", baseline=B),
+                "t-stage",
+                "project-SF-131",
+            ),
+        ]
+    )
+    [action] = plan.actions
+    assert isinstance(action, RelocateTaskAction)
+    assert (action.source_task_id, action.staged_task_id) == ("t-src", "t-stage")
+    assert action.source_retired is True
+
+
+@pytest.mark.parametrize(
+    ("tasks", "reason"),
+    [
+        pytest.param(
+            [
+                _named(
+                    staged_task_name("SF-427", "t-src", "x", baseline=B),
+                    "t-a",
+                    "project-SF-131",
+                ),
+                _named(
+                    staged_task_name("SF-427", "t-src", "x", baseline=B),
+                    "t-b",
+                    "project-SF-131",
+                ),
+                clockify_task(
+                    "SF-427", "x", project_id="project-SF-999", task_id="t-src"
+                ),
+            ],
+            "multiple Clockify staging tasks",
+            id="two-staging-tasks",
+        ),
+        pytest.param(
+            [
+                clockify_task("SF-427", "x", task_id="t-src"),
+                _named(
+                    staged_task_name("SF-427", "t-src", "x", baseline=B),
+                    "t-a",
+                    "project-SF-131",
+                ),
+            ],
+            "already in place",
+            id="source-already-in-place",
+        ),
+        pytest.param(
+            [
+                _named(
+                    staged_task_name("SF-427", "t-gone", "x", baseline=B),
+                    "t-a",
+                    "project-SF-131",
+                )
+            ],
+            "not a task retired into it",
+            id="source-missing",
+        ),
+        pytest.param(
+            [
+                _named(
+                    retired_task_name("SF-427", "t-other", "x"),
+                    "t-src",
+                    "project-SF-999",
+                ),
+                _named(
+                    staged_task_name("SF-427", "t-src", "x", baseline=B),
+                    "t-a",
+                    "project-SF-131",
+                ),
+            ],
+            "not a task retired into it",
+            id="retired-into-another-task",
+        ),
+    ],
+)
+def test_any_other_marker_shape_is_a_conflict(
+    tasks: list[ClockifyTask], reason: str
+) -> None:
+    plan = _relocation_plan(tasks)
+    [action] = [a for a in plan.actions if a.jira_key == "SF-427"]
+    assert isinstance(action, ConflictAction)
+    assert reason in action.message
+
+
+def test_apply_refuses_a_relocation_that_was_never_inspected() -> None:
+    plan = _relocation_plan(
+        [clockify_task("SF-427", "x", project_id="project-SF-999", task_id="t-src")]
+    )
+    clockify = FakeClockifySyncClient()
+    with pytest.raises(SyncApplyError, match="preview again"):
+        apply_sync_plan(
+            plan,
+            clockify=clockify,
+            workspace_id="workspace-1",
+            client_id="client-1",
+            index=build_index([clockify_project("SF-131", "Production Vehicle")], []),
+        )
+    assert clockify.operations == []

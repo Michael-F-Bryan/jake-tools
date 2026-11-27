@@ -511,9 +511,26 @@ jake-tools clockify jira-sync --issue SF-304 --apply --json
 (status To Do, In Progress, Blocked, or In Review). Repeat
 `--issue KEY` to reconcile exact work items regardless of assignee or status
 (a missing task for a Done issue is created, then completed). Dry-run is
-the default; `--apply` creates, renames, reactivates, or completes records and
-then re-fetches every changed Clockify object for verification. The command
-never deletes records.
+the default; `--apply` creates, renames, reactivates, relocates, or completes
+records and then re-fetches every changed Clockify object for verification.
+The command never deletes records.
+
+Relocation (`clockify_relocation.py`, `RELOCATE_TASK`): Clockify's task update
+has no `projectId`, so a misplaced task is replaced, not moved. A staging task
+`[relocating KEY from SRC]` is created first, then entries are re-pointed
+(full `UpdateTimeEntryRequest` echo, whole-record read-back), then the source
+is retired as `[relocated KEY to NEW]`, and the staging task is promoted last.
+Markers never claim the key. The staging marker carries `#BASELINE`, a hash
+of the source task's fields and every entry minus its placement, written
+before any entry moves. Preview resumes only exact marker relations whose
+records still match it, and also in the default scope after the issue leaves
+discovery; every other shape, and a baseline mismatch, is a conflict. Removing
+the hash is the human "accept", and it is re-recorded first. The digest binds
+whole-record fingerprints.
+No rollback: a mismatch stops with `failure.recovery`. Entry rates are
+read-only in the API, so a changed rate is reported, never asserted preserved.
+Writes are tested over HTTP in `test_mcp_clockify_jira_sync.py`, including a
+sweep that interrupts every write (refused and landed-then-500).
 
 ### `newsletter`
 

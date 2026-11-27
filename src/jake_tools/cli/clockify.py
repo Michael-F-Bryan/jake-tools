@@ -224,8 +224,8 @@ def jira_sync(
 ) -> None:
     """Reconcile Jira work with Clockify.
 
-    Dry runs are read-only. Use --apply to create, rename, reactivate, or complete
-    Clockify records from the emitted plan. By default, planned or underway Jira
+    Dry runs are read-only. Use --apply to create, rename, reactivate, relocate,
+    or complete Clockify records from the emitted plan. By default, planned or underway Jira
     work (To Do, In Progress, Blocked, In Review) assigned to currentUser() is
     selected. --issue selects exact work items
     regardless of assignee or status. The command never deletes records.
@@ -250,7 +250,10 @@ def jira_sync(
         click.echo(json.dumps(report.model_dump(mode="json"), indent=2))
     elif report.failure is not None:
         _emit_applied_before_failure(report)
-        raise click.ClickException(report.failure.message)
+        message = report.failure.message
+        if report.failure.recovery:
+            message += f"\nRecovery: {report.failure.recovery}"
+        raise click.ClickException(message)
     else:
         _emit_sync_report(report)
 
@@ -321,6 +324,8 @@ def _describe_action(action: SyncReportAction) -> str:
         return f"{prefix} — create under {action.project_key}: {action.desired_name}"
     if action.kind == SyncActionKind.CREATE_PROJECT:
         return f"{prefix} — create project {action.desired_name!r}"
+    if action.kind == SyncActionKind.RELOCATE_TASK:
+        return f"{prefix} — {action.message}"
     return prefix
 
 
