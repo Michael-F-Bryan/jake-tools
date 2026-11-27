@@ -220,6 +220,24 @@ class ClockifyTask(BaseModel):
     status: TaskStatus
 
 
+class ClockifyRecord(BaseModel):
+    """A Clockify record kept whole: ``id`` is checked, every other field is
+    kept exactly as Clockify sent it, including fields this package does not
+    model. Used where a write must preserve, and a read-back must compare,
+    the full record rather than the handful of fields the typed models hold.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="allow")
+
+    id: str
+
+    def raw(self) -> JsonObject:
+        return self.model_dump(mode="json")
+
+
+TaskRateKind = Literal["hourly-rate", "cost-rate"]
+
+
 class JiraIssueRef(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -457,6 +475,93 @@ class ClockifyClient:
             self._request_json("PUT", path, payload=payload),
             path,
         )
+
+    # --- Whole-record reads and writes, for task relocation -------------------
+    #
+    # Clockify cannot move a task to another project (the task update body has
+    # no projectId), so relocation creates a replacement task and re-points each
+    # time entry at it. These methods keep records whole (``ClockifyRecord``)
+    # so the caller can carry every field across and compare read-backs in full.
+
+    def get_workspace_users(self, workspace_id: str) -> list[ClockifyUser]:
+        """Every workspace member Clockify lists with ``status=ALL``."""
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/users"
+        return self._get_paginated_list(ClockifyUser, path, params={"status": "ALL"})
+
+    def get_task_time_entries(
+        self,
+        workspace_id: str,
+        user_id: str,
+        *,
+        project_id: str,
+        task_id: str,
+    ) -> list[JsonObject]:
+        """One user's time entries Clockify filters to a project and task."""
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/user/{validate_clockify_id(user_id)}/time-entries"
+        records = self._get_paginated_list(
+            ClockifyRecord,
+            path,
+            params={
+                "project": validate_clockify_id(project_id),
+                "task": validate_clockify_id(task_id),
+            },
+        )
+        return [record.raw() for record in records]
+
+    def get_time_entry_record(self, workspace_id: str, entry_id: str) -> JsonObject:
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/time-entries/{validate_clockify_id(entry_id)}"
+        return self._validate(
+            ClockifyRecord, self._request_json("GET", path), path
+        ).raw()
+
+    def update_time_entry(
+        self, workspace_id: str, entry_id: str, payload: JsonObject
+    ) -> JsonObject:
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/time-entries/{validate_clockify_id(entry_id)}"
+        return self._validate(
+            ClockifyRecord, self._request_json("PUT", path, payload=payload), path
+        ).raw()
+
+    def get_task_record(
+        self, workspace_id: str, project_id: str, task_id: str
+    ) -> JsonObject:
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/projects/{validate_clockify_id(project_id)}/tasks/{validate_clockify_id(task_id)}"
+        return self._validate(
+            ClockifyRecord, self._request_json("GET", path), path
+        ).raw()
+
+    def create_task_record(
+        self, workspace_id: str, project_id: str, payload: JsonObject
+    ) -> JsonObject:
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/projects/{validate_clockify_id(project_id)}/tasks"
+        return self._validate(
+            ClockifyRecord, self._request_json("POST", path, payload=payload), path
+        ).raw()
+
+    def update_task_record(
+        self, workspace_id: str, project_id: str, task_id: str, payload: JsonObject
+    ) -> JsonObject:
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/projects/{validate_clockify_id(project_id)}/tasks/{validate_clockify_id(task_id)}"
+        return self._validate(
+            ClockifyRecord, self._request_json("PUT", path, payload=payload), path
+        ).raw()
+
+    def update_task_rate(
+        self,
+        workspace_id: str,
+        project_id: str,
+        task_id: str,
+        *,
+        kind: TaskRateKind,
+        amount: int,
+    ) -> JsonObject:
+        """Set a task's billable or cost rate from now on (never ``since``)."""
+        path = f"/workspaces/{validate_clockify_id(workspace_id)}/projects/{validate_clockify_id(project_id)}/tasks/{validate_clockify_id(task_id)}/{kind}"
+        return self._validate(
+            ClockifyRecord,
+            self._request_json("PUT", path, payload={"amount": amount}),
+            path,
+        ).raw()
 
     def _get_paginated_list(
         self,

@@ -413,6 +413,7 @@ def test_jira_sync_defaults_to_json_dry_run(monkeypatch) -> None:
             "task_id": "task-1",
             "jira_status": "Done",
             "message": "",
+            "relocation": None,
             "applied": False,
             "verified": False,
         }
@@ -672,6 +673,7 @@ def test_jira_sync_apply_failure_prints_report_with_failure_and_exits_nonzero(
         "jira_key": "SF-304",
         "kind": "MARK_TASK_DONE",
         "message": "Clockify request failed for PUT /tasks: 500 Boom",
+        "recovery": "",
     }
     assert [action["applied"] for action in payload["actions"]] == [False]
 

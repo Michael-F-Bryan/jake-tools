@@ -33,8 +33,8 @@ Reconcile Jira work into Clockify projects and tasks.
 
 Preview by default (apply=false): reads Jira and Clockify and returns a
 SyncReport - scope, inventory counts, the planned actions (create/rename
-project, create/reactivate/rename task, mark task done), any conflicts, and
-a plan_digest. Nothing is written.
+project, relocate/create/reactivate/rename task, mark task done), any
+conflicts, and a plan_digest. Nothing is written.
 
 To apply, call again with apply=true and plan_digest set to the digest from
 the preview you reviewed. The plan is recomputed; if it no longer matches
@@ -52,7 +52,7 @@ issues is the only filter. Omitted means planned or underway Jira work
 assigned to the credentialled user: status To Do, In Progress, Blocked, or In
 Review, and Backlog, TRIAGE, and Investigate are not automatically created.
 Explicit selection never bypasses placement under a Project / Phase ancestor,
-duplicate or wrong-project conflicts, the digest, or verification. A key that
+duplicate conflicts, the digest, or verification. A key that
 cannot be planned is a conflict naming it, and one Jira cannot return fails the
 call with an upstream_error naming it. Fetched ancestors are for placement only:
 their phase project is checked, but their own tasks are never touched.
@@ -64,6 +64,24 @@ the digest covers the completed final state; the second action has no task_id
 until the first runs. A missing Backlog, TRIAGE, or Investigate task is
 created active. Existing tasks keep their normal rename/reactivate/complete
 reconciliation, and one already in the right state needs no action.
+
+Jira decides placement. A task that sits under a different Clockify project
+than its Project / Phase is RELOCATE_TASK (`relocation` names the source and
+every time entry that follows it). Clockify cannot move a task, so apply
+creates a "[relocating KEY from SOURCE]" staging task in the destination
+(creating that project first if needed), copies the task's writable fields and
+rates, re-points each time entry, retires the source as "[relocated KEY to
+NEW]" (DONE), and promotes the staging task to the canonical name last. The
+digest binds a fingerprint of every whole entry record. Each entry is re-read
+before its write and compared whole after it. A mismatch, such as a rate
+Clockify recomputed, stops the apply without rolling back, and
+`failure.recovery` says what was verified and which write is unverified. A
+fresh preview resumes only an exact staging/retired marker relation whose
+records still match the baseline the staging marker recorded ("#HASH") before
+any entry moved. Otherwise it is a conflict naming the entries; a person
+accepts them by removing " #HASH" from the staging task's name. Running,
+locked or unsupported entries, duplicate task identity, and stray markers are
+also conflicts.
 
 Never deletes anything in Clockify or Jira, and never writes to Jira.
 """
